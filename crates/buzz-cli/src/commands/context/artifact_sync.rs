@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use nostr::Event;
 use serde::Serialize;
 
 use super::profile::{ProfileEnvironment, ResolvedProfile};
-use crate::client::BuzzClient;
+use super::runtime::{event_builder, hostname, query_events, tag, ContextRuntime};
+use crate::client::{normalize_artifact_sha256, BuzzClient};
 use crate::error::CliError;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -56,6 +58,174 @@ pub async fn sync(
         dry_run,
     )
     .await
+}
+
+pub async fn put(
+    profile: &ResolvedProfile,
+    environment: &ProfileEnvironment,
+    file: &Path,
+) -> Result<(), CliError> {
+    let runtime = ContextRuntime::new(profile, environment)?;
+    let body = read_artifact(file)?;
+    let receipt = runtime
+        .local_artifact_client()?
+        .put_artifact(bytes::Bytes::from(body))
+        .await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&receipt)
+            .map_err(|error| CliError::Other(format!("receipt serialization failed: {error}")))?
+    );
+    Ok(())
+}
+
+pub async fn get(
+    profile: &ResolvedProfile,
+    environment: &ProfileEnvironment,
+    sha256: &str,
+    out: Option<&Path>,
+) -> Result<(), CliError> {
+    let runtime = ContextRuntime::new(profile, environment)?;
+    let sha256 = normalize_artifact_sha256(sha256)?;
+    let local = runtime.local_artifact_client()?;
+    let bytes = match local.get_artifact(&sha256).await {
+        Ok(bytes) => bytes,
+        Err(local_error) => {
+            runtime
+                .cloud_artifact_client()
+                .map_err(|_| local_error)?
+                .get_artifact(&sha256)
+                .await?
+        }
+    };
+    let out = out
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&sha256));
+    std::fs::write(&out, &bytes)
+        .map_err(|error| CliError::Other(format!("could not write {}: {error}", out.display())))?;
+    println!(
+        "saved artifact {sha256} to {} ({} bytes)",
+        out.display(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+pub async fn head(
+    profile: &ResolvedProfile,
+    environment: &ProfileEnvironment,
+    sha256: &str,
+) -> Result<(), CliError> {
+    let runtime = ContextRuntime::new(profile, environment)?;
+    let sha256 = normalize_artifact_sha256(sha256)?;
+    if runtime
+        .local_artifact_client()?
+        .head_artifact(&sha256)
+        .await?
+    {
+        println!("present {sha256}");
+        Ok(())
+    } else {
+        println!("absent {sha256}");
+        Err(CliError::NotFound(format!("artifact {sha256} is absent")))
+    }
+}
+
+pub async fn announce(
+    profile: &ResolvedProfile,
+    environment: &ProfileEnvironment,
+    file: &Path,
+    message: Option<&str>,
+) -> Result<String, CliError> {
+    let runtime = ContextRuntime::new(profile, environment)?;
+    let body = read_artifact(file)?;
+    let local_receipt = runtime
+        .local_artifact_client()?
+        .put_artifact(bytes::Bytes::from(body.clone()))
+        .await?;
+    let rendezvous_receipt = runtime
+        .cloud_artifact_uploader_client()?
+        .put_artifact(bytes::Bytes::from(body))
+        .await?;
+    if local_receipt.sha256 != rendezvous_receipt.sha256 {
+        return Err(CliError::Other(format!(
+            "artifact identity changed between local and rendezvous custody: {} != {}",
+            local_receipt.sha256, rendezvous_receipt.sha256
+        )));
+    }
+
+    let sha256 = local_receipt.sha256;
+    let context = runtime.default_context()?;
+    let (_, role) = runtime.local_event_client()?;
+    let identity = runtime.identity_label(role);
+    let machine = hostname();
+    let default_message = format!(
+        "artifact {} ({} bytes)",
+        file.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unnamed"),
+        local_receipt.size
+    );
+    let event_id = runtime
+        .post_builder(event_builder(
+            message.unwrap_or(&default_message),
+            [
+                tag(&["x", &sha256])?,
+                tag(&["h", context])?,
+                tag(&["agent", &identity])?,
+                tag(&["machine", &machine])?,
+            ],
+            None,
+        ))
+        .await?;
+    super::journal::sync(profile, environment, false)?;
+    verify_rendezvous_manifest(profile, environment, &sha256, context).await?;
+    println!("sha256: {sha256}");
+    println!("manifest accepted: {event_id}");
+    println!("rendezvous custody: verified");
+    println!("context: {context}");
+    Ok(sha256)
+}
+
+pub async fn verify_rendezvous_manifest(
+    profile: &ResolvedProfile,
+    environment: &ProfileEnvironment,
+    sha256: &str,
+    context: &str,
+) -> Result<(), CliError> {
+    let runtime = ContextRuntime::new(profile, environment)?;
+    let sha256 = normalize_artifact_sha256(sha256)?;
+    let reader = runtime.cloud_reader_client()?;
+    let manifests = query_events(
+        &reader,
+        &[serde_json::json!({
+            "kinds": [nostr::Kind::TextNote.as_u16()],
+            "#x": [sha256],
+            "#h": [context],
+            "limit": 10,
+        })],
+    )
+    .await?;
+    if manifests.is_empty() {
+        return Err(CliError::NotFound(format!(
+            "rendezvous has no signed manifest for artifact {sha256} in context {context}"
+        )));
+    }
+    runtime
+        .cloud_artifact_client()?
+        .get_artifact(&sha256)
+        .await?;
+    Ok(())
+}
+
+fn read_artifact(file: &Path) -> Result<Vec<u8>, CliError> {
+    let metadata = std::fs::metadata(file)
+        .map_err(|error| CliError::Usage(format!("cannot access {}: {error}", file.display())))?;
+    if !metadata.is_file() {
+        return Err(CliError::Usage(format!("{} is not a file", file.display())));
+    }
+    std::fs::read(file)
+        .map_err(|error| CliError::Usage(format!("failed to read {}: {error}", file.display())))
 }
 
 async fn sync_clients(

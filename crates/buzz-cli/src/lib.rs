@@ -291,13 +291,94 @@ pub enum ContextSubcommand {
         #[arg(long)]
         json: bool,
     },
+    /// Save an encrypted context head.
+    Save {
+        /// Context scope, for example buzz/portable-relay.
+        scope: String,
+        /// Value file, or '-' for stdin.
+        file: Option<std::path::PathBuf>,
+    },
+    /// Load an encrypted context head.
+    Load {
+        /// Context scope, for example buzz/portable-relay.
+        scope: String,
+    },
+    /// List encrypted context heads.
+    Ls {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Append a plaintext, non-sensitive journal session record.
+    Log { project: String, message: String },
+    /// Read recent project session records.
+    Sessions {
+        project: String,
+        #[arg(default_value_t = 10)]
+        limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Push the local journal through the configured replication runtime.
+    Sync {
+        /// Print the exact path/reference plan without executing replication.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Observe signed Beacon pulses from configured relays.
+    Pulse {
+        /// Optional relay URL; omit to inspect local and rendezvous.
+        relay: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Project the context event graph.
+    Graph {
+        #[arg(long, value_enum, default_value = "tree")]
+        format: ContextGraphFormat,
+    },
+    /// Render declaration-governed state from the selected profile's perspective.
+    Status {
+        /// Optional node label to select.
+        node: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Post plaintext tooling coordination to the configured shared context.
+    Share {
+        /// Read content from this file, or '-' for stdin.
+        file: Option<std::path::PathBuf>,
+        /// Inline message; conflicts with FILE.
+        #[arg(short = 'm', long, conflicts_with = "file")]
+        message: Option<String>,
+    },
     /// Synchronize content-addressed artifacts using profile identity roles.
     #[command(subcommand)]
     Artifact(ContextArtifactSubcommand),
+    /// Manage signed journal handoff lifecycles.
+    #[command(subcommand)]
+    Handoff(ContextHandoffSubcommand),
+    /// Manage declaration-governed replication agreements.
+    #[command(subcommand)]
+    Agreement(ContextAgreementSubcommand),
 }
 
 #[derive(Subcommand)]
 pub enum ContextArtifactSubcommand {
+    /// Store a file in the local content-addressed artifact store.
+    Put { file: std::path::PathBuf },
+    /// Fetch and byte-verify an artifact.
+    Get {
+        sha256: String,
+        out: Option<std::path::PathBuf>,
+    },
+    /// Probe artifact presence at the local store.
+    Head { sha256: String },
+    /// Store an artifact locally and at the rendezvous, then publish its manifest.
+    Announce {
+        file: std::path::PathBuf,
+        message: Option<String>,
+    },
     /// Fetch referenced artifacts from the rendezvous into the local store.
     Sync {
         /// Report the missing set without fetching or uploading bytes.
@@ -307,6 +388,73 @@ pub enum ContextArtifactSubcommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ContextHandoffSubcommand {
+    Open {
+        spec: std::path::PathBuf,
+    },
+    Claim {
+        open_id: String,
+        note: Option<String>,
+    },
+    Return {
+        open_id: String,
+        spec: std::path::PathBuf,
+    },
+    Close {
+        open_id: String,
+        return_id: String,
+        note: Option<String>,
+    },
+    VerifyArtifacts {
+        return_id: String,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ContextAgreementSubcommand {
+    Export {
+        stream: String,
+        #[arg(required = true)]
+        readers: Vec<String>,
+    },
+    Admit {
+        source: String,
+        principal: String,
+        #[arg(required = true)]
+        verification_keys: Vec<String>,
+    },
+    Read {
+        stream: String,
+        principal: String,
+        #[arg(required = true)]
+        reader_keys: Vec<String>,
+    },
+    Steward {
+        principal: String,
+        steward_pubkey: String,
+    },
+    Match {
+        stream: String,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ContextGraphFormat {
+    Tree,
+    Json,
+    Dot,
+    Mermaid,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2100,7 +2248,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("artifact", 3),
-            ("context", 4),
+            ("context", 16),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

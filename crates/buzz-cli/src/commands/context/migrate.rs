@@ -1,11 +1,11 @@
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 
 use super::profile::{
-    legacy_profile, CredentialProvider, IdentityRef, ProfileEnvironment, ProfileFile,
+    discover_legacy_optional_roles, legacy_profile, ProfileEnvironment, ProfileFile,
 };
 use crate::error::CliError;
 
@@ -73,7 +73,12 @@ pub fn migrate(
         request.rendezvous.map(str::to_string),
         request.default_context.map(str::to_string),
     );
-    discover_optional_roles(&legacy_root, environment, &mut profile);
+    profile.node.label = environment
+        .variables
+        .get("BUZZ_CTX_NODE")
+        .cloned()
+        .or_else(|| Some(request.profile.to_string()));
+    discover_legacy_optional_roles(&legacy_root, &environment.variables, &mut profile);
     let serialized = toml::to_string_pretty(&profile)
         .map_err(|error| CliError::Other(format!("profile serialization failed: {error}")))?;
 
@@ -163,46 +168,6 @@ pub fn migrate(
         profile_path: profile_path.display().to_string(),
         actions,
     })
-}
-
-fn discover_optional_roles(
-    legacy_root: &Path,
-    environment: &ProfileEnvironment,
-    profile: &mut ProfileFile,
-) {
-    let relay_witness = legacy_root.join("sovereign.ndjson.relay-key");
-    if relay_witness.is_file() {
-        profile.identities.relay_witness = Some(file_identity(relay_witness, None));
-    }
-    let agent_name = environment.variables.get("BUZZ_CTX_AGENT").filter(|name| {
-        !name.is_empty()
-            && name.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-            })
-    });
-    if let Some(agent_name) = agent_name {
-        let key = legacy_root.join("agents").join(format!("{agent_name}.key"));
-        if key.is_file() {
-            let auth = legacy_root
-                .join("agents")
-                .join(format!("{agent_name}.auth"));
-            profile.identities.agent = Some(file_identity(key, auth.is_file().then_some(auth)));
-        }
-    }
-    let steward_key = legacy_root.join("agents/steward.key");
-    if steward_key.is_file() {
-        let auth = legacy_root.join("agents/steward.auth");
-        profile.identities.steward =
-            Some(file_identity(steward_key, auth.is_file().then_some(auth)));
-    }
-}
-
-fn file_identity(path: PathBuf, auth_tag: Option<PathBuf>) -> IdentityRef {
-    IdentityRef {
-        provider: CredentialProvider::File,
-        reference: path.display().to_string(),
-        auth_tag,
-    }
 }
 
 fn path_has_entries(path: &Path) -> Result<bool, CliError> {

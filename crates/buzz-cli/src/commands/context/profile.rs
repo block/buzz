@@ -15,6 +15,8 @@ pub struct ProfileFile {
     pub schema_version: u32,
     pub data_root: PathBuf,
     #[serde(default)]
+    pub node: NodeConfig,
+    #[serde(default)]
     pub relays: RelayConfig,
     #[serde(default)]
     pub paths: PathConfig,
@@ -28,6 +30,12 @@ pub struct ProfileFile {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub installation: InstallationConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NodeConfig {
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,10 +74,11 @@ pub struct IdentityRoles {
     pub steward: Option<IdentityRef>,
     pub artifact_source_reader: Option<IdentityRef>,
     pub artifact_destination_owner: Option<IdentityRef>,
+    pub artifact_rendezvous_uploader: Option<IdentityRef>,
 }
 
 impl IdentityRoles {
-    pub fn named(&self) -> [(&'static str, Option<&IdentityRef>); 7] {
+    pub fn named(&self) -> [(&'static str, Option<&IdentityRef>); 8] {
         [
             ("journal_author", self.journal_author.as_ref()),
             ("replication_transport", self.replication_transport.as_ref()),
@@ -84,6 +93,10 @@ impl IdentityRoles {
                 "artifact_destination_owner",
                 self.artifact_destination_owner.as_ref(),
             ),
+            (
+                "artifact_rendezvous_uploader",
+                self.artifact_rendezvous_uploader.as_ref(),
+            ),
         ]
     }
 }
@@ -93,6 +106,7 @@ impl IdentityRoles {
 pub struct IdentityRef {
     pub provider: CredentialProvider,
     pub reference: String,
+    pub label: Option<String>,
     pub auth_tag: Option<PathBuf>,
 }
 
@@ -260,25 +274,23 @@ pub fn resolve_profile(
             },
         )
     } else if let Some(root) = explicit {
-        (
-            legacy_profile(
-                root,
-                compatibility_local.clone(),
-                compatibility_rendezvous.clone(),
-                compatibility_context.clone(),
-            ),
-            ProfileSource::ExplicitOverride,
-        )
+        let mut file = legacy_profile(
+            root,
+            compatibility_local.clone(),
+            compatibility_rendezvous.clone(),
+            compatibility_context.clone(),
+        );
+        discover_legacy_optional_roles(root, &environment.variables, &mut file);
+        (file, ProfileSource::ExplicitOverride)
     } else if path_has_entries(&legacy_root)? {
-        (
-            legacy_profile(
-                &legacy_root,
-                compatibility_local,
-                compatibility_rendezvous,
-                compatibility_context,
-            ),
-            ProfileSource::LegacyDetected,
-        )
+        let mut file = legacy_profile(
+            &legacy_root,
+            compatibility_local,
+            compatibility_rendezvous,
+            compatibility_context,
+        );
+        discover_legacy_optional_roles(&legacy_root, &environment.variables, &mut file);
+        (file, ProfileSource::LegacyDetected)
     } else {
         (fresh_profile(&default_data_root), ProfileSource::Fresh)
     };
@@ -362,6 +374,7 @@ fn resolve_profile_references(file: &mut ProfileFile, config_dir: &Path) {
         file.identities.steward.as_mut(),
         file.identities.artifact_source_reader.as_mut(),
         file.identities.artifact_destination_owner.as_mut(),
+        file.identities.artifact_rendezvous_uploader.as_mut(),
     ]
     .into_iter()
     .flatten()
@@ -417,6 +430,7 @@ fn fresh_profile(data_root: &Path) -> ProfileFile {
     ProfileFile {
         schema_version: PROFILE_SCHEMA_VERSION,
         data_root: data_root.to_path_buf(),
+        node: NodeConfig::default(),
         relays: RelayConfig::default(),
         paths: PathConfig::default(),
         identities: IdentityRoles::default(),
@@ -437,11 +451,13 @@ pub fn legacy_profile(
     let role = || IdentityRef {
         provider: CredentialProvider::File,
         reference: key.clone(),
+        label: None,
         auth_tag: None,
     };
     ProfileFile {
         schema_version: PROFILE_SCHEMA_VERSION,
         data_root: root.to_path_buf(),
+        node: NodeConfig::default(),
         relays: RelayConfig {
             local: local_relay,
             rendezvous,
@@ -455,6 +471,7 @@ pub fn legacy_profile(
             steward: None,
             artifact_source_reader: Some(role()),
             artifact_destination_owner: Some(role()),
+            artifact_rendezvous_uploader: Some(role()),
         },
         context: ContextConfig {
             default_h: default_context,
@@ -470,6 +487,52 @@ pub fn legacy_profile(
             graph_renderer: Some(root.join("bin/buzz-ctx-graph")),
         },
         installation: InstallationConfig::default(),
+    }
+}
+
+pub fn discover_legacy_optional_roles(
+    root: &Path,
+    variables: &BTreeMap<String, String>,
+    profile: &mut ProfileFile,
+) {
+    let relay_witness = root.join("sovereign.ndjson.relay-key");
+    if relay_witness.is_file() {
+        profile.identities.relay_witness = Some(file_identity(relay_witness, None, None));
+    }
+    let agent_name = variables.get("BUZZ_CTX_AGENT").filter(|name| {
+        !name.is_empty()
+            && name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+    });
+    if let Some(agent_name) = agent_name {
+        let key = root.join("agents").join(format!("{agent_name}.key"));
+        if key.is_file() {
+            let auth = root.join("agents").join(format!("{agent_name}.auth"));
+            profile.identities.agent = Some(file_identity(
+                key,
+                auth.is_file().then_some(auth),
+                Some(agent_name.clone()),
+            ));
+        }
+    }
+    let steward_key = root.join("agents/steward.key");
+    if steward_key.is_file() {
+        let auth = root.join("agents/steward.auth");
+        profile.identities.steward = Some(file_identity(
+            steward_key,
+            auth.is_file().then_some(auth),
+            Some("steward".into()),
+        ));
+    }
+}
+
+fn file_identity(path: PathBuf, auth_tag: Option<PathBuf>, label: Option<String>) -> IdentityRef {
+    IdentityRef {
+        provider: CredentialProvider::File,
+        reference: path.display().to_string(),
+        label,
+        auth_tag,
     }
 }
 
@@ -517,6 +580,9 @@ impl ResolvedProfile {
             "artifact_source_reader" => self.file.identities.artifact_source_reader.as_ref(),
             "artifact_destination_owner" => {
                 self.file.identities.artifact_destination_owner.as_ref()
+            }
+            "artifact_rendezvous_uploader" => {
+                self.file.identities.artifact_rendezvous_uploader.as_ref()
             }
             _ => None,
         }
@@ -670,6 +736,35 @@ mod tests {
     }
 
     #[test]
+    fn explicit_legacy_override_discovers_the_selected_agent_identity() {
+        let root = TempDir::new().expect("tempdir");
+        let mut env = environment(&root);
+        let legacy = env.home.join("custom-context");
+        std::fs::create_dir_all(legacy.join("agents")).expect("agents");
+        std::fs::write(
+            legacy.join("agents/claude-code.key"),
+            "credential reference",
+        )
+        .expect("key path");
+        std::fs::write(
+            legacy.join("agents/claude-code.auth"),
+            "attestation reference",
+        )
+        .expect("auth path");
+        env.ctx_home_override = Some(legacy.clone());
+        env.variables
+            .insert("BUZZ_CTX_AGENT".into(), "claude-code".into());
+        let resolved = resolve_profile("default", &env).expect("profile resolves");
+        let agent = resolved.file.identities.agent.expect("agent discovered");
+        assert_eq!(agent.label.as_deref(), Some("claude-code"));
+        assert_eq!(
+            agent.reference,
+            legacy.join("agents/claude-code.key").display().to_string()
+        );
+        assert_eq!(agent.auth_tag, Some(legacy.join("agents/claude-code.auth")));
+    }
+
+    #[test]
     fn unmanaged_legacy_layout_is_detected_without_becoming_the_default() {
         let root = TempDir::new().expect("tempdir");
         let env = environment(&root);
@@ -686,5 +781,51 @@ mod tests {
         for invalid in ["", "../owner", "Upper", "space name", "name/child"] {
             assert!(validate_profile_name(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn enterprise_profile_preserves_split_identity_roles() {
+        let root = TempDir::new().expect("tempdir");
+        let env = environment(&root);
+        let config = env.config_home.join("buzz/profiles/vumc.toml");
+        std::fs::create_dir_all(config.parent().expect("parent")).expect("config dir");
+        let public = || IdentityRef {
+            provider: CredentialProvider::PublicKey,
+            reference: Keys::generate().public_key().to_hex(),
+            label: None,
+            auth_tag: None,
+        };
+        let mut file = fresh_profile(&env.data_home.join("buzz-local-relay/vumc"));
+        file.node.label = Some("vamc3w36217hk".into());
+        file.relays.rendezvous = Some("https://relay.example".into());
+        file.identities = IdentityRoles {
+            journal_author: Some(public()),
+            replication_transport: Some(public()),
+            relay_witness: Some(public()),
+            agent: Some(public()),
+            steward: Some(public()),
+            artifact_source_reader: Some(public()),
+            artifact_destination_owner: Some(public()),
+            artifact_rendezvous_uploader: Some(public()),
+        };
+        std::fs::write(
+            &config,
+            toml::to_string_pretty(&file).expect("profile serializes"),
+        )
+        .expect("profile");
+        let resolved = resolve_profile("vumc", &env).expect("profile resolves");
+        assert_eq!(resolved.layout, LayoutStatus::Ready);
+        let keys = resolved
+            .file
+            .identities
+            .named()
+            .into_iter()
+            .map(|(_, identity)| identity.expect("configured").reference.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys.len(),
+            8,
+            "enterprise roles must remain independently addressable"
+        );
     }
 }

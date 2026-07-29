@@ -26,6 +26,7 @@ pub struct DoctorReport {
     pub relays: Vec<RelayDoctor>,
     pub identities: Vec<IdentityDoctor>,
     pub runtime: Vec<RuntimeDoctor>,
+    pub cursors: Vec<CursorDoctor>,
     pub installation: InstallationDoctor,
     pub secret_redaction: &'static str,
 }
@@ -78,6 +79,13 @@ pub struct RuntimeDoctor {
     pub path: Option<String>,
     pub exists: bool,
     pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorDoctor {
+    pub name: String,
+    pub value: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,6 +200,7 @@ pub async fn diagnose(
         relays,
         identities,
         runtime,
+        cursors: cursor_statuses(&profile.cursors),
         installation: installation_status(profile),
         secret_redaction: "private credential material is never included",
     }
@@ -282,6 +291,44 @@ fn runtime_status(name: &'static str, path: Option<&Path>) -> RuntimeDoctor {
             .filter(|path| path.is_file())
             .and_then(|path| hash_file(path).ok()),
     }
+}
+
+fn cursor_statuses(path: &Path) -> Vec<CursorDoctor> {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut cursors = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            match std::fs::read_to_string(entry.path()) {
+                Ok(value) => {
+                    let value = value.trim();
+                    if value.len() <= 256 && !value.chars().any(char::is_control) {
+                        CursorDoctor {
+                            name,
+                            value: Some(value.into()),
+                            status: "readable".into(),
+                        }
+                    } else {
+                        CursorDoctor {
+                            name,
+                            value: None,
+                            status: "redacted: cursor is not a short printable value".into(),
+                        }
+                    }
+                }
+                Err(error) => CursorDoctor {
+                    name,
+                    value: None,
+                    status: format!("unreadable: {error}"),
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    cursors.sort_by(|left, right| left.name.cmp(&right.name));
+    cursors
 }
 
 fn installation_status(profile: &ResolvedProfile) -> InstallationDoctor {
@@ -403,6 +450,14 @@ pub fn print_doctor(report: &DoctorReport, json: bool) -> Result<(), CliError> {
             runtime.path.as_deref().unwrap_or("unconfigured")
         );
     }
+    for cursor in &report.cursors {
+        println!(
+            "  cursor {:<20} {} — {}",
+            cursor.name,
+            cursor.value.as_deref().unwrap_or("-"),
+            cursor.status
+        );
+    }
     println!("  install      {}", report.installation.status);
     println!("  secrets      {}", report.secret_redaction);
     Ok(())
@@ -410,7 +465,15 @@ pub fn print_doctor(report: &DoctorReport, json: bool) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use nostr::Keys;
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::commands::context::profile::{
+        legacy_profile, CredentialProvider, IdentityRef, ProfileEnvironment,
+    };
 
     #[test]
     fn release_manifest_drift_is_reported_without_secret_fields() {
@@ -426,5 +489,46 @@ mod tests {
         assert!(!encoded.contains("private_key"));
         assert!(!encoded.contains("secret"));
         assert!(!encoded.contains("nsec"));
+    }
+
+    #[tokio::test]
+    async fn doctor_derives_public_identity_without_serializing_environment_secret() {
+        let root = TempDir::new().expect("tempdir");
+        let layout = root.path().join("context");
+        std::fs::create_dir_all(&layout).expect("layout");
+        let keys = Keys::generate();
+        let private = keys.secret_key().to_secret_hex();
+        let mut file = legacy_profile(
+            &layout,
+            "http://127.0.0.1:7777".into(),
+            Some("https://relay.example".into()),
+            Some("shared/tooling".into()),
+        );
+        file.identities.journal_author = Some(IdentityRef {
+            provider: CredentialProvider::Environment,
+            reference: "DOCTOR_TEST_KEY".into(),
+            label: Some("journal".into()),
+            auth_tag: None,
+        });
+        std::fs::write(
+            layout.join("profile.toml"),
+            toml::to_string_pretty(&file).expect("profile serializes"),
+        )
+        .expect("profile");
+        let mut variables = BTreeMap::new();
+        variables.insert("DOCTOR_TEST_KEY".into(), private.clone());
+        let environment = ProfileEnvironment {
+            home: root.path().join("home"),
+            config_home: root.path().join("config"),
+            data_home: root.path().join("data"),
+            ctx_home_override: Some(layout),
+            variables,
+        };
+        let profile =
+            super::super::profile::resolve_profile("default", &environment).expect("resolve");
+        let report = diagnose(&profile, &environment, true).await;
+        let encoded = serde_json::to_string(&report).expect("report");
+        assert!(encoded.contains(&keys.public_key().to_hex()));
+        assert!(!encoded.contains(&private));
     }
 }
