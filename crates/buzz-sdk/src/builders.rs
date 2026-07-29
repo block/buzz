@@ -4,6 +4,7 @@
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    forward::{forward_tags, ForwardSourceType},
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
@@ -11,8 +12,8 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_USER_STATUS,
-        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE,
+        KIND_STREAM_MESSAGE_FORWARD, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -235,6 +236,58 @@ pub fn build_message(
     }
     imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+}
+
+/// Build a forwarded message (kind 40009).
+///
+/// The forward is a root message authored by the forwarder: `note` is the
+/// forwarder's own text (empty when they add nothing) and the complete signed
+/// `original` travels verbatim in the `fwd` tag. The original's text is never
+/// merged into the content, so attribution and full-text search stay intact.
+///
+/// - `destination_channel_id`: channel or DM UUID to forward into (DMs are
+///   ordinary channels, so one path covers both)
+/// - `original`: the complete signed event being forwarded
+/// - `source_channel_id`: the original's own channel — must equal its `h` tag
+/// - `source_type`: visibility class of the source channel; only
+///   [`ForwardSourceType::Channel`] emits the `q` back-reference
+/// - `note`: the forwarder's optional note (max 64 KiB)
+/// - `mentions`: pubkey hex strings to p-tag, from mentions in `note` only
+///   (deduped, max 50) — a forward never p-tags the original author, which
+///   would fire a false "you were mentioned" notification
+///
+/// Tag assembly (kind allowlist, source/embedded `h` agreement, the 64 KiB
+/// `fwd` cap, `q`-only-for-open, and verbatim `imeta` passthrough) is delegated
+/// to [`buzz_core::forward::forward_tags`], the shared contract the relay
+/// validates against.
+///
+/// Forwarding a forward is the caller's job to flatten: pass the *embedded*
+/// original, since kind 40009 is not itself forwardable and is rejected here.
+pub fn build_forward(
+    destination_channel_id: Uuid,
+    original: &nostr::Event,
+    source_channel_id: Uuid,
+    source_type: ForwardSourceType,
+    note: &str,
+    mentions: &[&str],
+) -> Result<EventBuilder, SdkError> {
+    check_content(note, 64 * 1024)?;
+    let raw = forward_tags(
+        destination_channel_id,
+        original,
+        source_channel_id,
+        source_type,
+    )
+    .map_err(|e| SdkError::InvalidInput(e.to_string()))?;
+
+    let mut tags: Vec<Tag> = Vec::with_capacity(raw.len() + mentions.len());
+    for parts in &raw {
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        tags.push(tag(&parts)?);
+    }
+    mention_tags(mentions, &mut tags)?;
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE_FORWARD as u16), note).tags(tags))
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -1841,7 +1894,7 @@ pub fn build_unarchive_identity_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventId, Keys};
+    use nostr::{EventId, JsonUtil, Keys};
 
     fn keys() -> Keys {
         Keys::generate()
@@ -2034,6 +2087,151 @@ mod tests {
         let cid = uuid();
         let max = "x".repeat(64 * 1024);
         assert!(build_message(cid, &max, None, &[], false, &[]).is_ok());
+    }
+
+    /// A signed kind 9 original in `cid` carrying one imeta tag.
+    fn original_message(cid: Uuid, author: &Keys) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), "original body")
+            .tags([
+                Tag::parse(["h", &cid.to_string()]).expect("h tag"),
+                Tag::parse(["imeta", "url https://example.test/a.png", "x abc123"])
+                    .expect("imeta tag"),
+            ])
+            .sign_with_keys(author)
+            .expect("sign")
+    }
+
+    #[test]
+    fn forward_happy_path_carries_the_signed_original() {
+        let src = uuid();
+        let dest = uuid();
+        let author = keys();
+        let original = original_message(src, &author);
+
+        let ev = sign(
+            build_forward(
+                dest,
+                &original,
+                src,
+                ForwardSourceType::Channel,
+                "look at this",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(ev.kind.as_u16(), 40009);
+        assert_eq!(ev.content, "look at this");
+        assert!(has_tag(&ev, "h", &dest.to_string()));
+        assert!(has_tag(&ev, "k", "9"));
+        assert_eq!(tag_values(&ev, "fwd-src"), vec![src.to_string()]);
+        assert_eq!(tag_values(&ev, "imeta").len(), 1);
+
+        // The fwd tag round-trips to the byte-identical signed original.
+        let embedded = nostr::Event::from_json(&tag_values(&ev, "fwd")[0]).expect("embedded event");
+        assert_eq!(embedded.id, original.id);
+        assert_eq!(embedded.sig, original.sig);
+
+        // The original's author is never p-tagged (no false mention notification).
+        assert!(tag_values(&ev, "p").is_empty());
+    }
+
+    #[test]
+    fn forward_without_a_note_has_empty_content() {
+        let src = uuid();
+        let original = original_message(src, &keys());
+        let ev =
+            sign(build_forward(uuid(), &original, src, ForwardSourceType::Dm, "", &[]).unwrap());
+        assert_eq!(ev.content, "");
+    }
+
+    #[test]
+    fn forward_quotes_only_open_sources() {
+        let src = uuid();
+        let original = original_message(src, &keys());
+
+        let open = sign(
+            build_forward(uuid(), &original, src, ForwardSourceType::Channel, "", &[]).unwrap(),
+        );
+        assert_eq!(tag_values(&open, "q"), vec![original.id.to_hex()]);
+
+        for source_type in [ForwardSourceType::Private, ForwardSourceType::Dm] {
+            let ev = sign(build_forward(uuid(), &original, src, source_type, "", &[]).unwrap());
+            assert!(tag_values(&ev, "q").is_empty());
+        }
+    }
+
+    #[test]
+    fn forward_p_tags_only_note_mentions() {
+        let src = uuid();
+        let author = keys();
+        let original = original_message(src, &author);
+        let mentioned = keys().public_key().to_hex();
+
+        let ev = sign(
+            build_forward(
+                uuid(),
+                &original,
+                src,
+                ForwardSourceType::Private,
+                "@bob relevant",
+                &[&mentioned, &mentioned],
+            )
+            .unwrap(),
+        );
+        assert_eq!(tag_values(&ev, "p"), vec![mentioned]);
+        assert!(!has_tag(&ev, "p", &author.public_key().to_hex()));
+    }
+
+    #[test]
+    fn forward_rejects_a_forward_as_input() {
+        let src = uuid();
+        let inner = original_message(src, &keys());
+        let forward =
+            sign(build_forward(uuid(), &inner, src, ForwardSourceType::Channel, "", &[]).unwrap());
+
+        // Flattening is the caller's job: a kind 40009 original is refused.
+        let err = build_forward(uuid(), &forward, src, ForwardSourceType::Channel, "", &[])
+            .expect_err("kind 40009 must not be forwardable");
+        match err {
+            SdkError::InvalidInput(msg) => assert!(msg.contains("40009"), "{msg}"),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn forward_rejects_source_channel_that_differs_from_the_original() {
+        let src = uuid();
+        let original = original_message(src, &keys());
+        assert!(matches!(
+            build_forward(
+                uuid(),
+                &original,
+                uuid(),
+                ForwardSourceType::Channel,
+                "",
+                &[]
+            ),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn forward_note_too_large() {
+        let src = uuid();
+        let original = original_message(src, &keys());
+        let big = "x".repeat(64 * 1024 + 1);
+        assert!(matches!(
+            build_forward(
+                uuid(),
+                &original,
+                src,
+                ForwardSourceType::Channel,
+                &big,
+                &[]
+            ),
+            Err(SdkError::ContentTooLarge { .. })
+        ));
     }
 
     #[test]

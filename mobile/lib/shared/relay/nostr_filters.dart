@@ -122,7 +122,7 @@ abstract final class NostrFilters {
     String? channelId,
     int limit = 20,
   }) => NostrFilter(
-    kinds: [9, 40002, 45001, 45003],
+    kinds: [9, 40002, EventKind.streamMessageForward, 45001, 45003],
     tags: channelId != null
         ? {
             '#h': [channelId],

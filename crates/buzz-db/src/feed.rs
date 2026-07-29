@@ -37,7 +37,8 @@ use buzz_core::kind::{
     KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_GIT_ISSUE, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_STREAM_MESSAGE_FORWARD, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -103,7 +104,10 @@ fn build_mentions_query(
     qb.push(" AND m.pubkey_hex = ").push_bind(pubkey_hex);
     qb.push(" AND e.deleted_at IS NULL");
     qb.push(format!(
+        // A forward's `p` tags come only from mentions the forwarder wrote in
+        // the note, so they belong in the mentions feed like any message.
         " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, \
+         {KIND_STREAM_MESSAGE_FORWARD}, \
          {KIND_TEXT_NOTE}, {KIND_FORUM_POST}, {KIND_FORUM_COMMENT}, {KIND_GIT_PULL_REQUEST}, \
          {KIND_GIT_PR_UPDATE}, {KIND_GIT_ISSUE}, {KIND_GIT_STATUS_OPEN}, \
          {KIND_GIT_STATUS_MERGED}, {KIND_GIT_STATUS_CLOSED}, {KIND_GIT_STATUS_DRAFT})"
@@ -563,14 +567,21 @@ mod tests {
     #[test]
     fn mentions_query_includes_stream_message_kind() {
         use buzz_core::kind::{
-            KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2,
+            KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_FORWARD,
+            KIND_STREAM_MESSAGE_V2,
         };
         let mention_kinds: &[u32] = &[
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_V2,
+            KIND_STREAM_MESSAGE_FORWARD,
             KIND_FORUM_POST,
             KIND_FORUM_COMMENT,
         ];
+
+        assert!(
+            mention_kinds.contains(&KIND_STREAM_MESSAGE_FORWARD),
+            "a mention written in a forward's note must reach the mentions feed"
+        );
 
         assert!(
             mention_kinds.contains(&KIND_STREAM_MESSAGE),

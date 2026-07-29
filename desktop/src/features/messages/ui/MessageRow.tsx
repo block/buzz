@@ -26,7 +26,10 @@ import {
 import {
   KIND_HUDDLE_STARTED,
   KIND_STREAM_MESSAGE_DIFF,
+  KIND_STREAM_MESSAGE_FORWARD,
 } from "@/shared/constants/kinds";
+import { ForwardedMessageRow } from "@/features/messages/ui/ForwardedMessageCard";
+import { useForwardMessage } from "@/features/messages/ui/ForwardMessageProvider";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -178,6 +181,14 @@ export const MessageRow = React.memo(
         });
       },
       [channelId, openReminder],
+    );
+    const { openForwardDialog } = useForwardMessage();
+    const handleForward = React.useCallback(
+      (msg: TimelineMessage) => {
+        if (!channelId) return;
+        openForwardDialog({ message: msg, channelId });
+      },
+      [channelId, openForwardDialog],
     );
     const { mentionNames, mentionPubkeysByName } = React.useMemo(
       () => resolveMentionProps(message.tags, profiles),
@@ -334,6 +345,8 @@ export const MessageRow = React.memo(
               onOpenThread={onReply}
             />
           );
+        case KIND_STREAM_MESSAGE_FORWARD:
+          return <ForwardedMessageRow message={message} profiles={profiles} />;
         default:
           {
             const waveMessage = parseWaveMessageContent(message.body);
@@ -484,6 +497,7 @@ export const MessageRow = React.memo(
           onDelete={onDelete}
           onEdit={onEdit}
           onFollowThread={onFollowThread}
+          onForward={channelId ? handleForward : undefined}
           onMarkUnread={onMarkUnread}
           onMarkRead={onMarkRead}
           onReactionBadgeBurstRequest={

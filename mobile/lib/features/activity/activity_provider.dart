@@ -66,7 +66,14 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       // Mentions of me on user-visible channel content.
       session.fetchHistory(
         NostrFilter(
-          kinds: const [9, 40002, 1, 45001, 45003],
+          kinds: const [
+            9,
+            40002,
+            EventKind.streamMessageForward,
+            1,
+            45001,
+            45003,
+          ],
           tags: {
             '#p': [myPk],
           },
@@ -93,12 +100,18 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           limit: 20,
         ),
       ),
-      // Recent DM traffic (filtered to other senders below).
+      // Recent DM traffic (filtered to other senders below). Forwards are
+      // included because a no-note forward into a DM carries no p tag for the
+      // recipient, so the mentions query above never sees it.
       if (dmChannelIds.isEmpty)
         Future.value(const <NostrEvent>[])
       else
         session.fetchHistory(
-          NostrFilter(kinds: const [9], tags: {'#h': dmChannelIds}, limit: 30),
+          NostrFilter(
+            kinds: const [9, EventKind.streamMessageForward],
+            tags: {'#h': dmChannelIds},
+            limit: 30,
+          ),
         ),
     ]);
 

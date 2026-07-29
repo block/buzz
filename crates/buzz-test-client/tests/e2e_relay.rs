@@ -73,7 +73,7 @@ fn nip98_post_header(keys: &Keys, url: &str, body: &str) -> String {
 
 async fn e2e_db_pool() -> sqlx::Pool<sqlx::Postgres> {
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local docker-compose dev credentials
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -2911,5 +2911,428 @@ async fn test_nip29_relay_rejects_last_owner_self_demotion() {
             .as_deref(),
         Some("owner"),
         "the last owner must keep their role"
+    );
+}
+
+// -- kind:40009 message forwards ---------------------------------------------
+
+/// Create a channel over WebSocket with an explicit type/visibility and return
+/// its UUID. The creator becomes the channel owner (and therefore a member).
+async fn create_channel_ws(
+    client: &mut BuzzTestClient,
+    keys: &Keys,
+    channel_type: &str,
+    visibility: &str,
+) -> String {
+    let channel_uuid = uuid::Uuid::new_v4().to_string();
+    let channel_name = format!("relay-e2e-fwd-{channel_uuid}");
+
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid]).unwrap(),
+            Tag::parse(["name", &channel_name]).unwrap(),
+            Tag::parse(["channel_type", channel_type]).unwrap(),
+            Tag::parse(["visibility", visibility]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+
+    let ok = client.send_event(event).await.expect("create channel");
+    assert!(
+        ok.accepted,
+        "{channel_type}/{visibility} channel creation failed: {}",
+        ok.message
+    );
+    channel_uuid
+}
+
+/// Publish a kind:9 message into `channel_id` and return the signed event.
+async fn post_forwardable_message(
+    client: &mut BuzzTestClient,
+    keys: &Keys,
+    channel_id: &str,
+    content: &str,
+) -> nostr::Event {
+    let event = EventBuilder::new(Kind::Custom(9), content)
+        .tags(vec![Tag::parse(["h", channel_id]).unwrap()])
+        .sign_with_keys(keys)
+        .unwrap();
+    let ok = client
+        .send_event(event.clone())
+        .await
+        .expect("publish original message");
+    assert!(ok.accepted, "original message rejected: {}", ok.message);
+    event
+}
+
+fn forward_tag_vec(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|p| (*p).to_string()).collect()
+}
+
+/// Sign a kind:40009 forward carrying `tags` (raw string tag parts).
+fn sign_forward(keys: &Keys, note: &str, tags: &[Vec<String>]) -> nostr::Event {
+    let nostr_tags: Vec<Tag> = tags
+        .iter()
+        .map(|parts| Tag::parse(parts.iter().map(String::as_str)).expect("forward tag"))
+        .collect();
+    EventBuilder::new(Kind::Custom(40009), note)
+        .tags(nostr_tags)
+        .sign_with_keys(keys)
+        .expect("sign forward")
+}
+
+/// Build the canonical forward tag set via the shared buzz-core builder.
+fn canonical_forward_tags(
+    destination: &str,
+    original: &nostr::Event,
+    source: &str,
+    source_type: buzz_core::forward::ForwardSourceType,
+) -> Vec<Vec<String>> {
+    buzz_core::forward::forward_tags(
+        Uuid::parse_str(destination).expect("destination uuid"),
+        original,
+        Uuid::parse_str(source).expect("source uuid"),
+        source_type,
+    )
+    .expect("build forward tags")
+}
+
+/// Happy path: forwarding an open-channel message into another open channel is
+/// accepted, and the `q` back-reference to the original survives the round trip.
+#[tokio::test]
+#[ignore]
+async fn test_forward_open_channel_to_channel_is_accepted() {
+    use buzz_core::forward::ForwardSourceType;
+
+    let url = relay_url();
+    let keys = Keys::generate();
+    let source = create_test_channel(&keys).await;
+    let destination = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let original = post_forwardable_message(&mut client, &keys, &source, "forward me").await;
+
+    let tags = canonical_forward_tags(&destination, &original, &source, ForwardSourceType::Channel);
+    assert!(
+        tags.iter().any(|parts| parts[0] == "q"),
+        "an open source must carry a q back-reference"
+    );
+    let ok = client
+        .send_event(sign_forward(&keys, "worth a look", &tags))
+        .await
+        .expect("send forward");
+    client.disconnect().await.ok();
+
+    assert!(ok.accepted, "open channel forward rejected: {}", ok.message);
+}
+
+/// A DM is an ordinary channel, so the same mechanism forwards into one.
+#[tokio::test]
+#[ignore]
+async fn test_forward_open_channel_into_dm_is_accepted() {
+    use buzz_core::forward::ForwardSourceType;
+
+    let url = relay_url();
+    let keys = Keys::generate();
+    let source = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let dm = create_channel_ws(&mut client, &keys, "dm", "private").await;
+    let original = post_forwardable_message(&mut client, &keys, &source, "for your eyes").await;
+
+    let tags = canonical_forward_tags(&dm, &original, &source, ForwardSourceType::Channel);
+    let ok = client
+        .send_event(sign_forward(&keys, "", &tags))
+        .await
+        .expect("send forward into DM");
+    client.disconnect().await.ok();
+
+    assert!(ok.accepted, "forward into DM rejected: {}", ok.message);
+}
+
+/// A member of a private source may forward out of it; the envelope carries no
+/// `q` tag, so no linkable reference to unreadable content is published.
+#[tokio::test]
+#[ignore]
+async fn test_forward_from_private_source_by_member_is_accepted_without_quote() {
+    use buzz_core::forward::ForwardSourceType;
+
+    let url = relay_url();
+    let keys = Keys::generate();
+    let destination = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let source = create_private_channel_ws(&mut client, &keys).await;
+    let original = post_forwardable_message(&mut client, &keys, &source, "private note").await;
+
+    let tags = canonical_forward_tags(&destination, &original, &source, ForwardSourceType::Private);
+    assert!(
+        tags.iter().all(|parts| parts[0] != "q"),
+        "a private source must not emit a q tag"
+    );
+    let ok = client
+        .send_event(sign_forward(&keys, "sharing with the team", &tags))
+        .await
+        .expect("send private-source forward");
+    client.disconnect().await.ok();
+
+    assert!(
+        ok.accepted,
+        "member forwarding out of a private channel was rejected: {}",
+        ok.message
+    );
+}
+
+/// The laundering gate: a non-member of the private source cannot get the relay
+/// to bless a copy of its content, even with a valid embedded signature.
+#[tokio::test]
+#[ignore]
+async fn test_forward_from_private_source_by_non_member_is_rejected() {
+    use buzz_core::forward::ForwardSourceType;
+
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+    let destination = create_test_channel(&outsider_keys).await;
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect owner");
+    let source = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+    let original =
+        post_forwardable_message(&mut owner_client, &owner_keys, &source, "leaked secret").await;
+    owner_client.disconnect().await.ok();
+
+    let tags = canonical_forward_tags(&destination, &original, &source, ForwardSourceType::Private);
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect outsider");
+    let ok = outsider_client
+        .send_event(sign_forward(&outsider_keys, "look what I found", &tags))
+        .await
+        .expect("send laundering forward");
+    outsider_client.disconnect().await.ok();
+
+    assert!(
+        !ok.accepted,
+        "a non-member must not be able to forward private content, got: {}",
+        ok.message
+    );
+    assert!(
+        ok.message.contains("restricted:"),
+        "rejection should be a restriction, got: {}",
+        ok.message
+    );
+}
+
+/// The embedded copy is verified, not trusted: a tampered original is refused.
+#[tokio::test]
+#[ignore]
+async fn test_forward_with_tampered_embedded_original_is_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let source = create_test_channel(&keys).await;
+    let destination = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let original = post_forwardable_message(&mut client, &keys, &source, "genuine text").await;
+
+    let mut json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+    json["content"] = serde_json::Value::String("words the author never wrote".to_string());
+
+    let tags = vec![
+        forward_tag_vec(&["h", &destination]),
+        forward_tag_vec(&["fwd", &json.to_string()]),
+        forward_tag_vec(&["k", "9"]),
+        forward_tag_vec(&["fwd-src", &source, "channel"]),
+        forward_tag_vec(&["q", &original.id.to_hex(), "", &original.pubkey.to_hex()]),
+    ];
+    let ok = client
+        .send_event(sign_forward(&keys, "", &tags))
+        .await
+        .expect("send tampered forward");
+    client.disconnect().await.ok();
+
+    assert!(
+        !ok.accepted,
+        "a tampered embedded original must be rejected, got: {}",
+        ok.message
+    );
+}
+
+/// The `k` tag is the NIP-18 declaration of the embedded kind; a lie is refused.
+#[tokio::test]
+#[ignore]
+async fn test_forward_with_mismatched_k_tag_is_rejected() {
+    use buzz_core::forward::ForwardSourceType;
+
+    let url = relay_url();
+    let keys = Keys::generate();
+    let source = create_test_channel(&keys).await;
+    let destination = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let original = post_forwardable_message(&mut client, &keys, &source, "kind nine").await;
+
+    let tags: Vec<Vec<String>> =
+        canonical_forward_tags(&destination, &original, &source, ForwardSourceType::Channel)
+            .into_iter()
+            .map(|parts| {
+                if parts[0] == "k" {
+                    forward_tag_vec(&["k", "40002"])
+                } else {
+                    parts
+                }
+            })
+            .collect();
+    let ok = client
+        .send_event(sign_forward(&keys, "", &tags))
+        .await
+        .expect("send k-mismatch forward");
+    client.disconnect().await.ok();
+
+    assert!(
+        !ok.accepted,
+        "a k tag that disagrees with the embedded kind must be rejected, got: {}",
+        ok.message
+    );
+}
+
+/// Forwards never nest: an embedded kind:40009 is refused so depth stays 1.
+#[tokio::test]
+#[ignore]
+async fn test_forward_of_a_forward_is_rejected() {
+    use buzz_core::forward::ForwardSourceType;
+
+    let url = relay_url();
+    let keys = Keys::generate();
+    let source = create_test_channel(&keys).await;
+    let destination = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let original = post_forwardable_message(&mut client, &keys, &source, "the first message").await;
+
+    // A real, accepted forward — then try to forward the forward itself.
+    let inner_tags =
+        canonical_forward_tags(&destination, &original, &source, ForwardSourceType::Channel);
+    let inner = sign_forward(&keys, "first hop", &inner_tags);
+    let ok = client
+        .send_event(inner.clone())
+        .await
+        .expect("send first-hop forward");
+    assert!(ok.accepted, "first hop rejected: {}", ok.message);
+
+    let nested = vec![
+        forward_tag_vec(&["h", &source]),
+        forward_tag_vec(&["fwd", &serde_json::to_string(&inner).unwrap()]),
+        forward_tag_vec(&["k", "40009"]),
+        forward_tag_vec(&["fwd-src", &destination, "channel"]),
+    ];
+    let ok = client
+        .send_event(sign_forward(&keys, "second hop", &nested))
+        .await
+        .expect("send nested forward");
+    client.disconnect().await.ok();
+
+    assert!(
+        !ok.accepted,
+        "forwarding a forward must be rejected, got: {}",
+        ok.message
+    );
+}
+
+/// Provenance: a validly signed original that was never published to this relay
+/// has no provenance here, so it cannot be laundered in with a real signature
+/// even when the forwarder owns both channels.
+#[tokio::test]
+#[ignore]
+async fn test_forward_of_an_unpublished_original_is_rejected() {
+    use buzz_core::forward::ForwardSourceType;
+
+    let url = relay_url();
+    let keys = Keys::generate();
+    let source = create_test_channel(&keys).await;
+    let destination = create_test_channel(&keys).await;
+
+    // Signed for the source channel but deliberately never sent to the relay.
+    let original = EventBuilder::new(Kind::Custom(9), "never published here")
+        .tags(vec![Tag::parse(["h", &source]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign unpublished original");
+
+    let tags = canonical_forward_tags(&destination, &original, &source, ForwardSourceType::Channel);
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let ok = client
+        .send_event(sign_forward(&keys, "found this somewhere", &tags))
+        .await
+        .expect("send unpublished-original forward");
+    client.disconnect().await.ok();
+
+    assert!(
+        !ok.accepted,
+        "an original that was never published must not be forwardable, got: {}",
+        ok.message
+    );
+    assert!(
+        ok.message.contains("restricted:"),
+        "rejection should be a restriction, got: {}",
+        ok.message
+    );
+}
+
+/// The source-type label is checked against the channel row, so a forwarder
+/// cannot downgrade a private source to "channel" to win a linkable attribution.
+#[tokio::test]
+#[ignore]
+async fn test_forward_with_spoofed_source_type_is_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let destination = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect forwarder");
+    let source = create_private_channel_ws(&mut client, &keys).await;
+    let original = post_forwardable_message(&mut client, &keys, &source, "private original").await;
+
+    // Hand-rolled tags: the builder would never label a private source
+    // "channel", which is exactly the claim the relay must refuse.
+    let tags = vec![
+        forward_tag_vec(&["h", &destination]),
+        forward_tag_vec(&["fwd", &serde_json::to_string(&original).unwrap()]),
+        forward_tag_vec(&["k", "9"]),
+        forward_tag_vec(&["fwd-src", &source, "channel"]),
+        forward_tag_vec(&["q", &original.id.to_hex(), "", &original.pubkey.to_hex()]),
+    ];
+    let ok = client
+        .send_event(sign_forward(&keys, "", &tags))
+        .await
+        .expect("send spoofed-source forward");
+    client.disconnect().await.ok();
+
+    assert!(
+        !ok.accepted,
+        "a spoofed fwd-src type must be rejected, got: {}",
+        ok.message
+    );
+    assert!(
+        ok.message.contains("does not match source channel"),
+        "rejection should name the source-type mismatch, got: {}",
+        ok.message
     );
 }

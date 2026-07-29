@@ -7,14 +7,13 @@ use forum::{forum_message_from_event, forum_reply_from_event};
 
 use crate::{
     app_state::AppState,
-    events,
+    events, events_forward,
     managed_agents::{find_managed_agent_mut, load_managed_agents, ManagedAgentRecord},
     models::{
         FeedItemInfo, FeedMeta, FeedResponse, FeedSections, ForumMessageInfo, ForumPostsResponse,
-        ForumThreadReplyInfo, ForumThreadResponse, SearchResponse, SendChannelMessageResponse,
+        ForumThreadReplyInfo, ForumThreadResponse, SendChannelMessageResponse,
         ThreadRepliesResponse,
     },
-    nostr_convert,
     relay::{query_relay, submit_event, submit_event_with_keys},
 };
 
@@ -27,10 +26,11 @@ use crate::{
 /// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
 /// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
 /// kind) but still passes through the p-gate before it runs.
-const TIMELINE_KINDS: [u32; 11] = [
+const TIMELINE_KINDS: [u32; 12] = [
     9,
     40002,
     40008,
+    buzz_core_pkg::kind::KIND_STREAM_MESSAGE_FORWARD,
     40099,
     43001,
     43002,
@@ -71,6 +71,7 @@ pub async fn get_feed(
         "kinds": [
             9,
             40002,
+            buzz_core_pkg::kind::KIND_STREAM_MESSAGE_FORWARD,
             1,
             45001,
             45003,
@@ -136,74 +137,6 @@ pub async fn get_feed(
             generated_at: chrono::Utc::now().timestamp(),
         },
     })
-}
-
-fn build_search_messages_filter(
-    q: &str,
-    cap: u32,
-    channel_id: Option<&str>,
-    authors: Option<&[String]>,
-    since: Option<i64>,
-    until: Option<i64>,
-) -> serde_json::Value {
-    let mut filter = serde_json::Map::new();
-    filter.insert(
-        "kinds".to_string(),
-        serde_json::json!([9, 40002, 45001, 45003]),
-    );
-    filter.insert("search".to_string(), serde_json::json!(q.trim()));
-    // The desktop topbar is a typeahead surface. This bridge-only extension is
-    // consumed before nostr::Filter parsing on the relay, so general WS/NIP-50
-    // search remains word/lexeme-based.
-    filter.insert("search_mode".to_string(), serde_json::json!("prefix"));
-    filter.insert("limit".to_string(), serde_json::json!(cap));
-    if let Some(cid) = channel_id {
-        filter.insert("#h".to_string(), serde_json::json!([cid]));
-    }
-    // Optional operators from the desktop search parser (#2853). The relay
-    // already maps authors/since/until onto FTS; search remains never the
-    // access boundary (hits are refetched and re-authorized).
-    if let Some(authors) = authors {
-        let cleaned: Vec<&str> = authors
-            .iter()
-            .map(|a| a.trim())
-            .filter(|a| !a.is_empty())
-            .collect();
-        if !cleaned.is_empty() {
-            filter.insert("authors".to_string(), serde_json::json!(cleaned));
-        }
-    }
-    if let Some(since) = since {
-        filter.insert("since".to_string(), serde_json::json!(since));
-    }
-    if let Some(until) = until {
-        filter.insert("until".to_string(), serde_json::json!(until));
-    }
-    serde_json::Value::Object(filter)
-}
-
-#[tauri::command]
-pub async fn search_messages(
-    q: String,
-    limit: Option<u32>,
-    channel_id: Option<String>,
-    authors: Option<Vec<String>>,
-    since: Option<i64>,
-    until: Option<i64>,
-    state: State<'_, AppState>,
-) -> Result<SearchResponse, String> {
-    let cap = limit.unwrap_or(20).min(100);
-    let filter = build_search_messages_filter(
-        &q,
-        cap,
-        channel_id.as_deref(),
-        authors.as_deref(),
-        since,
-        until,
-    );
-
-    let events = query_relay(&state, &[filter]).await?;
-    Ok(nostr_convert::search_response_from_events(&events))
 }
 
 #[tauri::command]
@@ -463,7 +396,7 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
         &state,
         &[serde_json::json!({
             "ids": [event_id],
-            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, buzz_core_pkg::kind::KIND_STREAM_MESSAGE_FORWARD, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
             "limit": 1
         })],
     )
@@ -489,7 +422,7 @@ async fn resolve_thread_ref(
         state,
         &[serde_json::json!({
             "ids": [parent_event_id],
-            "kinds": [9, 40002, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+            "kinds": [9, 40002, buzz_core_pkg::kind::KIND_STREAM_MESSAGE_FORWARD, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
             "limit": 1
         })],
     )
@@ -608,6 +541,39 @@ pub async fn send_channel_message(
         root_event_id: resolved_root,
         parent_event_id,
         depth,
+        created_at: chrono::Utc::now().timestamp(),
+    })
+}
+
+/// Forward a message snapshot (kind 40009) into a destination channel or DM.
+///
+/// `note` is the forwarder's optional note (empty string when none).
+/// `forward_tags` carries the pre-composed `fwd`/`k`/`fwd-src`/`q`/`imeta`
+/// tags (see `buildForwardTags` in the desktop frontend); the builder rejects
+/// any other tag family. `mention_pubkeys` are mentions the forwarder wrote in
+/// the note. A forward is always a root message, so no thread fields apply.
+#[tauri::command]
+pub async fn forward_message(
+    channel_id: String,
+    note: String,
+    forward_tags: Vec<Vec<String>>,
+    mention_pubkeys: Option<Vec<String>>,
+    state: State<'_, AppState>,
+) -> Result<SendChannelMessageResponse, String> {
+    let channel_uuid = uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
+    let mentions = mention_pubkeys.unwrap_or_default();
+    let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
+
+    let builder =
+        events_forward::build_forward(channel_uuid, note.trim(), &forward_tags, &mention_refs)?;
+    let result = submit_event(builder, &state).await?;
+
+    Ok(SendChannelMessageResponse {
+        event_id: result.event_id,
+        root_event_id: None,
+        parent_event_id: None,
+        depth: 0,
         created_at: chrono::Utc::now().timestamp(),
     })
 }

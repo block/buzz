@@ -3,7 +3,9 @@ import test from "node:test";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import {
+  collectForwardEmbeddedPubkeys,
   collectMessageAuthorPubkeys,
+  collectMessageProfilePubkeys,
   collectReactionActorPubkeys,
   countTopLevelTimelineRows,
   formatTimelineMessages,
@@ -654,6 +656,79 @@ test("countTopLevelTimelineRows counts huddle start rows", () => {
 
 test("huddle ended stays lifecycle-only, not a timeline row", () => {
   assert.equal(isTimelineContentEvent({ kind: KIND_HUDDLE_ENDED }), false);
+});
+
+// A forwarded row renders the embedded original inline, so the embedded
+// author and its mentions must ride the surface's batched profile request —
+// otherwise each row fires its own single-pubkey query and embedded mentions
+// never resolve to a name.
+const SOURCE_CHANNEL_ID = "b90b5d5c-2c2a-4d40-9d4a-1cb27fb4b1a2";
+const PUBKEY_C =
+  "3333333333333333333333333333333333333333333333333333333333333333";
+
+function forwardEvent(embeddedOverrides = {}, tagOverrides = null) {
+  const embedded = {
+    id: HEX64_B,
+    pubkey: PUBKEY_B.toUpperCase(),
+    created_at: 1_700_000_000,
+    kind: 9,
+    tags: [
+      ["h", SOURCE_CHANNEL_ID],
+      ["p", PUBKEY_C],
+    ],
+    content: "ping @carol",
+    sig: "ab".repeat(64),
+    ...embeddedOverrides,
+  };
+
+  return {
+    id: HEX64_A,
+    pubkey: PUBKEY_A,
+    kind: 40009,
+    created_at: 1_700_000_100,
+    content: "worth a look",
+    tags: tagOverrides ?? [
+      ["h", CHANNEL_ID],
+      ["fwd", JSON.stringify(embedded)],
+      ["k", "9"],
+      ["fwd-src", SOURCE_CHANNEL_ID, "channel"],
+    ],
+    sig: "sig",
+  };
+}
+
+test("collectForwardEmbeddedPubkeys collects the embedded author and mentions", () => {
+  assert.deepEqual(collectForwardEmbeddedPubkeys([forwardEvent()]), [
+    PUBKEY_B,
+    PUBKEY_C,
+  ]);
+});
+
+test("collectForwardEmbeddedPubkeys ignores non-forwards and malformed envelopes", () => {
+  assert.deepEqual(collectForwardEmbeddedPubkeys([streamMessage()]), []);
+  // Missing `fwd`/`fwd-src` tags: parseForwardEnvelope returns null.
+  assert.deepEqual(
+    collectForwardEmbeddedPubkeys([forwardEvent({}, [["h", CHANNEL_ID]])]),
+    [],
+  );
+  // Unparseable embedded JSON.
+  assert.deepEqual(
+    collectForwardEmbeddedPubkeys([
+      forwardEvent({}, [
+        ["h", CHANNEL_ID],
+        ["fwd", "{not json"],
+        ["fwd-src", SOURCE_CHANNEL_ID, "channel"],
+      ]),
+    ]),
+    [],
+  );
+});
+
+test("collectMessageProfilePubkeys includes forwarded-original pubkeys", () => {
+  const pubkeys = collectMessageProfilePubkeys([forwardEvent()]);
+  assert.ok(pubkeys.includes(PUBKEY_A), "forwarder");
+  assert.ok(pubkeys.includes(PUBKEY_B), "embedded author");
+  assert.ok(pubkeys.includes(PUBKEY_C), "embedded mention");
 });
 
 // Guardrail: the history fetch requests exactly CHANNEL_TIMELINE_CONTENT_KINDS,

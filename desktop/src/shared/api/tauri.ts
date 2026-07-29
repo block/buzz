@@ -95,7 +95,7 @@ type RawSearchResponse = {
   found: number;
 };
 
-type RawSendChannelMessageResult = {
+export type RawSendChannelMessageResult = {
   event_id: string;
   parent_event_id: string | null;
   root_event_id: string | null;

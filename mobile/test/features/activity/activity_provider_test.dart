@@ -8,9 +8,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 /// Records every DM history query (`#h` filter) so tests can assert whether
-/// the DM source was fetched. All queries resolve to empty lists.
+/// the DM source was fetched, and with which kinds. All queries resolve to
+/// empty lists.
 class _RecordingSessionNotifier extends RelaySessionNotifier {
   final List<List<String>> dmQueries = [];
+  final List<List<int>> dmKinds = [];
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -21,7 +23,10 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     final h = filter.tags['#h'];
-    if (h != null) dmQueries.add(h);
+    if (h != null) {
+      dmQueries.add(h);
+      dmKinds.add(filter.kinds);
+    }
     return const [];
   }
 }
@@ -83,6 +88,29 @@ void main() {
 
     expect(session.dmQueries, hasLength(1));
     expect(session.dmQueries.single, ['dm1']);
+  });
+
+  test('DM query asks for forwards too, since a no-note forward into a DM '
+      'carries no p tag for the recipient', () async {
+    final session = _RecordingSessionNotifier();
+    final channels = _LateChannelsNotifier();
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(() => channels),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(activityProvider.future);
+    channels.resolve([_dmChannel('dm1')]);
+    await container.read(channelsProvider.future);
+    await container.read(activityProvider.future);
+
+    expect(session.dmKinds.single, contains(EventKind.streamMessage));
+    expect(session.dmKinds.single, contains(EventKind.streamMessageForward));
   });
 
   test('does not query DMs when the resolved channel list has none', () async {

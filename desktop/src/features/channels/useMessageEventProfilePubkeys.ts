@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import {
+  collectForwardEmbeddedPubkeys,
   collectMessageAuthorPubkeys,
   collectMessageMentionPubkeys,
   collectReactionActorPubkeys,
@@ -18,6 +19,9 @@ export function useMessageEventProfilePubkeys(
       ...new Set([
         ...collectMessageAuthorPubkeys(events, relaySelfPubkey),
         ...collectMessageMentionPubkeys(events),
+        // Forwarded rows render an embedded original: its author and mentions
+        // ride this batch instead of a per-row query.
+        ...collectForwardEmbeddedPubkeys(events),
         ...collectReactionActorPubkeys(events, relaySelfPubkey),
       ]),
     ];

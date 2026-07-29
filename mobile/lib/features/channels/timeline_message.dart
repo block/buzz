@@ -113,6 +113,77 @@ class SystemEvent {
   }
 }
 
+/// Source-channel type label carried on a forward's `fwd-src` tag.
+enum ForwardSourceType {
+  /// Open-visibility channel — attribution may name and link the source.
+  channel,
+
+  /// Private (non-open) group channel — attribution stays anonymous.
+  private,
+
+  /// Direct message — attribution stays anonymous.
+  dm,
+}
+
+/// Parsed forward metadata from a kind-40009 event's tags.
+@immutable
+class ForwardInfo {
+  /// The complete original signed event, embedded in the `fwd` tag.
+  final NostrEvent original;
+
+  /// Source channel UUID from the `fwd-src` tag.
+  final String sourceChannelId;
+
+  /// Source channel type label from the `fwd-src` tag.
+  final ForwardSourceType sourceType;
+
+  const ForwardInfo({
+    required this.original,
+    required this.sourceChannelId,
+    required this.sourceType,
+  });
+
+  /// Parse forward metadata from a kind-40009 event's tags.
+  ///
+  /// Returns null when the `fwd` or `fwd-src` tags are missing or malformed,
+  /// so callers can fall back to rendering the event like a normal message.
+  static ForwardInfo? fromTags(List<List<String>> tags) {
+    String? fwdJson;
+    String? sourceChannelId;
+    String? sourceTypeLabel;
+    for (final tag in tags) {
+      if (tag.length >= 2 && tag[0] == 'fwd') fwdJson ??= tag[1];
+      if (tag.length >= 3 && tag[0] == 'fwd-src') {
+        sourceChannelId ??= tag[1];
+        sourceTypeLabel ??= tag[2];
+      }
+    }
+    if (fwdJson == null || sourceChannelId == null || sourceChannelId.isEmpty) {
+      return null;
+    }
+
+    final sourceType = switch (sourceTypeLabel) {
+      'channel' => ForwardSourceType.channel,
+      'private' => ForwardSourceType.private,
+      'dm' => ForwardSourceType.dm,
+      _ => null,
+    };
+    if (sourceType == null) return null;
+
+    try {
+      final decoded = jsonDecode(fwdJson);
+      if (decoded is! Map<String, dynamic>) return null;
+      return ForwardInfo(
+        original: NostrEvent.fromJson(decoded),
+        sourceChannelId: sourceChannelId,
+        sourceType: sourceType,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 @immutable
 class TimelineReaction {
   final String emoji;
@@ -157,6 +228,11 @@ class TimelineMessage {
   /// Root event ID of the thread (null for top-level messages).
   final String? rootId;
 
+  /// Forward metadata for kind-40009 messages. Null for normal messages and
+  /// for forwards whose `fwd`/`fwd-src` tags failed to parse (which then
+  /// render like a normal message showing only the forwarder's note).
+  final ForwardInfo? forward;
+
   const TimelineMessage({
     required this.id,
     required this.pubkey,
@@ -170,6 +246,7 @@ class TimelineMessage {
     this.reactions = const [],
     this.parentId,
     this.rootId,
+    this.forward,
   });
 
   /// Attachment messages stay visually distinct from surrounding messages,
@@ -448,7 +525,8 @@ List<TimelineMessage> formatTimeline(
 
     if (event.kind == EventKind.streamMessage ||
         event.kind == EventKind.streamMessageV2 ||
-        event.kind == EventKind.streamMessageDiff) {
+        event.kind == EventKind.streamMessageDiff ||
+        event.kind == EventKind.streamMessageForward) {
       final edit = edits[event.id];
       final effectiveTags = edit?.tags ?? event.tags;
       // Include both notify (`p`) and reference-only (`mention`) tags —
@@ -473,6 +551,9 @@ List<TimelineMessage> formatTimeline(
           reactions: reactionsFor(event.id),
           parentId: threadRef.parentId,
           rootId: threadRef.rootId,
+          forward: event.kind == EventKind.streamMessageForward
+              ? ForwardInfo.fromTags(event.tags)
+              : null,
         ),
       );
     }
