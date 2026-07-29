@@ -35,7 +35,7 @@ test("startPersonaSync backfills history including the deletion kind", () => {
     return Promise.resolve(() => Promise.resolve());
   });
 
-  startPersonaSync("owner-pubkey", () => false);
+  startPersonaSync("owner-pubkey", "wss://relay.example", () => false);
 
   assert.equal(fetchCalls.length, 1, "must do exactly one backfill fetch");
   assert.deepEqual(
@@ -57,4 +57,54 @@ test("startPersonaSync backfills history including the deletion kind", () => {
   );
 
   mock.reset();
+});
+
+// Regression guard for the arrival-scope fix (F6): the reconcile must carry the
+// relay this subscription was opened on, NOT whichever community happens to be
+// active when the reconcile runs. Without the forwarded URL the backend falls
+// back to the active workspace and an in-flight event lands in the wrong
+// community's scoped retention store on a mid-flight switch.
+test("startPersonaSync forwards its own relay as the event arrival relay", async () => {
+  const invokes = [];
+  // @tauri-apps/api/core reads `window.__TAURI_INTERNALS__.invoke`.
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: (cmd, args) => {
+        invokes.push({ cmd, args });
+        return Promise.resolve();
+      },
+    },
+  };
+
+  const ownEvent = { id: "e1", pubkey: "owner-pubkey", kind: KIND_PERSONA };
+  const foreignEvent = { id: "e2", pubkey: "someone-else", kind: KIND_PERSONA };
+
+  mock.method(relayClient, "fetchEvents", () =>
+    Promise.resolve([ownEvent, foreignEvent]),
+  );
+  mock.method(relayClient, "subscribeLive", () =>
+    Promise.resolve(() => Promise.resolve()),
+  );
+
+  startPersonaSync("owner-pubkey", "wss://community-a.example", () => false);
+  // Let the backfill promise chain and the reconcile invoke settle.
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const reconciles = invokes.filter(
+    (call) => call.cmd === "reconcile_inbound_persona_event",
+  );
+  assert.equal(
+    reconciles.length,
+    1,
+    "only the subscribed author's event reconciles",
+  );
+  assert.equal(
+    reconciles[0].args.arrivalRelayUrl,
+    "wss://community-a.example",
+    "reconcile must carry the subscription's relay as the arrival relay",
+  );
+  assert.equal(JSON.parse(reconciles[0].args.eventJson).id, "e1");
+
+  mock.reset();
+  delete globalThis.window;
 });

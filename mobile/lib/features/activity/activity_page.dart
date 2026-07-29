@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' show SemanticsRole;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -9,8 +11,10 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channels_provider.dart';
@@ -30,6 +34,7 @@ import 'reminders_provider.dart';
 part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
 part 'activity_page/lists.dart';
+part 'activity_page/popover_menu.dart';
 part 'activity_page/status_views.dart';
 
 /// Conversation-oriented Activity inbox.
@@ -281,6 +286,7 @@ class ActivityPage extends HookConsumerWidget {
     return FrostedScaffold(
       appBar: FrostedAppBar(
         gradient: context.appColors.topSectionGradient,
+        automaticallyImplyLeading: false,
         title: const Text('Activity'),
         titleStyle: headerTitleStyle,
         actions: [

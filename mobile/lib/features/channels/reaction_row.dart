@@ -75,11 +75,10 @@ class ReactionRow extends StatelessWidget {
                       const SizedBox(width: Grid.quarter),
                       Text(
                         '${reaction.count}',
-                        style: context.textTheme.labelSmall?.copyWith(
+                        style: reactionCountTextStyle.copyWith(
                           color: reaction.reactedByCurrentUser
                               ? context.colors.primary
                               : context.colors.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ],

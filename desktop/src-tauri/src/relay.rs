@@ -532,49 +532,9 @@ pub struct AgentProfileInfo {
 // ── Signed-event submission ─────────────────────────────────────────────────
 
 mod submit;
-pub use submit::{submit_event, submit_event_at_with_keys, SubmitEventResponse};
-
-/// POST an already-signed event to `/events` with NIP-98 auth.
-///
-/// The persona flush loop drains pre-signed events from the retention store,
-/// so it must publish them verbatim — re-signing through `submit_event` would
-/// mint a new `created_at`/signature and break the compare-and-clear that
-/// `mark_synced` relies on. Only the NIP-98 request auth is signed here (with
-/// the owner keys), and that lock is dropped before the `.await`.
-pub async fn submit_signed_event(
-    event: &nostr::Event,
-    state: &AppState,
-) -> Result<SubmitEventResponse, String> {
-    crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
-    let body_bytes = event.as_json().into_bytes();
-    let auth_header = {
-        let keys = state.signing_keys()?;
-        build_nip98_auth_header_for_keys(&keys, &Method::POST, &url, &body_bytes)?
-    }; // keys dropped here
-
-    let response = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", "application/json")
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    let result: SubmitEventResponse = parse_json_response(response).await?;
-
-    if !result.accepted {
-        return Err(format!("relay rejected event: {}", result.message));
-    }
-
-    Ok(result)
-}
+pub use submit::{
+    submit_event, submit_event_at_with_keys, submit_signed_event_at_with_keys, SubmitEventResponse,
+};
 
 /// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
 ///

@@ -101,7 +101,7 @@ class FilterChipBar<T> extends StatelessWidget {
     final fg = isSelected
         ? context.colors.onPrimary
         : context.colors.onSurfaceVariant;
-    final labelStyle = context.textTheme.bodyLarge?.copyWith(
+    final labelStyle = filterChipTextStyle.copyWith(
       color: fg,
       fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
     );

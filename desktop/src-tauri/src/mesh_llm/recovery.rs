@@ -412,6 +412,7 @@ mod tests {
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: std::collections::BTreeMap::from([
                 ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
                 (

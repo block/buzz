@@ -138,7 +138,7 @@ test("Buzz shared compute explains automatic model selection", async ({
   });
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await chooseSharedComputeProvider(page);
 
   await expect
@@ -167,7 +167,7 @@ test("create agent persists Buzz shared compute with auto model", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await page.locator("#persona-display-name").fill(agentName);
 
   await chooseSharedComputeProvider(page);
@@ -211,7 +211,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.getByRole("menuitem", { name: "Create agent" }).click();
 
   await page.locator("#persona-display-name").fill(agentName);
   await page
