@@ -2,7 +2,7 @@
 //!
 //! On macOS (WKWebView) and Windows (WebView2) the media-permission prompt is
 //! routed to the OS automatically, so microphone/camera capture "just works".
-//! WebKitGTK is different on two counts, and both must be fixed or capture
+//! WebKitGTK is different on two counts, and both must be handled or capture
 //! fails on Linux only:
 //!
 //! * `enable-media-stream` is **off by default**, so `navigator.mediaDevices`
@@ -11,12 +11,45 @@
 //!   with media-stream on, the call rejects with `NotAllowedError`.
 //!
 //! This module reaches the underlying `webkit2gtk::WebView` via
-//! [`tauri::Webview::with_webview`], enables the media-stream settings, and
-//! installs a `permission-request` handler that allows microphone/camera
-//! requests while leaving every other permission kind to WebKit's default.
+//! [`tauri::Webview::with_webview`], enables media-stream, and installs a
+//! `permission-request` handler that is **deny-by-default**: a `UserMedia`
+//! request is allowed only when it comes from a trusted app origin and asks for
+//! an audio and/or video device. Tauri does not restrict navigation by default,
+//! so without the origin check any document that ended up in this webview would
+//! inherit silent mic/camera access for the process lifetime.
 //!
 //! Buzz's AppImage pins `GDK_BACKEND=x11` (see [`crate::webkit_rendering`]),
 //! which is the backend WebKitGTK media capture is reliable on.
+
+/// The origin Tauri serves the packaged app from on Linux.
+const PROD_ORIGIN: &str = "tauri://localhost";
+
+/// The Vite dev-server origin (`devUrl` in `tauri.conf.json`, `strictPort`
+/// 1420 in `vite.config.ts`). Only trusted in debug builds.
+#[cfg(debug_assertions)]
+const DEV_ORIGIN: &str = "http://localhost:1420";
+
+/// Whether `uri` (the webview's current document URI) is a trusted app origin
+/// allowed to use mic/camera. Matches the origin exactly or as a path prefix so
+/// `tauri://localhost.evil.com` and `http://localhost:14200` do not slip
+/// through. Pure and platform-independent so it can be unit-tested everywhere.
+fn is_trusted_media_origin(uri: &str) -> bool {
+    fn matches(uri: &str, origin: &str) -> bool {
+        uri == origin
+            || uri
+                .strip_prefix(origin)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    if matches(uri, PROD_ORIGIN) {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    if matches(uri, DEV_ORIGIN) {
+        return true;
+    }
+    false
+}
 
 /// Enable microphone/camera capture for `webview` if it is running on
 /// WebKitGTK. A no-op on every non-Linux target, so callers can invoke it
@@ -25,7 +58,7 @@
 pub fn enable_media_capture<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
     use webkit2gtk::{
         glib::prelude::Cast, PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
-        WebViewExt,
+        UserMediaPermissionRequestExt, WebViewExt,
     };
 
     // `with_webview` runs the closure on the UI thread, which GTK calls
@@ -35,33 +68,27 @@ pub fn enable_media_capture<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
         let webview = platform_webview.inner();
 
         if let Some(settings) = WebViewExt::settings(&webview) {
-            // The setting that actually makes `getUserMedia` reachable.
             settings.set_enable_media_stream(true);
-            // Lets captured/remote streams play back via MediaSource.
-            settings.set_enable_mediasource(true);
-            // Capture is a deliberate user action; no gesture gate needed.
-            settings.set_media_playback_requires_user_gesture(false);
-
-            // WebRTC peer connections and getDisplayMedia need a WebKitGTK
-            // built with -DENABLE_WEB_RTC=ON and the crate's `v2_38` API.
-            // Gated so the build still works against stock WebKitGTK.
-            #[cfg(feature = "webkit_webrtc")]
-            settings.set_enable_webrtc(true);
         }
 
-        // Replace WebKit's auto-deny default: allow microphone/camera prompts,
-        // and return `false` for anything else so geolocation, notifications,
-        // etc. keep their default (denied) handling.
-        webview.connect_permission_request(|_webview, request| {
-            if request
-                .downcast_ref::<UserMediaPermissionRequest>()
-                .is_some()
-            {
+        // Deny-by-default: allow only mic/camera requests from a trusted app
+        // origin; deny everything else (still returning `true` so WebKit's
+        // auto-deny default does not also run). Non-`UserMedia` requests return
+        // `false` and keep their default handling.
+        webview.connect_permission_request(|wv, request| {
+            let Some(request) = request.downcast_ref::<UserMediaPermissionRequest>() else {
+                return false;
+            };
+
+            let uri = wv.uri().map(|u| u.to_string()).unwrap_or_default();
+            let for_device = request.is_for_audio_device() || request.is_for_video_device();
+
+            if for_device && is_trusted_media_origin(&uri) {
                 request.allow();
-                true
             } else {
-                false
+                request.deny();
             }
+            true
         });
     });
 
@@ -74,3 +101,41 @@ pub fn enable_media_capture<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
 /// platform. macOS and Windows route media permissions through the OS.
 #[cfg(not(target_os = "linux"))]
 pub fn enable_media_capture<R: tauri::Runtime>(_webview: &tauri::Webview<R>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::is_trusted_media_origin;
+
+    #[test]
+    fn allows_production_app_origin() {
+        assert!(is_trusted_media_origin("tauri://localhost"));
+        assert!(is_trusted_media_origin(
+            "tauri://localhost/channels/general"
+        ));
+    }
+
+    #[test]
+    fn denies_untrusted_origins() {
+        assert!(!is_trusted_media_origin(""));
+        assert!(!is_trusted_media_origin("https://evil.example.com"));
+        // Prefix look-alikes must not slip through.
+        assert!(!is_trusted_media_origin("tauri://localhost.evil.com"));
+        assert!(!is_trusted_media_origin("tauri://localhostfoo"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn allows_dev_origin_in_debug_only() {
+        assert!(is_trusted_media_origin("http://localhost:1420"));
+        assert!(is_trusted_media_origin("http://localhost:1420/"));
+        // A different localhost port is still untrusted.
+        assert!(!is_trusted_media_origin("http://localhost:14200"));
+        assert!(!is_trusted_media_origin("http://localhost:3000"));
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn denies_dev_origin_in_release() {
+        assert!(!is_trusted_media_origin("http://localhost:1420"));
+    }
+}

@@ -22,10 +22,6 @@ mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:me
 # OS keyring backing for desktop secret storage (nsec private keys). When
 # disabled, secrets fall back to 0o600 files. On by default for real builds.
 system-keyring = ["dep:keyring"]
-# WebRTC peer connections / getDisplayMedia in the Linux webview. Needs a
-# WebKitGTK built with -DENABLE_WEB_RTC=ON; off by default so builds against
-# stock WebKitGTK keep working. Plain getUserMedia does not require this.
-webkit_webrtc = ["webkit2gtk/v2_38"]
 
 [build-dependencies]
 base64 = "0.22"
