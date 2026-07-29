@@ -402,29 +402,19 @@ export const ChannelPane = React.memo(function ChannelPane({
   const canDropInMainColumn =
     hasMainComposerOverlay && !isComposerDisabled && !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
-  // Unified working set for the composer bar: observer-derived turns primary,
-  // bot typing fallback (both folded together by agentWorkingSignal). This is
-  // what makes the bar show for an agent whose observer stream is live but
-  // whose typing signal never arrives — and vice versa.
+  // Unified working set for the composer bar: observer-derived active turns
+  // only (real harness turn on a contentful event). Typing is not a working
+  // signal — see agentWorkingSignal.
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
   const hasComposerBottomActivity = hasComposerBotActivity || hasTypingActivity;
-  const threadComposerBotTypingPubkeys = React.useMemo(() => {
-    if (!openThreadHeadId) return [];
-    return botTypingEntries
-      .filter((entry) => entry.threadHeadId === openThreadHeadId)
-      .map((entry) => entry.pubkey)
-      .filter(
-        (pubkey, index, all) =>
-          all.findIndex(
-            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
-          ) === index,
-      );
-  }, [botTypingEntries, openThreadHeadId]);
+  // Thread composer "is working" uses the same observer-backed set as the
+  // channel composer. Bot typing alone must not light the working spinner.
+  const threadComposerWorkingBotPubkeys = composerWorkingBotPubkeys;
   const hasThreadComposerBotActivity =
-    threadComposerBotTypingPubkeys.length > 0;
+    threadComposerWorkingBotPubkeys.length > 0;
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -894,7 +884,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                       onOpenAgentSession={onOpenAgentSession}
                       openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}
-                      workingBotPubkeys={threadComposerBotTypingPubkeys}
+                      workingBotPubkeys={threadComposerWorkingBotPubkeys}
                       variant="inline"
                     />
                   ) : null

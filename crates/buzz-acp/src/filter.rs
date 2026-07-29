@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use buzz_core::kind::is_ephemeral;
 use tracing::{error, warn};
 
 /// Errors that can occur during filter expression evaluation.
@@ -373,6 +374,12 @@ pub async fn match_event(
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
+    // Ephemeral kinds (typing/presence/etc.) never match a subscription rule.
+    // Wildcard (`kinds = []`) must not wake agents on empty kind-20002 pings.
+    if is_ephemeral(event.kind.as_u16() as u32) {
+        return None;
+    }
+
     for (index, rule) in rules.iter().enumerate() {
         // 1. Channel scope check.
         if !rule.channels.matches(&channel_id) {
@@ -607,6 +614,24 @@ mod tests {
     }
 
     #[tokio::test]
+
+    #[tokio::test]
+    async fn test_match_event_rejects_ephemeral_typing_even_on_wildcard() {
+        // Subscribe-all / empty kinds must still never match kind-20002.
+        let rules = [make_rule(
+            "all",
+            ChannelScope::All("all".into()),
+            vec![],
+            false,
+            None,
+            None,
+        )];
+        let event = make_event(20002, "");
+        let channel_id = any_channel();
+        let result = match_event(&event, channel_id, &rules, "").await;
+        assert!(result.is_none(), "typing indicators must never match");
+    }
+
     async fn test_match_event_kind_filter() {
         let event = make_event(9, "hello");
         let channel_id = any_channel();
