@@ -231,6 +231,7 @@ export function AppShell() {
   const relayConnectionCard = useSidebarRelayConnectionCard(
     channelsErrorMessage,
     communitiesHook.activeCommunity?.relayUrl,
+    `${communitiesHook.activeCommunity?.id ?? "none"}-${communitiesHook.reinitKey}`,
   );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
