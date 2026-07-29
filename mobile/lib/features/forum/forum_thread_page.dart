@@ -8,6 +8,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/compose_bar.dart';
@@ -77,7 +78,12 @@ class ForumThreadPage extends HookConsumerWidget {
       body: threadAsync.when(
         loading: () => Padding(
           padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
-          child: const Center(child: CircularProgressIndicator()),
+          child: const Center(
+            child: BuzzLoadingIndicator(
+              size: 44,
+              semanticLabel: 'Loading thread',
+            ),
+          ),
         ),
         error: (e, _) => Padding(
           padding: EdgeInsets.only(top: frostedAppBarHeight(context)),

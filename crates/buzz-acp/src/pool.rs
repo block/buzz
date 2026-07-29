@@ -309,10 +309,13 @@ pub enum ControlSignal {
 /// for that — only a function parameter pass-through.
 ///
 /// If `active_run_id` is `None` at write time (no `session/update` seen yet
-/// — e.g. agents that never emit run-id metadata), the steer cannot form a
-/// valid `expectedRunId` and the read loop acks
-/// [`SteerError::ExpectedRunIdMissing`]. The main loop maps this to the
-/// "Err-before-pending" bucket: no withhold/mark was established at
+/// — e.g. agents that never emit run-id metadata), the goose-native method
+/// cannot form a valid `expectedRunId`, and the read loop falls back to the
+/// cross-adapter `_session/steering` method when the agent advertised
+/// `_meta.steering.supported` at `initialize`. That method takes no run id, so
+/// no freshness concern applies to it. When neither transport is available the
+/// read loop acks [`SteerError::ExpectedRunIdMissing`]. The main loop maps that
+/// to the "Err-before-pending" bucket: no withhold/mark was established at
 /// `pool::send_steer` time because the request was rejected before any
 /// write, so the watcher only needs to release nothing and fall back to the
 /// universal `ControlSignal::Steer` cancel+merge path.
@@ -326,7 +329,8 @@ pub struct SteerRequest {
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
 }
 
-/// Why a goose-native steer failed.
+/// Why a mid-turn steer failed, on either transport
+/// (`_goose/unstable/session/steer` or `_session/steering`).
 ///
 /// String and integer fields are intentionally `Debug`-only — read by
 /// `tracing` macros in the main loop's `PoolEvent::SteerAck` arm via
@@ -349,14 +353,28 @@ pub enum SteerError {
     /// Transport-level failure: write error, read EOF, JSON-RPC framing
     /// violation, etc. The string carries the underlying `AcpError`'s display.
     Transport(String),
-    /// At steer-write time `AcpClient::active_run_id` was `None`, so the
-    /// read loop couldn't form a valid `expectedRunId`. The read loop drops
-    /// the request without writing anything; the main loop should release
-    /// any withheld event and fall back to the universal cancel+merge
+    /// At steer-write time neither steer transport was available: no
+    /// `expectedRunId` (`AcpClient::active_run_id` was `None`, so the
+    /// goose-native method could not be formed) and the agent did not
+    /// advertise the cross-adapter `_session/steering` extension. The read
+    /// loop drops the request without writing anything; the main loop should
+    /// release any withheld event and fall back to the universal cancel+merge
     /// `ControlSignal::Steer` path. This is in the same "Err-before-pending"
     /// bucket as `Transport` write failures: no in-process state was
     /// established, so no in-process cleanup is needed.
     ExpectedRunIdMissing,
+    /// A `_session/steering` request returned a JSON-RPC *success* whose
+    /// `outcome` was not one of the two recognized delivery outcomes
+    /// (`injected`, `startedNewTurn`) — including `failed` (codex-acp) and a
+    /// missing `outcome` entirely. `outcome` carries what the agent actually
+    /// reported, for logs.
+    ///
+    /// The steer did NOT land, so the main loop must release the withheld
+    /// event and fire the cancel+merge fallback — exactly like a write that
+    /// never happened. Treating an unrecognized success as delivery would
+    /// drop the user's message: codex-acp answers unrecognized extension
+    /// methods with a bare `{}` success rather than `-32601`.
+    OutcomeRejected { outcome: String },
     /// The read loop never got to dispatch the steer because the prompt
     /// completed first. Delivery state for the underlying message is
     /// unknown after prompt completion — the main loop must treat this as
@@ -369,7 +387,7 @@ pub enum SteerError {
     PromptCompleted,
 }
 
-/// Outcome of a goose-native steer, sent from the read loop back to the
+/// Outcome of a mid-turn steer, sent from the read loop back to the
 /// main loop's ack watcher.
 #[derive(Debug)]
 pub enum SteerAck {
@@ -1879,6 +1897,18 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Turn start, labelled exactly as `log_stop_reason` labels the end, so a
+    // log reads as start/stop pairs. Purely observational: an unpaired start is
+    // the only durable evidence that a turn was entered and never returned, and
+    // without it a stalled agent and an agent nobody woke leave identical logs —
+    // zero completions either way, so anything reading them afterwards has to
+    // guess which happened.
+    tracing::info!(
+        target: "pool::prompt",
+        "turn starting for {}",
+        prompt_label(&source)
+    );
+
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -3113,12 +3143,19 @@ fn classify_control_cancel_failure(
     }
 }
 
-/// Log a stop reason at the appropriate tracing level.
-fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
-    let label = match source {
+/// How a turn's source is named in the `pool::prompt` log lines.
+///
+/// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
+fn prompt_label(source: &PromptSource) -> String {
+    match source {
         PromptSource::Channel(cid) => format!("channel {cid}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
-    };
+    }
+}
+
+/// Log a stop reason at the appropriate tracing level.
+fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
+    let label = prompt_label(source);
     match stop_reason {
         StopReason::EndTurn => {
             tracing::info!(target: "pool::prompt", "turn complete for {label}: end_turn");

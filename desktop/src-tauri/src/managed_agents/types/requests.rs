@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    RelayMeshConfig, RespondTo,
+    CatalogSource, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -91,6 +91,10 @@ pub struct CreatePersonaRequest {
     /// NIP-AP behavioral group. Absent = behavior group stays unset.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
+    /// Set when this persona is a copy of another owner's shared catalog entry,
+    /// so the catalog can tell an already-added foreign persona from a new one.
+    #[serde(default)]
+    pub catalog_source: Option<CatalogSource>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,8 +279,10 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
@@ -427,5 +433,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record.parallelism, Some(8));
+    }
+
+    /// The catalog copy path is the only caller that sends this field, and it
+    /// sends camelCase from TS. Without it deserializing, the copy silently
+    /// lands with no provenance and duplicate-add returns.
+    #[test]
+    fn create_request_deserializes_camel_case_catalog_source() {
+        let request: CreatePersonaRequest = serde_json::from_str(
+            r#"{
+                "displayName": "Copy",
+                "avatarUrl": null,
+                "systemPrompt": "Prompt",
+                "catalogSource": { "ownerPubkey": "abc", "personaId": "helper" }
+            }"#,
+        )
+        .expect("camelCase catalogSource payload from TS should deserialize");
+        assert_eq!(
+            request.catalog_source,
+            Some(CatalogSource {
+                owner_pubkey: "abc".to_string(),
+                persona_id: "helper".to_string(),
+            })
+        );
+    }
+
+    /// Ordinary agent creation never sends the field.
+    #[test]
+    fn create_request_without_catalog_source_is_not_a_catalog_copy() {
+        let request: CreatePersonaRequest = serde_json::from_str(
+            r#"{ "displayName": "Fresh", "avatarUrl": null, "systemPrompt": "Prompt" }"#,
+        )
+        .expect("a create payload without provenance should deserialize");
+        assert_eq!(request.catalog_source, None);
     }
 }

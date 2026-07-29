@@ -95,7 +95,12 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
 
     Widget buildGalleryBody() {
       if (recentSnapshot.connectionState != ConnectionState.done) {
-        return const Center(child: CircularProgressIndicator(strokeWidth: 3));
+        return const Center(
+          child: BuzzLoadingIndicator(
+            size: 44,
+            semanticLabel: 'Loading recent photos',
+          ),
+        );
       }
       if (recentSnapshot.hasError) {
         return const _PhotoGalleryMessage(
@@ -209,12 +214,10 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                     key: const ValueKey('photo-gallery-action'),
                     onPressed: isResolving.value ? null : choosePhotos,
                     icon: isResolving.value
-                        ? SizedBox.square(
-                            dimension: 22,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: context.colors.primary,
-                            ),
+                        ? BuzzLoadingIndicator(
+                            size: 22,
+                            color: context.colors.primary,
+                            semanticLabel: 'Opening all photos',
                           )
                         : const Icon(LucideIcons.images, size: 18),
                     label: Text(actionLabel),
@@ -223,12 +226,10 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                     key: const ValueKey('photo-gallery-action'),
                     onPressed: isResolving.value ? null : choosePhotos,
                     icon: isResolving.value
-                        ? const SizedBox.square(
-                            dimension: 22,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
+                        ? const BuzzLoadingIndicator(
+                            size: 22,
+                            color: Colors.white,
+                            semanticLabel: 'Preparing selected photos',
                           )
                         : const Icon(LucideIcons.plus, size: 18),
                     label: Text(actionLabel),

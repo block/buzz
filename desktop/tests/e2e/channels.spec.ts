@@ -712,7 +712,6 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeDisabled();
   await expect(page.getByTestId("new-dm-search")).toBeDisabled();
-  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "create_managed_agent"),
@@ -720,6 +719,9 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     .toBeGreaterThan(baselineCreateCount);
   await expect(page.getByTestId("chat-title")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+  // Assert popover hidden after chat-title settles — by this point the send
+  // flow has completed and the UI has fully transitioned away from the popover.
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
 
   const sendCommands = (await readCommandLog(page)).slice(
     baselineCommands.length,
@@ -782,8 +784,11 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
 test("routes an agent mention from an existing DM to the expanded conversation", async ({
   page,
 }) => {
+  // Delay persona provisioning so the follow-up expanded-DM open/start sequence
+  // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    createManagedAgentDelayMs: 100,
   });
   await page.goto("/");
 
@@ -837,7 +842,10 @@ test("routes an agent mention from an existing DM to the expanded conversation",
 test("routes a managed relay-agent mention from an existing DM to the expanded conversation", async ({
   page,
 }) => {
+  // Delay the expanded open_dm call so routing/navigation settles
+  // deterministically under fast CI execution.
   await installMockBridge(page, {
+    openDmDelayMs: 100,
     managedAgents: [
       {
         pubkey: DM_RELAY_AGENT_PUBKEY,
@@ -967,8 +975,11 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
 test("drops an expanded DM after the first message fails", async ({ page }) => {
   const retryMessage = "Retry without the agent";
   const sendError = "Mock first DM send failed.";
+  // Delay persona provisioning so the follow-up expanded-DM open/start sequence
+  // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    createManagedAgentDelayMs: 100,
     sendMessageErrors: [sendError],
   });
   await page.goto("/");
@@ -2632,7 +2643,7 @@ test("Inbox All excludes generic channel traffic", async ({ page }) => {
   ).toHaveCount(0);
 });
 
-test("Inbox unread-only hides reminders and drafts from mixed All", async ({
+test("Inbox All never lists drafts and unread-only hides reminders", async ({
   page,
 }) => {
   const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
@@ -2737,7 +2748,8 @@ test("Inbox unread-only hides reminders and drafts from mixed All", async ({
   const draftRow = page.getByTestId(`home-all-drafts-${draftKey}`);
   await expect(messageRow).toBeVisible();
   await expect(reminderRow).toBeVisible();
-  await expect(draftRow).toBeVisible();
+  // Drafts belong to the dedicated Drafts filter — never the mixed All view.
+  await expect(draftRow).toHaveCount(0);
 
   await page.getByTestId("inbox-options-trigger").click();
   await page.getByRole("switch", { name: "Show unread only" }).click();
@@ -2745,6 +2757,12 @@ test("Inbox unread-only hides reminders and drafts from mixed All", async ({
   await expect(messageRow).toBeVisible();
   await expect(reminderRow).toHaveCount(0);
   await expect(draftRow).toHaveCount(0);
+
+  // The draft is still reachable under the Drafts filter.
+  await page.keyboard.press("Escape");
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await expect(page.getByTestId("home-inbox-drafts")).toBeVisible();
 });
 
 test("Inbox merges a due reminder into its represented conversation", async ({

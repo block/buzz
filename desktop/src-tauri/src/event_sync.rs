@@ -13,10 +13,10 @@ use std::path::Path;
 /// `sync_team_personas` wrote in [`crate::migration::run_boot_migrations`]
 /// (see its `# Ordering` guard). Event signing needs the resolved owner keys,
 /// so this runs after identity resolution, not in the boot migrations.
-pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
-    migrate_personas_to_events(app, owner_keys);
-    migrate_teams_to_events(app, owner_keys);
-    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys);
+pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys, db_path: &Path) {
+    migrate_personas_to_events(app, owner_keys, db_path);
+    migrate_teams_to_events(app, owner_keys, db_path);
+    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path);
 }
 
 /// Spawn the best-effort event reconcile off the synchronous Tauri setup path.
@@ -25,10 +25,14 @@ pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
 /// `AppState::keys` mutex. The reconcile itself is still synchronous JSON,
 /// SQLite, and signing work, so it runs on the blocking pool rather than an
 /// async worker.
-pub fn spawn_event_sync(app: tauri::AppHandle, owner_keys: nostr::Keys) {
+pub fn spawn_event_sync(
+    app: tauri::AppHandle,
+    owner_keys: nostr::Keys,
+    db_path: std::path::PathBuf,
+) {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
-            run_event_sync(&app, &owner_keys);
+            run_event_sync(&app, &owner_keys, &db_path);
         })
         .await
         {
@@ -57,14 +61,14 @@ pub fn spawn_event_sync(app: tauri::AppHandle, owner_keys: nostr::Keys) {
 /// `pending_sync = 1` for later relay publish. Migration succeeds on local
 /// write, not relay acknowledgment. Every retained row is a real signed
 /// event — there is no placeholder path.
-pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
+pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys, db_path: &Path) {
     use crate::managed_agents::managed_agents_base_dir;
 
     let Ok(base_dir) = managed_agents_base_dir(app) else {
         return;
     };
 
-    match migrate_personas_in_dir(&base_dir, keys) {
+    match migrate_personas_in_dir_at(&base_dir, keys, db_path) {
         Ok(0) => {}
         Ok(migrated) => {
             eprintln!(
@@ -82,7 +86,16 @@ pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
 /// Returns the number of personas (re)written to the retention store. Returns
 /// `Ok(0)` when every non-builtin persona already has a matching retained row
 /// (or there are none to reconcile).
+#[cfg(test)]
 fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
+    migrate_personas_in_dir_at(base_dir, keys, &base_dir.join("retention.db"))
+}
+
+fn migrate_personas_in_dir_at(
+    base_dir: &Path,
+    keys: &nostr::Keys,
+    db_path: &Path,
+) -> Result<u32, String> {
     use crate::managed_agents::{
         persona_events::{build_persona_event, monotonic_created_at, persona_d_tag},
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
@@ -127,9 +140,8 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
     }
 
     // Open (or create) the retention database.
-    let db_path = base_dir.join("retention.db");
     let conn =
-        open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
+        open_retention_db(db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
 
     let mut migrated = 0u32;
 
@@ -149,7 +161,12 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
         // bump (F1) so a changed body always lands.
         let existing = get_retained_event(&conn, KIND_PERSONA, &pubkey, &d_tag)?;
 
-        let event = build_persona_event(record)
+        let mut scoped_record = record.clone();
+        scoped_record.shared = existing
+            .as_ref()
+            .and_then(|row| nostr::Event::from_json(&row.raw_event).ok())
+            .is_some_and(|event| buzz_core_pkg::kind::persona_event_is_shared(&event));
+        let event = build_persona_event(&scoped_record)
             .map_err(|e| format!("failed to build event for '{}': {e}", record.display_name))?
             .custom_created_at(monotonic_created_at(
                 existing.as_ref().map(|row| row.created_at),
@@ -202,14 +219,14 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
 ///
 /// Must run after the persisted identity is resolved (it signs each event with
 /// the owner's keys).
-pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
+pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys, db_path: &Path) {
     use crate::managed_agents::managed_agents_base_dir;
 
     let Ok(base_dir) = managed_agents_base_dir(app) else {
         return;
     };
 
-    match migrate_teams_in_dir(&base_dir, keys) {
+    match migrate_teams_in_dir_at(&base_dir, keys, db_path) {
         Ok(0) => {}
         Ok(migrated) => {
             eprintln!("buzz-desktop: team-event-migration: {migrated} teams migrated to retention");
@@ -225,7 +242,16 @@ pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
 /// Returns the number of teams (re)written to the retention store. The
 /// per-coordinate content compare matches [`migrate_personas_in_dir`]: an
 /// unchanged team is skipped so a launch does not churn `pending_sync`.
+#[cfg(test)]
 fn migrate_teams_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
+    migrate_teams_in_dir_at(base_dir, keys, &base_dir.join("retention.db"))
+}
+
+fn migrate_teams_in_dir_at(
+    base_dir: &Path,
+    keys: &nostr::Keys,
+    db_path: &Path,
+) -> Result<u32, String> {
     use crate::managed_agents::{
         persona_events::monotonic_created_at,
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
@@ -252,9 +278,8 @@ fn migrate_teams_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, Stri
         return Ok(0);
     }
 
-    let db_path = base_dir.join("retention.db");
     let conn =
-        open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
+        open_retention_db(db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
 
     let mut migrated = 0u32;
 

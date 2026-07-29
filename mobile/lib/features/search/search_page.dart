@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -92,10 +93,12 @@ class SearchPage extends HookConsumerWidget {
     }
 
     return FrostedScaffold(
+      backgroundColor: Colors.transparent,
       // Keep the empty state centered in the page rather than the portion left
       // above the keyboard.
       resizeToAvoidBottomInset: false,
       appBar: FrostedAppBar(
+        automaticallyImplyLeading: false,
         gradient: context.appColors.topSectionGradient,
         title: const Text('Search'),
         titleStyle: headerTitleStyle,
@@ -343,7 +346,10 @@ class _SearchBody extends ConsumerWidget {
     return ListView(
       key: const Key('search-results-list'),
       padding: EdgeInsets.only(
-        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+        bottom:
+            Grid.xl +
+            MediaQuery.paddingOf(context).bottom +
+            MediaQuery.viewInsetsOf(context).bottom,
       ),
       children: [
         if (showChannels && state.channelResults.isNotEmpty)
@@ -365,7 +371,12 @@ class _SearchBody extends ConsumerWidget {
         if (state.isLoading)
           const Padding(
             padding: EdgeInsets.all(Grid.sm),
-            child: Center(child: CircularProgressIndicator()),
+            child: Center(
+              child: BuzzLoadingIndicator(
+                size: 36,
+                semanticLabel: 'Loading more search results',
+              ),
+            ),
           ),
       ],
     );
@@ -388,7 +399,10 @@ class _RecentSearches extends StatelessWidget {
     return ListView(
       key: const Key('recent-searches-list'),
       padding: EdgeInsets.only(
-        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+        bottom:
+            Grid.xl +
+            MediaQuery.paddingOf(context).bottom +
+            MediaQuery.viewInsetsOf(context).bottom,
       ),
       children: [
         Padding(

@@ -1140,9 +1140,7 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
-    /// Tuple: (initialized client, protocol version, supports_goose_steer).
-    /// The third element is always `true` — the supervisor uses
-    /// try-and-tolerate for the steer extension.
+    /// Tuple: (initialized client, protocol version, agent name).
     result: Result<(AcpClient, u32, String)>,
 }
 
@@ -2228,18 +2226,18 @@ async fn tokio_main() -> Result<()> {
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
-                                    // Try-and-tolerate fork: when the mode
-                                    // wants a Steer, attempt the non-cancelling
-                                    // path first for any agent. On accept,
+                                    // Non-cancelling fork: when the mode
+                                    // wants a Steer, attempt the
+                                    // non-cancelling path first. On accept,
                                     // withhold the queued event and spawn an
                                     // ack watcher; the main loop's
                                     // `PoolEvent::SteerAck` arm decides
                                     // success/release/fallback. On reject
-                                    // (including `-32601 method_not_found`
-                                    // from agents that don't implement the
-                                    // extension), fall through to the universal
-                                    // cancel+merge `Steer` signal so the event
-                                    // still reaches the agent.
+                                    // (including agents that advertise no
+                                    // steer transport at all), fall through
+                                    // to the universal cancel+merge `Steer`
+                                    // signal so the event still reaches the
+                                    // agent.
                                     let native_attempted = matches!(signal, ControlSignal::Steer)
                                         && try_native_steer(
                                             &mut pool,
@@ -2419,13 +2417,25 @@ async fn tokio_main() -> Result<()> {
                 event_id,
                 ack,
             })) => {
-                // Goose-native steer attempt resolved. Locked semantics
-                // (Eva + Max + Perci, unanimous on Option X):
+                // Mid-turn steer attempt resolved (either transport:
+                // `_goose/unstable/session/steer` or `_session/steering`).
+                // Locked semantics (Eva + Max + Perci, unanimous on Option X):
                 //
                 //   Success
                 //     The agent received the steer via the non-cancelling
                 //     path. Drop the withheld event so normal dispatch
                 //     never redelivers it.
+                //
+                //     Also covers `_session/steering`'s `startedNewTurn`
+                //     outcome: the message was delivered, but into a fresh
+                //     turn because the one being steered had already
+                //     finished. Delivery is what this arm keys on, so the
+                //     event is still dropped. The read loop deliberately
+                //     does NOT renew its hard deadline in that case (the
+                //     awaited turn is settled), while
+                //     `extend_in_flight_deadline` below still applies —
+                //     the agent really is running more work, so the
+                //     channel's in-flight budget should reflect it.
                 //
                 //   Err(_) where the write never landed (Transport /
                 //   ExpectedRunIdMissing):
@@ -2433,6 +2443,16 @@ async fn tokio_main() -> Result<()> {
                 //     attempted on the wire". Release withheld back to the
                 //     queue front AND issue the cancel+merge fallback so
                 //     the message still reaches the agent.
+                //
+                //   Err(OutcomeRejected { .. })
+                //     A `_session/steering` request returned a JSON-RPC
+                //     success whose `outcome` was not `injected` or
+                //     `startedNewTurn` (codex's `failed`, an unknown value,
+                //     or a bare `{}` with no `outcome` at all). The steer
+                //     did not land, so this is treated exactly like a write
+                //     that never happened: release withheld AND fire the
+                //     cancel+merge fallback. Handled by the catch-all
+                //     `Err(_)` arm below.
                 //
                 //   Err(AgentError { code: -32601, .. })
                 //     The agent returned method_not_found — it does not
@@ -2490,9 +2510,9 @@ async fn tokio_main() -> Result<()> {
                     Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
                         (true, false, false)
                     }
-                    // Transport / ExpectedRunIdMissing: write never landed.
-                    // Release and fire the cancel+merge fallback so the
-                    // message still reaches the agent.
+                    // Transport / ExpectedRunIdMissing / OutcomeRejected: the
+                    // steer did not land. Release and fire the cancel+merge
+                    // fallback so the message still reaches the agent.
                     Ok(pool::SteerAck::Err(_)) => (true, false, true),
                     Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
                     Err(_recv_err) => (true, false, false),
@@ -2926,15 +2946,15 @@ fn dispatch_pending(
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
 
-        // Goose-native non-cancelling steer seam: snapshot capability before
-        // the agent moves into `run_prompt_task`, and install the per-turn
-        // steer receiver on the read loop so the main loop's mode-gate fork
+        // Mid-turn non-cancelling steer seam: install the per-turn steer
+        // receiver on the read loop so the main loop's mode-gate fork
         // (see the `if accepted && queue.is_channel_in_flight(...)` block
         // in the relay event branch of the main `select!` loop) can drive
         // it via the matching sender stored in `TaskMeta.steer_tx`.
-        // Install the steer channel for every prompt task — the supervisor
-        // uses try-and-tolerate: it attempts the steer for any agent and
-        // treats `-32601 method_not_found` as "fall back to cancel+merge".
+        // Installed for every prompt task: the read loop picks the steer
+        // transport at write time from `active_run_id` and the agent's
+        // advertised `_session/steering` capability, and acks
+        // `ExpectedRunIdMissing` (→ cancel+merge) when it has neither.
         let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
         agent.acp.install_steer_rx(rx);
         let steer_tx = Some(tx);
@@ -3783,7 +3803,8 @@ async fn initialize_agent_pool(
                                 .and_then(|info| info.get("name"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown"),
-                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
+                            steering_supported = acp.steering_supported(),
+                            "agent initialized"
                         );
                         acp.observe(
                             "agent_initialized",

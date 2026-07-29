@@ -264,10 +264,9 @@ class _MessageList extends HookConsumerWidget {
                 return const Padding(
                   padding: EdgeInsets.symmetric(vertical: Grid.xs),
                   child: Center(
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                    child: BuzzLoadingIndicator(
+                      size: 24,
+                      semanticLabel: 'Loading older messages',
                     ),
                   ),
                 );

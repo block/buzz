@@ -17,6 +17,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -735,7 +736,6 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
 
-      focusNode.unfocus();
       unawaited(
         iosAttachmentPopover
             .present(
@@ -766,7 +766,10 @@ class ComposeBar extends HookConsumerWidget {
               }),
             )
             .then((didPresent) {
-              if (!didPresent && context.mounted) toggleAttachments();
+              if (!didPresent && context.mounted) {
+                focusNode.unfocus();
+                toggleAttachments();
+              }
             }),
       );
     }
