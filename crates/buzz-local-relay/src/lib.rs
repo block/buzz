@@ -36,8 +36,8 @@ use buzz_core::identity::{
 };
 use buzz_core::ingest::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
 use buzz_core::kind::{
-    event_kind_u32, KIND_NIP29_CREATE_GROUP, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
-    KIND_NIP29_GROUP_METADATA,
+    event_kind_u32, KIND_BEACON_PULSE, KIND_NIP29_CREATE_GROUP, KIND_NIP29_GROUP_ADMINS,
+    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_SYNC_DECLARATION,
 };
 use buzz_core::replication::{
     ReplicationBatch, ReplicationCursor, ReplicationIngestOutcome, ReplicationReceipt,
@@ -70,6 +70,11 @@ const MAX_REPLICATION_BATCH_SIZE: usize = 1_000;
 /// Upper bound for one stored artifact blob (bytes).
 const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const LOCAL_REPLICATION_CURSOR_PREFIX: &str = "local-ndjson-v1:";
+/// Adapter identifier carried in Beacon pulse content.
+const PULSE_ADAPTER_ID: &str = "portable-relay-laptop-v0.1";
+/// Role hint carried in Beacon pulse tags: the laptop node is the sovereign
+/// source of truth, where the Cloudflare custodian pulses as "rendezvous".
+const PULSE_ROLE_SOVEREIGN: &str = "sovereign";
 
 /// Persistent or in-memory storage selection for a local relay.
 #[derive(Debug, Clone)]
@@ -682,8 +687,108 @@ impl LocalRelay {
         if result.publish_live {
             let _ = self.live_events.send(event);
             self.publish_projected_events(projected).await?;
+            // Every journal transition is witnessed: the pulse follows the
+            // event (and any relay-authored projections it produced).
+            // Ephemeral acceptances change no journal state and stay silent.
+            if result.message == "stored" {
+                if let Some(pulse) = self.current_pulse().await {
+                    let _ = self.live_events.send(pulse);
+                }
+            }
         }
         Ok(result)
+    }
+
+    /// Builds this node's Beacon pulse (kind 20700): a signed witness
+    /// statement of the state it currently holds — journal head and
+    /// witnessed chain, and the effective kind-30700 agreement heads it
+    /// applies. Synthesized fresh on every call (a pulse is an answer, not
+    /// stored state); `None` when the relay carries no dedicated key.
+    /// Signed with the relay key: the node witnesses in its own voice,
+    /// never the owner's.
+    async fn current_pulse(&self) -> Option<Event> {
+        let keys = self.relay_keys.as_ref()?;
+        let (sequence, head, previous, agreements, admit_claimed) = {
+            let inner = self.store.inner.lock().await;
+            let sequence = inner.journal.len();
+            let head = inner.journal.last().map(|event| event.id.to_hex());
+            // Every journal append emits a pulse, so the witnessed chain is
+            // the journal chain: `previous` is the entry before the head.
+            let previous = sequence
+                .checked_sub(2)
+                .and_then(|index| inner.journal.get(index))
+                .map(|event| event.id.to_hex());
+            let mut agreements = serde_json::Map::new();
+            let mut admit_claimed = false;
+            if let Some((owner, node_label)) = self.governance.as_ref() {
+                for stored in &inner.events {
+                    let event = &stored.event;
+                    if event_kind_u32(event) != KIND_SYNC_DECLARATION || event.pubkey != *owner {
+                        continue;
+                    }
+                    let Some(d_tag) = event_tag_value(event, "d") else {
+                        continue;
+                    };
+                    if event_tag_value(event, "n") != Some(node_label.as_str()) {
+                        continue;
+                    }
+                    agreements.insert(d_tag.to_string(), Value::String(event.id.to_hex()));
+                    admit_claimed = admit_claimed || d_tag.starts_with("admit/");
+                }
+            }
+            (sequence, head, previous, agreements, admit_claimed)
+        };
+        let label = self
+            .governance
+            .as_ref()
+            .map(|(_, label)| label.clone())
+            .unwrap_or_default();
+        let content = json!({
+            "node": label,
+            "label": label,
+            "adapter": PULSE_ADAPTER_ID,
+            "journal": { "sequence": sequence, "head": head },
+            "previous": previous,
+            // The laptop is a push source: it holds no destination-side
+            // replication checkpoints (the push cursor lives with the
+            // pusher, not the relay).
+            "checkpoints": {},
+            "agreements": agreements,
+            "coherence": {
+                "governance": {
+                    "peers": if admit_claimed { "journal" } else { "bootstrap" },
+                },
+            },
+        });
+        let mut tags = Vec::new();
+        if !label.is_empty() {
+            tags.push(Tag::parse(["n", label.as_str()]).ok()?);
+        }
+        tags.push(Tag::parse(["role", PULSE_ROLE_SOVEREIGN]).ok()?);
+        EventBuilder::new(Kind::Custom(KIND_BEACON_PULSE as u16), content.to_string())
+            .tags(tags)
+            .sign_with_keys(keys)
+            .inspect_err(|error| tracing::warn!(%error, "beacon pulse signing failed"))
+            .ok()
+    }
+
+    /// Who may observe the pulse. It reveals journal metadata (head IDs and
+    /// agreement heads), so under required identity it is addressed to the
+    /// parties of this node's agreements: the owner and any admitted peer
+    /// verification key. On an open node it is open.
+    fn pulse_visible_to(&self, principal: Option<&AuthenticatedPrincipal>) -> bool {
+        let Some(identity) = self.identity.as_ref() else {
+            return true;
+        };
+        let Some(pubkey) = principal.and_then(principal_pubkey) else {
+            return false;
+        };
+        if let Some((owner, _)) = self.governance.as_ref() {
+            if *owner == pubkey {
+                return true;
+            }
+        }
+        identity.is_admitted_verification_key(&pubkey)
     }
 
     /// Backfills relay-authored discovery state for accepted create commands
@@ -844,6 +949,28 @@ impl LocalRelay {
         self.authorize_query(principal, operation, filters)?;
         let mut events = self.store.query(filters).await?;
         events.retain(|event| self.event_is_visible(principal, operation, event));
+        // The pulse is synthesized, never stored: a filter that explicitly
+        // names the pulse kind receives a fresh witness statement. Open
+        // filters never surface it — witnessing happens on request, not by
+        // accident.
+        let pulse_filters: Vec<Filter> = filters
+            .iter()
+            .filter(|filter| {
+                filter
+                    .kinds
+                    .as_ref()
+                    .is_some_and(|kinds| kinds.contains(&Kind::Custom(KIND_BEACON_PULSE as u16)))
+            })
+            .cloned()
+            .collect();
+        if !pulse_filters.is_empty() && self.pulse_visible_to(principal) {
+            if let Some(pulse) = self.current_pulse().await {
+                if filters_match(&pulse_filters, &stored_event(pulse.clone())) {
+                    // Newest-first ordering: the pulse is signed at "now".
+                    events.insert(0, pulse);
+                }
+            }
+        }
         Ok(events)
     }
 
@@ -974,8 +1101,13 @@ pub async fn serve(listener: TcpListener, relay: Arc<LocalRelay>) -> std::io::Re
     axum::serve(listener, router(relay)).await
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok" }))
+async fn health(State(relay): State<Arc<LocalRelay>>) -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        // The witness identity behind Beacon pulses (kind 20700), or null
+        // when this relay carries no dedicated key.
+        "witness": relay.relay_keys.as_ref().map(|keys| keys.public_key().to_hex()),
+    }))
 }
 
 async fn submit_event(
@@ -1406,12 +1538,22 @@ async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>, audience: 
                     Ok(event) => {
                         for (subscription_id, filters) in &subscriptions {
                             let stored = stored_event(event.clone());
-                            if filters_match(filters, &stored)
-                                && relay.event_is_visible(
+                            if !filters_match(filters, &stored) {
+                                continue;
+                            }
+                            // Pulses carry their own standing rule: they are
+                            // addressed to the parties of the node's
+                            // agreements, not disclosed by kind policy.
+                            let visible = if event_kind_u32(&event) == KIND_BEACON_PULSE {
+                                relay.pulse_visible_to(principal.as_ref())
+                            } else {
+                                relay.event_is_visible(
                                     principal.as_ref(),
                                     ReadOperation::LiveDelivery,
                                     &event,
                                 )
+                            };
+                            if visible
                                 && send_json(
                                     &mut sender,
                                     json!(["EVENT", subscription_id, event]),
@@ -2236,5 +2378,201 @@ mod tests {
         assert_eq!(eose_text, "[\"EOSE\",\"history\"]");
 
         server.abort();
+    }
+
+    async fn ephemeral_relay(relay_keys: Option<Keys>) -> Arc<LocalRelay> {
+        let store = Arc::new(
+            EventStore::open(StorageMode::Ephemeral)
+                .await
+                .expect("store opens"),
+        );
+        LocalRelay::open_full_with_store_and_keys(
+            store,
+            Arc::new(ReplicationDisabled),
+            None,
+            None,
+            relay_keys,
+        )
+    }
+
+    fn pulse_filter() -> Filter {
+        Filter::new().kind(Kind::Custom(KIND_BEACON_PULSE as u16))
+    }
+
+    fn pulse_content(event: &Event) -> Value {
+        serde_json::from_str(&event.content).expect("pulse content is JSON")
+    }
+
+    #[tokio::test]
+    async fn beacon_pulse_is_synthesized_only_on_explicit_request() {
+        let witness = Keys::generate();
+        let relay = ephemeral_relay(Some(witness.clone())).await;
+        let note = signed_event(1, "witnessed");
+        let submitted = relay.submit(note.clone()).await.expect("note submits");
+        assert_eq!(submitted.message, "stored");
+
+        let pulses = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("pulse query succeeds");
+        assert_eq!(pulses.len(), 1);
+        let pulse = &pulses[0];
+        assert_eq!(pulse.kind.as_u16() as u32, KIND_BEACON_PULSE);
+        assert_eq!(pulse.pubkey, witness.public_key());
+        verify_event(pulse).expect("pulse signature verifies");
+        let content = pulse_content(pulse);
+        assert_eq!(content["adapter"], PULSE_ADAPTER_ID);
+        assert_eq!(content["journal"]["sequence"], 1);
+        assert_eq!(content["journal"]["head"], note.id.to_hex());
+        assert_eq!(content["previous"], Value::Null);
+
+        // Filters that do not name the pulse kind never surface it.
+        let notes = relay
+            .query_for(
+                None,
+                ReadOperation::Query,
+                &[Filter::new().kind(Kind::Custom(1))],
+            )
+            .await
+            .expect("note query succeeds");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, note.id);
+    }
+
+    #[tokio::test]
+    async fn beacon_pulse_witnessed_chain_and_foreign_pulses_stay_ephemeral() {
+        let witness = Keys::generate();
+        let relay = ephemeral_relay(Some(witness.clone())).await;
+        let first = signed_event(1, "first");
+        let second = signed_event(1, "second");
+        relay.submit(first.clone()).await.expect("first submits");
+        relay.submit(second.clone()).await.expect("second submits");
+
+        // A client-submitted event of the pulse kind is ephemeral: accepted
+        // for fan-out, never journaled, never mistaken for this node's own
+        // witness statement.
+        let foreign = signed_event(KIND_BEACON_PULSE as u16, "{}");
+        let outcome = relay.submit(foreign).await.expect("foreign submits");
+        assert_eq!(outcome.message, "ephemeral");
+
+        let pulses = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("pulse query succeeds");
+        assert_eq!(pulses.len(), 1);
+        assert_eq!(pulses[0].pubkey, witness.public_key());
+        let content = pulse_content(&pulses[0]);
+        assert_eq!(content["journal"]["sequence"], 2);
+        assert_eq!(content["journal"]["head"], second.id.to_hex());
+        assert_eq!(content["previous"], first.id.to_hex());
+    }
+
+    #[tokio::test]
+    async fn beacon_pulse_is_absent_without_relay_keys() {
+        let relay = ephemeral_relay(None).await;
+        relay
+            .submit(signed_event(1, "unwitnessed"))
+            .await
+            .expect("note submits");
+        let pulses = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("pulse query succeeds");
+        assert!(pulses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn beacon_pulse_reports_agreement_heads_for_the_governed_node() {
+        let owner = Keys::generate();
+        let store = Arc::new(
+            EventStore::open(StorageMode::Ephemeral)
+                .await
+                .expect("store opens"),
+        );
+        let relay = LocalRelay::open_governed_with_keys(
+            store,
+            Arc::new(ReplicationDisabled),
+            None,
+            None,
+            Some((owner.public_key(), "ted-laptop".to_string())),
+            Some(Keys::generate()),
+        );
+        let declaration = EventBuilder::new(
+            Kind::Custom(KIND_SYNC_DECLARATION as u16),
+            "{\"status\":\"active\",\"principal\":\"did:example:peer\"}",
+        )
+        .tags(vec![
+            Tag::parse(["d", "admit/laptop-test/sovereign"]).expect("d tag parses"),
+            Tag::parse(["n", "ted-laptop"]).expect("n tag parses"),
+            Tag::parse(["p", &Keys::generate().public_key().to_hex()]).expect("p tag parses"),
+        ])
+        .sign_with_keys(&owner)
+        .expect("declaration signs");
+        relay
+            .submit(declaration.clone())
+            .await
+            .expect("declaration submits");
+
+        let pulses = relay
+            .query_for(None, ReadOperation::Query, &[pulse_filter()])
+            .await
+            .expect("pulse query succeeds");
+        assert_eq!(pulses.len(), 1);
+        let content = pulse_content(&pulses[0]);
+        assert_eq!(content["label"], "ted-laptop");
+        assert_eq!(
+            content["agreements"]["admit/laptop-test/sovereign"],
+            declaration.id.to_hex()
+        );
+        assert_eq!(content["coherence"]["governance"]["peers"], "journal");
+        assert!(pulses[0].tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("n")
+                && values.get(1).map(String::as_str) == Some("ted-laptop")
+        }));
+    }
+
+    #[tokio::test]
+    async fn beacon_pulse_standing_is_owner_and_admitted_peers_only() {
+        use buzz_core::identity::AuthenticationMethod;
+
+        let owner = Keys::generate();
+        let peer = Keys::generate();
+        let stranger = Keys::generate();
+        let adapter = LocalIdentityAdapter::with_peer_trust_and_proof_store(
+            [identity::RelayPeerTrust::new(
+                ReplicationSourceId::new("laptop-test/sovereign".to_string()),
+                "did:example:peer",
+                [(peer.public_key(), "did:example:peer#nostr-key".to_string())],
+            )],
+            None::<PathBuf>,
+        )
+        .expect("adapter opens");
+        let store = Arc::new(
+            EventStore::open(StorageMode::Ephemeral)
+                .await
+                .expect("store opens"),
+        );
+        let relay = LocalRelay::open_governed_with_keys(
+            store,
+            Arc::new(ReplicationDisabled),
+            Some(Arc::new(adapter)),
+            None,
+            Some((owner.public_key(), "ted-laptop".to_string())),
+            Some(Keys::generate()),
+        );
+        let principal = |pubkey: PublicKey| AuthenticatedPrincipal {
+            principal: buzz_core::identity::Principal::Nostr { pubkey },
+            method: AuthenticationMethod::Nip98,
+            audience: "http://localhost/".to_string(),
+            authenticated_at: 0,
+            expires_at: None,
+            proof_id: None,
+        };
+
+        assert!(relay.pulse_visible_to(Some(&principal(owner.public_key()))));
+        assert!(relay.pulse_visible_to(Some(&principal(peer.public_key()))));
+        assert!(!relay.pulse_visible_to(Some(&principal(stranger.public_key()))));
+        assert!(!relay.pulse_visible_to(None));
     }
 }

@@ -352,7 +352,8 @@ Options:
   --require-auth  Require NIP-42 WebSocket and NIP-98 HTTP authentication
   --peer-trust PATH  JSON trust config admitting replication peers (needs --require-auth)
   --artifacts DIR    Content-addressed artifact store (default: <data>.artifacts)
-  --relay-key PATH   Dedicated relay-state signing key (default: <data>.relay-key)
+  --relay-key PATH   Dedicated relay signing key for relay-authored state and
+                     Beacon pulse witness statements (default: <data>.relay-key)
   --owner PUBKEY     Owner pubkey (hex); owner-signed admit declarations in the
                      journal then govern peer trust, and --peer-trust becomes
                      bootstrap-only (requires --node-label)

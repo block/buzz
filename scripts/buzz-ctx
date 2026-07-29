@@ -90,6 +90,21 @@ pin_for_export() { # $1 = stream id → current export declaration head id ("" i
     | sed 's/^200 //' | jq -r '.[0].id // empty'
 }
 
+render_pulse() { # $1 = query result JSON array holding one kind-20700 pulse
+  printf '%s' "$1" | jq -r '.[0] | (.content | fromjson) as $c |
+    "pulse  \(.pubkey[0:12])…  node \(if $c.label == "" then "(unlabelled)" else $c.label end) [\((.tags[] | select(.[0]=="role"))[1] // "?")]",
+    "  witnessed   \(.created_at | todate)",
+    "  journal     seq \($c.journal.sequence)  head \(($c.journal.head // "(empty)")[0:12])\(if $c.journal.head then "…" else "" end)  prev \(($c.previous // "(none)")[0:12])\(if $c.previous then "…" else "" end)",
+    (if ($c.checkpoints | length) > 0
+     then ($c.checkpoints | to_entries[] | "  checkpoint  \(.key)  \(.value)")
+     else "  checkpoint  (none)" end),
+    (if ($c.agreements | length) > 0
+     then ($c.agreements | to_entries[] | "  agreement   \(.key)  \(.value[0:12])…")
+     else "  agreement   (none)" end),
+    "  governance  \($c.coherence.governance | to_entries | map("\(.key)=\(.value)") | join("  "))",
+    ""'
+}
+
 case "${1:-}" in
   save)
     # Context heads are NIP-AE engrams (kind 30174): NIP-44 encrypted,
@@ -809,27 +824,34 @@ case "${1:-}" in
       --key "$KEY"
     ;;
   pulse)
-    # The Beacon pulse (kind 20700, ephemeral): the custodian's signed
-    # witness statement of the state it currently holds. Synthesized on
-    # request — a query that explicitly names the kind receives a fresh
-    # pulse — so the plain HTTP query path observes it with no new surface.
+    # The Beacon pulse (kind 20700, ephemeral): a node's signed witness
+    # statement of the state it currently holds. Synthesized on request —
+    # a query that explicitly names the kind receives a fresh pulse — so
+    # the plain HTTP query path observes it with no new surface. With no
+    # argument, witnesses both nodes of the pair (local sovereign + cloud
+    # rendezvous) side by side; shared reality is visible exactly when
+    # their heads and agreements are compatible.
     # See specs/architecture/beacon-pulse-v0.1-draft.md.
-    relay="${2:-$CLOUD_URL}"
-    result="$("$CLIENT" query "$KEY" "$relay" '[{"kinds":[20700],"limit":1}]' \
-      | sed 's/^200 //')"
-    [ "$(printf '%s' "$result" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] \
-      || die "no pulse from $relay (no witness key configured, or no standing to observe it)"
-    printf '%s' "$result" | jq -r '.[0] | (.content | fromjson) as $c |
-      "pulse  \(.pubkey[0:12])…  node \(if $c.label == "" then "(unlabelled)" else $c.label end) (\($c.node))",
-      "  witnessed   \(.created_at | todate)",
-      "  journal     seq \($c.journal.sequence)  head \(($c.journal.head // "(empty)")[0:12])\(if $c.journal.head then "…" else "" end)  prev \(($c.previous // "(none)")[0:12])\(if $c.previous then "…" else "" end)",
-      (if ($c.checkpoints | length) > 0
-       then ($c.checkpoints | to_entries[] | "  checkpoint  \(.key)  \(.value)")
-       else "  checkpoint  (none)" end),
-      (if ($c.agreements | length) > 0
-       then ($c.agreements | to_entries[] | "  agreement   \(.key)  \(.value[0:12])…")
-       else "  agreement   (none)" end),
-      "  governance  \($c.coherence.governance | to_entries | map("\(.key)=\(.value)") | join("  "))"'
+    if [ -n "${2:-}" ]; then
+      relays="$2"
+    else
+      relays="$LOCAL_URL $CLOUD_URL"
+    fi
+    shown=0
+    for relay in $relays; do
+      if ! result="$("$CLIENT" query "$KEY" "$relay" \
+          '[{"kinds":[20700],"limit":1}]' 2>/dev/null | sed 's/^200 //')"; then
+        echo "unreachable  $relay" >&2
+        continue
+      fi
+      if [ "$(printf '%s' "$result" | jq 'length' 2>/dev/null || echo 0)" -eq 0 ]; then
+        echo "silent       $relay (no witness key, or no standing to observe)" >&2
+        continue
+      fi
+      render_pulse "$result"
+      shown=$((shown + 1))
+    done
+    [ "$shown" -gt 0 ] || die "no pulse observed from: $relays"
     ;;
   *)
     sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'

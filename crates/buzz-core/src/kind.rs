@@ -101,6 +101,23 @@ pub const KIND_AGENT_ENGRAM: u32 = 30174;
 /// See `specs/architecture/sovereign-sync-agreement-v0.1-draft.md`.
 pub const KIND_SYNC_DECLARATION: u32 = 30700;
 
+/// Beacon pulse (ephemeral).
+///
+/// PROVISIONAL number pending upstream registry assignment. A node's signed
+/// witness statement of the state it currently holds: journal head and
+/// witnessed chain, replication checkpoints, and the effective
+/// `KIND_SYNC_DECLARATION` agreement heads it applies. The ephemeral
+/// counterpart of 30700 — the durable agreement versus the witness of now.
+/// See `specs/architecture/beacon-pulse-v0.1-draft.md`.
+pub const KIND_BEACON_PULSE: u32 = 20700;
+
+/// Beacon pulse response (ephemeral).
+///
+/// PROVISIONAL number pending upstream registry assignment. A peer's answer
+/// to a Beacon pulse, `e`-tagged to the pulse it answers, carrying a
+/// `stance`: recognize, advanced, conflict, diverged, or unsatisfied.
+pub const KIND_BEACON_RESPONSE: u32 = 20701;
+
 /// NIP-ER: Event Reminder (parameterized replaceable, author-only).
 ///
 /// Encrypted, author-only reminder addressed by `(pubkey, kind, d_tag)`. The
@@ -591,6 +608,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_AGENT_PROFILE,
     KIND_AGENT_ENGRAM,
     KIND_SYNC_DECLARATION,
+    KIND_BEACON_PULSE,
+    KIND_BEACON_RESPONSE,
     KIND_EVENT_REMINDER,
     KIND_PERSONA,
     KIND_TEAM,
@@ -794,6 +813,8 @@ const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_SYNC_DECLARATION)); // 30700 ∈ 30000–39999
+const _: () = assert!(is_ephemeral(KIND_BEACON_PULSE)); // 20700 ∈ 20000–29999
+const _: () = assert!(is_ephemeral(KIND_BEACON_RESPONSE)); // 20701 ∈ 20000–29999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

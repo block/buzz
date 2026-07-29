@@ -1,11 +1,11 @@
 # Beacon Pulse v0.1 (draft)
 
-Status: draft for discussion; implemented in the Cloudflare portable relay
-adapter (`cloudflare/portable-relay`) and not yet upstreamed. Kind numbers are
-provisional pending assignment in the shared registry
-(`buzz-core/src/kind.rs`). Companion to
-`sovereign-sync-agreement-v0.1-draft.md`: kind 30700 is the durable agreement,
-kind 20700 the ephemeral witness of now.
+Status: draft for discussion; implemented in both portable relay adapters —
+the Cloudflare rendezvous (`cloudflare/portable-relay`) and the laptop node
+(`crates/buzz-local-relay`) — and not yet upstreamed. Kind numbers are in the
+shared registry (`buzz-core/src/kind.rs`), PROVISIONAL pending upstream
+assignment. Companion to `sovereign-sync-agreement-v0.1-draft.md`: kind 30700
+is the durable agreement, kind 20700 the ephemeral witness of now.
 
 ## Purpose
 
@@ -37,13 +37,23 @@ range and the existing portable profiles:
 
 ## Identity: the witness key
 
-A pulse is signed by the **node's own witness key** (Cloudflare adapter:
-the `BUZZ_NODE_SECRET` Worker secret), a distinct identity from the owner:
-**the node witnesses, the owner governs.** When no witness key is
-configured the capability is absent — the node stays a silent custodian and
+A pulse is signed by the **node's own witness key**, a distinct identity
+from the owner: **the node witnesses, the owner governs.** When no witness
+key is configured the capability is absent — the node stays silent and
 `/health` reports `witness: null`. The witness pubkey is published in
 `/health` for out-of-band binding (e.g. an owner-signed binding statement
 or a future kind-30700 `witness/<label>` declaration head).
+
+Per adapter:
+
+- **Cloudflare rendezvous** — the `BUZZ_NODE_SECRET` Worker secret; pulses
+  carry `role: rendezvous`.
+- **Laptop node** — the relay's existing dedicated key (`--relay-key`,
+  already used for relay-authored NIP-29 projections; auto-generated beside
+  the journal); pulses carry `role: sovereign`. The laptop derives
+  `previous` from the journal chain directly (every append is witnessed),
+  and reports no checkpoints — it is a push source; the push cursor lives
+  with the pusher.
 
 ## Event shape
 
@@ -128,6 +138,8 @@ deliberately out of scope for v0.1; they belong to the agreement layer.
 
 ## Observation
 
-`buzz-ctx pulse [relay-url]` queries the rendezvous custodian (default:
-the Cloudflare replica) for a pulse and renders the witness statement.
-Any NIP-01 client can subscribe with `{"kinds": [20700]}`.
+`buzz-ctx pulse` with no argument witnesses every node of the pair — the
+local sovereign node and the cloud rendezvous — side by side; shared
+reality is visible exactly when their heads and agreements are compatible.
+`buzz-ctx pulse <relay-url>` targets one node. Any NIP-01 client can
+subscribe with `{"kinds": [20700]}`.
