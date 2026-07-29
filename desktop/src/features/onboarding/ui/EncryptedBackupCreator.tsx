@@ -565,7 +565,7 @@ export function EncryptedBackupCreator({
               onClick={() => dispatch({ type: "download-clicked" })}
               type="button"
             >
-              {state.downloadPending ? <PendingDownloadTicker /> : "Download"}
+              {state.downloadPending ? <PendingDownloadTicker /> : "Backup key"}
             </Button>
           </div>
         );

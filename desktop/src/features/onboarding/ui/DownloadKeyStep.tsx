@@ -158,11 +158,24 @@ export function DownloadKeyStep({
             Next
           </Button>
         ) : (
-          <div
-            className="flex justify-center"
-            data-testid="onboarding-create-slot"
-            ref={setCreateButtonSlot}
-          />
+          /* Relative row keeps the Download CTA truly centered while Skip
+             hangs off its right edge without shifting the center. */
+          <div className="relative flex items-center justify-center">
+            <div
+              className="flex justify-center"
+              data-testid="onboarding-create-slot"
+              ref={setCreateButtonSlot}
+            />
+            <Button
+              className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
+              data-testid="onboarding-skip"
+              onClick={onNext}
+              type="button"
+              variant="ghost"
+            >
+              Skip for now
+            </Button>
+          </div>
         )}
 
         <Button

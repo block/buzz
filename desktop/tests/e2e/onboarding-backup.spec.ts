@@ -82,9 +82,11 @@ test("chooser shows masked key; reveal and copy fetch it explicitly", async ({
     .toContain("copy_text_to_clipboard");
   expect(await invokedCommands(page)).toContain("get_nsec");
 
-  // Backup is recommended, never required.
+  // Next leads into the download step, where backup stays skippable.
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
   await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
+  await page.getByTestId("onboarding-skip").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
@@ -99,9 +101,9 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
 }) => {
   await enterMachineBackup(page);
 
-  // The download flow is its own onboarding step behind the footer CTA.
+  // The download flow is its own onboarding step behind the footer's Next.
   await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
-  await page.getByTestId("backup-option-download").click();
+  await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
 
   // The password field starts empty; the create button sits in the footer's
@@ -110,6 +112,7 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await expect(input).toHaveValue("");
   await expect(page.getByTestId("encrypted-backup-create")).toBeDisabled();
   await expect(page.getByTestId("onboarding-next")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-skip")).toBeVisible();
 
   // The inset refresh icon opens the generator popover and immediately
   // fills the field (mock default: 3 words, spaces).
@@ -166,21 +169,22 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
 test("download step Back returns to the backup chooser", async ({ page }) => {
   await enterMachineBackup(page);
 
-  await page.getByTestId("backup-option-download").click();
+  await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
   await expect(page.getByTestId("backup-passphrase-input")).toBeVisible();
-  // The chooser's footer CTA belongs to the previous step.
-  await expect(page.getByTestId("backup-option-download")).toHaveCount(0);
+  // The chooser's footer Next belongs to the previous step; the download
+  // step only mounts its own Next once the backup exists.
+  await expect(page.getByTestId("onboarding-next")).toHaveCount(0);
 
   await page.getByTestId("onboarding-back").click();
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("backup-key-value")).toBeVisible();
-  await expect(page.getByTestId("backup-option-download")).toBeVisible();
+  await expect(page.getByTestId("onboarding-next")).toBeVisible();
 });
 
 test("typed password requires 12 characters", async ({ page }) => {
   await enterMachineBackup(page);
-  await page.getByTestId("backup-option-download").click();
+  await page.getByTestId("onboarding-next").click();
 
   const create = page.getByTestId("encrypted-backup-create");
   await expect(create).toBeDisabled(); // empty field
@@ -233,9 +237,12 @@ test("reveal shows inline error when get_nsec fails and Next still advances", as
   await page.getByTestId("backup-key-reveal-toggle").click();
 
   await expect(page.getByTestId("backup-copy-error")).toBeVisible();
-  // Keychain failure does not trap the user.
+  // Keychain failure does not trap the user: Next still advances into the
+  // download step, and Skip there continues to setup.
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
   await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
+  await page.getByTestId("onboarding-skip").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 

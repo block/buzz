@@ -238,7 +238,6 @@ export function MachineOnboardingFlow({
               direction="forward"
               onBack={() => setPage("identity")}
               onDownload={() => setPage("download")}
-              onNext={() => setPage("setup")}
             />
           ) : page === "download" ? (
             <DownloadKeyStep

@@ -34,7 +34,7 @@ let introPlayed = false;
 const REVEAL_ANIMATION_CLASS =
   "animate-in fade-in duration-700 motion-reduce:animate-none";
 
-/** Saving a Keycase is recommended, never required to continue onboarding. */
+/** Viewing the key never blocks onboarding — Next is always actionable. */
 export function backupNextDisabled(): boolean {
   return false;
 }
@@ -44,22 +44,16 @@ type BackupStepProps = {
   onBack: () => void;
   /** Advances to the dedicated "Download your key" onboarding step. */
   onDownload: () => void;
-  onNext: () => void;
 };
 
 /**
- * Onboarding backup step — shows the freshly created key and offers two ways
- * to back it up without blocking setup: the encrypted download flow (its own
- * onboarding step, via `onDownload`) or a direct clipboard copy destined for
- * a password manager. The raw key is fetched only when the user explicitly
+ * Onboarding backup step — shows the freshly created key and offers a direct
+ * clipboard copy destined for a password manager. Next leads into the
+ * encrypted download step (its own onboarding page, via `onDownload`), which
+ * is skippable there. The raw key is fetched only when the user explicitly
  * clicks Copy or Reveal, and is never held in state before that.
  */
-export function BackupStep({
-  direction,
-  onBack,
-  onDownload,
-  onNext,
-}: BackupStepProps) {
+export function BackupStep({ direction, onBack, onDownload }: BackupStepProps) {
   const [created, setCreated] = React.useState(introPlayed);
   const [copyState, setCopyState] = React.useState<
     "idle" | "copying" | "copied"
@@ -284,28 +278,15 @@ export function BackupStep({
 
       {created ? (
         <OnboardingFooter className={REVEAL_ANIMATION_CLASS}>
-          {/* Relative row keeps the primary CTA truly centered while Skip
-              hangs off its right edge without shifting the center. */}
-          <div className="relative flex items-center justify-center">
-            <Button
-              className={ONBOARDING_PRIMARY_CTA_CLASS}
-              data-testid="backup-option-download"
-              onClick={onDownload}
-              type="button"
-            >
-              Backup your key
-            </Button>
-            <Button
-              className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
-              data-testid="onboarding-next"
-              disabled={backupNextDisabled()}
-              onClick={onNext}
-              type="button"
-              variant="ghost"
-            >
-              Skip for now
-            </Button>
-          </div>
+          <Button
+            className={ONBOARDING_PRIMARY_CTA_CLASS}
+            data-testid="onboarding-next"
+            disabled={backupNextDisabled()}
+            onClick={onDownload}
+            type="button"
+          >
+            Next
+          </Button>
 
           <Button
             className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"

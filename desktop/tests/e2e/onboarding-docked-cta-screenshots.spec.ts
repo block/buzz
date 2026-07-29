@@ -68,7 +68,10 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02b-backup-revealed.png` });
 
+  // Next leads into the download step; Skip there continues to setup.
   await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
+  await page.getByTestId("onboarding-skip").click();
   await expect(
     page.getByRole("heading", { name: "Set up your agent harnesses" }),
   ).toBeVisible();
