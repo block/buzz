@@ -471,7 +471,7 @@ pub enum MessagesCmd {
     },
     /// Full-text search across messages
     #[command(
-        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20\n  buzz messages search --query deploy --channel <UUID>\n  buzz messages search --query deploy --since 1783497600 --until 1784102400\n  buzz messages search --query deploy --kinds 9,45001,45003"
     )]
     Search {
         /// Search query string (optional when --author is given)
@@ -483,6 +483,15 @@ pub enum MessagesCmd {
         /// Unix timestamp — return messages after this time
         #[arg(long)]
         since: Option<i64>,
+        /// Unix timestamp — return messages before this time
+        #[arg(long)]
+        until: Option<i64>,
+        /// Channel UUID — restrict results to one channel (from 'buzz channels list')
+        #[arg(long)]
+        channel: Option<String>,
+        /// Nostr event kinds to search (comma-separated) — defaults to chat, channel, and forum kinds
+        #[arg(long, value_delimiter = ',')]
+        kinds: Vec<u16>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,

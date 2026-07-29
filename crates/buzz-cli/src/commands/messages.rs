@@ -337,11 +337,60 @@ pub async fn cmd_get_thread(
     Ok(())
 }
 
+/// Kinds searched when `--kind` is not supplied: chat, channel metadata,
+/// forum posts, and forum comments.
+const DEFAULT_SEARCH_KINDS: &[u16] = &[9, 40002, 45001, 45003];
+
+/// Build the relay filter for `messages search`.
+///
+/// Split out of [`cmd_search`] so the filter shape is testable without a
+/// relay. Omitting every optional argument produces the same object the
+/// command sent before `--channel`, `--until`, and `--kind` existed.
+fn build_search_filter(
+    query: Option<&str>,
+    author_hex: Option<&str>,
+    since: Option<i64>,
+    until: Option<i64>,
+    channel: Option<&str>,
+    kinds: &[u16],
+    limit: u32,
+) -> serde_json::Value {
+    let kind_list: Vec<u16> = if kinds.is_empty() {
+        DEFAULT_SEARCH_KINDS.to_vec()
+    } else {
+        kinds.to_vec()
+    };
+    let mut filter = serde_json::json!({
+        "kinds": kind_list,
+        "limit": limit
+    });
+    if let Some(q) = query {
+        filter["search"] = serde_json::json!(q);
+    }
+    if let Some(pk) = author_hex {
+        filter["authors"] = serde_json::json!([pk]);
+    }
+    if let Some(s) = since {
+        filter["since"] = serde_json::json!(s);
+    }
+    if let Some(u) = until {
+        filter["until"] = serde_json::json!(u);
+    }
+    if let Some(c) = channel {
+        filter["#h"] = serde_json::json!([c]);
+    }
+    filter
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_search(
     client: &BuzzClient,
     query: Option<&str>,
     author: Option<&str>,
     since: Option<i64>,
+    until: Option<i64>,
+    channel: Option<&str>,
+    kinds: &[u16],
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
@@ -350,6 +399,16 @@ pub async fn cmd_search(
             "at least one of --query or --author is required".into(),
         ));
     }
+    if let (Some(s), Some(u)) = (since, until) {
+        if s > u {
+            return Err(CliError::Usage(
+                "--since must not be later than --until".into(),
+            ));
+        }
+    }
+    if let Some(c) = channel {
+        crate::validate::validate_uuid(c)?;
+    }
     let limit = limit.unwrap_or(20).min(100);
 
     let author_hex = match author {
@@ -357,19 +416,15 @@ pub async fn cmd_search(
         None => None,
     };
 
-    let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 45001, 45003],
-        "limit": limit
-    });
-    if let Some(q) = query {
-        filter["search"] = serde_json::json!(q);
-    }
-    if let Some(ref pk) = author_hex {
-        filter["authors"] = serde_json::json!([pk]);
-    }
-    if let Some(s) = since {
-        filter["since"] = serde_json::json!(s);
-    }
+    let filter = build_search_filter(
+        query,
+        author_hex.as_deref(),
+        since,
+        until,
+        channel,
+        kinds,
+        limit,
+    );
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     // The full-text path returns relevance order; a pure author/time query has
@@ -856,6 +911,9 @@ pub async fn dispatch(
             query,
             author,
             since,
+            until,
+            channel,
+            kinds,
             limit,
         } => {
             cmd_search(
@@ -863,6 +921,9 @@ pub async fn dispatch(
                 query.as_deref(),
                 author.as_deref(),
                 since,
+                until,
+                channel.as_deref(),
+                &kinds,
                 limit,
                 format,
             )
@@ -1163,5 +1224,77 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod search_filter_tests {
+    use super::build_search_filter;
+    use serde_json::json;
+
+    const UUID: &str = "0b7f9c2e-3d4a-4b1c-8e5f-6a7b8c9d0e1f";
+    const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn defaults_to_the_four_message_kinds_when_no_kind_flag_is_given() {
+        let f = build_search_filter(Some("deploy"), None, None, None, None, &[], 20);
+        assert_eq!(f["kinds"], json!([9, 40002, 45001, 45003]));
+    }
+
+    #[test]
+    fn explicit_kinds_replace_the_defaults() {
+        let f = build_search_filter(Some("deploy"), None, None, None, None, &[9, 40002], 20);
+        assert_eq!(f["kinds"], json!([9, 40002]));
+    }
+
+    #[test]
+    fn channel_becomes_an_h_tag_filter() {
+        let f = build_search_filter(Some("deploy"), None, None, None, Some(UUID), &[], 20);
+        assert_eq!(f["#h"], json!([UUID]));
+    }
+
+    #[test]
+    fn no_h_key_at_all_when_channel_is_absent() {
+        let f = build_search_filter(Some("deploy"), None, None, None, None, &[], 20);
+        assert!(f.get("#h").is_none(), "unscoped search must not send #h");
+    }
+
+    #[test]
+    fn until_is_passed_through_when_present_and_absent_otherwise() {
+        let with = build_search_filter(
+            Some("deploy"),
+            None,
+            None,
+            Some(1_784_102_400),
+            None,
+            &[],
+            20,
+        );
+        assert_eq!(with["until"], json!(1_784_102_400));
+        let without = build_search_filter(Some("deploy"), None, None, None, None, &[], 20);
+        assert!(without.get("until").is_none());
+    }
+
+    #[test]
+    fn omitting_every_new_flag_reproduces_the_previous_filter_exactly() {
+        let f = build_search_filter(
+            Some("checkout"),
+            Some(PUBKEY),
+            Some(1_783_497_600),
+            None,
+            None,
+            &[],
+            20,
+        );
+        assert_eq!(
+            f,
+            json!({
+                "kinds": [9, 40002, 45001, 45003],
+                "limit": 20,
+                "search": "checkout",
+                "authors": [PUBKEY],
+                "since": 1_783_497_600
+            })
+        );
     }
 }

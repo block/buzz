@@ -36,6 +36,9 @@ buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
+buzz messages search --query "architecture" --channel <uuid>          # scope to one channel
+buzz messages search --query "architecture" --since <ts> --until <ts> # bound both ends
+buzz messages search --query "architecture" --kinds 9,45001,45003     # override default kinds
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>
 
