@@ -64,30 +64,32 @@ export function DevMessageRow({
   }
 
   return (
-    <div className="flex min-w-0 gap-2 py-0.5 text-sm leading-6">
-      <span className="shrink-0 select-none text-muted-foreground/50">
-        {formatTime(event.created_at)}
-      </span>
-      <span
+    <div className="min-w-0 py-1 text-sm leading-6">
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span
+          className={cn(
+            "shrink-0 font-medium",
+            isSelf && "underline decoration-dotted underline-offset-4",
+          )}
+          style={{ color: resolveColor(event.pubkey) }}
+        >
+          {resolveName(event.pubkey)}
+        </span>
+        <span className="shrink-0 select-none text-xs text-muted-foreground/50">
+          {formatTime(event.created_at)}
+        </span>
+        {reactions && reactions.length > 0 ? (
+          <ReactionChips reactions={reactions} />
+        ) : null}
+      </div>
+      <div
         className={cn(
-          "shrink-0 font-medium",
-          isSelf && "underline decoration-dotted underline-offset-4",
-        )}
-        style={{ color: resolveColor(event.pubkey) }}
-      >
-        {resolveName(event.pubkey)}
-      </span>
-      <span
-        className={cn(
-          "min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+          "min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
           event.pending && "text-muted-foreground",
         )}
       >
         {renderHighlightedContent(event.content, mentionStyles)}
-      </span>
-      {reactions && reactions.length > 0 ? (
-        <ReactionChips reactions={reactions} />
-      ) : null}
+      </div>
     </div>
   );
 }
