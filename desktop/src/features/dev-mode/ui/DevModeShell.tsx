@@ -380,6 +380,29 @@ export function DevModeShell() {
     />
   );
 
+  const sideChatOpen = Boolean(
+    view === "channel" && activeChannel && threadOpen && selectedRoot && mode,
+  );
+
+  const composer = mode ? (
+    <DevPromptComposer
+      active={composerActive}
+      busy={busy}
+      focusSignal={focusSignal}
+      hint={hint}
+      mode={mode}
+      onChange={setInput}
+      onCycleMode={handleCycleMode}
+      onEscape={handleEscape}
+      onNavigate={handleNavigate}
+      onOpenPalette={() => setPaletteOpen(true)}
+      onSubmit={handleSubmit}
+      onSwitchPane={handleSwitchPane}
+      placeholder={placeholder}
+      value={input}
+    />
+  ) : null;
+
   return (
     <div
       className="relative flex min-h-0 flex-1 flex-col bg-background"
@@ -426,7 +449,12 @@ export function DevModeShell() {
           threadOpen && selectedRoot && mode ? (
             <DevSplitPane
               activePane={activePane}
-              main={transcriptFor(activeChannel)}
+              main={
+                <>
+                  {transcriptFor(activeChannel)}
+                  {composer}
+                </>
+              }
               side={
                 <DevThreadPanel
                   active={activePane === "thread"}
@@ -471,24 +499,7 @@ export function DevModeShell() {
         </div>
       ) : null}
 
-      {mode ? (
-        <DevPromptComposer
-          active={composerActive}
-          busy={busy}
-          focusSignal={focusSignal}
-          hint={hint}
-          mode={mode}
-          onChange={setInput}
-          onCycleMode={handleCycleMode}
-          onEscape={handleEscape}
-          onNavigate={handleNavigate}
-          onOpenPalette={() => setPaletteOpen(true)}
-          onSubmit={handleSubmit}
-          onSwitchPane={handleSwitchPane}
-          placeholder={placeholder}
-          value={input}
-        />
-      ) : null}
+      {sideChatOpen ? null : composer}
 
       {paletteOpen ? (
         <DevCommandPalette
