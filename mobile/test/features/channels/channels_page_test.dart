@@ -28,6 +28,7 @@ void main() {
     bool previewDirectory = false,
     double keyboardInset = 0,
     bool disableAnimations = false,
+    double bottomPadding = 0,
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
     TextScaler textScaler = TextScaler.noScaling,
@@ -52,6 +53,7 @@ void main() {
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
             textScaler: textScaler,
+            padding: EdgeInsets.only(bottom: bottomPadding),
             viewInsets: EdgeInsets.only(bottom: keyboardInset),
           ),
           child: child!,
@@ -140,6 +142,29 @@ void main() {
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('keeps the last channel above the floating tab bar', (
+    tester,
+  ) async {
+    const footerClearance = 102.0;
+    await tester.pumpWidget(
+      buildTestable(
+        bottomPadding: footerClearance,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final padding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.byType(SliverPadding),
+      ),
+    );
+    expect((padding.padding as EdgeInsets).bottom, footerClearance);
   });
 
   testWidgets('aligns the top, section, row, and skeleton label columns', (

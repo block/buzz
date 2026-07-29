@@ -18,8 +18,13 @@ double mobileTabFooterBackdropHeight(BuildContext context) =>
 
 /// Shared fade behind the floating mobile tab bar.
 class MobileTabFooterBackdrop extends StatelessWidget {
+  /// Vertical extent of the backdrop in logical pixels.
   final double height;
+
+  /// Gradient stop positions, from the transparent top to the opaque bottom.
   final List<double> stops;
+
+  /// Surface-color alpha values paired with [stops].
   final List<double> opacities;
 
   const MobileTabFooterBackdrop({

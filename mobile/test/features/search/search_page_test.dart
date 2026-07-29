@@ -248,6 +248,7 @@ void main() {
     tester,
   ) async {
     const keyboardInset = 300.0;
+    const footerClearance = 102.0;
 
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -266,6 +267,7 @@ void main() {
         child: Builder(
           builder: (context) => MediaQuery(
             data: MediaQuery.of(context).copyWith(
+              padding: const EdgeInsets.only(bottom: footerClearance),
               viewInsets: const EdgeInsets.only(bottom: keyboardInset),
             ),
             child: const SearchPage(),
@@ -282,13 +284,14 @@ void main() {
     );
     final padding = recentSearches.padding! as EdgeInsets;
 
-    expect(padding.bottom, Grid.xl + keyboardInset);
+    expect(padding.bottom, Grid.xl + footerClearance + keyboardInset);
   });
 
   testWidgets('keeps search results scrollable above the keyboard', (
     tester,
   ) async {
     const keyboardInset = 300.0;
+    const footerClearance = 102.0;
     final state = SearchState(
       query: 'general',
       channelResults: [
@@ -318,6 +321,7 @@ void main() {
         child: Builder(
           builder: (context) => MediaQuery(
             data: MediaQuery.of(context).copyWith(
+              padding: const EdgeInsets.only(bottom: footerClearance),
               viewInsets: const EdgeInsets.only(bottom: keyboardInset),
             ),
             child: const SearchPage(),
@@ -332,7 +336,7 @@ void main() {
     );
     final padding = results.padding! as EdgeInsets;
 
-    expect(padding.bottom, Grid.xl + keyboardInset);
+    expect(padding.bottom, Grid.xl + footerClearance + keyboardInset);
   });
 
   testWidgets('keeps no-results feedback above the keyboard', (tester) async {

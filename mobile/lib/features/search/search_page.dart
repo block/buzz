@@ -346,7 +346,10 @@ class _SearchBody extends ConsumerWidget {
     return ListView(
       key: const Key('search-results-list'),
       padding: EdgeInsets.only(
-        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+        bottom:
+            Grid.xl +
+            MediaQuery.paddingOf(context).bottom +
+            MediaQuery.viewInsetsOf(context).bottom,
       ),
       children: [
         if (showChannels && state.channelResults.isNotEmpty)
@@ -396,7 +399,10 @@ class _RecentSearches extends StatelessWidget {
     return ListView(
       key: const Key('recent-searches-list'),
       padding: EdgeInsets.only(
-        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+        bottom:
+            Grid.xl +
+            MediaQuery.paddingOf(context).bottom +
+            MediaQuery.viewInsetsOf(context).bottom,
       ),
       children: [
         Padding(
