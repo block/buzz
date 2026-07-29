@@ -29,6 +29,8 @@ mod secret_store;
 mod shutdown;
 mod templates;
 mod util;
+#[cfg(target_os = "linux")]
+pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
