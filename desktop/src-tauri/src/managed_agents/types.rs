@@ -77,21 +77,14 @@ pub struct AgentDefinition {
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
-    /// NIP-AP behavioral defaults, stored in WIRE shape (kebab-case string,
-    /// not the `RespondTo` enum) so `persona_event_content` is a verbatim
-    /// copy and quad-absent records serialize byte-identically to the
-    /// pre-activation era. Copied onto instances at mint time only — spawn
-    /// re-snapshot never touches them. Validated at the instance boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
-    #[serde(default)]
-    pub created_at: String,
-    #[serde(default)]
-    pub updated_at: String,
+    #[serde(default)] pub created_at: String,
+    #[serde(default)] pub updated_at: String,
 }
 
 impl AgentDefinition {
@@ -243,35 +236,15 @@ pub struct ManagedAgentRecord {
     /// against what was actually published rather than re-deriving it from
     /// persona config — which would silently overwrite user intent on restart.
     /// `#[serde(default)]` so pre-existing records deserialize as `None`.
-    #[serde(default)]
-    pub avatar_url: Option<String>,
-    #[serde(default = "default_acp_command")]
-    pub acp_command: String,
-    #[serde(default)]
-    pub agent_command: String,
+    #[serde(default)] pub avatar_url: Option<String>,
+    #[serde(default = "default_acp_command")] pub acp_command: String,
+    #[serde(default)] pub agent_command: String,
     /// Explicit per-instance harness pin. `None` (the default) means inherit
-    /// the harness from the linked persona's `runtime`, so persona harness
-    /// edits propagate on the next spawn — mirroring the opt-in `model`
-    /// override. `Some` is set only when the user deliberately picks a harness
-    /// that diverges from the persona. Resolved via `effective_agent_command`;
-    /// `agent_command` above is the create-time snapshot kept for avatar/legacy
-    /// derivations and is not authoritative for spawn.
-    #[serde(default)]
-    pub agent_command_override: Option<String>,
-    #[serde(default)]
-    pub agent_args: Vec<String>,
-    /// Create-time snapshot of the catalog MCP command. Never read at spawn —
-    /// the effective MCP command is always re-derived from the runtime catalog
-    /// (`known_acp_runtime`) — and no longer written by updates. Kept for
-    /// serde compatibility with existing stores.
-    #[serde(default)]
-    pub mcp_command: String,
-    /// Deprecated: `BUZZ_ACP_TURN_TIMEOUT` is ignored by the harness and the
-    /// desktop no longer emits or edits it. Kept for serde compatibility with
-    /// existing stores; use `idle_timeout_seconds` or
-    /// `max_turn_duration_seconds` for turn-length control.
-    #[serde(default)]
-    pub turn_timeout_seconds: u64,
+    /// the harness from the linked persona's `runtime`.
+    #[serde(default)] pub agent_command_override: Option<String>,
+    #[serde(default)] pub agent_args: Vec<String>,
+    #[serde(default)] pub mcp_command: String,
+    #[serde(default)] pub turn_timeout_seconds: u64,
     /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent
     /// may stay silent on its ACP channel mid-turn before the harness times
     /// the turn out.
@@ -330,33 +303,17 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub provider_binary_path: Option<String>,
     /// Installed team directory path (absolute). Set when agent was created from a team persona.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "persona_pack_path"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "persona_pack_path")]
     pub persona_team_dir: Option<PathBuf>,
-    /// Persona name within the team.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "persona_name_in_pack"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "persona_name_in_pack")]
     pub persona_name_in_team: Option<String>,
-    #[serde(default)]
-    pub created_at: String,
-    #[serde(default)]
-    pub updated_at: String,
-    #[serde(default)]
-    pub last_started_at: Option<String>,
-    #[serde(default)]
-    pub last_stopped_at: Option<String>,
-    #[serde(default)]
-    pub last_exit_code: Option<i32>,
-    #[serde(default)]
-    pub last_error: Option<String>,
-    #[serde(default)]
-    pub last_error_code: Option<i64>,
+    #[serde(default)] pub created_at: String,
+    #[serde(default)] pub updated_at: String,
+    #[serde(default)] pub last_started_at: Option<String>,
+    #[serde(default)] pub last_stopped_at: Option<String>,
+    #[serde(default)] pub last_exit_code: Option<i32>,
+    #[serde(default)] pub last_error: Option<String>,
+    #[serde(default)] pub last_error_code: Option<i64>,
     /// Inbound author gate mode. Translates to `BUZZ_ACP_RESPOND_TO`.
     #[serde(default)]
     pub respond_to: RespondTo,
