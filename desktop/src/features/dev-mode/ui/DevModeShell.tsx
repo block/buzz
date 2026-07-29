@@ -3,8 +3,8 @@ import * as React from "react";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   groupSessionChannels,
-  useChannelCategories,
-} from "@/features/dev-mode/lib/channelCategories";
+  usePinnedChannels,
+} from "@/features/dev-mode/lib/pinnedChannels";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
 import {
@@ -50,7 +50,11 @@ function devComposerModeKey(mode: DevComposerMode): string {
  */
 type ShellView = "fresh" | "navigator" | "channel";
 
-export function DevModeShell() {
+export function DevModeShell({
+  unreadChannelIds,
+}: {
+  unreadChannelIds: ReadonlySet<string>;
+}) {
   const identityQuery = useIdentityQuery();
   const channelsQuery = useChannelsQuery();
   const isFullscreen = useIsFullscreen();
@@ -85,31 +89,23 @@ export function DevModeShell() {
   );
   const mode = modes[foundModeIndex === -1 ? 0 : foundModeIndex];
 
-  /** All session channels, ascending by recency (newest last). */
-  const sessions = React.useMemo(() => {
-    const streams = (channelsQuery.data ?? []).filter(
-      (channel) =>
-        channel.channelType === "stream" &&
-        channel.isMember &&
-        channel.archivedAt === null,
-    );
-    streams.sort((left, right) =>
-      (left.lastMessageAt ?? "").localeCompare(right.lastMessageAt ?? ""),
-    );
-    return streams;
-  }, [channelsQuery.data]);
-
-  const categories = useChannelCategories();
-  // Categories at the top, uncategorized (incl. new sessions) below; `flat`
-  // matches the navigator's render order so ↑/↓ walk what is on screen.
-  const { groups: channelGroups, flat: orderedChannels } = React.useMemo(
-    () => groupSessionChannels(sessions, categories),
-    [categories, sessions],
+  const sessions = React.useMemo(
+    () =>
+      (channelsQuery.data ?? []).filter(
+        (channel) =>
+          channel.channelType === "stream" &&
+          channel.isMember &&
+          channel.archivedAt === null,
+      ),
+    [channelsQuery.data],
   );
 
-  const channelCategory = React.useCallback(
-    (channelId: string) => categories.assignments[channelId] ?? null,
-    [categories],
+  const pinnedIds = usePinnedChannels();
+  // Pinned chats on top, everything else below — each newest-first; `flat`
+  // matches the navigator's render order so ↑/↓ walk what is on screen.
+  const { groups: channelGroups, flat: orderedChannels } = React.useMemo(
+    () => groupSessionChannels(sessions, pinnedIds),
+    [pinnedIds, sessions],
   );
 
   const findChannel = React.useCallback(
@@ -583,13 +579,12 @@ export function DevModeShell() {
 
       <div className="flex min-h-0 flex-1">
         <DevChannelNavigator
-          categoryOrder={categories.order}
-          channelCategory={channelCategory}
           dimmed={view === "channel"}
           groups={channelGroups}
           highlightedId={view === "fresh" ? null : navigatorId}
           onHighlight={handleHighlight}
           onOpen={openChannel}
+          unreadChannelIds={unreadChannelIds}
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">

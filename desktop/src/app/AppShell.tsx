@@ -775,7 +775,9 @@ export function AppShell() {
                     ) : displayStyle === "developer" ? (
                       <div className="flex min-h-0 flex-1 overflow-hidden">
                         <React.Suspense fallback={null}>
-                          <LazyDevModeShell />
+                          <LazyDevModeShell
+                            unreadChannelIds={unreadChannelIds}
+                          />
                         </React.Suspense>
                       </div>
                     ) : (
