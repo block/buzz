@@ -8,8 +8,9 @@ use std::time::{Duration, SystemTime};
 use url::Url;
 
 use super::{
-    consume_agent_snapshot_handoff_from_dir, parse_agent_snapshot_handoff_id,
-    read_agent_snapshot_handoff_from_dir, PendingAgentSnapshotImport, PendingAgentSnapshotImports,
+    agent_snapshot_handoff_url_exceeds_limit, consume_agent_snapshot_handoff_from_dir,
+    parse_agent_snapshot_handoff_id, read_agent_snapshot_handoff_from_dir,
+    PendingAgentSnapshotImport, PendingAgentSnapshotImports,
 };
 #[cfg(target_os = "macos")]
 use super::{
@@ -58,6 +59,17 @@ fn agent_snapshot_handoff_requires_one_canonical_lowercase_uuid() {
             "accepted invalid handoff URL: {invalid}"
         );
     }
+}
+
+#[test]
+fn normalized_whitespace_does_not_bypass_handoff_url_limit() {
+    let raw = format!(
+        "{}buzz://import-agent-snapshot?handoff={HANDOFF_ID}",
+        " ".repeat(300)
+    );
+    let parsed = Url::parse(&raw).unwrap();
+    assert_eq!(parsed.host_str(), Some("import-agent-snapshot"));
+    assert!(agent_snapshot_handoff_url_exceeds_limit(&parsed, &raw));
 }
 
 #[cfg(target_os = "macos")]

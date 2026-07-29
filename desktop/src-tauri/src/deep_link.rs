@@ -19,7 +19,7 @@ use agent_snapshot_handoff_security::{
 };
 
 const AGENT_SNAPSHOT_HANDOFF_EVENT: &str = "agent-snapshot-import-available";
-const AGENT_SNAPSHOT_HANDOFF_URL_PREFIX: &str = "buzz://import-agent-snapshot";
+const MAX_DEEP_LINK_URL_BYTES: usize = 64 * 1024;
 const AGENT_SNAPSHOT_HANDOFF_MAX_URL_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -118,6 +118,11 @@ fn queue_agent_snapshot_handoff(app: &tauri::AppHandle, handoff_id: String) -> R
         return Err("another agent snapshot handoff is already awaiting preview".to_string());
     }
     Ok(())
+}
+
+fn agent_snapshot_handoff_url_exceeds_limit(url: &Url, raw: &str) -> bool {
+    url.host_str() == Some("import-agent-snapshot")
+        && raw.len() > AGENT_SNAPSHOT_HANDOFF_MAX_URL_BYTES
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -410,12 +415,8 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
 /// Currently supports:
 /// - `buzz://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
 pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
-    if url_str.len() > AGENT_SNAPSHOT_HANDOFF_MAX_URL_BYTES
-        && url_str
-            .get(..AGENT_SNAPSHOT_HANDOFF_URL_PREFIX.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(AGENT_SNAPSHOT_HANDOFF_URL_PREFIX))
-    {
-        eprintln!("buzz-desktop: snapshot handoff deep link exceeds the URL size limit");
+    if url_str.len() > MAX_DEEP_LINK_URL_BYTES {
+        eprintln!("buzz-desktop: deep link exceeds the URL size limit");
         return;
     }
     let url = match Url::parse(url_str) {
@@ -433,6 +434,10 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
 
     match url.host_str() {
         Some("import-agent-snapshot") => {
+            if agent_snapshot_handoff_url_exceeds_limit(&url, url_str) {
+                eprintln!("buzz-desktop: snapshot handoff deep link exceeds the URL size limit");
+                return;
+            }
             let Some(handoff_id) = parse_agent_snapshot_handoff_id(&url) else {
                 eprintln!("buzz-desktop: snapshot handoff deep link has an invalid id: {url_str}");
                 return;
