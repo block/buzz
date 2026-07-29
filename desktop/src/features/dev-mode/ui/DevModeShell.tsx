@@ -84,6 +84,12 @@ export function DevModeShell({
     setFocusSignal((current) => current + 1);
   }, []);
 
+  // While a prompt card is selected the caret leaves the message box — the
+  // shell owns ↑/↓/Enter/Escape via a window listener until the selection
+  // clears (Escape, ↓ past the newest card, or a click on the box).
+  const cardSelectionActive =
+    view === "channel" && selectedRootId !== null && !threadOpen;
+
   const foundModeIndex = modes.findIndex(
     (candidate) => devComposerModeKey(candidate) === modeKey,
   );
@@ -171,6 +177,8 @@ export function DevModeShell({
 
   React.useEffect(() => {
     const handleWindowFocus = () => {
+      // Card selection owns the keyboard — don't put the caret back in a box.
+      if (cardSelectionActive) return;
       const last = lastFocusedRef.current;
       if (last?.isConnected) {
         last.focus();
@@ -180,7 +188,7 @@ export function DevModeShell({
     };
     window.addEventListener("focus", handleWindowFocus);
     return () => window.removeEventListener("focus", handleWindowFocus);
-  }, [focusComposer]);
+  }, [cardSelectionActive, focusComposer]);
 
   // Clicks on non-interactive chrome must not blur the active input — this
   // also covers the click that refocuses the window landing on dead space.
@@ -213,6 +221,7 @@ export function DevModeShell({
       ) {
         return;
       }
+      if (cardSelectionActive) return;
       requestAnimationFrame(() => {
         const selection = window.getSelection();
         if (selection && !selection.isCollapsed) return;
@@ -224,7 +233,7 @@ export function DevModeShell({
         }
       });
     },
-    [focusComposer],
+    [cardSelectionActive, focusComposer],
   );
 
   const closePalette = React.useCallback(() => {
@@ -480,7 +489,42 @@ export function DevModeShell({
         : "tab: target · enter: send · ↑: channels · /: palette";
 
   const composerActive =
-    !paletteOpen && !(threadOpen && activePane === "thread");
+    !paletteOpen &&
+    !(threadOpen && activePane === "thread") &&
+    !cardSelectionActive;
+
+  React.useEffect(() => {
+    if (!cardSelectionActive || paletteOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // A focused input owns its own keys (e.g. a click landed in one).
+      if (
+        event.target instanceof HTMLElement &&
+        event.target.matches("textarea, input, [contenteditable='true']")
+      ) {
+        return;
+      }
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        navigateCards(event.key === "ArrowUp" ? -1 : 1);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (selectedRootId) handleOpenThread(selectedRootId);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        handleEscape();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    cardSelectionActive,
+    handleEscape,
+    handleOpenThread,
+    navigateCards,
+    paletteOpen,
+    selectedRootId,
+  ]);
 
   const transcriptFor = (channel: NonNullable<typeof activeChannel>) => (
     <DevTranscript
@@ -507,6 +551,9 @@ export function DevModeShell({
       onEscape={handleEscape}
       onNavigate={handleNavigate}
       onOpenPalette={() => setPaletteOpen(true)}
+      onReactivate={() => {
+        if (cardSelectionActive) setSelectedRootId(null);
+      }}
       onSubmit={handleSubmit}
       onSwitchPane={handleSwitchPane}
       placeholder={placeholder}

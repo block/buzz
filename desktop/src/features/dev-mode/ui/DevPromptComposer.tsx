@@ -31,6 +31,8 @@ type DevPromptComposerProps = {
   /** `/` on an empty input. */
   onOpenPalette: () => void;
   onEscape: () => void;
+  /** Click on the box while inactive — the user wants to type again. */
+  onReactivate?: () => void;
 };
 
 export function DevPromptComposer({
@@ -48,6 +50,7 @@ export function DevPromptComposer({
   onSwitchPane,
   onOpenPalette,
   onEscape,
+  onReactivate,
 }: DevPromptComposerProps) {
   const { textareaRef, dragging, resizeHandleProps } = useComposerAutoGrow(
     value,
@@ -62,6 +65,10 @@ export function DevPromptComposer({
   React.useEffect(() => {
     if (active) {
       textareaRef.current?.focus();
+    } else {
+      // Inactive means something else owns the keyboard (card selection,
+      // side chat, palette) — the caret must leave the box.
+      textareaRef.current?.blur();
     }
   }, [active, focusSignal]);
 
@@ -135,7 +142,11 @@ export function DevPromptComposer({
           onChange={(event) => onChange(event.target.value)}
           onFocus={() => onSwitchPane("main")}
           onKeyDown={handleKeyDown}
+          onMouseDown={() => {
+            if (!active) onReactivate?.();
+          }}
           placeholder={placeholder}
+          readOnly={!active}
           rows={1}
           spellCheck={false}
           value={value}
