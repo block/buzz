@@ -172,7 +172,7 @@ class SearchPage extends HookConsumerWidget {
                   return SizeTransition(
                     sizeFactor: curvedAnimation,
                     axis: Axis.horizontal,
-                    axisAlignment: 1,
+                    alignment: Alignment.centerRight,
                     child: FadeTransition(
                       opacity: curvedAnimation,
                       child: SlideTransition(

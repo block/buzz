@@ -222,7 +222,7 @@ class MessageContent extends HookConsumerWidget {
           _MessageCodeBlock(name: name, code: code),
       linkBuilder: (context, linkText, url, linkStyle) =>
           _buildLink(context, ref, linkText, url, linkStyle, style),
-      imageBuilder: (context, imageUrl) =>
+      imageBuilder: (context, imageUrl, width, height) =>
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
       maxLines: maxLines,
       inlineComponents: [
