@@ -38,6 +38,7 @@ function runtime(
 async function navigateToSetupPage(
   page: Parameters<typeof installMockBridge>[0],
 ) {
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await page.getByRole("button", { name: "Create a new identity key" }).click();
   await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
