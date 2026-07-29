@@ -440,6 +440,13 @@ file and one `agent_id`, so the second deploy overwrote the first agent's minted
 either record drove whichever identity was written last. `deploy` therefore refuses a payload whose
 `agent.pubkey` is absent or is not a 64-character hex key, rather than falling back to the name.
 
+**A host provisioned before this rule keeps its old units.** The instance name changed, so a
+redeploy provisions a new unit alongside the name-keyed one rather than replacing it, and the old
+unit keeps running under `Restart=always`. There is no `undeploy` op to clean that up, so on a
+pilot host stop and remove the stale pair by hand:
+`systemctl --user disable --now buzz-acp@<old-slug>.service` and delete
+`~/.config/buzz-acp/<old-slug>.env`, which holds an nsec.
+
 ## Env file contract
 
 The local spawn contract from `runtime.rs`, transcribed. Values resolved on the host — the absolute
