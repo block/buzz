@@ -20,6 +20,7 @@ export function buildRuntimeModelProviderPayload({
   initialModel,
   initialProvider,
   initialModelProviderEditableWithoutRuntime,
+  runsRemotely = false,
 }: {
   runtime: string;
   model: string;
@@ -30,6 +31,14 @@ export function buildRuntimeModelProviderPayload({
   initialModel: string | null | undefined;
   initialProvider: string | null | undefined;
   initialModelProviderEditableWithoutRuntime: boolean;
+  /**
+   * "Where to run" targets a backend provider. Such a create carries no local
+   * runtime by design — its harness is pinned from the HOST's catalog — but its
+   * Model and LLM provider fields are still shown and still required, keyed off
+   * the remote harness. Without this the blank runtime would read as "no fields
+   * were visible" and silently drop the pair the user just filled in.
+   */
+  runsRemotely?: boolean;
 }): {
   runtime: string | undefined;
   model: string | undefined;
@@ -47,7 +56,8 @@ export function buildRuntimeModelProviderPayload({
   // user's model/provider choice is persisted in the payload.
   const modelProviderEditableWithoutRuntime =
     (initialModelProviderEditableWithoutRuntime ||
-      isAutoSeededRuntimeForBuiltinEdit) &&
+      isAutoSeededRuntimeForBuiltinEdit ||
+      runsRemotely) &&
     runtimeForSubmit.length === 0;
   const llmProviderVisibleForSubmit =
     (runtimeForSubmit.length > 0 &&

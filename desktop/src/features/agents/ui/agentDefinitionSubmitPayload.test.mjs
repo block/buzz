@@ -78,6 +78,54 @@ test("edit-provider-only: chosen provider persists, runtime omitted on auto-seed
 // handleRuntimeDropdownChange clears isAutoSeeded=false so the runtime is no
 // longer treated as auto-seeded and MUST appear in the payload.
 
+// ── remote create ──────────────────────────────────────────────────────────
+//
+// A provider create carries no local runtime: its harness is pinned from the
+// HOST's catalog and reaches the backend through BackendIntent, not this
+// payload. But the Model and LLM provider fields are still rendered (keyed off
+// the remote harness) and Customize mode refuses to submit without them, so the
+// blank runtime must not be read as "no fields were visible".
+
+test("remote-create: the model and provider the user filled in are persisted", () => {
+  const result = buildRuntimeModelProviderPayload({
+    runtime: "",
+    model: "gpt-5",
+    provider: "openai",
+    isEditMode: false,
+    isAutoSeeded: false,
+    initialPreviousRuntime: "",
+    initialModel: undefined,
+    initialProvider: undefined,
+    initialModelProviderEditableWithoutRuntime: false,
+    runsRemotely: true,
+  });
+  assert.equal(result.runtime, undefined, "no local runtime to send");
+  assert.equal(result.model, "gpt-5", "model must survive a remote create");
+  assert.equal(
+    result.provider,
+    "openai",
+    "provider must survive a remote create",
+  );
+});
+
+// The local half: a blank runtime with no remote target really does mean no
+// fields were shown, so nothing is invented.
+test("local-create: a blank runtime still sends no model or provider", () => {
+  const result = buildRuntimeModelProviderPayload({
+    runtime: "",
+    model: "gpt-5",
+    provider: "openai",
+    isEditMode: false,
+    isAutoSeeded: false,
+    initialPreviousRuntime: "",
+    initialModel: undefined,
+    initialProvider: undefined,
+    initialModelProviderEditableWithoutRuntime: false,
+  });
+  assert.equal(result.model, undefined);
+  assert.equal(result.provider, undefined);
+});
+
 test("explicit-runtime-chosen: runtime and model both persisted when user explicitly selects runtime", () => {
   const result = buildRuntimeModelProviderPayload({
     ...BUILTIN_EDIT_BASE,

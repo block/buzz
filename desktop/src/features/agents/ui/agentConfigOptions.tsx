@@ -49,12 +49,16 @@ type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
 export type PersonaModelOption = {
   id: string;
   label: string;
+  /** Secondary line under the label, verbatim from the adapter. */
+  description?: string;
 };
 
 export type PersonaDropdownOption = {
   disabled?: boolean;
   label: string;
   value: string;
+  /** Secondary line under the label, when the option carries one. */
+  description?: string;
 };
 
 /**
@@ -300,6 +304,51 @@ export function getDefaultLlmProviderLabel(
     : "Select a provider\u2026";
 }
 
+/**
+ * The secondary line to show under a model option's label, or `undefined` for
+ * none.
+ *
+ * Adapters put the identifying detail in `description` and only the family in
+ * `name` — `claude-agent-acp` reports name "Opus" with description
+ * "Opus 4.7 · Best for everyday…", so a label-only row cannot tell two entries
+ * of different major versions apart. Nothing here parses the text: it is the
+ * adapter's own sentence, shown verbatim, minus the case where it merely
+ * repeats the label and would be pure noise.
+ */
+export function personaModelOptionDescription(
+  description: string | null | undefined,
+  label: string,
+): string | undefined {
+  const trimmed = (description ?? "").trim();
+  if (trimmed.length === 0) return undefined;
+  return trimmed.toLowerCase() === label.trim().toLowerCase()
+    ? undefined
+    : trimmed;
+}
+
+/**
+ * One model option as the pickers take it.
+ *
+ * The zero-value id becomes `AUTO_MODEL_DROPDOWN_VALUE` because a dropdown
+ * cannot carry an empty value, and `description` is spread rather than assigned
+ * so an option without a secondary line carries no `description` key at all and
+ * stays deep-equal to the plain shape.
+ *
+ * `label` is a parameter because the inherit row is relabelled by its caller
+ * (`Use agent defaults (…)`), which is the only thing that ever differs between
+ * the two projections.
+ */
+export function personaModelDropdownOption(
+  option: PersonaModelOption,
+  label: string = option.label,
+): PersonaDropdownOption {
+  return {
+    label,
+    value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
+    ...(option.description ? { description: option.description } : {}),
+  };
+}
+
 /** Returns the zero-value model option label.
  *
  * When a global model is configured, the empty-model option reads
@@ -338,11 +387,30 @@ export function buildTemplateModelDropdownOptions(
     !hasZeroValue && trimmedInheritedModel.length > 0
       ? [{ id: "", label: inheritedModelLabel }, ...modelOptions]
       : modelOptions;
-  return base.map((option) => ({
-    label: option.id === "" ? inheritedModelLabel : option.label,
-    value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-  }));
+  return base.map((option) =>
+    personaModelDropdownOption(
+      option,
+      option.id === "" ? inheritedModelLabel : option.label,
+    ),
+  );
 }
+
+/**
+ * Which provider ids this build hides, given the env keys baked into it.
+ *
+ * The rule is one fact — "a build with a baked provider hides Databricks v1,
+ * because its boot migration rewrites v1 to v2" — and both dialogs asked it
+ * with byte-identical code. One owner, so the two can never answer differently.
+ */
+export function hiddenProviderIdsForBuild(
+  bakedEnvKeys: readonly string[] | undefined,
+): ReadonlySet<string> {
+  return (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
+    ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
+    : EMPTY_HIDDEN_PROVIDER_IDS;
+}
+
+const EMPTY_HIDDEN_PROVIDER_IDS: ReadonlySet<string> = new Set<string>();
 
 /**
  * Build the provider dropdown options for a persona/instance dialog.

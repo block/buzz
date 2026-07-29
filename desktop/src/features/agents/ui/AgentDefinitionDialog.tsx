@@ -10,10 +10,13 @@ import type {
 import { cn } from "@/shared/lib/cn";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
-import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
-import { PersonaDropdownField } from "./PersonaDropdownField";
+import {
+  createGateHarnessId,
+  createRuntimeSelectionSatisfied,
+  runtimeDropdownOptions as buildRuntimeDropdownOptions,
+  runtimeDropdownPlaceholder,
+} from "./createRuntimeGate";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
@@ -34,8 +37,7 @@ import {
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
-  buildPersonaRuntimeDropdownOptions,
+  hiddenProviderIdsForBuild,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
@@ -46,12 +48,8 @@ import {
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
-  PERSONA_FIELD_CONTROL_CLASS,
-  PERSONA_FIELD_SHELL_CLASS,
-  PERSONA_LABEL_OPTIONAL_CLASS,
   shouldClearKnownModelForSelectionScope,
 } from "./agentConfigOptions";
-import { RequiredFieldLabel } from "./agentConfigControls";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
   relayMeshModelPickerState,
@@ -62,10 +60,7 @@ import {
   selectionOnRuntimeChange,
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
-import {
-  MODEL_DISCOVERY_LOADING_VALUE,
-  usePersonaModelDiscovery,
-} from "./usePersonaModelDiscovery";
+import { MODEL_DISCOVERY_LOADING_VALUE } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -79,16 +74,22 @@ import {
   agentAiConfigurationModeSatisfied,
   agentAiConfigurationPairForMode,
   initialAgentAiConfigurationMode,
+  modelFieldStatus,
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
+import { AgentDefinitionIdentityFields } from "./AgentDefinitionIdentityFields";
+import { AgentLlmProviderField } from "./AgentLlmProviderField";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import {
   ADD_CUSTOM_HARNESS_OPTION,
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { useCreateRuntimeSeed } from "./useCreateRuntimeSeed";
+import { useRemoteAwareModelDiscovery } from "./useRemoteAwareModelDiscovery";
+import type { RemoteModelDiscoveryView } from "./whereToRunIntent";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -107,10 +108,46 @@ type AgentDefinitionDialogProps = {
   ) => Promise<unknown>;
   /** Publishes saved changes when the edited agent is shared in the catalog. */
   publishCatalogUpdatesOnSave?: boolean;
-  /** Rendered below the form fields in create mode only ("Where to run"). */
-  createRunSection?: React.ReactNode;
+  /**
+   * Rendered below the form fields in create mode only ("Where to run"). A
+   * render prop because the section's host model probe must carry this
+   * component's unsaved credential env (it reads the global layer itself).
+   */
+  createRunSection?: (args: { envVars: EnvVarsValue }) => React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
+  /**
+   * True when "Where to run" targets a backend provider. The harness then comes
+   * from the REMOTE host's catalog, so the local-runtime requirements below do
+   * not apply — demanding a locally-installed runtime would make every
+   * remote-only harness unsubmittable.
+   */
+  createRunsRemotely?: boolean;
+  /**
+   * The picked remote harness's model catalog, read from the HOST. Non-null
+   * only for a provider create with a harness picked; it then REPLACES local
+   * model discovery, because the local catalog answers for this computer and
+   * the agent is not going to run here.
+   */
+  createRemoteModelDiscovery?: RemoteModelDiscoveryView | null;
+  /**
+   * Display label of the harness picked from the HOST's catalog. The summary
+   * would otherwise name the local default runtime, which for a remote create
+   * is a harness on the wrong computer that the deploy will never run.
+   */
+  createRemoteHarnessLabel?: string | null;
+  /**
+   * Id of the harness pinned on the HOST, which owns every credential question
+   * for a provider create: the deploy writes this agent's env on the host,
+   * keyed off the REMOTE command (`deploy.rs::metadata_env`), so the local
+   * runtime id — seeded from whatever this computer happens to have installed
+   * — names the wrong env contract. The id spaces are identical by
+   * construction: the SSH provider's discovery emits the same `goose` /
+   * `buzz-agent` keys the local catalog uses. Null until a harness is pinned.
+   */
+  createRemoteHarnessId?: string | null;
+  /** This EDIT's definition backs a provider record — see `createRuntimeSeedAction`. */
+  editsProviderRecord?: boolean;
 };
 
 export type AgentDefinitionSubmitOptions = {
@@ -137,6 +174,11 @@ export function AgentDefinitionDialog({
   publishCatalogUpdatesOnSave = false,
   createRunSection,
   createSubmitBlocked = false,
+  createRunsRemotely = false,
+  createRemoteModelDiscovery = null,
+  createRemoteHarnessLabel = null,
+  createRemoteHarnessId = null,
+  editsProviderRecord = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
@@ -168,6 +210,12 @@ export function AgentDefinitionDialog({
   // Without this, clearing runtime back to "" via "No preference" would re-
   // trigger the effect (the `runtime` dep would pass the length guard) and
   // snap the dropdown back to the default — an edit-mode regression.
+  //
+  // One deliberate exception: shedding the seed for a remote create re-arms
+  // this, so returning "Where to run" to this computer seeds the local default
+  // again rather than leaving a create that requires a local harness with none.
+  // That path cannot collide with the "No preference" case above — an explicit
+  // dropdown choice clears `isRuntimeAutoSeededRef`, which the shed requires.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -233,56 +281,19 @@ export function AgentDefinitionDialog({
     hasSeededForOpenRef.current = false;
   }, [initialValues, open]);
 
-  React.useEffect(() => {
-    if (
-      !open ||
-      !initialValues ||
-      initialValues.runtime?.trim() ||
-      runtimesLoading ||
-      runtime.trim().length > 0 ||
-      defaultRuntime === null ||
-      hasSeededForOpenRef.current
-    ) {
-      return;
-    }
-
-    setRuntime(defaultRuntime.id);
-    hasSeededForOpenRef.current = true;
-    if ("id" in initialValues) {
-      // Edit mode: record that this runtime was auto-seeded so the submit path
-      // can omit it from the payload for builtin definitions (canonical runtime
-      // null; sync would revert the value anyway). Explicit user changes via
-      // the dropdown clear this flag.
-      isRuntimeAutoSeededRef.current = true;
-    }
-  }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
-
-  // Keep an inherited Create runtime synced with defaults saved in-place.
-  React.useEffect(() => {
-    if (
-      !open ||
-      !initialValues ||
-      "id" in initialValues ||
-      initialValues.runtime?.trim() ||
-      aiConfigurationMode !== "defaults" ||
-      runtimesLoading ||
-      defaultRuntime === null ||
-      (runtime.trim().length > 0 && !isRuntimeAutoSeededRef.current)
-    ) {
-      return;
-    }
-
-    if (runtime !== defaultRuntime.id) setRuntime(defaultRuntime.id);
-    isRuntimeAutoSeededRef.current = true;
-    hasSeededForOpenRef.current = true;
-  }, [
+  useCreateRuntimeSeed({
     aiConfigurationMode,
+    createRunsRemotely,
+    editsProviderRecord,
     defaultRuntime,
+    hasSeededForOpenRef,
     initialValues,
+    isRuntimeAutoSeededRef,
     open,
     runtime,
     runtimesLoading,
-  ]);
+    setRuntime,
+  });
 
   // Keep setup guidance reachable when no available runtime can be inherited.
   React.useEffect(() => {
@@ -342,6 +353,7 @@ export function AgentDefinitionDialog({
       initialModel: initialValues.model,
       initialProvider: initialValues.provider,
       initialModelProviderEditableWithoutRuntime,
+      runsRemotely: createRunsRemotely,
     });
     const namePool = parsePersonaNamePoolText(namePoolText);
     const namePoolInput =
@@ -388,13 +400,21 @@ export function AgentDefinitionDialog({
   }
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  // The harness whose credential contract this dialog must satisfy — the
+  // host's pin for a remote create, the local runtime otherwise. See
+  // createGateHarnessId for why the local id is the wrong question remotely.
+  const effectiveHarnessId = createGateHarnessId({
+    runsRemotely: createRunsRemotely,
+    runtime,
+    remoteHarnessId: createRemoteHarnessId,
+  });
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const runtimeCanChooseLlmProvider =
-    runtimeSupportsLlmProviderSelection(runtime) ||
+    runtimeSupportsLlmProviderSelection(effectiveHarnessId) ||
     blankRuntimeModelProviderEditable;
   const llmProviderFieldVisible =
-    (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
+    (effectiveHarnessId.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
   // Required credential env keys for this runtime + provider combination.
@@ -402,9 +422,17 @@ export function AgentDefinitionDialog({
   // locked rows in the env vars editor.
   // File-layer config for the selected runtime (e.g. goose config.yaml).
   // Used to silence requirements already satisfied there.
-  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
-    enabled: open,
+  const { data: localRuntimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
+    enabled: open && !createRunsRemotely,
   });
+  // The file layer reads THIS machine's ~/.config, so it can only answer for a
+  // local create. Letting a local goose config.yaml silence a requirement that
+  // belongs to a different host would turn a loud create-time block into a
+  // silent deploy-time failure. Disabling the query is not enough on its own:
+  // a disabled query still hands back whatever another surface cached.
+  const runtimeFileConfig = createRunsRemotely
+    ? undefined
+    : localRuntimeFileConfig;
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setHasUserChanges(true);
     setAiConfigurationMode(nextMode);
@@ -433,10 +461,15 @@ export function AgentDefinitionDialog({
         globalEnvVars: globalConfig.env_vars,
         globalProvider: inheritedProviderDefault.value,
         globalModel: inheritedModelDefault.value,
+        // Deliberately false even for a remote create. The credential keys this
+        // gate demands are the ones the agent's env carries, and a remote
+        // deploy writes that env to the host verbatim — so a missing key is
+        // just as fatal there, and silencing the gate would ship an agent that
+        // deploys and then cannot authenticate.
         isProviderMode: false,
         model,
         provider: trimmedProvider,
-        runtimeId: runtime,
+        runtimeId: effectiveHarnessId,
         runtimeFileConfig,
       }),
     [
@@ -447,7 +480,7 @@ export function AgentDefinitionDialog({
       inheritedProviderDefault.value,
       model,
       trimmedProvider,
-      runtime,
+      effectiveHarnessId,
       runtimeFileConfig,
     ],
   );
@@ -480,8 +513,12 @@ export function AgentDefinitionDialog({
   } = apiKeyFieldState;
   const providerIsRequired =
     aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
+  // A remote create has no local runtime to key the field off — its harness
+  // lives on the host — so the host's own catalog makes the field meaningful.
   const modelFieldVisible =
-    runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
+    runtime.trim().length > 0 ||
+    blankRuntimeModelProviderEditable ||
+    createRemoteModelDiscovery !== null;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
   // Gate the provider requirement on the field's actual visibility, not the raw
   // runtime capability. Codex/Claude hide the provider picker (they drive their
@@ -494,47 +531,34 @@ export function AgentDefinitionDialog({
     { provider, model },
     runtimeCanChooseLlmProvider,
   );
-  const selectedRuntimeIsAvailable =
-    runtime.trim().length === 0 ||
-    selectedRuntime?.availability === "available";
-  // Gate model/provider validity through missingNormalizedFields — single
-  // source of truth with the readiness gate so display and Save can't drift.
-  const canSubmit =
-    canSubmitPersonaDialog({ displayName, isPending }) &&
-    (!isCreateMode || runtime.trim().length > 0) &&
-    (!isCreateMode || selectedRuntimeIsAvailable) &&
-    (!isCreateMode || !createSubmitBlocked) &&
-    // Crash-loop guard, create AND edit: an empty allowlist would crash
-    // every instance minted from this definition at startup.
-    personaBehaviorDraftValid(behaviorDraft) &&
-    // D1: localModeSatisfied covers both missingNormalizedFields AND
-    // missingEnvKeys — credential env keys now block submit, not just display.
-    localModeSatisfied &&
-    customAiPairSatisfied &&
-    !isAvatarUploadPending;
-
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
-  const envVarsForDiscovery = React.useMemo(
-    () => ({ ...globalConfig.env_vars, ...envVars }),
-    [globalConfig.env_vars, envVars],
-  );
+  // How far the LOCAL catalog gates this create — see createRuntimeGate.ts.
+  const runtimeGate = {
+    isCreateMode,
+    runsRemotely: createRunsRemotely,
+    runtime,
+    selectedRuntime,
+    hasLocalDefaultRuntime: defaultRuntime !== null,
+  };
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
-  } = usePersonaModelDiscovery({
-    envVars: envVarsForDiscovery,
-    isCustomProviderEditing,
-    modelFieldVisible,
-    open,
-    // Gate provider by runtime: runtimes that don't support LLM provider
-    // selection (codex, claude) must not inherit the global provider — doing
-    // so causes them to discover models from the wrong provider.
-    provider: runtimeSupportsLlmProviderSelection(runtime)
-      ? effectiveProvider
-      : "",
-    selectedRuntime,
+  } = useRemoteAwareModelDiscovery({
+    local: {
+      envVars,
+      globalEnvVars: globalConfig.env_vars,
+      isCustomProviderEditing,
+      modelFieldVisible,
+      open,
+      provider: effectiveProvider,
+      runtime,
+      selectedRuntime,
+    },
+    remote: createRemoteModelDiscovery,
+    onHarnessChange: () => {
+      setModel("");
+      setIsCustomModelEditing(false);
+    },
   });
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
@@ -553,17 +577,28 @@ export function AgentDefinitionDialog({
     modelFieldVisible,
     provider: effectiveProvider,
   });
-  // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
-  // migration rewrites any persisted Databricks v1 values → v2. Hide the v1
-  // option there so it is not offered for new selections. OSS builds have no
-  // baked provider, so v1 remains visible.
-  const hideProviderIds = React.useMemo(
-    () =>
-      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
-        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
-        : new Set<string>(),
-    [bakedEnvKeys],
-  );
+  const { blocked: modelBlocked, status: modelStatus } = modelFieldStatus({
+    catalog: discoveredModelOptions,
+    discoveryStatus: modelDiscoveryStatus,
+    isTypedEntry: isCustomModelEditing && showCustomModelInput,
+    model,
+  });
+  // Gate model/provider validity through missingNormalizedFields — single
+  // source of truth with the readiness gate so display and Save can't drift.
+  const canSubmit =
+    canSubmitPersonaDialog({ displayName, isPending }) &&
+    createRuntimeSelectionSatisfied(runtimeGate) &&
+    (!isCreateMode || !createSubmitBlocked) &&
+    // Crash-loop guard, create AND edit: an empty allowlist would crash
+    // every instance minted from this definition at startup.
+    personaBehaviorDraftValid(behaviorDraft) &&
+    // D1: localModeSatisfied covers both missingNormalizedFields AND
+    // missingEnvKeys — credential env keys now block submit, not just display.
+    localModeSatisfied &&
+    customAiPairSatisfied &&
+    !modelBlocked &&
+    !isAvatarUploadPending;
+  const hideProviderIds = hiddenProviderIdsForBuild(bakedEnvKeys);
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     runtime,
@@ -578,18 +613,21 @@ export function AgentDefinitionDialog({
   const showCustomProviderInput =
     llmProviderFieldVisible && isCustomProviderEditing;
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
-  const { blankRuntimeOptionLabel, runtimeDropdownOptions } =
-    buildPersonaRuntimeDropdownOptions({
-      defaultRuntimeId: defaultRuntime?.id,
-      isCreateMode,
-      runtime,
-      runtimes,
-      runtimesLoading,
-    });
+  const runtimeDropdownOptions = buildRuntimeDropdownOptions({
+    defaultRuntimeId: defaultRuntime?.id ?? null,
+    gate: runtimeGate,
+    runtimes,
+    runtimesLoading,
+  });
   runtimeDropdownOptions.push(ADD_CUSTOM_HARNESS_OPTION);
-  const runtimeSummaryLabel = selectedRuntime
-    ? formatRuntimeOptionLabel(selectedRuntime)
-    : runtime.trim() || "Not configured";
+  // The host's pick wins outright for a remote create: `runtime` still holds
+  // whatever the local seeding effects resolved, and naming that harness in
+  // the summary would describe a machine this agent will never run on.
+  const runtimeSummaryLabel =
+    createRemoteHarnessLabel ??
+    (selectedRuntime
+      ? formatRuntimeOptionLabel(selectedRuntime)
+      : runtime.trim() || "Not configured");
   const providerDropdownOptions: PersonaDropdownOption[] = [
     ...providerOptions
       .filter((option) => option.id.trim().length > 0)
@@ -783,55 +821,20 @@ export function AgentDefinitionDialog({
           />
 
           <div className="space-y-5">
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="persona-display-name"
-              >
-                Agent name
-              </label>
-              <div
-                className={cn(
-                  "flex min-h-11 items-center px-3",
-                  PERSONA_FIELD_SHELL_CLASS,
-                )}
-              >
-                <Input
-                  autoCorrect="off"
-                  className={cn(
-                    "h-8 px-0 py-0 leading-6",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={isPending}
-                  id="persona-display-name"
-                  onChange={(event) => setDisplayName(event.target.value)}
-                  placeholder="Fizz"
-                  value={displayName}
-                />
-              </div>
-            </div>
+            {/* First, not last: every field below is scoped by the answer. The
+                harness comes from the chosen machine's catalog and the models
+                come from that harness, so asking this at the end would mean
+                answering the dependent questions against the wrong computer
+                and then silently re-scoping them. */}
+            {isCreateMode ? createRunSection?.({ envVars }) : null}
 
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="persona-system-prompt"
-              >
-                Agent instructions
-              </label>
-              <div className={PERSONA_FIELD_SHELL_CLASS}>
-                <Textarea
-                  className={cn(
-                    "min-h-40 resize-y px-3 py-3 leading-5",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={isPending}
-                  id="persona-system-prompt"
-                  onChange={(event) => setSystemPrompt(event.target.value)}
-                  placeholder="Describe what this agent should do."
-                  value={systemPrompt}
-                />
-              </div>
-            </div>
+            <AgentDefinitionIdentityFields
+              disabled={isPending}
+              displayName={displayName}
+              onDisplayNameChange={setDisplayName}
+              onSystemPromptChange={setSystemPrompt}
+              systemPrompt={systemPrompt}
+            />
 
             {modelFieldVisible ? (
               <AgentAiConfigurationModeField
@@ -845,61 +848,37 @@ export function AgentDefinitionDialog({
               className="space-y-5"
               data-testid={`agent-${aiConfigurationMode}-configuration-section`}
             >
-              {aiConfigurationMode === "custom" ? (
+              {/* A remote create has exactly one harness question, and the
+                  host's catalog owns it. This picker lists what is installed
+                  on THIS computer, so offering it too would present two
+                  harness controls of which only the other one reaches the
+                  deploy — and its "not installed, visit Settings" warning
+                  describes the wrong machine. */}
+              {aiConfigurationMode === "custom" && !createRunsRemotely ? (
                 <AgentHarnessField
                   disabled={isPending || runtimesLoading}
                   onValueChange={handleRuntimeDropdownChange}
                   options={runtimeDropdownOptions}
-                  placeholder={blankRuntimeOptionLabel}
+                  placeholder={runtimeDropdownPlaceholder({
+                    isCreateMode,
+                    runtimesLoading,
+                  })}
                   value={runtimeDropdownValue}
                   warning={runtimeWarning}
                 />
               ) : null}
 
               {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
-                <div className="space-y-1.5">
-                  <RequiredFieldLabel
-                    htmlFor="persona-llm-provider"
-                    isRequired={providerIsRequired}
-                  >
-                    LLM provider
-                    {!providerIsRequired ? (
-                      <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                        Optional
-                      </span>
-                    ) : null}
-                  </RequiredFieldLabel>
-                  <PersonaDropdownField
-                    disabled={isPending}
-                    id="persona-llm-provider"
-                    onValueChange={handleProviderDropdownChange}
-                    options={providerDropdownOptions}
-                    placeholder="Choose a provider"
-                    value={providerSelectValue}
-                  />
-                  {showCustomProviderInput ? (
-                    <div
-                      className={cn(
-                        "mt-2 flex min-h-11 items-center px-3",
-                        PERSONA_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
-                        aria-label="Custom provider ID"
-                        autoCorrect="off"
-                        className={cn(
-                          "h-8 px-0 py-0 leading-6",
-                          PERSONA_FIELD_CONTROL_CLASS,
-                        )}
-                        disabled={isPending}
-                        id="persona-custom-provider"
-                        onChange={(event) => setProvider(event.target.value)}
-                        placeholder="Custom provider ID"
-                        value={provider}
-                      />
-                    </div>
-                  ) : null}
-                </div>
+                <AgentLlmProviderField
+                  disabled={isPending}
+                  isRequired={providerIsRequired}
+                  onCustomProviderChange={setProvider}
+                  onProviderValueChange={handleProviderDropdownChange}
+                  options={providerDropdownOptions}
+                  provider={provider}
+                  selectValue={providerSelectValue}
+                  showCustomInput={showCustomProviderInput}
+                />
               ) : null}
 
               {llmProviderFieldVisible &&
@@ -931,7 +910,7 @@ export function AgentDefinitionDialog({
                     disabled={isPending}
                     isExplicitModelRequired={isExplicitModelRequired}
                     model={model}
-                    modelDiscoveryStatus={modelDiscoveryStatus}
+                    modelDiscoveryStatus={modelStatus}
                     modelDropdownOptions={modelDropdownOptions}
                     modelSelectValue={modelSelectValue}
                     onCustomModelChange={setModel}
@@ -971,8 +950,6 @@ export function AgentDefinitionDialog({
               onSaved={selectSavedHarness}
               open={isAddHarnessOpen}
             />
-
-            {isCreateMode ? createRunSection : null}
 
             <div className="space-y-3">
               <button

@@ -19,7 +19,11 @@ import { WhereToRunSection } from "./WhereToRunSection";
 import {
   canSubmitWhereToRun,
   emptyWhereToRunDraft,
+  LOCAL_RUN_TARGET_VALUE,
+  remoteHarnessSummaryLabel,
+  remoteModelDiscoveryView,
   resolveBackendIntent,
+  selectedRemoteHarness,
 } from "./whereToRunIntent";
 
 type AgentDialogCreateProps = {
@@ -70,6 +74,12 @@ type AgentDialogDefinitionEditProps = {
     options: AgentDefinitionSubmitOptions,
   ) => Promise<unknown>;
   publishCatalogUpdatesOnSave?: boolean;
+  /**
+   * The definition being edited backs a provider record. Suppresses the local
+   * harness auto-seed — see `createRuntimeSeedAction`. Callers now route such
+   * records to instance-edit instead, so this is the belt-and-braces path.
+   */
+  editsProviderRecord?: boolean;
 };
 
 type AgentDialogProps =
@@ -125,13 +135,18 @@ function AgentCreateDialogRouter({
 
   return (
     <AgentDefinitionDialog
-      createRunSection={
+      createRemoteHarnessId={selectedRemoteHarness(runDraft)?.id ?? null}
+      createRemoteHarnessLabel={remoteHarnessSummaryLabel(runDraft)}
+      createRemoteModelDiscovery={remoteModelDiscoveryView(runDraft)}
+      createRunSection={({ envVars }) => (
         <WhereToRunSection
           draft={runDraft}
+          envVars={envVars}
           isPending={isDefinitionPending}
           onDraftChange={setRunDraft}
         />
-      }
+      )}
+      createRunsRemotely={runDraft.runOn !== LOCAL_RUN_TARGET_VALUE}
       createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
       description={copy.description}
       error={definitionError}

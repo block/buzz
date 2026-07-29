@@ -22,9 +22,9 @@ import {
   CANONICAL_CONFIG_BEHAVIORS,
   resolveDisclosure,
   shouldRevealDependentConfigFields,
-  shouldRenderModelControl,
   shouldShowModelStatusMessage,
 } from "./AgentConfigFields.tsx";
+import { shouldRenderModelControl } from "./agentAiConfigurationPolicy.ts";
 
 test("canonical behaviors: onboarding's values are the only behavior", () => {
   assert.deepEqual(CANONICAL_CONFIG_BEHAVIORS, {

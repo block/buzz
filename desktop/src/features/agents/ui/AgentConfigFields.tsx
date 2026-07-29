@@ -54,6 +54,10 @@ import {
 } from "@/features/agents/ui/buzzAgentModelTuningFields";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
+import {
+  modelFieldStatus,
+  shouldRenderModelControl,
+} from "./agentAiConfigurationPolicy";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
 
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
@@ -154,41 +158,6 @@ export function shouldShowModelStatusMessage(
   status: { message: string; tone: string } | null,
 ): boolean {
   return showDescriptions || status !== null;
-}
-
-/**
- * Whether the Model control should render given discovery state.
- *
- * Optional-model harnesses (Claude Code / Codex, `acpNative`) omit the control
- * while discovery is in flight and after a **confirmed successful empty**
- * catalog (IPC resolved, no usable options) — there is nothing useful to pick.
- * Discovery failures / unavailable runtimes keep the control so #2246 failure
- * UI can render. Full disclosure still shows the control when Custom model is
- * available. Required-model harnesses always render the control.
- */
-export function shouldRenderModelControl({
-  discoveredModelOptions,
-  modelDiscoveryLoading,
-  modelDiscoverySuccessfulEmpty,
-  modelIsOptional,
-  showCustomModelOption,
-}: {
-  discoveredModelOptions: readonly { id: string }[] | null;
-  modelDiscoveryLoading: boolean;
-  /** True only when discovery IPC resolved with a response that yielded no options. */
-  modelDiscoverySuccessfulEmpty: boolean;
-  modelIsOptional: boolean;
-  showCustomModelOption: boolean;
-}): boolean {
-  if (!modelIsOptional) return true;
-  if (modelDiscoveryLoading) return false;
-  const hasExplicitModel = (discoveredModelOptions ?? []).some(
-    (option) => option.id.trim().length > 0,
-  );
-  if (hasExplicitModel) return true;
-  if (showCustomModelOption) return true;
-  // Omit only on confirmed successful empty — not on failure/unavailable.
-  return !modelDiscoverySuccessfulEmpty;
 }
 
 export type AgentConfigFieldsProps = {
@@ -351,12 +320,6 @@ export function AgentConfigFields({
     runtimeFileConfig,
     runtimeId: credentialRuntimeId,
   });
-  const configIsValid =
-    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
-  React.useEffect(() => {
-    onValidityChange?.(configIsValid);
-  }, [configIsValid, onValidityChange]);
-
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
@@ -382,6 +345,23 @@ export function AgentConfigFields({
     modelIsOptional,
     showCustomModelOption,
   });
+  // Declared after the catalog so a model typed against it can block Save
+  // rather than silently resolving to the adapter's default at runtime.
+  const { blocked: modelBlocked, status: modelStatus } = modelFieldStatus({
+    catalog: dependentFieldsDisabled ? null : discoveredModelOptions,
+    discoveryStatus: dependentFieldsDisabled ? null : modelDiscoveryStatus,
+    isTypedEntry:
+      isCustomModelEditing && providerForDiscovery.trim() !== "relay-mesh",
+    model: config.model ?? "",
+  });
+  const configIsValid =
+    selectedRuntimeId.length > 0 &&
+    modelIsValid &&
+    credentialsValid &&
+    !modelBlocked;
+  React.useEffect(() => {
+    onValidityChange?.(configIsValid);
+  }, [configIsValid, onValidityChange]);
 
   // Mount-time healing policy: onboarding page 4 edits the root config during
   // first-run (no higher layers to inherit from), so acting on open is safe
@@ -797,9 +777,7 @@ export function AgentConfigFields({
             modelDiscoveryLoading={
               dependentFieldsDisabled ? false : modelDiscoveryLoading
             }
-            modelDiscoveryStatus={
-              dependentFieldsDisabled ? null : modelDiscoveryStatus
-            }
+            modelDiscoveryStatus={modelStatus}
             onIsCustomModelEditingChange={onCustomModelEditingChange}
             onModelChange={handleModelChange}
             placeholderClassName={placeholderClassName}
@@ -811,7 +789,7 @@ export function AgentConfigFields({
             showCustomModelOption={showCustomModelOption}
             showStatusMessage={shouldShowModelStatusMessage(
               showDescriptions,
-              dependentFieldsDisabled ? null : modelDiscoveryStatus,
+              modelStatus,
             )}
             testId="global-agent-model"
             useCustomSelect={useCustomSelect}
