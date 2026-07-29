@@ -3,13 +3,13 @@ import { Check, Copy, KeyRound, ShieldX, Ticket } from "lucide-react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { nsecToNpub, pubkeyToNpub } from "@/shared/lib/nostrUtils";
+import { copyTextWithFallback } from "@/shared/lib/clipboard";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { InviteRedeemForm } from "./InviteRedeemForm";
-import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type MembershipDeniedProps = {
   /** The relay that denied membership — used as the target for bare-code invites. */
@@ -40,6 +40,7 @@ export function MembershipDenied({
       return pubkey;
     }
   }, [pubkey]);
+  const npubRef = React.useRef<HTMLElement | null>(null);
   const [copied, setCopied] = React.useState(false);
   const [importError, setImportError] = React.useState<string | null>(null);
   const [isImportFormOpen, setIsImportFormOpen] = React.useState(false);
@@ -54,11 +55,18 @@ export function MembershipDenied({
 
   const handleCopy = React.useCallback(async () => {
     try {
-      await writeTextToClipboard(npub);
+      await copyTextWithFallback(npub);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback: select the text so the user can copy manually
+      const node = npubRef.current;
+      if (node) {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
     }
   }, [npub]);
 
@@ -125,7 +133,10 @@ export function MembershipDenied({
               Your public key (npub)
             </p>
             <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 truncate rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5 font-mono text-xs text-foreground">
+              <code
+                ref={npubRef}
+                className="min-w-0 flex-1 truncate rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5 font-mono text-xs text-foreground"
+              >
                 {npub}
               </code>
               <Button
