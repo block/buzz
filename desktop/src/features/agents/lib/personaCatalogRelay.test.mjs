@@ -205,6 +205,30 @@ test("test_non_svg_data_avatar_is_rejected", () => {
   assert.equal(catalogAvatarUrl("data:image/png,%89PNG"), null);
 });
 
+test("test_legacy_inline_raster_avatar_survives_the_catalog", () => {
+  for (const mime of ["png", "jpeg", "gif", "webp"]) {
+    const avatar = `data:image/${mime};base64,iVBORw0KGgo=`;
+    assert.equal(catalogAvatarUrl(avatar), avatar);
+  }
+});
+
+test("test_inline_raster_avatar_rejects_unbounded_or_malformed_payloads", () => {
+  const prefix = "data:image/png;base64,";
+  const payloadLength = 256 * 1_024 - prefix.length;
+  const validPayloadLength = payloadLength - (payloadLength % 4);
+  const withinCap = `${prefix}${"a".repeat(validPayloadLength - 2)}==`;
+  assert.ok(withinCap.length <= 256 * 1_024);
+  assert.equal(catalogAvatarUrl(withinCap), withinCap);
+  assert.equal(
+    catalogAvatarUrl(
+      `${withinCap}${"a".repeat(256 * 1_024 - withinCap.length + 1)}`,
+    ),
+    null,
+  );
+  assert.equal(catalogAvatarUrl("data:image/png;base64,not base64"), null);
+  assert.equal(catalogAvatarUrl("data:image/bmp;base64,aA=="), null);
+});
+
 test("test_oversized_inline_svg_avatar_is_rejected", () => {
   const withinCap = `data:image/svg+xml,${"a".repeat(8_192 - "data:image/svg+xml,".length)}`;
   assert.equal(withinCap.length, 8_192);
