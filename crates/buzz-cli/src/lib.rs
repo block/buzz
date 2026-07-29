@@ -173,6 +173,8 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Profile-driven sovereign context, custody, and replication operations
+    Context(ContextCmd),
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -239,6 +241,56 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(clap::Args)]
+pub struct ContextCmd {
+    /// Named profile under $XDG_CONFIG_HOME/buzz/profiles.
+    #[arg(long, env = "BUZZ_PROFILE", default_value = "default")]
+    profile: String,
+
+    #[command(subcommand)]
+    command: ContextSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum ContextSubcommand {
+    /// Report the context CLI build and Git revision.
+    Version {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diagnose the selected profile without exposing credential material.
+    Doctor {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Skip relay reachability probes.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Plan or apply a safe legacy ~/.buzz-local profile migration.
+    Migrate {
+        /// Apply the plan. Omit for the default dry run.
+        #[arg(long)]
+        apply: bool,
+        /// Legacy state root. Defaults to $HOME/.buzz-local.
+        #[arg(long)]
+        legacy_home: Option<std::path::PathBuf>,
+        /// Local source-of-truth relay URL for the generated profile.
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        local_relay: String,
+        /// Optional rendezvous relay URL for the generated profile.
+        #[arg(long)]
+        rendezvous: Option<String>,
+        /// Optional default shared-context identifier.
+        #[arg(long)]
+        context: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1758,12 +1810,17 @@ pub enum ModerationCmd {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
-    if let Cmd::Pack(ref sub) = cli.command {
-        return match sub {
-            PackCmd::Validate { path } => commands::pack::cmd_validate(path),
-            PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
-        };
+    // Context and pack commands resolve their own profile/identity or are
+    // local-only. They must not inherit the global one-key CLI identity.
+    match &cli.command {
+        Cmd::Context(context) => return commands::context::dispatch(context).await,
+        Cmd::Pack(sub) => {
+            return match sub {
+                PackCmd::Validate { path } => commands::pack::cmd_validate(path),
+                PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
+            };
+        }
+        _ => {}
     }
 
     // Auth: private key is required for all relay operations.
@@ -1794,6 +1851,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Context(_) => unreachable!("handled above"),
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -1836,6 +1894,7 @@ mod tests {
             "artifact",
             "canvas",
             "channels",
+            "context",
             "dms",
             "emoji",
             "feed",
@@ -2025,6 +2084,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("artifact", 3),
+            ("context", 3),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

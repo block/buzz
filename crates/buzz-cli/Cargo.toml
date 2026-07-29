@@ -28,6 +28,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # Serialization — JSON body building and response passthrough
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = "1.0"
 
 # Structured error types with exit code mapping
 thiserror = { workspace = true }
