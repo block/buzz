@@ -60,6 +60,7 @@ const overrides = new Map([
   // queued for a broader composition-root split. Bumped for the
   // archive/unarchive/transfer community-management commands (web parity).
   ["src-tauri/src/lib.rs", 1013],
+  ["src-tauri/src/managed_agents/types.rs", 1020],
   // persona-events rebase: build_deploy_payload threads `state` for the
   // read-time relay-URL workspace fallback while keeping the create-time env
   // pin (the credential-leak guard). Load-bearing feature growth from the

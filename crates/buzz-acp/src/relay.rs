@@ -2075,11 +2075,11 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                        // Membership notification — extract channel UUID from h tag.
-                        let channel_uuid = match extract_h_tag_uuid(&event) {
+                        // Membership notification — extract channel UUID from d or h tag.
+                        let channel_uuid = match extract_channel_uuid_from_event(&event) {
                             Some(uuid) => uuid,
                             None => {
-                                warn!("membership notification missing h tag — dropping");
+                                warn!("membership notification missing d or h tag — dropping");
                                 return true;
                             }
                         };
@@ -3414,11 +3414,11 @@ async fn dns_flat_sleep(
     }
 }
 
-/// Extract a channel UUID from the h tag of a Nostr event.
-fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
+/// Extract a channel UUID from the d or h tag of a Nostr event.
+fn extract_channel_uuid_from_event(event: &nostr::Event) -> Option<Uuid> {
     event.tags.iter().find_map(|tag| {
         let tag_vec = tag.as_slice();
-        if tag_vec.len() >= 2 && tag_vec[0] == "h" {
+        if tag_vec.len() >= 2 && (tag_vec[0] == "h" || tag_vec[0] == "d") {
             tag_vec[1].parse::<Uuid>().ok()
         } else {
             None
@@ -4145,6 +4145,27 @@ mod tests {
         let map = merge_discovered_channels(vec![ch], &meta);
 
         assert!(map.contains_key(&ch), "archived=false is treated as live");
+    }
+
+    #[test]
+    fn extract_channel_uuid_from_event_supports_both_d_and_h_tags() {
+        let channel_id = Uuid::new_v4();
+        let keys = Keys::generate();
+
+        // NIP-29 kind:39002 membership event with 'd' tag
+        let event_d = EventBuilder::new(Kind::Custom(39002), "")
+            .tag(Tag::parse(["d", &channel_id.to_string()]).unwrap())
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // Standard event with 'h' tag
+        let event_h = EventBuilder::new(Kind::Custom(9), "")
+            .tag(Tag::parse(["h", &channel_id.to_string()]).unwrap())
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        assert_eq!(extract_channel_uuid_from_event(&event_d), Some(channel_id));
+        assert_eq!(extract_channel_uuid_from_event(&event_h), Some(channel_id));
     }
 
     #[test]
