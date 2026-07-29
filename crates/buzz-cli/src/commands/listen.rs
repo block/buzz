@@ -36,7 +36,9 @@ fn parse_kinds(raw: Option<&str>) -> Result<Vec<u32>, CliError> {
                 out.push(k);
             }
             if out.is_empty() {
-                return Err(CliError::Usage("--kinds must list at least one kind".into()));
+                return Err(CliError::Usage(
+                    "--kinds must list at least one kind".into(),
+                ));
             }
             Ok(out)
         }
@@ -88,10 +90,7 @@ async fn post_webhook(client: &reqwest::Client, url: &str, body: &str) {
         .send()
         .await
     {
-        eprintln!(
-            "{}",
-            json!({"error":"webhook","message": format!("{e}")})
-        );
+        eprintln!("{}", json!({"error":"webhook","message": format!("{e}")}));
     }
 }
 
@@ -184,13 +183,10 @@ async fn listen_session(
 ) -> Result<(), CliError> {
     use buzz_ws_client::{NostrWsConnection, RelayMessage};
 
-    let mut conn = NostrWsConnection::connect_authenticated(
-        ws_url,
-        client.keys(),
-        client.auth_tag(),
-    )
-    .await
-    .map_err(|e| CliError::Other(format!("websocket: {e}")))?;
+    let mut conn =
+        NostrWsConnection::connect_authenticated(ws_url, client.keys(), client.auth_tag())
+            .await
+            .map_err(|e| CliError::Other(format!("websocket: {e}")))?;
 
     let sub_id = format!("buzz-listen-{}", &Uuid::new_v4().to_string()[..8]);
     let mut req = vec![json!("REQ"), json!(sub_id)];
@@ -215,8 +211,7 @@ async fn listen_session(
                     .map_err(|e| CliError::Other(format!("event serialize: {e}")))?;
                 let line = normalize_events(std::slice::from_ref(&raw));
                 // normalize_events returns a JSON array; unwrap first element for NDJSON stream.
-                let arr: Vec<serde_json::Value> =
-                    serde_json::from_str(&line).unwrap_or_default();
+                let arr: Vec<serde_json::Value> = serde_json::from_str(&line).unwrap_or_default();
                 let body = arr.first().cloned().unwrap_or(raw);
                 let text = serde_json::to_string(&body).unwrap_or_default();
                 println!("{text}");
@@ -256,7 +251,13 @@ mod tests {
     #[test]
     fn channel_filter_uses_h_tag() {
         let ch = "11111111-1111-1111-1111-111111111111".to_string();
-        let f = build_listen_filters(&[ch.clone()], false, &"a".repeat(64), DEFAULT_KINDS).unwrap();
+        let f = build_listen_filters(
+            std::slice::from_ref(&ch),
+            false,
+            &"a".repeat(64),
+            DEFAULT_KINDS,
+        )
+        .unwrap();
         assert_eq!(f.len(), 1);
         assert_eq!(f[0]["#h"][0], ch);
     }
