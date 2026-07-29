@@ -241,9 +241,7 @@ impl TurnTotalState {
             // First response with a total.
             (TurnTotalState::Unseen, Some(n)) => TurnTotalState::Exact(n),
             // Subsequent response — checked add to the running sum.
-            (TurnTotalState::Exact(acc), Some(n)) => {
-                TurnTotalState::Exact(acc.saturating_add(n))
-            }
+            (TurnTotalState::Exact(acc), Some(n)) => TurnTotalState::Exact(acc.saturating_add(n)),
         }
     }
 

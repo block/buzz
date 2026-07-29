@@ -5436,7 +5436,10 @@ mod tests {
         assert_eq!(turn.output_tokens, Some(30));
 
         // Verify cumulative counts carry the genuine session total.
-        let cum = payload.cumulative.as_ref().expect("cumulative counts present");
+        let cum = payload
+            .cumulative
+            .as_ref()
+            .expect("cumulative counts present");
         assert_eq!(
             cum.total_tokens,
             Some(620),
@@ -5467,25 +5470,22 @@ mod tests {
             model: None,
         };
 
-        let turn_counts = Some(TokenCounts {
+        let turn = TokenCounts {
             input_tokens: usage.turn_input_tokens,
             output_tokens: usage.turn_output_tokens,
             total_tokens: usage.turn_total_tokens,
             cost_usd: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
-        });
-        let cumulative_counts = Some(TokenCounts {
+        };
+        let cum = TokenCounts {
             input_tokens: Some(usage.cumulative_input_tokens),
             output_tokens: Some(usage.cumulative_output_tokens),
             total_tokens: usage.cumulative_total_tokens,
             cost_usd: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
-        });
-
-        let turn = turn_counts.unwrap();
-        let cum = cumulative_counts.unwrap();
+        };
 
         assert!(
             turn.total_tokens.is_none(),
@@ -5494,7 +5494,9 @@ mod tests {
         // Double-check it was not derived as input+output.
         assert_ne!(
             turn.total_tokens,
-            turn.input_tokens.zip(turn.output_tokens).map(|(i, o)| i + o),
+            turn.input_tokens
+                .zip(turn.output_tokens)
+                .map(|(i, o)| i + o),
             "total_tokens must never equal input+output when provider omitted it"
         );
         assert!(

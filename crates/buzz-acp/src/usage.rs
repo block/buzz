@@ -1070,7 +1070,10 @@ mod tests {
         assert!(usage.delta_reliable, "input/output delta unaffected");
         assert_eq!(usage.turn_input_tokens, Some(100));
         assert_eq!(usage.turn_output_tokens, Some(30));
-        assert!(usage.turn_total_tokens.is_none(), "absent field → null turn total");
+        assert!(
+            usage.turn_total_tokens.is_none(),
+            "absent field → null turn total"
+        );
         assert!(
             usage.cumulative_total_tokens.is_none(),
             "absent cumulative total passes through as None"

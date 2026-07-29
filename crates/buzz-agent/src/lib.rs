@@ -756,9 +756,10 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                     // Turn had no usage-bearing responses → no change to cumulative.
                     (acc, crate::types::TurnTotalState::Unseen) => acc,
                     // First exact turn — adopt its value.
-                    (crate::types::TurnTotalState::Unseen, crate::types::TurnTotalState::Exact(n)) => {
-                        crate::types::TurnTotalState::Exact(n)
-                    }
+                    (
+                        crate::types::TurnTotalState::Unseen,
+                        crate::types::TurnTotalState::Exact(n),
+                    ) => crate::types::TurnTotalState::Exact(n),
                     // Add to running exact sum.
                     (
                         crate::types::TurnTotalState::Exact(acc),
