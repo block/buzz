@@ -909,17 +909,7 @@ async fn handle_workflow_trigger(
         author: hex::encode(&self_bytes),
         ..Default::default()
     };
-    if !event.content.is_empty() {
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&event.content) {
-            for (k, v) in map {
-                let val_str = match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                trigger_ctx.webhook_fields.insert(k, val_str);
-            }
-        }
-    }
+    populate_trigger_ctx_from_content(&mut trigger_ctx, &event.content);
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
     let event_id_bytes = event.id.as_bytes().to_vec();
@@ -992,6 +982,50 @@ async fn handle_workflow_trigger(
             })
         ),
     })
+}
+
+/// Populate `TriggerContext` fields from a manual-trigger event's JSON content
+/// (the `--inputs` payload of `buzz workflows trigger`).
+///
+/// `TriggerContext::get_field` matches `text`/`timestamp`/`emoji`/`message_id`
+/// against the struct's own fields *before* ever consulting
+/// `webhook_fields` — so a value stuffed into `webhook_fields` under one of
+/// these names is silently unreachable and templates like `{{trigger.text}}`
+/// always resolve to the struct's default empty string. Route known names
+/// onto the struct fields directly; everything else still falls through to
+/// `webhook_fields`.
+///
+/// `author`/`channel_id` are computed by the caller from trusted server state
+/// and are deliberately excluded here — manual input must not override them.
+///
+/// Accepts convenience nesting under a top-level `"trigger"` key, matching
+/// the `{{trigger.X}}` placeholder callers write in workflow templates (e.g.
+/// `--inputs '{"trigger":{"text":"..."}}'`), as well as flat input.
+fn populate_trigger_ctx_from_content(ctx: &mut TriggerContext, content: &str) {
+    if content.is_empty() {
+        return;
+    }
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(content) else {
+        return;
+    };
+    if let Some(serde_json::Value::Object(nested)) = map.remove("trigger") {
+        map.extend(nested);
+    }
+    for (k, v) in map {
+        let val_str = match v {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        match k.as_str() {
+            "text" => ctx.text = val_str,
+            "timestamp" => ctx.timestamp = val_str,
+            "emoji" => ctx.emoji = val_str,
+            "message_id" => ctx.message_id = val_str,
+            _ => {
+                ctx.webhook_fields.insert(k, val_str);
+            }
+        }
+    }
 }
 
 /// Enforce the approver_spec field against the requesting pubkey.
@@ -1367,4 +1401,61 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+#[cfg(test)]
+mod trigger_ctx_tests {
+    use super::*;
+
+    fn base_ctx() -> TriggerContext {
+        TriggerContext {
+            channel_id: "chan-1".to_owned(),
+            author: "owner-pubkey".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn flat_text_input_populates_struct_field_not_webhook_fields() {
+        let mut ctx = base_ctx();
+        populate_trigger_ctx_from_content(&mut ctx, r#"{"text":"manual test from Honey"}"#);
+        assert_eq!(ctx.text, "manual test from Honey");
+        assert_eq!(ctx.get_field("text"), Some("manual test from Honey"));
+    }
+
+    #[test]
+    fn nested_under_trigger_key_also_populates_struct_field() {
+        let mut ctx = base_ctx();
+        populate_trigger_ctx_from_content(
+            &mut ctx,
+            r#"{"trigger":{"text":"manual test from Honey"}}"#,
+        );
+        assert_eq!(ctx.text, "manual test from Honey");
+        assert_eq!(ctx.get_field("text"), Some("manual test from Honey"));
+    }
+
+    #[test]
+    fn cannot_override_server_trusted_author_or_channel_id() {
+        let mut ctx = base_ctx();
+        populate_trigger_ctx_from_content(
+            &mut ctx,
+            r#"{"author":"attacker","channel_id":"other-chan"}"#,
+        );
+        assert_eq!(ctx.author, "owner-pubkey");
+        assert_eq!(ctx.channel_id, "chan-1");
+    }
+
+    #[test]
+    fn unknown_keys_still_fall_through_to_webhook_fields() {
+        let mut ctx = base_ctx();
+        populate_trigger_ctx_from_content(&mut ctx, r#"{"custom_key":"custom_value"}"#);
+        assert_eq!(ctx.get_field("custom_key"), Some("custom_value"));
+    }
+
+    #[test]
+    fn empty_content_leaves_defaults_untouched() {
+        let mut ctx = base_ctx();
+        populate_trigger_ctx_from_content(&mut ctx, "");
+        assert_eq!(ctx.text, "");
+    }
 }
