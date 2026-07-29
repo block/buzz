@@ -42,8 +42,12 @@ pub async fn generate_agent_completion(
 
         let personas = load_personas(&app).unwrap_or_default();
         let global = load_global_agent_config(&app).unwrap_or_default();
-        let discovery = agent_model_discovery_config(record, &personas, &global)
-            .map_err(|e| format!("cannot run completion for {pubkey}: {}", user_facing_harness_error(&e)))?;
+        let discovery = agent_model_discovery_config(record, &personas, &global).map_err(|e| {
+            format!(
+                "cannot run completion for {pubkey}: {}",
+                user_facing_harness_error(&e)
+            )
+        })?;
 
         let resolved_agent = resolve_command(&discovery.command)
             .map(|p| p.display().to_string())

@@ -1,5 +1,7 @@
 import type * as React from "react";
 
+import { DevLink } from "@/features/dev-mode/ui/DevLink";
+
 /**
  * Conservative keyword highlighting for developer-mode transcripts. Message
  * text is tokenized into React spans — never HTML — so arbitrary content
@@ -33,14 +35,12 @@ export function renderHighlightedContent(content: string): React.ReactNode[] {
         </span>,
       );
     } else {
-      nodes.push(
-        <span
-          key={`${index}-url`}
-          className="text-blue-500 underline decoration-blue-500/40"
-        >
-          {token}
-        </span>,
-      );
+      // Sentence punctuation after a URL belongs to the prose, not the href.
+      const href = token.replace(/[.,;:!?]+$/, "");
+      nodes.push(<DevLink href={href} key={`${index}-url`} />);
+      if (href.length < token.length) {
+        nodes.push(token.slice(href.length));
+      }
     }
     lastIndex = index + token.length;
   }
