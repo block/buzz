@@ -53,7 +53,7 @@ query_heads() { # $1 = relay URL; empty output on failure
 }
 query_handoffs() { # $1 = relay URL; empty output on failure
   "$CLIENT" query "$STEWARD_KEY" "$1" \
-    '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return"]}]' \
+    '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return","handoff:close"]}]' \
     2>/dev/null | sed 's/^200 //' || true
 }
 HEADS="$({ query_heads "$LOCAL_URL"; echo; query_heads "$CLOUD_URL"; } \
@@ -118,10 +118,12 @@ FINDINGS="$(mktemp)"
     | [$handoffs[] | select(lifecycle(.) == "handoff:open")] as $opens
     | [$handoffs[] | select(lifecycle(.) == "handoff:claim")] as $claims
     | [$handoffs[] | select(lifecycle(.) == "handoff:return")] as $returns
+    | [$handoffs[] | select(lifecycle(.) == "handoff:close")] as $closes
     | [ $opens[]
         | . as $open
         | [$claims[] | select(parent(.) == $open.id)] as $mine_claims
         | [$returns[] | select(parent(.) == $open.id)] as $mine_returns
+        | [$closes[] | select(parent(.) == $open.id)] as $mine_closes
         | ($mine_claims | sort_by([.created_at, .id]) | last) as $claim
         | ($mine_returns | sort_by([.created_at, .id]) | last) as $return
         | {open: $open,
@@ -135,7 +137,8 @@ FINDINGS="$(mktemp)"
               else "unknown"
               end),
            state:
-             (if ($mine_returns | length) > 0 then "RETURNED"
+             (if ($mine_closes | length) > 0 then "CLOSED"
+              elif ($mine_returns | length) > 0 then "RETURNED"
               elif ($mine_claims | length) > 0 then "CLAIMED"
               else "OPEN"
               end)}
@@ -213,7 +216,7 @@ FINDINGS="$(mktemp)"
               | select(.state == "RETURNED")
               | "- AWAITING VERIFY: \(body(.open).title // "(untitled)") (\(.open.id[0:8])…) returned by \(.claimant)" ]
             | .[] ),
-          "- handoffs: \([$delegations[] | select(.state == "OPEN")] | length) open, \([$delegations[] | select(.state == "CLAIMED")] | length) claimed, \([$delegations[] | select(.state == "RETURNED")] | length) returned",
+          "- handoffs: \([$delegations[] | select(.state == "OPEN")] | length) open, \([$delegations[] | select(.state == "CLAIMED")] | length) claimed, \([$delegations[] | select(.state == "RETURNED")] | length) returned-unverified",
           ""
         end ),
       "## Custody exposure",

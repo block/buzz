@@ -21,6 +21,7 @@
 #   buzz-ctx handoff open <spec-file|->  # open a journal-native hand-off
 #   buzz-ctx handoff claim <event-id> [note]  # claim an open hand-off
 #   buzz-ctx handoff return <event-id> <spec-file|->  # return results
+#   buzz-ctx handoff close <open-event-id> [note]  # verify and close a hand-off
 #   buzz-ctx handoff list                # list hand-offs and lifecycle state
 #   buzz-ctx agreement export <stream> <reader-pubkey>...  # declare (offer)
 #   buzz-ctx agreement admit <source> <principal> <pubkey>...  # sink trust half
@@ -169,7 +170,7 @@ case "${1:-}" in
     echo "context: $CONTEXT"
     ;;
   handoff)
-    sub="${2:?usage: buzz-ctx handoff open|claim|return|list ...}"
+    sub="${2:?usage: buzz-ctx handoff open|claim|return|close|list ...}"
     CONTEXT="${BUZZ_CTX_CONTEXT:-5b2ab726-c2b0-4bce-bcb9-bf5f7f883f0b}"
     case "$sub" in
       open)
@@ -368,10 +369,61 @@ case "${1:-}" in
         echo "return event: $event_id"
         echo "accepted: $acceptance"
         ;;
+      close)
+        open_event_id="${3:?usage: buzz-ctx handoff close <open-event-id> [note]}"
+        [[ "$open_event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
+          || die "open event id must be 64 hex characters"
+        note="${4:-}"
+        content="$(jq -n --arg verifier "$AGENT" --arg host "$MACHINE" \
+          --arg note "$note" \
+          '{verifier:$verifier, host:$host}
+           + (if $note == "" then {} else {note:$note} end)')" \
+          || die "could not build handoff close content"
+        signer_key="$KEY"
+        signer_pub="$PUBKEY"
+        auth_tag="null"
+        if [ -f "$HOME_DIR/agents/$AGENT.key" ]; then
+          signer_key="$HOME_DIR/agents/$AGENT.key"
+          signer_pub="$("$CLIENT" pubkey "$signer_key")"
+          auth_tag="$(cat "$HOME_DIR/agents/$AGENT.auth" 2>/dev/null || echo null)"
+        fi
+        event="$(jq -n --arg pk "$signer_pub" --arg c "$content" \
+          --arg context "$CONTEXT" --arg open "$open_event_id" \
+          --arg agent "$AGENT" --arg machine "$MACHINE" \
+          --arg ts "$(date +%s)" --argjson auth "$auth_tag" \
+          '{pubkey:$pk, created_at:($ts|tonumber), kind:1,
+            tags:([["t","handoff:close"],["h",$context],
+                   ["agent",$agent],["machine",$machine],["e",$open]]
+                  + (if $auth == null then [] else [$auth] end)),
+            content:$c}')" \
+          || die "could not build handoff close event"
+        relay="$(relay_for_write)"
+        tmp="$(mktemp)" || die "could not create temporary handoff event file"
+        printf '%s' "$event" > "$tmp" \
+          || { rm -f "$tmp"; die "could not write temporary handoff event file"; }
+        post_result="$("$CLIENT" post "$signer_key" "$relay" "$tmp")" \
+          || { rm -f "$tmp"; die "handoff close event post failed"; }
+        rm -f "$tmp"
+        # The post receipt is two lines: `200 {json}` then `event_id=…`; only
+        # the first line is the JSON acceptance.
+        acceptance="$(printf '%s' "$post_result" | head -n 1 | sed 's/^200 //' \
+          | jq -er 'select(.accepted | type == "boolean") | "\(.accepted) (\(.message // "no message"))"')" \
+          || die "handoff close event post returned an invalid acceptance receipt"
+        case "$acceptance" in
+          true\ *) ;;
+          *) die "handoff close event rejected: $acceptance" ;;
+        esac
+        event_id="$(printf '%s' "$post_result" | sed -n 's/^event_id=//p' | head -n 1)"
+        [[ "$event_id" =~ ^[0-9a-fA-F]{64}$ ]] \
+          || die "handoff close event post returned an invalid event id"
+        echo "handoff closed: ${open_event_id:0:12}… by $AGENT@$MACHINE"
+        echo "close event: $event_id"
+        echo "accepted: $acceptance"
+        ;;
       list)
         relay="$(relay_for_read)"
         result="$("$CLIENT" query "$KEY" "$relay" \
-          '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return"]}]')" \
+          '[{"kinds":[1],"#t":["handoff:open","handoff:claim","handoff:return","handoff:close"]}]')" \
           || die "handoff lifecycle query failed"
         printf '%s' "$result" | sed 's/^200 //' \
           | jq -r --argjson now "$(date +%s)" '
@@ -390,20 +442,24 @@ case "${1:-}" in
             [.[] | select(lifecycle(.) == "handoff:open")] as $opens
             | [.[] | select(lifecycle(.) == "handoff:claim")] as $claims
             | [.[] | select(lifecycle(.) == "handoff:return")] as $returns
+            | [.[] | select(lifecycle(.) == "handoff:close")] as $closes
             | $opens
             | sort_by(.created_at)
             | reverse[]
             | . as $open
             | [$claims[] | select(parent(.) == $open.id)] as $mine_claims
             | [$returns[] | select(parent(.) == $open.id)] as $mine_returns
-            | ([$open] + $mine_claims + $mine_returns
+            | [$closes[] | select(parent(.) == $open.id)] as $mine_closes
+            | ([$open] + $mine_claims + $mine_returns + $mine_closes
                | max_by(.created_at)) as $latest
             | ($mine_claims | sort_by(.created_at) | last | body(.).runner) as $claimant
-            | (if ($mine_returns | length) > 0 then "RETURNED"
+            | ($mine_closes | sort_by(.created_at) | last | body(.).verifier) as $verifier
+            | (if ($mine_closes | length) > 0 then "CLOSED"
+               elif ($mine_returns | length) > 0 then "RETURNED"
                elif ($mine_claims | length) > 0 then "CLAIMED"
                else "OPEN"
                end) as $state
-            | "\($state)  \(age($latest.created_at))  \(body($open).title // "(untitled)")  \($open.id[0:12])…\(if $claimant == null then "" else "  \($claimant)" end)"
+            | "\($state)  \(age($latest.created_at))  \(body($open).title // "(untitled)")  \($open.id[0:12])…\(if $state == "CLOSED" then "  verified by \($verifier)" elif $claimant == null then "" else "  \($claimant)" end)"
           ' \
           || die "handoff lifecycle query returned invalid event data"
         ;;
