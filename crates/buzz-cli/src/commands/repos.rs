@@ -6,7 +6,7 @@ use nostr::{Event, EventBuilder, Tag, Timestamp};
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_repo_id;
+use crate::validate::{validate_repo_id, validate_uuid};
 
 fn parse_events(json: &str) -> Result<Vec<Event>, CliError> {
     serde_json::from_str(json)
@@ -83,40 +83,41 @@ fn build_protection_tag(
     Tag::parse(values).map_err(tag_error)
 }
 
-enum ProtectionChange {
-    Set(Box<Tag>),
-    Remove(String),
+enum RepoAnnouncementChange {
+    SetProtection(Box<Tag>),
+    RemoveProtection(String),
+    BindChannel(String),
 }
 
 fn build_updated_repo_announcement(
     existing: &Event,
-    change: ProtectionChange,
+    change: RepoAnnouncementChange,
 ) -> Result<EventBuilder, CliError> {
     let repo_id = repo_id_from_event(existing)?;
-    let (pattern, replacement) = match change {
-        ProtectionChange::Set(tag) => {
-            let pattern = protection_pattern(&tag)
-                .ok_or_else(|| CliError::Other("replacement is not a protection tag".into()))?
-                .to_string();
-            (pattern, Some(*tag))
-        }
-        ProtectionChange::Remove(pattern) => {
-            RefPattern::parse(&pattern)
-                .map_err(|error| CliError::Usage(format!("invalid ref pattern: {error}")))?;
-            (pattern, None)
-        }
-    };
-
     let mut tags: Vec<Tag> = existing
         .tags
         .iter()
-        .filter(|tag| {
-            !has_tag_name(tag, "auth") && protection_pattern(tag) != Some(pattern.as_str())
-        })
+        .filter(|tag| !has_tag_name(tag, "auth"))
         .cloned()
         .collect();
-    if let Some(tag) = replacement {
-        tags.push(tag);
+
+    match change {
+        RepoAnnouncementChange::SetProtection(tag) => {
+            let pattern = protection_pattern(&tag)
+                .ok_or_else(|| CliError::Other("replacement is not a protection tag".into()))?
+                .to_string();
+            tags.retain(|tag| protection_pattern(tag) != Some(pattern.as_str()));
+            tags.push(*tag);
+        }
+        RepoAnnouncementChange::RemoveProtection(pattern) => {
+            RefPattern::parse(&pattern)
+                .map_err(|error| CliError::Usage(format!("invalid ref pattern: {error}")))?;
+            tags.retain(|tag| protection_pattern(tag) != Some(pattern.as_str()));
+        }
+        RepoAnnouncementChange::BindChannel(channel_id) => {
+            tags.retain(|tag| !has_tag_name(tag, "buzz-channel"));
+            tags.push(Tag::parse(["buzz-channel", &channel_id]).map_err(tag_error)?);
+        }
     }
 
     let raw_tags: Vec<Vec<String>> = tags.iter().map(|tag| tag.as_slice().to_vec()).collect();
@@ -126,13 +127,19 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
-    let next_created_at = existing
-        .created_at
-        .as_secs()
-        .checked_add(1)
-        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    // Advance observed head monotonically while keeping it inside the relay's
+    // ±15-minute timestamp admission window. A stale announcement must use now.
+    let now_secs = Timestamp::now().as_secs();
+    let min_allowed = now_secs.saturating_sub(840);
+    let next_created_at = if existing.created_at.as_secs() < min_allowed {
+        now_secs
+    } else {
+        existing
+            .created_at
+            .as_secs()
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?
+    };
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -320,7 +327,10 @@ async fn cmd_protect_set(
         require_patch,
     )?;
     let event = current_repo(client, repo_id).await?;
-    let builder = build_updated_repo_announcement(&event, ProtectionChange::Set(Box::new(tag)))?;
+    let builder = build_updated_repo_announcement(
+        &event,
+        RepoAnnouncementChange::SetProtection(Box::new(tag)),
+    )?;
     submit_repo_update(client, builder).await
 }
 
@@ -341,8 +351,24 @@ async fn cmd_protect_remove(
             "repository {repo_id:?} has no protection rule for {ref_pattern:?}"
         )));
     }
-    let builder =
-        build_updated_repo_announcement(&event, ProtectionChange::Remove(ref_pattern.to_string()))?;
+    let builder = build_updated_repo_announcement(
+        &event,
+        RepoAnnouncementChange::RemoveProtection(ref_pattern.to_string()),
+    )?;
+    submit_repo_update(client, builder).await
+}
+
+async fn cmd_bind_channel(
+    client: &BuzzClient,
+    repo_id: &str,
+    channel_id: &str,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    let event = current_repo(client, repo_id).await?;
+    let builder = build_updated_repo_announcement(
+        &event,
+        RepoAnnouncementChange::BindChannel(channel_id.to_string()),
+    )?;
     submit_repo_update(client, builder).await
 }
 
@@ -370,6 +396,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         }
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+        ReposCmd::BindChannel { id, channel } => cmd_bind_channel(client, &id, &channel).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
             ReposProtectCmd::Set {
@@ -404,7 +431,7 @@ mod tests {
 
     use super::{
         build_protection_tag, build_updated_repo_announcement, protection_rules_json,
-        validate_write_response, ProtectionChange,
+        validate_write_response, RepoAnnouncementChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -421,6 +448,7 @@ mod tests {
 
     #[test]
     fn protection_update_preserves_metadata_and_replaces_only_matching_pattern() {
+        let now = Timestamp::now().as_secs();
         let existing = signed_repo(
             vec![
                 tag(&["d", "demo"]),
@@ -432,21 +460,21 @@ mod tests {
                 tag(&["buzz-protect", "refs/tags/*", "no-delete"]),
             ],
             "repository content",
-            100,
+            now - 100,
         );
         let replacement = build_protection_tag("refs/heads/main", Some("admin"), true, true, false)
             .expect("valid replacement");
 
         let updated = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Set(Box::new(replacement)),
+            RepoAnnouncementChange::SetProtection(Box::new(replacement)),
         )
         .expect("build update")
         .sign_with_keys(&Keys::generate())
         .expect("sign update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        assert_eq!(updated.created_at.as_secs(), now - 99);
         assert!(!updated
             .tags
             .iter()
@@ -488,6 +516,48 @@ mod tests {
     }
 
     #[test]
+    fn bind_channel_replaces_prior_binding_and_refreshes_stale_announcement() {
+        let before = Timestamp::now().as_secs();
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["name", "Demo"]),
+                tag(&["buzz-channel", "11111111-1111-1111-1111-111111111111"]),
+                tag(&["buzz-protect", "refs/heads/main", "push:member"]),
+            ],
+            "repository content",
+            before - 1_000,
+        );
+
+        let updated = build_updated_repo_announcement(
+            &existing,
+            RepoAnnouncementChange::BindChannel("c20547ff-6dd8-4cd3-8d15-98fad68b060f".into()),
+        )
+        .expect("build update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+
+        assert!(updated.created_at.as_secs() >= before);
+        assert!(updated.created_at.as_secs() <= Timestamp::now().as_secs());
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-channel", "c20547ff-6dd8-4cd3-8d15-98fad68b060f"]));
+        assert_eq!(
+            updated
+                .tags
+                .iter()
+                .filter(|tag| super::has_tag_name(tag, "buzz-channel"))
+                .count(),
+            1
+        );
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["buzz-protect", "refs/heads/main", "push:member"] }));
+    }
+
+    #[test]
     fn protection_remove_preserves_other_patterns() {
         let existing = signed_repo(
             vec![
@@ -501,7 +571,7 @@ mod tests {
 
         let updated = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Remove("refs/heads/main".into()),
+            RepoAnnouncementChange::RemoveProtection("refs/heads/main".into()),
         )
         .expect("build removal")
         .sign_with_keys(&Keys::generate())
@@ -538,7 +608,7 @@ mod tests {
 
         let error = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Set(Box::new(replacement)),
+            RepoAnnouncementChange::SetProtection(Box::new(replacement)),
         )
         .expect_err("malformed existing rule must fail closed");
 
@@ -564,7 +634,7 @@ mod tests {
 
         let error = build_updated_repo_announcement(
             &existing,
-            ProtectionChange::Set(Box::new(replacement)),
+            RepoAnnouncementChange::SetProtection(Box::new(replacement)),
         )
         .expect_err("the 51st rule must be rejected");
 

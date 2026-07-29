@@ -1145,6 +1145,15 @@ pub enum ReposCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Bind this repository's member permissions to a channel.
+    BindChannel {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Channel UUID whose member roles control protected pushes.
+        #[arg(long)]
+        channel: String,
+    },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
@@ -1988,7 +1997,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["create", "get", "list", "protect"]
+            vec!["bind-channel", "create", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2051,7 +2060,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 4),
+            ("repos", 5),
             ("social", 7),
             ("upload", 1),
             ("users", 5),
