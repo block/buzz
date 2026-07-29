@@ -1097,20 +1097,13 @@ pub(super) fn normalize_agent_models(
                 for o in options {
                     if let Some(value) = o.get("value").and_then(|v| v.as_str()) {
                         if seen_ids.insert(value.to_string()) {
+                            let str_field =
+                                |k: &str| o.get(k).and_then(|v| v.as_str()).map(str::to_string);
                             models.push(AgentModelInfo {
                                 id: value.to_string(),
-                                // The schema field is `name`; `displayName` is
-                                // a pre-standardization spelling some adapters
-                                // still emit. Same order as buzz-acp's reader.
-                                name: o
-                                    .get("name")
-                                    .or_else(|| o.get("displayName"))
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string),
-                                description: o
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string),
+                                // `displayName`: legacy spelling. buzz-acp order.
+                                name: str_field("name").or_else(|| str_field("displayName")),
+                                description: str_field("description"),
                             });
                         }
                     }

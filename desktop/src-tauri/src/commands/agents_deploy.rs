@@ -1,6 +1,8 @@
-//! Provider deploy payload construction, split from `agents.rs` (file-size
-//! guard). `build_deploy_payload` gathers live state; `deploy_payload_json`
-//! is the pure serialization half so payload completeness stays testable.
+//! Provider deploy: payload construction and the deploy call itself, split
+//! from `agents.rs` (file-size guard). `build_deploy_payload` gathers live
+//! state; `deploy_payload_json` is the pure serialization half so payload
+//! completeness stays testable; `deploy_to_provider` resolves the binary,
+//! invokes it, and persists the outcome onto the record.
 
 use tauri::AppHandle;
 
@@ -8,8 +10,12 @@ use tauri::AppHandle;
 use crate::managed_agents::AgentDefinition;
 use crate::{
     app_state::AppState,
-    managed_agents::{load_personas, ManagedAgentRecord},
+    managed_agents::{
+        discover_provider_candidates, load_managed_agents, load_personas, provider_deploy,
+        resolve_provider_binary, save_managed_agents, ManagedAgentRecord, ProviderFailure,
+    },
     relay::relay_ws_url_with_override,
+    util::now_iso,
 };
 
 /// Resolve the deploy-specific structured model/provider for a managed agent.
@@ -196,4 +202,76 @@ fn binary_to_push(var: &str) -> Option<String> {
         .ok()
         .map(|path| path.trim().to_string())
         .filter(|path| !path.is_empty())
+}
+
+/// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
+/// spawn_blocking, and persists the result (backend_agent_id or last_error).
+///
+/// Idempotency: calling deploy on an already-deployed agent sends the same payload
+/// again. Providers are expected to handle this as an update-in-place or no-op —
+/// the protocol does not include an explicit `undeploy` operation (deferred to v2).
+///
+/// Returns Ok(()) or a [`ProviderFailure`]; either way the record is updated
+/// and saved first. The failure type is what keeps a recovery — a deploy onto a
+/// tailnet wanting browser re-auth carries one — alive for callers that can
+/// render it; each caller drops it explicitly where it cannot. The record's
+/// `last_error` stays a plain string regardless: it is a post-mortem read long
+/// after the fact, and an auth URL is a one-shot token that is stale by then.
+pub(super) async fn deploy_to_provider(
+    app: &AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    provider_id: &str,
+    config: &serde_json::Value,
+    agent_json: serde_json::Value,
+    cached_binary_path: Option<&str>,
+) -> Result<(), ProviderFailure> {
+    // Resolve via discovered candidates only. Cached path must match BOTH
+    // "is a discovered candidate" AND "belongs to this provider_id". A tampered
+    // record cannot redirect deploys to a different provider's binary.
+    let bin_path = cached_binary_path
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .map(|p| p.canonicalize().unwrap_or(p))
+        .filter(|canonical| {
+            discover_provider_candidates().iter().any(|(id, cp)| {
+                id == provider_id && cp.canonicalize().ok().as_ref() == Some(canonical)
+            })
+        })
+        .map_or_else(|| resolve_provider_binary(provider_id), Ok)?;
+
+    let config_clone = config.clone();
+    let deploy_result =
+        tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+
+    // Persist result under lock.
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let rec = records
+        .iter_mut()
+        .find(|r| r.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+
+    match deploy_result {
+        Ok(backend_agent_id) => {
+            rec.backend_agent_id = Some(backend_agent_id);
+            rec.last_started_at = Some(now_iso());
+            rec.updated_at = now_iso();
+            rec.last_error = None;
+        }
+        Err(ref e) => {
+            // The message only — see the `last_error` note above.
+            rec.last_error = Some(e.message.clone());
+            rec.updated_at = now_iso();
+            save_managed_agents(app, &records)?;
+            return Err(e.clone());
+        }
+    }
+    save_managed_agents(app, &records)?;
+    Ok(())
 }

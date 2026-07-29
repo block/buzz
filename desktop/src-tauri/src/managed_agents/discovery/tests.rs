@@ -626,12 +626,11 @@ fn create_time_override_preserves_pin_for_persona_less_create() {
 
 #[test]
 fn update_time_override_preserves_same_runtime_pin_when_overriding() {
-    // The bug this fixes: the user picks "Custom command" in the edit
-    // dialog and saves `goose` verbatim for a goose persona. That is a
-    // deliberate pin (harness_override true) — it must be kept so future
-    // persona runtime edits stop propagating, even though it maps to the
-    // persona's own runtime. `divergent_agent_command_override` alone would
-    // wrongly drop it to `None`.
+    // The bug this fixes: the user picks "Custom command" in the edit dialog
+    // and saves `goose` verbatim for a goose persona. That is a deliberate pin
+    // (harness_override true) — it must be kept so future persona runtime edits
+    // stop propagating, even though it maps to the persona's own runtime.
+    // `divergent_agent_command_override` alone would wrongly drop it to `None`.
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     assert_eq!(
         update_time_agent_command_override(Some("p1"), &personas, Some("goose"), true),
@@ -751,10 +750,10 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
     assert_eq!(record_agent_command(&record, &personas), "codex-acp");
 }
 
-// ── probe_codex_acp_version ───────────────────────────────────────────────────
-
 mod create_time_args;
 mod managed_path_resolution;
+
+// ── probe_codex_acp_version ───────────────────────────────────────────────────
 
 #[cfg(unix)]
 #[test]
