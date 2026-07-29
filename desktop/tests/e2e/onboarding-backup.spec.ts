@@ -89,8 +89,9 @@ test("chooser shows masked key; reveal and copy fetch it explicitly", async ({
 });
 
 // ---------------------------------------------------------------------------
-// Encrypted download path: password → encrypt locally → native save → saved
-// confirmation. The raw key must never be fetched on this path.
+// Encrypted download path ("Backup your key" step): password → encrypt
+// locally → native save → saved confirmation. The raw key must never be
+// fetched on this path.
 // ---------------------------------------------------------------------------
 
 test("download happy path: generated password, encrypt, native save, Next", async ({
@@ -98,13 +99,15 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
 }) => {
   await enterMachineBackup(page);
 
-  // The download flow sits behind the footer CTA.
+  // The download flow is its own onboarding step behind the footer CTA.
   await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
   await page.getByTestId("backup-option-download").click();
+  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
 
-  // Default mode: generated password shown, but backup remains optional.
+  // Default mode: generated password shown; the create button sits in the
+  // footer's primary slot until the encrypted payload exists.
   await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
-  await expect(page.getByTestId("onboarding-next")).toBeEnabled();
+  await expect(page.getByTestId("onboarding-next")).toHaveCount(0);
 
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/03-backup-download-passphrase.png` });
@@ -135,17 +138,17 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });
 
-test("download view returns to the chooser via All backup options", async ({
-  page,
-}) => {
+test("download step Back returns to the backup chooser", async ({ page }) => {
   await enterMachineBackup(page);
 
   await page.getByTestId("backup-option-download").click();
+  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
   await expect(page.getByTestId("backup-passphrase-generated")).toBeVisible();
-  // The footer download CTA hides while the flow is open.
+  // The chooser's footer CTA belongs to the previous step.
   await expect(page.getByTestId("backup-option-download")).toHaveCount(0);
 
-  await page.getByTestId("backup-back-to-options").click();
+  await page.getByTestId("onboarding-back").click();
+  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("backup-key-value")).toBeVisible();
   await expect(page.getByTestId("backup-option-download")).toBeVisible();
 });

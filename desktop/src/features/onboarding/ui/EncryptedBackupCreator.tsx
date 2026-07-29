@@ -1,5 +1,6 @@
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import * as React from "react";
+import { createPortal } from "react-dom";
 
 import {
   createNcryptsecBackup,
@@ -23,6 +24,15 @@ import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
 type EncryptedBackupCreatorProps = {
   /** "spotlight" is the onboarding treatment; "boxed" fits settings cards. */
   variant?: "spotlight" | "boxed";
+  /**
+   * When set, the "Encrypt and download" button is portaled into this element
+   * (e.g. the onboarding footer's primary slot) instead of rendering inline.
+   */
+  createButtonPortal?: HTMLElement | null;
+  /** Extra classes for the "Encrypt and download" button. */
+  createButtonClassName?: string;
+  /** Fired once the encrypted payload has been created (before saving). */
+  onCreated?: () => void;
   /** Fired only after the encrypted key file has been saved successfully. */
   onSaved?: (path: string) => void;
 };
@@ -35,6 +45,9 @@ type EncryptedBackupCreatorProps = {
  */
 export function EncryptedBackupCreator({
   variant = "spotlight",
+  createButtonPortal,
+  createButtonClassName,
+  onCreated,
   onSaved,
 }: EncryptedBackupCreatorProps) {
   const [state, dispatch] = React.useReducer(
@@ -79,6 +92,7 @@ export function EncryptedBackupCreator({
       const ncryptsec = await createNcryptsecBackup(passphrase);
       if (!mountedRef.current) return;
       dispatch({ type: "create-succeeded", ncryptsec });
+      onCreated?.();
       setIsSaving(true);
       setSaveError(null);
       try {
@@ -103,7 +117,7 @@ export function EncryptedBackupCreator({
             err instanceof Error ? err.message : "Failed to encrypt your key.",
         });
     }
-  }, [onSaved, state]);
+  }, [onCreated, onSaved, state]);
 
   const handleSaveCopy = React.useCallback(async () => {
     if (!state.ncryptsec || isSaving) return;
@@ -300,24 +314,33 @@ export function EncryptedBackupCreator({
         </p>
       ) : null}
 
-      <div className="flex justify-center">
-        <Button
-          className="h-9 rounded-full px-6"
-          data-testid="encrypted-backup-create"
-          disabled={createDisabled(state)}
-          onClick={() => void handleCreate()}
-          type="button"
-        >
-          {state.isCreating ? (
-            <>
-              <Spinner className="h-4 w-4 border-2" />
-              Encrypting… this takes a couple of seconds
-            </>
-          ) : (
-            "Encrypt and download"
-          )}
-        </Button>
-      </div>
+      {(() => {
+        const createButton = (
+          <Button
+            className={cn("h-9 rounded-full px-6", createButtonClassName)}
+            data-testid="encrypted-backup-create"
+            disabled={createDisabled(state)}
+            onClick={() => void handleCreate()}
+            type="button"
+          >
+            {state.isCreating ? (
+              <>
+                <Spinner className="h-4 w-4 border-2" />
+                Encrypting… this takes a couple of seconds
+              </>
+            ) : (
+              "Encrypt and download"
+            )}
+          </Button>
+        );
+        // `undefined` = inline (settings); `null` = slot not mounted yet
+        // (skip a frame rather than flashing the button inline).
+        if (createButtonPortal === undefined)
+          return <div className="flex justify-center">{createButton}</div>;
+        return createButtonPortal
+          ? createPortal(createButton, createButtonPortal)
+          : null;
+      })()}
     </div>
   );
 }

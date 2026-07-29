@@ -1,5 +1,4 @@
-import { ArrowLeft, Check, Copy, Eye, EyeOff, Info } from "lucide-react";
-import { motion, type Transition, useReducedMotion } from "motion/react";
+import { Check, Copy, Eye, EyeOff, Info } from "lucide-react";
 import * as React from "react";
 
 import { getNsec } from "@/shared/api/tauriIdentity";
@@ -16,7 +15,6 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-import { EncryptedBackupCreator } from "./EncryptedBackupCreator";
 import { ONBOARDING_KEY_TEXT_CLASS } from "./NsecMaskedDisplay";
 
 /**
@@ -36,87 +34,6 @@ let introPlayed = false;
 const REVEAL_ANIMATION_CLASS =
   "animate-in fade-in duration-700 motion-reduce:animate-none";
 
-/**
- * Shared-element id for the nsec card → shell box morph between the
- * chooser and the download view. Same id on both sides lets Motion run the
- * scale-down/translate-up FLIP with an automatic crossfade.
- */
-const NSEC_SHELL_LAYOUT_ID = "nsec-shell-box";
-
-/** Morph tween — same curve as the onboarding line-slide keyframes. */
-const SHELL_MORPH_TRANSITION: Transition = {
-  type: "tween",
-  duration: 0.55,
-  ease: [0.22, 1, 0.36, 1],
-};
-
-/**
- * One half of the "[   ]" pair that clamps around the shell box once it
- * settles — the visual is the user working on the secure shell that
- * surrounds their key. Brackets close inward as they fade in.
- */
-function ShellBracket({
-  reduceMotion,
-  side,
-  visible,
-}: {
-  reduceMotion: boolean;
-  side: "left" | "right";
-  visible: boolean;
-}) {
-  return (
-    <motion.div
-      animate={
-        visible
-          ? { opacity: 1, x: 0 }
-          : { opacity: 0, x: side === "left" ? -10 : 10 }
-      }
-      aria-hidden
-      className={cn(
-        // The bracket pair frames the h-16 (64px) box as a concentric 96px
-        // square: each line sits 10px clear of the box on every side (plus
-        // the 6px line itself), and the 2rem corner radius wraps the box's
-        // rounded-2xl (16px) corners at a constant 16px offset. The vertical
-        // line lives on the OUTER edge of the 32px-deep arm, so each bracket
-        // pulls 16px back over the box (negative margin) to keep that line
-        // 10px from the box edge.
-        "h-24 w-8 shrink-0 border-black",
-        side === "left"
-          ? "-mr-4 rounded-l-[2rem] border-y-[6px] border-l-[6px]"
-          : "-ml-4 rounded-r-[2rem] border-y-[6px] border-r-[6px]",
-      )}
-      initial={false}
-      transition={
-        reduceMotion ? { duration: 0 } : { duration: 0.35, ease: "easeOut" }
-      }
-    />
-  );
-}
-
-/**
- * The chooser offers both backup methods: copying happens in place, while the
- * encrypted download flow expands into its own view.
- */
-type BackupView = "choose" | "download";
-
-function BackToOptions({ onClick }: { onClick: () => void }) {
-  return (
-    <div className="mt-4 flex justify-center">
-      <Button
-        className="h-8 gap-1 text-sm text-muted-foreground hover:text-accent-foreground"
-        data-testid="backup-back-to-options"
-        onClick={onClick}
-        size="sm"
-        type="button"
-        variant="ghost"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-        All backup options
-      </Button>
-    </div>
-  );
-}
-
 /** Saving a Keycase is recommended, never required to continue onboarding. */
 export function backupNextDisabled(): boolean {
   return false;
@@ -125,22 +42,25 @@ export function backupNextDisabled(): boolean {
 type BackupStepProps = {
   direction: OnboardingTransitionDirection;
   onBack: () => void;
+  /** Advances to the dedicated "Download your key" onboarding step. */
+  onDownload: () => void;
   onNext: () => void;
 };
 
 /**
- * Onboarding backup step — offers two ways to back up the new key without
- * blocking setup: a portable password-protected Keycase (recommended) or a
- * direct clipboard copy destined for a password manager. The raw key is
- * fetched only when the user explicitly clicks Copy, goes straight to the
- * clipboard, and is never rendered or held in state.
+ * Onboarding backup step — shows the freshly created key and offers two ways
+ * to back it up without blocking setup: the encrypted download flow (its own
+ * onboarding step, via `onDownload`) or a direct clipboard copy destined for
+ * a password manager. The raw key is fetched only when the user explicitly
+ * clicks Copy or Reveal, and is never held in state before that.
  */
-export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
+export function BackupStep({
+  direction,
+  onBack,
+  onDownload,
+  onNext,
+}: BackupStepProps) {
   const [created, setCreated] = React.useState(introPlayed);
-  const [view, setView] = React.useState<BackupView>("choose");
-  // True once the card → shell-box morph has finished; gates the brackets.
-  const [shellSettled, setShellSettled] = React.useState(false);
-  const reduceMotion = useReducedMotion() ?? false;
   const [copyState, setCopyState] = React.useState<
     "idle" | "copying" | "copied"
   >("idle");
@@ -274,175 +194,118 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
             REVEAL_ANIMATION_CLASS,
           )}
         >
-          {view === "choose" ? (
-            <div className="w-full">
-              <motion.div
-                layoutId={NSEC_SHELL_LAYOUT_ID}
-                transition={
-                  reduceMotion ? { duration: 0 } : SHELL_MORPH_TRANSITION
-                }
-              >
-                <Card className="px-8 py-6" variant="textured">
-                  <div className="mx-auto flex w-full min-w-0 max-w-[832px] items-center gap-4">
-                    <div className="min-w-0 flex-1">
-                      <p
-                        className={cn(
-                          ONBOARDING_KEY_TEXT_CLASS,
-                          isRevealed && nsec
-                            ? "select-text"
-                            : "select-none blur-[4px]",
-                        )}
-                        data-testid="backup-key-value"
-                      >
-                        {isRevealed && nsec ? nsec : maskedKey}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 gap-1.5">
+          <div className="w-full">
+            <Card className="px-8 py-6" variant="textured">
+              <div className="mx-auto flex w-full min-w-0 max-w-[832px] items-center gap-4">
+                <div className="min-w-0 flex-1">
+                  <p
+                    className={cn(
+                      ONBOARDING_KEY_TEXT_CLASS,
+                      isRevealed && nsec
+                        ? "select-text"
+                        : "select-none blur-[4px]",
+                    )}
+                    data-testid="backup-key-value"
+                  >
+                    {isRevealed && nsec ? nsec : maskedKey}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-1.5">
+                  <Button
+                    aria-label={
+                      isRevealed ? "Hide private key" : "Reveal private key"
+                    }
+                    className="h-10 w-10 text-muted-foreground hover:text-foreground"
+                    data-testid="backup-key-reveal-toggle"
+                    onClick={() => void toggleReveal()}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    {isRevealed ? (
+                      <EyeOff className="h-6 w-6" aria-hidden="true" />
+                    ) : (
+                      <Eye className="h-6 w-6" aria-hidden="true" />
+                    )}
+                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
                       <Button
-                        aria-label={
-                          isRevealed ? "Hide private key" : "Reveal private key"
-                        }
+                        aria-label="Copy private key"
                         className="h-10 w-10 text-muted-foreground hover:text-foreground"
-                        data-testid="backup-key-reveal-toggle"
-                        onClick={() => void toggleReveal()}
+                        data-testid="backup-copy-key"
+                        disabled={copyState === "copying"}
+                        onClick={() => void copyKeyToClipboard()}
                         size="icon"
                         type="button"
                         variant="ghost"
                       >
-                        {isRevealed ? (
-                          <EyeOff className="h-6 w-6" aria-hidden="true" />
+                        {copyState === "copying" ? (
+                          <Spinner className="h-5 w-5 border-2" />
+                        ) : copyState === "copied" ? (
+                          <Check
+                            className="h-6 w-6 text-primary"
+                            aria-hidden="true"
+                          />
                         ) : (
-                          <Eye className="h-6 w-6" aria-hidden="true" />
+                          <Copy className="h-6 w-6" aria-hidden="true" />
                         )}
                       </Button>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            aria-label="Copy private key"
-                            className="h-10 w-10 text-muted-foreground hover:text-foreground"
-                            data-testid="backup-copy-key"
-                            disabled={copyState === "copying"}
-                            onClick={() => void copyKeyToClipboard()}
-                            size="icon"
-                            type="button"
-                            variant="ghost"
-                          >
-                            {copyState === "copying" ? (
-                              <Spinner className="h-5 w-5 border-2" />
-                            ) : copyState === "copied" ? (
-                              <Check
-                                className="h-6 w-6 text-primary"
-                                aria-hidden="true"
-                              />
-                            ) : (
-                              <Copy className="h-6 w-6" aria-hidden="true" />
-                            )}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent className="max-w-[240px] text-center">
-                          Copy your key and save it somewhere safe — a password
-                          manager is a great place for it.
-                        </TooltipContent>
-                      </Tooltip>
-                    </div>
-                  </div>
-                  {copyError ? (
-                    <p
-                      className="mt-3 text-center text-sm text-destructive"
-                      data-testid="backup-copy-error"
-                    >
-                      Could not retrieve your private key: {copyError}. You can
-                      continue and find it later in Settings &gt; Profile &gt;
-                      Identity.
-                    </p>
-                  ) : null}
-                </Card>
-              </motion.div>
-
-              <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
-                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>
-                  Never share your private key. Anyone with this key can
-                  impersonate you and access everything in your account.
-                </span>
-              </p>
-            </div>
-          ) : (
-            <div className="w-full">
-              <div className="mb-6 flex items-center justify-center">
-                <ShellBracket
-                  reduceMotion={reduceMotion}
-                  side="left"
-                  visible={shellSettled || reduceMotion}
-                />
-                <motion.div
-                  className="h-16 w-16 rounded-2xl bg-white"
-                  data-testid="backup-key-shell"
-                  layoutId={NSEC_SHELL_LAYOUT_ID}
-                  onLayoutAnimationComplete={() => setShellSettled(true)}
-                  transition={
-                    reduceMotion ? { duration: 0 } : SHELL_MORPH_TRANSITION
-                  }
-                />
-                <ShellBracket
-                  reduceMotion={reduceMotion}
-                  side="right"
-                  visible={shellSettled || reduceMotion}
-                />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-[240px] text-center">
+                      Copy your key and save it somewhere safe — a password
+                      manager is a great place for it.
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
               </div>
-              <motion.div
-                animate={{ opacity: 1, y: 0 }}
-                initial={reduceMotion ? false : { opacity: 0, y: 12 }}
-                transition={{ delay: 0.12, duration: 0.4, ease: "easeOut" }}
-              >
-                <Card className="w-full px-8 py-6" variant="textured">
-                  <div className="mx-auto w-full max-w-[832px]">
-                    <div className="mb-5 space-y-2 text-center">
-                      <h2 className="text-lg font-medium">Download your key</h2>
-                      <p className="text-xs leading-5 text-muted-foreground">
-                        Your key is encrypted with your password before it
-                        downloads. Keep the file private — you need both it and
-                        the password to restore your identity.
-                      </p>
-                    </div>
-                    <EncryptedBackupCreator variant="spotlight" />
-                  </div>
-                </Card>
-                <BackToOptions
-                  onClick={() => {
-                    setShellSettled(false);
-                    setView("choose");
-                  }}
-                />
-              </motion.div>
-            </div>
-          )}
+              {copyError ? (
+                <p
+                  className="mt-3 text-center text-sm text-destructive"
+                  data-testid="backup-copy-error"
+                >
+                  Could not retrieve your private key: {copyError}. You can
+                  continue and find it later in Settings &gt; Profile &gt;
+                  Identity.
+                </p>
+              ) : null}
+            </Card>
+
+            <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                Never share your private key. Anyone with this key can
+                impersonate you and access everything in your account.
+              </span>
+            </p>
+          </div>
         </div>
       )}
 
       {created ? (
         <OnboardingFooter className={REVEAL_ANIMATION_CLASS}>
-          <Button
-            className={ONBOARDING_PRIMARY_CTA_CLASS}
-            data-testid="onboarding-next"
-            disabled={backupNextDisabled()}
-            onClick={onNext}
-            type="button"
-          >
-            Next
-          </Button>
-
-          {view === "choose" ? (
+          {/* Relative row keeps the primary CTA truly centered while Skip
+              hangs off its right edge without shifting the center. */}
+          <div className="relative flex items-center justify-center">
             <Button
-              className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+              className={ONBOARDING_PRIMARY_CTA_CLASS}
               data-testid="backup-option-download"
-              onClick={() => setView("download")}
+              onClick={onDownload}
+              type="button"
+            >
+              Backup your key
+            </Button>
+            <Button
+              className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
+              data-testid="onboarding-next"
+              disabled={backupNextDisabled()}
+              onClick={onNext}
               type="button"
               variant="ghost"
             >
-              Download my key
+              Skip for now
             </Button>
-          ) : null}
+          </div>
 
           <Button
             className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
@@ -453,6 +316,11 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           >
             Back
           </Button>
+
+          <p className="text-xs text-foreground/50">
+            You can back up your key anytime in Settings &rarr; Profile &rarr;
+            Identity.
+          </p>
         </OnboardingFooter>
       ) : null}
     </OnboardingSlideTransition>

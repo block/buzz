@@ -103,7 +103,7 @@ export function WelcomeSetup({
       data-system-color-scheme={systemColorScheme}
     >
       <StartupWindowDragRegion />
-      <OnboardingChrome current={5} />
+      <OnboardingChrome current={6} />
       <OnboardingFooterProvider>
         <div className="relative flex min-h-0 w-full max-w-[920px] flex-1 flex-col items-center text-center">
           {page === "welcome" ? (

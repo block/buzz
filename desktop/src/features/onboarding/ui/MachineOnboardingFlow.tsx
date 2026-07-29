@@ -10,6 +10,7 @@ import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
+import { DownloadKeyStep } from "./DownloadKeyStep";
 import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
 import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
@@ -25,6 +26,7 @@ export type MachineOnboardingPage =
   | "identity"
   | "key-import"
   | "backup"
+  | "download"
   | "setup"
   | "config";
 
@@ -136,7 +138,15 @@ export function MachineOnboardingFlow({
       {page === "identity" ? <LandingBees /> : null}
       {page !== "identity" ? (
         <OnboardingChrome
-          current={page === "config" ? 4 : page === "setup" ? 3 : 2}
+          current={
+            page === "config"
+              ? 5
+              : page === "setup"
+                ? 4
+                : page === "download"
+                  ? 3
+                  : 2
+          }
         />
       ) : null}
       <OnboardingFooterProvider>
@@ -227,6 +237,13 @@ export function MachineOnboardingFlow({
             <BackupStep
               direction="forward"
               onBack={() => setPage("identity")}
+              onDownload={() => setPage("download")}
+              onNext={() => setPage("setup")}
+            />
+          ) : page === "download" ? (
+            <DownloadKeyStep
+              direction="forward"
+              onBack={() => setPage("backup")}
               onNext={() => setPage("setup")}
             />
           ) : page === "setup" ? (
