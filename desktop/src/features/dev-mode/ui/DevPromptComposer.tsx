@@ -212,6 +212,11 @@ export function DevPromptComposer({
             data-testid="dev-mode-draft-banner"
           >
             <span className="font-semibold">{draftLabel}</span>
+            <DevComposerModeLine
+              agentColor={agentColor}
+              busy={busy}
+              mode={mode}
+            />
             <span className="text-primary/60">esc cancels</span>
           </span>
         ) : (
