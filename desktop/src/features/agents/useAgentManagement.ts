@@ -20,6 +20,7 @@ import {
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
+  resolveCreateRuntimeForDefinition,
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
@@ -187,17 +188,20 @@ export function useAgentManagement() {
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
       const runtimes = await availableRuntimesForStart(runtimesQuery);
-      const runtime = runtimes.find(
-        (candidate) => candidate.id === input.runtime,
+      // A provider create runs the harness on the remote host, so the local
+      // catalog does not gate it — see resolveCreateRuntimeForDefinition.
+      // Only when an instance is actually started, though: a definition-only
+      // create materializes nothing remote, so it keeps the local contract.
+      const { runtime } = resolveCreateRuntimeForDefinition(
+        runtimes,
+        input.runtime,
+        intent === "definition_start" && backendIntent?.type === "provider",
       );
-      if (!runtime) {
-        throw new Error("Choose an available runtime for this agent.");
-      }
 
       const avatarUrl = await resolveManagedAgentAvatarUrl(
         input.avatarUrl,
         undefined,
-        runtime.avatarUrl,
+        runtime?.avatarUrl,
       );
       const persona = await createPersonaMutation.mutateAsync({
         ...input,

@@ -158,8 +158,22 @@ function fromRawPublicationResult(
   };
 }
 
-export async function deletePersona(id: string): Promise<void> {
-  await invokeTauri("delete_persona", { id });
+/**
+ * Delete a persona and cascade-delete every agent instance built from it.
+ *
+ * `forceRemoteDelete` acknowledges that provider-backed instances in the
+ * cascade leave their remote units running — the provider protocol has no
+ * undeploy, so this app can forget those records but not stop them. The
+ * backend refuses such a cascade without it.
+ */
+export async function deletePersona(
+  id: string,
+  forceRemoteDelete?: boolean,
+): Promise<void> {
+  await invokeTauri("delete_persona", {
+    id,
+    forceRemoteDelete: forceRemoteDelete ?? null,
+  });
 }
 
 export async function setPersonaActive(

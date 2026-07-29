@@ -23,7 +23,6 @@ import {
   deleteManagedAgent,
   deleteCustomHarness,
   discoverAcpRuntimes,
-  discoverBackendProviders,
   discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
@@ -86,6 +85,12 @@ import type {
 } from "@/features/agents/channelAgents";
 export { findReusableAgent } from "@/features/agents/agentReuse";
 export {
+  backendProviderProbeQueryKey,
+  backendProvidersQueryKey,
+  useBackendProviderProbesQuery,
+  useBackendProvidersQuery,
+} from "@/features/agents/backendProviderHooks";
+export {
   teamsQueryKey,
   useCreateTeamMutation,
   useDeleteTeamMutation,
@@ -110,7 +115,6 @@ export const personasQueryKey = ["personas"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
-export const backendProvidersQueryKey = ["backend-providers"] as const;
 export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
 
 type InvalidateAgentQueriesOptions = {
@@ -271,15 +275,6 @@ export function useGitBashPrerequisiteQuery() {
     queryKey: gitBashPrerequisiteQueryKey,
     queryFn: discoverGitBashPrerequisite,
     staleTime: 15_000,
-  });
-}
-
-export function useBackendProvidersQuery(options?: { enabled?: boolean }) {
-  return useQuery({
-    enabled: options?.enabled ?? true,
-    queryKey: backendProvidersQueryKey,
-    queryFn: discoverBackendProviders,
-    staleTime: 30_000,
   });
 }
 
@@ -506,7 +501,15 @@ export function useDeletePersonaMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (id: string) => deletePersona(id),
+    mutationFn: ({
+      id,
+      forceRemoteDelete,
+    }: {
+      id: string;
+      /** Acknowledges that provider-backed cascade instances leave their
+       * remote units running. The backend refuses the cascade without it. */
+      forceRemoteDelete?: boolean;
+    }) => deletePersona(id, forceRemoteDelete),
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),

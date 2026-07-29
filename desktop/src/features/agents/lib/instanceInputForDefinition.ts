@@ -67,6 +67,39 @@ export function resolveStartRuntimeForDefinition(
 }
 
 /**
+ * Resolve the runtime for a definition CREATE, honouring where the agent will
+ * actually run.
+ *
+ * For a local create the definition's runtime must be installed on this
+ * machine, so an unavailable pick is refused exactly as before.
+ *
+ * For a provider create the harness lives on the REMOTE host and is chosen
+ * from that host's catalog (`discover_provider_harnesses`); the local catalog
+ * describes a different machine entirely. Requiring a locally-installed
+ * runtime here would make every remote-only harness unsubmittable — the user
+ * could not create a Goose agent on their server without first installing
+ * Goose on their laptop — so the local availability check does not apply.
+ * The runtime is still returned when it happens to resolve locally, because
+ * callers use it for the avatar fallback; `null` simply means "no local
+ * counterpart", which is normal and not an error.
+ *
+ * Returns `{ runtime }` on success and throws with an actionable message on
+ * refusal, matching the start-path contract above.
+ */
+export function resolveCreateRuntimeForDefinition(
+  runtimes: readonly AcpRuntime[],
+  requestedRuntimeId: string | null | undefined,
+  isProviderCreate: boolean,
+): { runtime: AcpRuntime | null } {
+  const runtime =
+    runtimes.find((candidate) => candidate.id === requestedRuntimeId) ?? null;
+  if (!runtime && !isProviderCreate) {
+    throw new Error("Choose an available runtime for this agent.");
+  }
+  return { runtime };
+}
+
+/**
  * Where the started instance should run when the user picked something other
  * than plain local in the definition-create flow (B5). Absent intent =
  * today's local mapping, byte-identical.
@@ -86,6 +119,27 @@ export type BackendIntent = {
   type: "provider";
   id: string;
   config: Record<string, unknown>;
+  /**
+   * The harness chosen from the REMOTE host's catalog
+   * (`discover_provider_harnesses`). Correction C1: this is the only channel
+   * by which the harness choice reaches the host, so it must name a binary on
+   * the remote machine — never one resolved from the local runtime catalog.
+   */
+  harness?: RemoteHarnessSelection;
+};
+
+/**
+ * One entry of a provider's `discover_harnesses` catalog, narrowed to the
+ * fields the create mapping pins. `command` and `args` describe the remote
+ * host; `env` carries the runtime's `default_env`, which locally would be
+ * applied from the catalog at spawn time — a remote agent never spawns
+ * locally, so it has to ride along in the record or it is simply lost.
+ */
+export type RemoteHarnessSelection = {
+  id: string;
+  command: string;
+  args?: readonly string[];
+  env?: Record<string, string>;
 };
 
 /**
@@ -106,10 +160,17 @@ export type BackendIntent = {
  *   later definition edits made before the first spawn. (Mesh preset env is
  *   the deliberate exception: it is instance-override state, not
  *   definition env.)
+ *
+ * The provider branch deliberately diverges from the local one on the harness
+ * fields (command/args/env pinned rather than re-resolved). See the comments
+ * inside it: nothing re-resolves them for a record that never spawns locally.
  */
 export async function buildInstanceInputForDefinition(
   persona: AgentPersona,
-  runtime: AcpRuntime,
+  // Nullable only for a provider create: the harness then comes from the
+  // remote catalog via `backendIntent.harness`, and no local runtime need
+  // exist. The local branch below still requires one.
+  runtime: AcpRuntime | null,
   upload?: UploadMediaBytes,
   backendIntent?: BackendIntent,
 ): Promise<CreateManagedAgentInput> {
@@ -126,9 +187,39 @@ export async function buildInstanceInputForDefinition(
   };
 
   if (backendIntent?.type === "provider") {
+    const harness = backendIntent.harness;
+    if (!harness?.command.trim()) {
+      // Correction C1, refused at the source. Without a remote harness pin the
+      // record falls through `create_time_agent_command_override` (which
+      // returns None for a persona-backed create with harnessOverride: false)
+      // to `effective_agent_command`, which resolves against the LOCAL runtime
+      // registry and ultimately `default_agent_command()` — so the deploy
+      // payload would carry "buzz-agent" and the host would silently provision
+      // a harness the user never chose. The provider refuses a blank pin, but
+      // a wrong non-blank one it cannot detect, so the guard has to live here.
+      throw new Error(
+        "Select a harness installed on the remote host before creating this agent.",
+      );
+    }
     return {
       ...base,
-      harnessOverride: false,
+      // The pin is only preserved when harnessOverride is true: with false,
+      // the backend treats a divergent command as a missing-runtime fallback
+      // and discards it. A remote harness choice is always a deliberate pin —
+      // the definition's runtime names a LOCAL runtime id that says nothing
+      // about the remote machine, so it is never authoritative here.
+      harnessOverride: true,
+      agentCommand: harness.command,
+      // Unlike the local branch (which sends [] so spawn re-resolves args from
+      // the definition on every start), a provider-backed record never spawns
+      // locally. These args and env come from the remote catalog and have no
+      // second chance to be resolved, so they are pinned at create time.
+      agentArgs: [...(harness.args ?? [])],
+      ...(harness.env && Object.keys(harness.env).length > 0
+        ? { envVars: { ...harness.env } }
+        : {}),
+      model: persona.model ?? undefined,
+      provider: persona.provider ?? undefined,
       spawnAfterCreate: true,
       startOnAppLaunch: false,
       backend: {
@@ -137,6 +228,14 @@ export async function buildInstanceInputForDefinition(
         config: backendIntent.config,
       },
     };
+  }
+
+  if (!runtime) {
+    // Unreachable through the UI (`resolveCreateRuntimeForDefinition` only
+    // returns null for a provider create, which returned above), but a local
+    // create with no runtime has no harness to spawn — refuse rather than
+    // build an input whose agentCommand is undefined.
+    throw new Error("Choose an available runtime for this agent.");
   }
 
   return {

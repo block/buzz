@@ -34,6 +34,10 @@ import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import {
+  managedAgentRuntimeLabel,
+  runtimeCommandLabel,
+} from "@/features/profile/ui/profileRuntimeLabel";
+import {
   createOptimisticMessage,
   mergeTimelineCacheMessages,
 } from "@/features/messages/hooks";
@@ -68,17 +72,6 @@ type UserProfilePopoverProps = {
 
 const HOVER_OPEN_DELAY_MS = 500;
 const HOVER_CLOSE_DELAY_MS = 200;
-
-const RUNTIME_LABELS: Record<string, string> = {
-  goose: "Goose",
-  "claude-code": "Claude Code",
-  "codex-acp": "Codex",
-  aider: "Aider",
-};
-
-function runtimeLabel(command: string): string {
-  return RUNTIME_LABELS[command] ?? command;
-}
 
 function InfoBadge({ children }: { children: React.ReactNode }) {
   return (
@@ -606,9 +599,11 @@ export function UserProfilePopover({
           {isBotProfile && (managedAgent || relayAgent) ? (
             <div className="flex flex-wrap gap-1.5">
               {managedAgent?.agentCommand ? (
-                <InfoBadge>{runtimeLabel(managedAgent.agentCommand)}</InfoBadge>
+                <InfoBadge>{managedAgentRuntimeLabel(managedAgent)}</InfoBadge>
               ) : relayAgent?.agentType ? (
-                <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
+                <InfoBadge>
+                  {runtimeCommandLabel(relayAgent.agentType)}
+                </InfoBadge>
               ) : null}
               {managedAgent?.model ? (
                 <InfoBadge>{managedAgent.model}</InfoBadge>

@@ -4,6 +4,13 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { cn } from "@/shared/lib/cn";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
 
+/**
+ * The card's secondary metadata lines — model, then location. One constant so
+ * the two lines cannot drift into two weights of "secondary".
+ */
+const SECONDARY_LINE_CLASS =
+  "min-w-0 truncate text-xs font-normal text-secondary-foreground/75";
+
 type AgentIdentityCardProps = {
   actions?: ReactNode;
   ariaLabel: string;
@@ -11,6 +18,11 @@ type AgentIdentityCardProps = {
   avatarUrl?: string | null;
   dataTestId: string;
   label: string;
+  /**
+   * Where the agent runs ("on ssh"), for provider-backed records only.
+   * `null`/absent for a local agent — see `agentLocationLabel`.
+   */
+  locationLabel?: string | null;
   modelLabel?: string | null;
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
@@ -24,6 +36,7 @@ export function AgentIdentityCard({
   avatarUrl,
   dataTestId,
   label,
+  locationLabel,
   modelLabel,
   onClick,
   statusBadge,
@@ -73,8 +86,14 @@ export function AgentIdentityCard({
           {label}
         </span>
         {modelLabel ? (
-          <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
-            {modelLabel}
+          <span className={SECONDARY_LINE_CLASS}>{modelLabel}</span>
+        ) : null}
+        {locationLabel ? (
+          <span
+            className={SECONDARY_LINE_CLASS}
+            data-testid={`${dataTestId}-location`}
+          >
+            {locationLabel}
           </span>
         ) : null}
         {statusBadge}

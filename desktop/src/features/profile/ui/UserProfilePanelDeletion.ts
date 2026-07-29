@@ -4,6 +4,7 @@ import {
   deleteManagedAgentWithRules,
   type ManagedAgentActionResult,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { collectPersonaRemoteCascadeInstances } from "@/features/agents/lib/personaCascade";
 import { removeChannelMember } from "@/shared/api/tauri";
 import type {
   AgentPersona,
@@ -79,7 +80,17 @@ export function useProfileAgentDeletion({
         presenceLookup,
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
-        skipRemoteDeleteConfirm: true,
+        // The profile panel routes every delete through
+        // AgentDeleteConfirmDialog, which names the remote unit and states
+        // that the delete does not stop it — so the fallback confirm would be
+        // the second modal on one click.
+        //
+        // Scope: this claim covers the single-record path only. The persona
+        // cascade below deliberately does not set it — that flow has no
+        // per-instance dialog to make the disclosure, so it must keep the
+        // fallback confirm. Anyone adding a new caller has to make the same
+        // judgement rather than copying this line.
+        remoteOrphanDisclosedByCaller: true,
       }),
     [
       channels,
@@ -157,4 +168,31 @@ export async function deleteProfileManagedAgentsForPersona(
   }
 
   return {};
+}
+
+/**
+ * What deleting a persona takes with it: the instance count the confirm dialog
+ * reports, and the provider-backed instances whose remote units the delete
+ * cannot stop.
+ *
+ * One hook for both because they are one question asked at two precisions, and
+ * they must never disagree about which records the cascade covers.
+ */
+export function usePersonaDeleteCascade(
+  managedAgents: readonly ManagedAgent[] | undefined,
+  personaToDelete: AgentPersona | null,
+) {
+  return React.useMemo(() => {
+    if (!personaToDelete) return { instanceCount: 0, remoteInstances: [] };
+    const agents = managedAgents ?? [];
+    return {
+      instanceCount: agents.filter(
+        (agent) => agent.personaId === personaToDelete.id,
+      ).length,
+      remoteInstances: collectPersonaRemoteCascadeInstances(
+        agents,
+        personaToDelete.id,
+      ),
+    };
+  }, [managedAgents, personaToDelete]);
 }

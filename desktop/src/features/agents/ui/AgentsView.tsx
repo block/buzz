@@ -30,10 +30,28 @@ import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { collectPersonaRemoteCascadeInstances } from "@/features/agents/lib/personaCascade";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
+import type { AgentPersona } from "@/shared/api/types";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
+
+/**
+ * The instance dialog's "Edit avatar" hand-off, or `undefined` when there is
+ * no editable definition behind the record.
+ *
+ * The avatar is definition-level identity, so the instance dialog renders it
+ * read-only and delegates back here. Entering the definition dialog closes
+ * this one on the way, exactly as the profile panel's mount does.
+ */
+function editLinkedPersonaHandler(
+  persona: AgentPersona | null,
+  openEditDefinition: (persona: AgentPersona) => void,
+) {
+  if (!persona) return undefined;
+  return () => openEditDefinition(persona);
+}
 
 export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
@@ -81,6 +99,20 @@ export function AgentsView() {
         (value) => value.trim().length > 0,
       ),
   );
+
+  // Cascade instances the delete cannot stop, named in the confirm dialog.
+  const personaToDeleteId = personas.personaToDelete?.id;
+  const personaDeleteRemoteInstances = React.useMemo(
+    () =>
+      personaToDeleteId
+        ? collectPersonaRemoteCascadeInstances(
+            agents.managedAgents ?? [],
+            personaToDeleteId,
+          )
+        : [],
+    [agents.managedAgents, personaToDeleteId],
+  );
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
     // Consume a snapshot import that was enqueued before navigation (e.g. from
@@ -162,6 +194,7 @@ export function AgentsView() {
               }
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
+              presenceLookup={agents.managedPresenceQuery.data}
               startingAgentPubkey={agents.startingAgentPubkey}
               startingPersonaIds={agents.startingPersonaIds}
               onOpenAgentProfile={(pubkey, options) => {
@@ -332,6 +365,29 @@ export function AgentsView() {
           title={personas.personaDialogState.title}
         />
       ) : null}
+      {personas.agentToEditInstance ? (
+        // Rule 20: the card's Edit on a provider-backed agent edits the record
+        // itself. The definition dialog reads an AgentDefinition, which carries
+        // no backend or agent_command, so a remote target would open on a blank
+        // harness and be re-seeded with this computer's default. Local personas
+        // keep the definition-edit mount above. `personaCardEditAction` owns
+        // the decision; the definition it carries is the avatar hand-off, so
+        // routing here costs nothing the definition dialog would have offered.
+        <AgentDialog
+          agent={personas.agentToEditInstance.agent}
+          mode="instance-edit"
+          onEditLinkedPersona={editLinkedPersonaHandler(
+            personas.agentToEditInstance.persona,
+            personas.openEditDefinition,
+          )}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.setAgentToEditInstance(null);
+            }
+          }}
+          open
+        />
+      ) : null}
       {personas.personaToDelete ? (
         <PersonaDeleteDialog
           instanceCount={
@@ -340,7 +396,12 @@ export function AgentsView() {
             ).length
           }
           onConfirm={(persona) => {
-            void personas.handleDelete(persona);
+            // The dialog named every orphaned remote unit above, so confirming
+            // it is the acknowledgement the backend pre-flight requires.
+            void personas.handleDelete(
+              persona,
+              personaDeleteRemoteInstances.length > 0,
+            );
           }}
           onOpenChange={(open) => {
             if (!open) {
@@ -349,6 +410,7 @@ export function AgentsView() {
           }}
           open={personas.personaToDelete !== null}
           persona={personas.personaToDelete}
+          remoteInstances={personaDeleteRemoteInstances}
         />
       ) : null}
       {personas.personaToShare ? (

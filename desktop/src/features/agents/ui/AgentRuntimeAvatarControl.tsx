@@ -1,6 +1,7 @@
 import { CircleAlert, Play } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 
+import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import {
   type AvatarBadgeCurve,
@@ -8,6 +9,7 @@ import {
   STATUS_DOT_MASK_CURVE,
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import type { PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Spinner } from "@/shared/ui/spinner";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
@@ -20,6 +22,15 @@ type AgentRuntimeAvatarControlProps = {
   isActive: boolean;
   isStarting: boolean;
   label: string;
+  /**
+   * Live relay presence of the agent, read only while `isActive`. The dot must
+   * not be hardcoded green: `isActive` is a control-plane fact ("this desktop
+   * started it" / "this desktop deployed it"), and for a remote deployment that
+   * fact never expires, so a stopped remote agent would otherwise read as
+   * online forever. `null` is for a card with no agent behind it (a persona
+   * that has never been spawned), which is never active.
+   */
+  presenceStatus: PresenceStatus | null;
   startTestId: string;
   onOpenError?: () => void;
   onStart: () => void;
@@ -103,6 +114,7 @@ export function AgentRuntimeAvatarControl({
   isActive,
   isStarting,
   label,
+  presenceStatus,
   startTestId,
   onOpenError,
   onStart,
@@ -114,6 +126,10 @@ export function AgentRuntimeAvatarControl({
   const errorActionLabel = `${label} has a runtime error. Open runtime details.`;
   const transition = shouldReduceMotion ? { duration: 0 } : MASK_TRANSITION;
   const badge = isActive ? ACTIVE_BADGE : ACTION_BADGE;
+  const activePresence = presenceStatus ?? "offline";
+  const activeLabel = `${label} is ${getPresenceLabel(
+    activePresence,
+  ).toLowerCase()}`;
 
   return (
     <MaskedAvatarBadgeFrame
@@ -121,13 +137,16 @@ export function AgentRuntimeAvatarControl({
         <span className="grid h-full w-full place-items-center">
           {isActive ? (
             <span
-              aria-label={`${label} is running`}
+              aria-label={activeLabel}
               className="flex h-6 w-6 items-center justify-center rounded-full"
               data-testid={activeTestId}
               role="img"
-              title={`${label} is running`}
+              title={activeLabel}
             >
-              <PresenceDot className={ACTIVE_DOT_CLASS_NAME} status="online" />
+              <PresenceDot
+                className={ACTIVE_DOT_CLASS_NAME}
+                status={activePresence}
+              />
             </span>
           ) : (
             <button

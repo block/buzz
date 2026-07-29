@@ -6,11 +6,20 @@ import {
   RefreshCw,
 } from "lucide-react";
 
+import { resolveAgentAvatarUrl } from "@/features/agents/lib/agentAvatarUrl";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { agentLocationLabel } from "@/features/agents/lib/agentLocationLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import {
+  isManagedAgentActive,
+  managedAgentPresenceStatus,
+} from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  PresenceLookup,
+} from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
@@ -36,6 +45,12 @@ type UnifiedAgentsSectionProps = {
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
+  /**
+   * Live relay presence for the managed agents. Their `status` says what this
+   * desktop did to them, not whether they are alive right now — see
+   * `managedAgentPresenceStatus`.
+   */
+  presenceLookup: PresenceLookup | null | undefined;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onOpenAgentProfile: (
@@ -54,7 +69,10 @@ type UnifiedAgentsSectionProps = {
   onCreatePersona: () => void;
   onDiscoverPersonas: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
-  onEditPersona: (persona: AgentPersona) => void;
+  onEditPersona: (
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) => void;
   onSharePersona: (
     persona: AgentPersona,
     linkedAgent: ManagedAgent | undefined,
@@ -78,6 +96,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     agentsError,
     isActionPending,
     isAgentsLoading,
+    presenceLookup,
     startingAgentPubkey,
     startingPersonaIds,
     onOpenAgentProfile,
@@ -174,6 +193,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   defaultModel={defaultModel}
                   key={group.persona.id}
                   persona={group.persona}
+                  presenceLookup={presenceLookup}
                   startingAgentPubkey={startingAgentPubkey}
                   startingPersonaIds={startingPersonaIds}
                   onOpenAgentProfile={onOpenAgentProfile}
@@ -198,6 +218,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               defaultModel={defaultModel}
               groupKey="__unknown__"
               label="Unknown agents"
+              presenceLookup={presenceLookup}
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
@@ -211,6 +232,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               defaultModel={defaultModel}
               groupKey="__ungrouped__"
               label="Custom agents"
+              presenceLookup={presenceLookup}
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
@@ -243,6 +265,7 @@ function AgentPersonaCard({
   agent,
   defaultModel,
   persona,
+  presenceLookup,
   startingAgentPubkey,
   startingPersonaIds,
   onOpenAgentProfile,
@@ -254,6 +277,7 @@ function AgentPersonaCard({
   agent: ManagedAgent | undefined;
   defaultModel: string;
   persona: AgentPersona;
+  presenceLookup: PresenceLookup | null | undefined;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onOpenAgentProfile: (
@@ -272,9 +296,13 @@ function AgentPersonaCard({
   });
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
-  const avatarUrl = agent
-    ? firstAvatarUrl(persona.avatarUrl, profileQuery.data?.avatarUrl)
-    : persona.avatarUrl;
+  const avatarUrl = resolveAgentAvatarUrl({
+    agent,
+    personaAvatarUrl: persona.avatarUrl,
+    // Only a spawned agent has published a profile; a persona alone shows what
+    // its definition carries.
+    profileAvatarUrl: agent ? profileQuery.data?.avatarUrl : null,
+  });
   const friendlyError = agent
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
@@ -294,6 +322,7 @@ function AgentPersonaCard({
             isActive={isActive}
             isStarting={startingAgentPubkey === agent.pubkey}
             label={title}
+            presenceStatus={managedAgentPresenceStatus(agent, presenceLookup)}
             startTestId={`agent-runtime-start-${agent.pubkey}`}
             onOpenError={() => {
               onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
@@ -307,6 +336,7 @@ function AgentPersonaCard({
             isActive={false}
             isStarting={startingPersonaIds.has(persona.id)}
             label={title}
+            presenceStatus={null}
             startTestId={`persona-runtime-start-${persona.id}`}
             onStart={() => onStartPersona(persona)}
           />
@@ -315,6 +345,9 @@ function AgentPersonaCard({
       avatarUrl={avatarUrl}
       dataTestId={`persona-agent-row-${persona.id}`}
       label={title}
+      // Only a materialized agent has a backend. A definition that has never
+      // been started has no location yet — where it runs is chosen at create.
+      locationLabel={agentLocationLabel(agent?.backend)}
       modelLabel={modelLabel}
       onClick={() => {
         if (agent) {
@@ -346,12 +379,14 @@ function AgentPersonaCard({
 function StandaloneAgentCard({
   agent,
   defaultModel,
+  presenceLookup,
   startingAgentPubkey,
   onOpenAgentProfile,
   onStartAgent,
 }: {
   agent: ManagedAgent;
   defaultModel: string;
+  presenceLookup: PresenceLookup | null | undefined;
   startingAgentPubkey: string | null;
   onOpenAgentProfile: (
     pubkey: string,
@@ -361,6 +396,10 @@ function StandaloneAgentCard({
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
+  const avatarUrl = resolveAgentAvatarUrl({
+    agent,
+    profileAvatarUrl: profileQuery.data?.avatarUrl,
+  });
   const friendlyError = friendlyAgentLastError(
     agent.lastError,
     agent.lastErrorCode,
@@ -374,12 +413,13 @@ function StandaloneAgentCard({
       avatar={
         <AgentRuntimeAvatarControl
           activeTestId={`agent-runtime-active-${agent.pubkey}`}
-          avatarUrl={profileQuery.data?.avatarUrl}
+          avatarUrl={avatarUrl}
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
           isStarting={startingAgentPubkey === agent.pubkey}
           label={title}
+          presenceStatus={managedAgentPresenceStatus(agent, presenceLookup)}
           startTestId={`agent-runtime-start-${agent.pubkey}`}
           onOpenError={() => {
             onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
@@ -387,9 +427,10 @@ function StandaloneAgentCard({
           onStart={() => onStartAgent(agent.pubkey)}
         />
       }
-      avatarUrl={profileQuery.data?.avatarUrl}
+      avatarUrl={avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
       label={title}
+      locationLabel={agentLocationLabel(agent.backend)}
       modelLabel={resolveAgentCardModelLabel({
         agent,
         personaModel: null,
@@ -416,16 +457,6 @@ function StandaloneAgentCard({
       }
     />
   );
-}
-
-function firstAvatarUrl(
-  ...candidates: Array<string | null | undefined>
-): string | null {
-  for (const candidate of candidates) {
-    const trimmed = candidate?.trim();
-    if (trimmed) return trimmed;
-  }
-  return null;
 }
 
 function NewAgentCard({
@@ -491,6 +522,7 @@ function CollapsibleAgentGroup({
   agents,
   collapsed,
   defaultModel,
+  presenceLookup,
   startingAgentPubkey,
   onToggle,
   onOpenAgentProfile,
@@ -501,6 +533,7 @@ function CollapsibleAgentGroup({
   agents: ManagedAgent[];
   collapsed: ReadonlySet<string>;
   defaultModel: string;
+  presenceLookup: PresenceLookup | null | undefined;
   startingAgentPubkey: string | null;
   onToggle: (key: string) => void;
   onOpenAgentProfile: (
@@ -532,6 +565,7 @@ function CollapsibleAgentGroup({
               agent={agent}
               defaultModel={defaultModel}
               key={agent.pubkey}
+              presenceLookup={presenceLookup}
               startingAgentPubkey={startingAgentPubkey}
               onOpenAgentProfile={onOpenAgentProfile}
               onStartAgent={onStartAgent}

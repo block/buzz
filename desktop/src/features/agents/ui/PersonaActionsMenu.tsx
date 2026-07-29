@@ -32,7 +32,10 @@ export function PersonaActionsMenu({
   /** Profile agent instance linked to this definition, if one exists. */
   linkedAgent: ManagedAgent | undefined;
   onDuplicate: (persona: AgentPersona) => void;
-  onEdit: (persona: AgentPersona) => void;
+  onEdit: (
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) => void;
   onShare: (
     persona: AgentPersona,
     linkedAgent: ManagedAgent | undefined,
@@ -59,7 +62,10 @@ export function PersonaActionsMenu({
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
         {canEdit ? (
-          <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>
+          <DropdownMenuItem
+            disabled={disabled}
+            onClick={() => onEdit(persona, linkedAgent)}
+          >
             <Pencil className="h-4 w-4" />
             Edit
           </DropdownMenuItem>

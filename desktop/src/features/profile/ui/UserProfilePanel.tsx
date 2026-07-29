@@ -68,8 +68,15 @@ import {
 } from "@/features/profile/ui/UserProfilePanelSections";
 import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProfileAgentActions";
-import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
+import {
+  useProfileAgentDeletion,
+  usePersonaDeleteCascade,
+} from "@/features/profile/ui/UserProfilePanelDeletion";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
+import {
+  profileDialogEditsProviderRecord,
+  profileEditAgentTarget,
+} from "@/features/profile/ui/profileEditAgentTarget";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
 import { UserProfilePersonaDialogs } from "@/features/profile/ui/UserProfilePersonaDialogs";
 import { UserProfileSnapshotExportDialog } from "@/features/profile/ui/UserProfileSnapshotExportDialog";
@@ -398,12 +405,16 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona) {
+    if (
+      profileEditAgentTarget({ managedAgent, resolvedPersona }) ===
+        "definition" &&
+      resolvedPersona
+    ) {
       setPersonaDialogState(editPersonaDialogState(resolvedPersona));
       return;
     }
     setEditAgentOpen(true);
-  }, [resolvedPersona]);
+  }, [managedAgent, resolvedPersona]);
 
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({
@@ -595,6 +606,12 @@ export function UserProfilePanel({
     setPersonaActiveMutation.mutateAsync,
   ]);
 
+  // What the delete takes with it: the count, and the remote units it cannot stop.
+  const {
+    instanceCount: personaDeleteInstanceCount,
+    remoteInstances: personaDeleteRemoteInstances,
+  } = usePersonaDeleteCascade(managedAgentsQuery.data, personaToDelete);
+
   const handleConfirmDeletePersona = React.useCallback(
     async (personaToConfirm: AgentPersona) => {
       if (personaToConfirm.sourceTeam) {
@@ -604,7 +621,12 @@ export function UserProfilePanel({
       }
 
       try {
-        await deletePersonaMutation.mutateAsync(personaToConfirm.id);
+        await deletePersonaMutation.mutateAsync({
+          id: personaToConfirm.id,
+          // The dialog named every orphaned remote unit above, so confirming
+          // it is the acknowledgement the backend pre-flight requires.
+          forceRemoteDelete: personaDeleteRemoteInstances.length > 0,
+        });
         toast.success(`Deleted ${personaToConfirm.displayName}.`);
         setPersonaToDelete(null);
         onClose();
@@ -614,19 +636,7 @@ export function UserProfilePanel({
         );
       }
     },
-    [deletePersonaMutation.mutateAsync, onClose],
-  );
-
-  // Count of managed-agent instances backed by the persona being deleted.
-  // Shown in the confirm dialog so the user knows what will be cascade-deleted.
-  const personaDeleteInstanceCount = React.useMemo(
-    () =>
-      personaToDelete
-        ? (managedAgentsQuery.data ?? []).filter(
-            (a) => a.personaId === personaToDelete.id,
-          ).length
-        : 0,
-    [managedAgentsQuery.data, personaToDelete],
+    [deletePersonaMutation.mutateAsync, onClose, personaDeleteRemoteInstances],
   );
 
   const handleAddedToChannel = React.useCallback(
@@ -926,6 +936,10 @@ export function UserProfilePanel({
             ? createPersonaMutation.error
             : null
         }
+        editsProviderRecord={profileDialogEditsProviderRecord({
+          initialValues: personaDialogState?.initialValues,
+          managedAgent,
+        })}
         instanceCount={personaDeleteInstanceCount}
         isPending={
           createPersonaMutation.isPending ||
@@ -935,6 +949,7 @@ export function UserProfilePanel({
         }
         personaDialogState={personaDialogState}
         personaToDelete={personaToDelete}
+        remoteInstances={personaDeleteRemoteInstances}
         runtimes={acpRuntimesQuery.data ?? []}
         runtimesLoading={acpRuntimesQuery.isLoading}
         updateError={

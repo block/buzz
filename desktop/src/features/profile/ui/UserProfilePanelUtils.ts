@@ -292,7 +292,14 @@ export function personaManagedAgentUpdate(
     hasChanges = true;
   }
 
+  // A provider-backed record's harness lives on the HOST, and the catalog entry
+  // below was discovered on THIS computer: its command is a local binary path,
+  // its args are what that local build wants. Writing them over the pin would
+  // replace a working `hermes --profile marshall acp` with a path that does not
+  // exist on the host, from a dialog that never said it would touch the
+  // harness. The pin is only editable where it was made — at create/deploy.
   const runtimeChanged =
+    agent.backend.type === "local" &&
     options.previousPersona !== undefined &&
     options.previousPersona.runtime !== persona.runtime;
   const runtime = runtimeChanged

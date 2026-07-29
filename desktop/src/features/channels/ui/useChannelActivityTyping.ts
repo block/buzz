@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { reportChannelBotTyping } from "@/features/agents/agentWorkingSignal";
+import { resolveAgentAvatarUrl } from "@/features/agents/lib/agentAvatarUrl";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
@@ -151,7 +152,15 @@ export function mergeAgentNamesIntoProfiles(
     merged[key] = {
       ...merged[key],
       displayName: merged[key]?.displayName || agent.name,
-      avatarUrl: merged[key]?.avatarUrl ?? agent.avatarUrl,
+      // A local record was stamped with its runtime's avatar at create time; a
+      // provider-backed one never was, because the host's catalog carries no
+      // image on purpose. Without the pin's mark, a remote agent's every
+      // message in the timeline falls back to blank initials while its local
+      // twin shows a logo. Same precedence either way: a published profile
+      // still wins over the harness.
+      avatarUrl:
+        merged[key]?.avatarUrl ??
+        resolveAgentAvatarUrl({ agent, recordAvatarUrl: agent.avatarUrl }),
       nip05Handle: merged[key]?.nip05Handle ?? null,
       ownerPubkey: merged[key]?.ownerPubkey ?? currentPubkey ?? null,
       isAgent: true,

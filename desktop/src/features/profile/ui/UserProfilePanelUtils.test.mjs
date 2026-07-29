@@ -152,6 +152,34 @@ test("personaManagedAgentUpdate leaves runtime fields alone when runtime is unch
   );
 });
 
+test("personaManagedAgentUpdate never rewrites a remote record's harness pin", () => {
+  // The catalog entry below was discovered on THIS computer. Writing its
+  // command over a host pin would swap a working `hermes --profile marshall
+  // acp` for a path that does not exist there — from a dialog that only asked
+  // about the template's runtime. The rest of the template still syncs.
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({
+        agentCommand: "hermes",
+        agentArgs: ["--profile", "marshall", "acp"],
+        backend: { type: "provider", id: "ssh", config: { ssh_host: "vps" } },
+      }),
+      persona({ runtime: "claude" }),
+      {
+        previousPersona: persona({ runtime: "goose" }),
+        runtimes: [runtime()],
+      },
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+    },
+  );
+});
+
 test("parseProfilePanelView accepts all profile panel subviews", () => {
   for (const view of [
     "summary",
