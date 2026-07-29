@@ -91,7 +91,7 @@ test("removes Unicode tag payloads and default-ignorable controls", () => {
   assert.equal(
     mcpAppMessageText({
       role: "user",
-      content: "A\u00ad\u180e\u180f\u200c\ufe0f\ufff0\u3164\u{e0080}\u{e01f0}B",
+      content: "A\u00ad\u180e\u180f\ufe0f\ufff0\u3164\u{e0080}\u{e01f0}B",
     }),
     "AB",
   );
@@ -108,5 +108,12 @@ test("preserves joiners used by emoji and complex scripts", () => {
       content: "👩‍💻",
     }),
     "👩‍💻",
+  );
+  assert.equal(
+    mcpAppMessageText({
+      role: "user",
+      content: "می‌رود",
+    }),
+    "می‌رود",
   );
 });

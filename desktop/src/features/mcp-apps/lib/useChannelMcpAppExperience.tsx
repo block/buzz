@@ -5,6 +5,7 @@ import {
   mcpAppAttributedMessage,
   MCP_APP_POST_MAX_CHARS,
   MCP_APP_POST_MAX_LINES,
+  mcpAppDisplayText,
   mcpAppMessageText,
 } from "@/features/mcp-apps/lib/mcpAppMessage";
 import { useChannelMcpApps } from "@/features/mcp-apps/lib/useChannelMcpApps";
@@ -220,7 +221,10 @@ export function useMcpAppUi(
     } catch (cause) {
       setPostError(
         cause instanceof Error
-          ? cause.message
+          ? mcpAppDisplayText(
+              cause.message,
+              "Buzz could not post the app message.",
+            )
           : "Buzz could not post the app message.",
       );
     } finally {

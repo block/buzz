@@ -11,7 +11,9 @@ function isUnsafeDisplayCharacter(character: string): boolean {
   return (
     (codePoint <= 0x1f && codePoint !== 0x09 && codePoint !== 0x0a) ||
     (codePoint >= 0x7f && codePoint <= 0x9f) ||
-    (codePoint !== 0x200d && DEFAULT_IGNORABLE_CHARACTER_RE.test(character))
+    (codePoint !== 0x200c &&
+      codePoint !== 0x200d &&
+      DEFAULT_IGNORABLE_CHARACTER_RE.test(character))
   );
 }
 
