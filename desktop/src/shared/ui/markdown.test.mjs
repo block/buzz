@@ -521,23 +521,25 @@ test("rehypeImageGallery: leaves a single trailing image in the text flow", () =
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
-// which would break copy → paste → click for `buzz://message?…` links
-// end-to-end. We pass a custom `urlTransform` that delegates to the
-// default for `buzz://message` and legacy `buzz://message` hrefs.
+// which would break copy → paste → click for `buzz://message?…` and editor
+// deep links (`cursor://…`, `vscode://…`) end-to-end. We pass a custom
+// `urlTransform` that preserves those hrefs and delegates everything else
+// to the default.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
 // and asserts the link href survives to the rendered DOM. Mirrors the
-// `markdown.tsx` source — keep in sync if either changes.
+// `markdown/utils.ts` source — keep in sync if either changes.
 
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
+import { isEditorDeepLink } from "../lib/url.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 function messageLinkUrlTransform(value, key) {
-  if (key === "href" && isMessageLink(value)) {
+  if (key === "href" && (isMessageLink(value) || isEditorDeepLink(value))) {
     return value;
   }
   return defaultUrlTransform(value);
@@ -583,6 +585,21 @@ test("messageLinkUrlTransform: still strips javascript: scheme", () => {
 test("messageLinkUrlTransform: passes http(s) through unchanged", () => {
   const html = renderMarkdown("[ext](https://example.com/path)");
   assert.match(html, /href="https:\/\/example\.com\/path"/);
+});
+
+test("messageLinkUrlTransform: preserves cursor:// file deep link", () => {
+  const html = renderMarkdown(
+    "[open](cursor://file/Users/example/agent-kit/README.md)",
+  );
+  assert.match(
+    html,
+    /href="cursor:\/\/file\/Users\/example\/agent-kit\/README\.md"/,
+  );
+});
+
+test("messageLinkUrlTransform: preserves vscode:// deep link", () => {
+  const html = renderMarkdown("[open](vscode://file/Users/example/agent-kit)");
+  assert.match(html, /href="vscode:\/\/file\/Users\/example\/agent-kit"/);
 });
 
 test("messageLinkUrlTransform: preserves legacy buzz://message href", () => {
@@ -736,6 +753,43 @@ test("remarkMessageLinks: non-message buzz:// URLs are not matched", () => {
   assert.equal(kids.length, 1);
   assert.equal(kids[0].type, "text");
   assert.equal(kids[0].value, original);
+});
+
+import remarkEditorDeepLinks from "../../features/messages/lib/remarkEditorDeepLinks.ts";
+
+function runEditorDeepLinkPlugin(tree) {
+  remarkEditorDeepLinks()(tree);
+  return tree;
+}
+
+test("remarkEditorDeepLinks: bare cursor:// URL becomes a link node", () => {
+  const href = "cursor://file/Users/example/agent-kit";
+  const tree = runEditorDeepLinkPlugin(paragraph(text(href)));
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "link");
+  assert.equal(kids[0].url, href);
+  assert.equal(kids[0].children[0].value, href);
+});
+
+test("remarkEditorDeepLinks: bare vscode:// URL becomes a link node", () => {
+  const href = "vscode://file/Users/example/agent-kit/README.md";
+  const tree = runEditorDeepLinkPlugin(paragraph(text(href)));
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "link");
+  assert.equal(kids[0].url, href);
+});
+
+test("remarkEditorDeepLinks: trailing punctuation stays outside URL", () => {
+  const href = "cursor://file/Users/example/agent-kit";
+  const tree = runEditorDeepLinkPlugin(paragraph(text(`open ${href}.`)));
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 3);
+  assert.equal(kids[0].value, "open ");
+  assert.equal(kids[1].type, "link");
+  assert.equal(kids[1].url, href);
+  assert.equal(kids[2].value, ".");
 });
 
 test("remarkMessageLinks: text inside inlineCode is left alone", () => {

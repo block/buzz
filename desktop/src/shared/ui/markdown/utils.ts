@@ -2,6 +2,7 @@ import * as React from "react";
 import { defaultUrlTransform } from "react-markdown";
 
 import { isMessageLink } from "@/features/messages/lib/messageLink";
+import { isEditorDeepLink } from "@/shared/lib/url";
 
 export function useStableArray<T>(arr: T[]): T[] {
   const ref = React.useRef(arr);
@@ -166,13 +167,15 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
 }
 
 /**
- * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
+ * `urlTransform` for `<ReactMarkdown>` that preserves in-app and editor deep
  * links. The default transform strips unknown schemes (returns `""`) before
  * the `a` component override can see them, which would break copy → paste →
- * click end-to-end. Everything else delegates to `defaultUrlTransform`.
+ * click end-to-end for `buzz://message?…`, `cursor://…`, and `vscode://…`.
+ * Everything else delegates to `defaultUrlTransform` (http(s), mailto; strips
+ * `javascript:` and other unsafe schemes).
  */
 export function messageLinkUrlTransform(value: string, key: string): string {
-  if (key === "href" && isMessageLink(value)) {
+  if (key === "href" && (isMessageLink(value) || isEditorDeepLink(value))) {
     return value;
   }
   return defaultUrlTransform(value);
