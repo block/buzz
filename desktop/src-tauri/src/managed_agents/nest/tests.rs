@@ -37,7 +37,7 @@ fn nest_skill_contains_safe_mention_workflow() {
         .contains("permits unresolved or ambiguous `@Name` text as presentation-only"));
     assert!(BUZZ_CLI_SKILL_MD.contains("signed event's `mention_pubkeys`"));
     assert!(BUZZ_CLI_SKILL_MD.contains("no follow-up verification command is needed"));
-    assert!(BUZZ_CLI_SKILL_MD.contains("--allow-non-member-mentions"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Add membership separately only when authorized"));
     assert!(BUZZ_CLI_SKILL_MD.contains("never changes membership automatically"));
 }
 

@@ -569,7 +569,6 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
-    pub allow_non_member_mentions: bool,
 }
 
 pub async fn cmd_send_message(
@@ -600,10 +599,10 @@ pub async fn cmd_send_message(
     let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
-    if !missing.is_empty() && !p.allow_non_member_mentions {
+    if !missing.is_empty() {
         return Err(CliError::Usage(
             serde_json::json!({
-                "message": "mentioned pubkeys are not channel members; add them explicitly or retry with --allow-non-member-mentions",
+                "message": "mentioned pubkeys are not channel members; add them explicitly before retrying",
                 "missing_member_pubkeys": missing,
                 "add_member_command": format!("buzz channels add-member --channel {} --pubkey <pubkey> --role <member|bot>", p.channel_id),
             })
@@ -881,7 +880,6 @@ pub async fn dispatch(
             broadcast,
             files,
             mentions,
-            allow_non_member_mentions,
         } => {
             cmd_send_message(
                 client,
@@ -893,7 +891,6 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
-                    allow_non_member_mentions,
                 },
             )
             .await

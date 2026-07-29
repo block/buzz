@@ -3637,7 +3637,8 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("success JSON's `mention_pubkeys`"));
         assert!(prompt.contains("no follow-up verification command is needed"));
         assert!(prompt.contains("stops before sending"));
-        assert!(prompt.contains("--allow-non-member-mentions"));
+        assert!(prompt
+            .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
 }
