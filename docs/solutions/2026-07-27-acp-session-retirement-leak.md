@@ -94,23 +94,28 @@ quiet traffic.
 Close and cancellation cleanup failures are fail-closed. Buzz preserves
 retryable work, emits a redacted cleanup error, and replaces the process group.
 Replacement itself is also fail-closed: no new adapter starts unless bounded
-shutdown reaps the direct child and proves the original process group absent.
-If either proof is unavailable, the exact slot enters a process-lifetime
+shutdown verifies the platform's explicit containment boundary. Unix requires
+both direct-child reaping and proof that the original process group is absent.
+Windows currently requires verified direct-child reaping; adapter descendants
+remain a documented residual risk until Buzz places adapters in Job Objects.
+Other platforms without a declared containment boundary fail closed. When the
+required proof is unavailable, the exact slot enters a process-lifetime
 quarantine that maintenance and the ordinary crash cooldown cannot bypass. The
 eager-startup path stays alive in a visible degraded state rather than exiting
 into an automatic service restart, and graceful shutdown never reports clean
-completion while any original process ownership remains unverified. A
-checked-out task panic uses the same quarantine because unwinding destroys the
-only typed child owner and therefore cannot produce positive reaping evidence.
+completion while the platform-supported ownership boundary remains unverified.
+A checked-out task panic uses the same quarantine because unwinding destroys
+the only typed child owner and therefore cannot produce positive reaping
+evidence.
 An automatic-exit path with any unverified cleanup owner remains alive in that
 same non-spawning quarantine until an explicit shutdown request arrives; it
 cannot exit into a service-manager restart over a possibly live process group.
 Graceful shutdown cooperatively cancels checked-out prompt and heartbeat tasks,
 recovers each typed adapter owner, and then performs the bounded adapter
 shutdown and absence proof. It does not use task abortion as cleanup evidence.
-On platforms where descendant containment is unavailable, cleanup is
-unverified and therefore quarantined rather than inferred from direct-child
-exit.
+On platforms without the explicit Unix process-group or interim Windows
+direct-child boundary, cleanup is unverified and therefore quarantined rather
+than inferred from direct-child exit.
 
 The stored spawn-time process-group ID remains useful for read-only absence
 probes, but Buzz signals it only while Tokio still exposes the matching live
@@ -256,8 +261,9 @@ and asserts:
     and terminal denials are visible without retry spin;
 17. pre-loop and automatic-exit cleanup failures remain in non-spawning
     quarantine until explicit shutdown; graceful shutdown recovers checked-out
-    owners for bounded reap/probe, and unavailable descendant containment
-    fails closed;
+    owners for bounded reap/probe, Unix requires process-group absence,
+    Windows requires direct-child reaping, and undeclared platform boundaries
+    fail closed;
 18. startup signal tasks are removed on shutdown, while a second SIGINT or
     SIGTERM during graceful cleanup enters the hard-cleanup path;
 19. shutdown preempts blocked session setup, context preparation, and initial

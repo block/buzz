@@ -92,7 +92,9 @@ After the operator-approved restart:
    rotation, model switching, and a controlled membership-removal cycle;
 3. confirm every retired session produces a successful `session/close`, or a
    capability-negotiated process replacement after the old adapter's direct
-   child is reaped and its original process group is proven absent;
+   child is reaped and the platform boundary is verified: the original process
+   group is absent on Unix; Windows currently stops at direct-child reaping
+   until adapters are assigned to Job Objects;
 4. force separate eager-startup and graceful-shutdown cleanup failures. Eager
    startup must remain visibly degraded without starting an overlapping owner,
    and graceful shutdown must not report a clean exit while ownership of any
@@ -158,8 +160,10 @@ After the operator-approved restart:
    traffic or a quiet interval. Pre-loop and automatic-exit cleanup failures
    must remain alive in non-spawning quarantine until explicit shutdown.
    Graceful shutdown must cooperatively cancel checked-out prompt and heartbeat
-   work, recover each typed adapter owner, and perform bounded reap/probe;
-   unavailable descendant containment must not be reported as verified;
+   work, recover each typed adapter owner, and perform bounded reap/probe. Unix
+   must prove process-group absence; Windows must prove direct-child reaping;
+   platforms without either declared boundary must not report cleanup as
+   verified;
 16. send a second SIGINT or SIGTERM while graceful cleanup is pending and
     confirm it enters the bounded hard-cleanup path. Repeated startup/shutdown
     must leave no orphaned signal-handler tasks. Block `session/new` and the

@@ -143,6 +143,12 @@ pub enum ProcessGroupShutdownStatus {
         /// Platform error number returned by the process-group probe.
         errno: i32,
     },
+    /// Windows direct-child containment completed and the child was reaped.
+    ///
+    /// Windows does not yet place adapters in a Job Object, so this is an
+    /// explicit bounded platform boundary rather than descendant-absence proof.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    WindowsDirectChildBoundary,
     /// Process-group containment is unavailable on this platform.
     ///
     /// Direct-child termination alone is insufficient ownership proof.
@@ -170,9 +176,21 @@ fn classify_shutdown(
     direct_child: DirectChildShutdownStatus,
     process_group: ProcessGroupShutdownStatus,
 ) -> Result<(), ShutdownError> {
+    classify_shutdown_with_windows_boundary(process_id, direct_child, process_group, cfg!(windows))
+}
+
+fn classify_shutdown_with_windows_boundary(
+    process_id: u32,
+    direct_child: DirectChildShutdownStatus,
+    process_group: ProcessGroupShutdownStatus,
+    windows_direct_child_boundary_supported: bool,
+) -> Result<(), ShutdownError> {
     let child_verified = direct_child == DirectChildShutdownStatus::Reaped;
     let group_verified = match process_group {
         ProcessGroupShutdownStatus::Absent => true,
+        ProcessGroupShutdownStatus::WindowsDirectChildBoundary => {
+            windows_direct_child_boundary_supported
+        }
         ProcessGroupShutdownStatus::Unavailable
         | ProcessGroupShutdownStatus::Present
         | ProcessGroupShutdownStatus::ProbeFailed { .. } => false,
@@ -535,10 +553,10 @@ impl AcpClient {
     /// wait cannot verify exit. The group ID is retained independently of
     /// [`Child::id`], so verification still runs after Tokio clears the live ID.
     ///
-    /// On non-Unix platforms process-group containment is unavailable, so
-    /// shutdown fails closed after bounded direct-child termination. The
-    /// owning slot remains quarantined rather than treating possible
-    /// descendants as verified absent.
+    /// On Windows, a reaped direct child is the current explicit containment
+    /// boundary until adapter processes are placed in Job Objects. Other
+    /// non-Unix platforms fail closed because descendant containment remains
+    /// unavailable.
     ///
     /// Descendants that deliberately escape the original group with `setsid(2)`
     /// are outside this API's containment and verification boundary.
@@ -594,15 +612,13 @@ impl AcpClient {
         #[cfg(not(unix))]
         {
             // No portable descendant process-group primitive is available.
-            // Verify the direct child only and report that group containment
-            // was unavailable in any typed failure.
             let _ = self.child.start_kill();
             let direct_child = wait_for_direct_child(&mut self.child, SHUTDOWN_TIMEOUT).await;
-            let result = classify_shutdown(
-                self.spawn_process_id,
-                direct_child,
-                ProcessGroupShutdownStatus::Unavailable,
-            );
+            #[cfg(windows)]
+            let containment = ProcessGroupShutdownStatus::WindowsDirectChildBoundary;
+            #[cfg(all(not(unix), not(windows)))]
+            let containment = ProcessGroupShutdownStatus::Unavailable;
+            let result = classify_shutdown(self.spawn_process_id, direct_child, containment);
             if result.is_ok() {
                 self.shutdown_verified = true;
             }
@@ -3254,6 +3270,65 @@ mod tests {
         .is_ok());
     }
 
+    #[test]
+    fn shutdown_classification_accepts_reaped_child_at_windows_containment_boundary() {
+        assert!(classify_shutdown_with_windows_boundary(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::WindowsDirectChildBoundary,
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn windows_containment_boundary_still_rejects_unreaped_direct_child() {
+        let timeout = std::time::Duration::from_secs(5);
+        let error = classify_shutdown_with_windows_boundary(
+            41,
+            DirectChildShutdownStatus::TimedOut { timeout },
+            ProcessGroupShutdownStatus::WindowsDirectChildBoundary,
+            true,
+        )
+        .expect_err("the Windows boundary requires verified direct-child reaping");
+
+        assert_eq!(
+            error.direct_child,
+            DirectChildShutdownStatus::TimedOut { timeout }
+        );
+        assert_eq!(
+            error.process_group,
+            ProcessGroupShutdownStatus::WindowsDirectChildBoundary
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_containment_boundary_is_rejected_off_windows() {
+        let error = classify_shutdown(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::WindowsDirectChildBoundary,
+        )
+        .expect_err("the Windows direct-child boundary must not weaken other platforms");
+
+        assert_eq!(
+            error.process_group,
+            ProcessGroupShutdownStatus::WindowsDirectChildBoundary
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn production_classifier_accepts_reaped_child_at_windows_boundary() {
+        assert!(classify_shutdown(
+            41,
+            DirectChildShutdownStatus::Reaped,
+            ProcessGroupShutdownStatus::WindowsDirectChildBoundary,
+        )
+        .is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_group_signal_requires_live_spawn_identity_match() {
@@ -3312,7 +3387,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(unix))]
+    #[cfg(all(not(unix), not(windows)))]
     #[test]
     fn shutdown_classification_quarantines_when_descendant_containment_is_unavailable() {
         let error = classify_shutdown(
@@ -3325,15 +3400,14 @@ mod tests {
         assert_eq!(error.process_group, ProcessGroupShutdownStatus::Unavailable);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn shutdown_classification_rejects_unavailable_group_proof_on_unix() {
+    fn shutdown_classification_rejects_unavailable_containment() {
         let error = classify_shutdown(
             41,
             DirectChildShutdownStatus::Reaped,
             ProcessGroupShutdownStatus::Unavailable,
         )
-        .expect_err("Unix shutdown succeeds only with an absent original process group");
+        .expect_err("Unavailable containment must remain fail-closed on every platform");
 
         assert_eq!(error.process_group, ProcessGroupShutdownStatus::Unavailable);
     }
