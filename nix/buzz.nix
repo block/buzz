@@ -3,16 +3,21 @@
   rustPlatform,
   fetchPnpmDeps,
   fetchurl,
+  linkFarm,
+  jq,
+  moreutils,
   cmake,
   cargo-tauri,
   nodejs,
   pnpm,
   pnpmConfigHook,
   pkg-config,
-  wrapGAppsHook4,
-  makeWrapper,
+  autoPatchelfHook,
+  wrapGAppsHook3,
+  yq,
   gst_all_1,
   glib-networking,
+  bzip2,
   openssl,
   webkitgtk_4_1,
   alsa-lib,
@@ -20,9 +25,9 @@
   dbus,
   glib,
   gtk3,
+  libayatana-appindicator,
   libsoup_3,
   librsvg,
-  darwin,
   libiconv,
   stdenv,
   src,
@@ -30,8 +35,12 @@
 
 let
   versions = import ./versions.nix;
+  version =
+    (builtins.fromTOML (builtins.readFile (src + "/desktop/src-tauri/Cargo.toml"))).package.version;
 
-  sherpaOnnxSystemConfig = versions.sherpaOnnx.systems.${stdenv.hostPlatform.system} or (builtins.throw "Unsupported platform: ${stdenv.hostPlatform.system}. Supported platforms: ${builtins.toString (builtins.attrNames versions.sherpaOnnx.systems)}");
+  sherpaOnnxSystemConfig =
+    versions.sherpaOnnx.systems.${stdenv.hostPlatform.system}
+      or (builtins.throw "Unsupported platform: ${stdenv.hostPlatform.system}. Supported platforms: ${builtins.toString (builtins.attrNames versions.sherpaOnnx.systems)}");
 
   sherpaOnnxArchive = fetchurl {
     name = "sherpa-onnx-v${versions.sherpaOnnx.version}-${sherpaOnnxSystemConfig.urlSuffix}.tar.bz2";
@@ -39,21 +48,55 @@ let
     hash = sherpaOnnxSystemConfig.hash;
   };
 
-  sidecarPackages = [ "buzz-acp" "buzz-agent" "buzz-dev-mcp" "git-credential-nostr" "buzz-cli" ];
-  sidecarBinNames = [ "buzz-acp" "buzz-agent" "buzz-dev-mcp" "git-credential-nostr" "buzz" ];
+  sherpaOnnxArchiveDir = linkFarm "sherpa-onnx-archive" [
+    {
+      name = "sherpa-onnx-v${versions.sherpaOnnx.version}-${sherpaOnnxSystemConfig.urlSuffix}.tar.bz2";
+      path = sherpaOnnxArchive;
+    }
+  ];
 
+  sidecarPackages = [
+    "buzz-acp"
+    "buzz-agent"
+    "buzz-dev-mcp"
+    "git-credential-nostr"
+    "buzz-cli"
+  ];
+  sidecarBinNames = [
+    "buzz-acp"
+    "buzz-agent"
+    "buzz-dev-mcp"
+    "git-credential-nostr"
+    "buzz"
+  ];
+  prunePnpmDevTools = ''
+    jq 'del(.devDependencies["@biomejs/biome"])' package.json \
+      | sponge package.json
+    jq 'del(.devDependencies["@tauri-apps/cli"])' desktop/package.json \
+      | sponge desktop/package.json
+
+    yq -y -i \
+      'del(.importers["."].devDependencies["@biomejs/biome"])
+       | del(.importers.desktop.devDependencies["@tauri-apps/cli"])' \
+      pnpm-lock.yaml
+  '';
   sidecars = rustPlatform.buildRustPackage {
     pname = "buzz-sidecars";
-    version = versions.buzzVersion;
+    inherit version;
 
-    src = src;
+    inherit src;
 
     cargoLock = {
       lockFileContents = builtins.readFile (src + "/Cargo.lock");
       outputHashes = versions.sidecarCargoOutputHashes;
     };
 
-    cargoBuildFlags = lib.concatLists (map (p: [ "-p" p ]) sidecarPackages);
+    cargoBuildFlags = lib.concatLists (
+      map (p: [
+        "-p"
+        p
+      ]) sidecarPackages
+    );
     doCheck = false;
 
     nativeBuildInputs = [
@@ -67,82 +110,114 @@ let
 
     meta = with lib; {
       description = "Buzz sidecar binaries";
-      license = licenses.unfree;
-      platforms = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
+      license = licenses.asl20;
+      platforms = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
     };
   };
 in
-rustPlatform.buildRustPackage (finalAttrs: {
-  pname = "buzz-desktop";
-  version = versions.buzzVersion;
+{
+  buzz-sidecars = sidecars;
 
-  src = src;
+  buzz-desktop = rustPlatform.buildRustPackage (finalAttrs: {
+    pname = "buzz-desktop";
+    inherit version src;
 
-  cargoRoot = "desktop/src-tauri";
-  buildAndTestSubdir = "desktop/src-tauri";
+    cargoRoot = "desktop/src-tauri";
+    buildAndTestSubdir = "desktop/src-tauri";
 
-  cargoLock = {
-    lockFileContents = builtins.readFile (src + "/desktop/src-tauri/Cargo.lock");
-    outputHashes = versions.desktopCargoOutputHashes;
-  };
+    cargoLock = {
+      lockFileContents = builtins.readFile (src + "/desktop/src-tauri/Cargo.lock");
+      outputHashes = versions.desktopCargoOutputHashes;
+    };
 
-  doCheck = false;
+    doCheck = false;
 
-  pnpmDeps = fetchPnpmDeps {
-    inherit (finalAttrs) pname version src;
-    pnpm = pnpm;
-    fetcherVersion = 4;
-    hash = versions.pnpmHash;
-  };
+    pnpmDeps = fetchPnpmDeps {
+      inherit (finalAttrs) pname version src;
+      inherit pnpm;
+      pnpmWorkspaces = [ "buzz" ];
+      fetcherVersion = 4;
+      hash = versions.pnpmHash;
+      postPatch = prunePnpmDevTools;
+      prePnpmInstall = ''
+        pnpm config set network-concurrency 4
+        pnpm config set fetch-retries 5
+        pnpm config set fetch-retry-maxtimeout 120000
+        pnpm config set fetch-timeout 600000
+      '';
+    };
 
-  preBuild = ''
-    mkdir -p $TMPDIR/sherpa-onnx-archive
-    ln -sf ${sherpaOnnxArchive} $TMPDIR/sherpa-onnx-archive/sherpa-onnx-v${versions.sherpaOnnx.version}-${sherpaOnnxSystemConfig.urlSuffix}.tar.bz2
-    export SHERPA_ONNX_ARCHIVE_DIR=$TMPDIR/sherpa-onnx-archive
+    postPatch = prunePnpmDevTools;
 
-    mkdir -p desktop/src-tauri/binaries
-    for bin in ${builtins.concatStringsSep " " sidecarBinNames}; do
-      cp ${sidecars}/bin/$bin desktop/src-tauri/binaries/$bin-${stdenv.hostPlatform.config}
-    done
-  '';
+    pnpmWorkspaces = [ "buzz" ];
 
-  nativeBuildInputs = [
-    cmake
-    cargo-tauri.hook
-    nodejs
-    pnpmConfigHook
-    pnpm
-    pkg-config
-  ] ++ lib.optionals stdenv.hostPlatform.isLinux [ wrapGAppsHook4 ];
+    preBuild = ''
+      export SHERPA_ONNX_ARCHIVE_DIR=${sherpaOnnxArchiveDir}
+      ${lib.optionalString stdenv.hostPlatform.isLinux ''
+        export LD_LIBRARY_PATH=${lib.makeLibraryPath [ bzip2 ]}
+      ''}
 
-  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
-    alsa-lib
-    libopus
-    dbus
-    glib
-    gtk3
-    libsoup_3
-    librsvg
-    glib-networking
-    openssl
-    webkitgtk_4_1
-    gst_all_1.gstreamer
-    gst_all_1.gst-plugins-base
-    gst_all_1.gst-plugins-good
-    gst_all_1.gst-plugins-bad
-  ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
-    libiconv
-    darwin.apple_sdk.frameworks.CoreFoundation
-    darwin.apple_sdk.frameworks.Security
-    darwin.apple_sdk.frameworks.SystemConfiguration
-    darwin.apple_sdk.frameworks.AppKit
-  ];
+      mkdir -p desktop/src-tauri/binaries
+      for bin in ${builtins.concatStringsSep " " sidecarBinNames}; do
+        cp ${sidecars}/bin/$bin desktop/src-tauri/binaries/$bin-${stdenv.hostPlatform.config}
+      done
+    '';
 
-  meta = with lib; {
-    description = "Buzz desktop app";
-    homepage = "https://buzz.ai";
-    license = licenses.unfree;
-      platforms = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
-    mainProgram = "buzz-desktop";
-  };
-})
+    nativeBuildInputs = [
+      cmake
+      cargo-tauri.hook
+      jq
+      moreutils
+      nodejs
+      pnpmConfigHook
+      pnpm
+      pkg-config
+      yq
+    ]
+    ++ lib.optionals stdenv.hostPlatform.isLinux [
+      autoPatchelfHook
+      wrapGAppsHook3
+    ];
+
+    buildInputs =
+      lib.optionals stdenv.hostPlatform.isLinux [
+        alsa-lib
+        bzip2
+        libopus
+        dbus
+        glib
+        gtk3
+        libayatana-appindicator
+        libsoup_3
+        librsvg
+        glib-networking
+        openssl
+        webkitgtk_4_1
+        gst_all_1.gstreamer
+        gst_all_1.gst-plugins-base
+        gst_all_1.gst-plugins-good
+        gst_all_1.gst-plugins-bad
+      ]
+      ++ lib.optionals stdenv.hostPlatform.isDarwin [ libiconv ];
+
+    passthru = {
+      inherit sherpaOnnxArchiveDir sidecars;
+    };
+
+    meta = with lib; {
+      description = "Buzz desktop app";
+      homepage = "https://buzz.ai";
+      license = licenses.asl20;
+      platforms = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+      mainProgram = "buzz-desktop";
+    };
+  });
+}
