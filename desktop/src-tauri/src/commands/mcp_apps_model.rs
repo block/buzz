@@ -192,8 +192,8 @@ pub(super) fn parse_tools(value: &Value) -> Result<Vec<McpAppTool>, String> {
         .ok_or_else(|| "MCP tools/list response is missing result.tools".to_string())?;
     let mut parsed = Vec::new();
     for tool in tools.iter().take(MAX_TOOLS) {
-        let name = text(tool.get("name"))
-            .ok_or_else(|| "MCP tool is missing a valid name".to_string())?;
+        let name =
+            text(tool.get("name")).ok_or_else(|| "MCP tool is missing a valid name".to_string())?;
         let input_schema = tool
             .get("inputSchema")
             .cloned()
@@ -250,9 +250,7 @@ fn valid_header_token(value: &str) -> bool {
         })
 }
 
-pub(super) fn parse_param_headers(
-    input_schema: &Value,
-) -> Result<Vec<McpParamHeader>, String> {
+pub(super) fn parse_param_headers(input_schema: &Value) -> Result<Vec<McpParamHeader>, String> {
     fn visit(
         schema: &Value,
         path: &mut Vec<String>,

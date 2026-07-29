@@ -47,11 +47,11 @@ const SANDBOX_PROXY_HTML: &str = include_str!("mcp_apps_sandbox_proxy.html");
 
 #[path = "mcp_apps_model.rs"]
 mod model;
+use model::*;
 pub use model::{
     McpAppHostState, McpAppResource, McpAppResourceCsp, McpAppResourcePermissions,
     McpAppServerDescriptor, McpAppTool, McpAppToolCaller, PreparedMcpAppView,
 };
-use model::*;
 
 fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
@@ -588,13 +588,9 @@ async fn post_mcp_raw(
             "application/json, text/event-stream",
         )
         .json(payload);
-    for (name, value) in build_mcp_headers(
-        era,
-        protocol_version,
-        session_id,
-        payload,
-        param_headers,
-    ) {
+    for (name, value) in
+        build_mcp_headers(era, protocol_version, session_id, payload, param_headers)
+    {
         request = request.header(name.as_str(), value.as_str());
     }
     let response = request
@@ -891,13 +887,13 @@ fn sandbox_csp(csp: &McpAppResourceCsp) -> String {
 
 #[path = "mcp_apps_host.rs"]
 mod host;
-pub use host::{
-    call_mcp_app_tool, connect_mcp_app_server, disconnect_mcp_app_server,
-    handle_mcp_app_protocol, list_mcp_app_resources, list_mcp_app_tools, prepare_mcp_app_view,
-    read_mcp_app_resource, release_mcp_app_view,
-};
 #[cfg(test)]
 use host::{app_tool_allowed, sandbox_proxy_html};
+pub use host::{
+    call_mcp_app_tool, connect_mcp_app_server, disconnect_mcp_app_server, handle_mcp_app_protocol,
+    list_mcp_app_resources, list_mcp_app_tools, prepare_mcp_app_view, read_mcp_app_resource,
+    release_mcp_app_view,
+};
 
 #[cfg(test)]
 #[path = "mcp_apps_tests.rs"]

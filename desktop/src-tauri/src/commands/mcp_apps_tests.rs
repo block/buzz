@@ -366,7 +366,10 @@ fn invalid_parameter_header_annotations_exclude_only_that_tool() {
     });
     let tools = parse_tools(&response).unwrap();
     assert_eq!(
-        tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+        tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["valid"]
     );
 }
