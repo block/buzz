@@ -18,6 +18,13 @@ class RelayConfig {
   /// Nostr secret key (bech32 nsec) for signing events and NIP-42 AUTH.
   final String? nsec;
 
+  /// The origin as persisted, before scheme canonicalization.
+  ///
+  /// Exists solely so identity-scoped storage keys written before [baseUrl]
+  /// was canonicalized stay reachable — see [readMigratedPref]. Never use it
+  /// for network I/O; [baseUrl] and [wsUrl] are the addresses to connect to.
+  String get storedOrigin => _baseUrl;
+
   /// Relay origin as an HTTP(S) URL.
   ///
   /// Communities are persisted with whichever scheme their onboarding flow
