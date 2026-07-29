@@ -836,6 +836,7 @@ pub async fn cmd_update_channel(
     description: Option<&str>,
     ttl: Option<i64>,
     no_ttl: bool,
+    agent_response: Option<&str>,
 ) -> Result<(), CliError> {
     // Outer Option: None leaves TTL unchanged. Inner: Some(secs) sets it,
     // None (from --no-ttl) clears it, making the channel permanent.
@@ -845,15 +846,23 @@ pub async fn cmd_update_channel(
         (None, false) => None,
     };
 
-    if name.is_none() && description.is_none() && ttl_change.is_none() {
+    if name.is_none() && description.is_none() && ttl_change.is_none() && agent_response.is_none() {
         return Err(CliError::Usage(
-            "at least one field required (--name, --description, --ttl, --no-ttl)".into(),
+            "at least one field required (--name, --description, --ttl, --no-ttl, --agent-response)"
+                .into(),
         ));
     }
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_update_channel(channel_uuid, name, description, None, ttl_change)
-        .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+    let builder = buzz_sdk::build_update_channel(
+        channel_uuid,
+        name,
+        description,
+        None,
+        ttl_change,
+        agent_response,
+    )
+    .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1130,6 +1139,7 @@ pub async fn dispatch(
             description,
             ttl,
             no_ttl,
+            agent_response,
         } => {
             cmd_update_channel(
                 client,
@@ -1138,6 +1148,9 @@ pub async fn dispatch(
                 description.as_deref(),
                 ttl,
                 no_ttl,
+                agent_response
+                    .as_ref()
+                    .map(crate::AgentResponsePolicy::as_str),
             )
             .await
         }

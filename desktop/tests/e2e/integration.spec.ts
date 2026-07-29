@@ -485,6 +485,10 @@ test("manage sheet updates channel details through the relay", async ({
   await expect(
     editDialog.getByTestId("channel-management-purpose"),
   ).toHaveCount(0);
+  await editDialog.getByTestId("channel-management-agent-response").click();
+  await page
+    .getByTestId("channel-management-agent-response-option-all")
+    .click();
   await editDialog.getByTestId("channel-management-save-changes").click();
   await expect(editDialog).toHaveCount(0);
 
@@ -519,6 +523,9 @@ test("manage sheet updates channel details through the relay", async ({
   await expect(
     reopenedEditDialog.getByTestId("channel-management-purpose"),
   ).toHaveCount(0);
+  await expect(
+    reopenedEditDialog.getByTestId("channel-management-agent-response"),
+  ).toContainText("Every message");
 });
 
 test("manage sheet archive and unarchive survives a reload through the relay", async ({

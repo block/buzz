@@ -1,7 +1,7 @@
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
+export type AgentResponsePolicy = "mentions" | "all";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
-
 export type Channel = {
   id: string;
   name: string;
@@ -19,8 +19,8 @@ export type Channel = {
   isMember: boolean;
   ttlSeconds: number | null;
   ttlDeadline: string | null;
+  agentResponsePolicy: AgentResponsePolicy;
 };
-
 export type ChannelDetail = Channel & {
   createdBy: string;
   createdAt: string;
@@ -33,7 +33,6 @@ export type ChannelDetail = Channel & {
   maxMembers: number | null;
   nip29GroupId: string | null;
 };
-
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;
@@ -61,6 +60,7 @@ export type UpdateChannelInput = {
   visibility?: ChannelVisibility;
   /** Omit to leave unchanged, `null` to clear (permanent), or a positive number of seconds to set. */
   ttlSeconds?: number | null;
+  agentResponse?: AgentResponsePolicy;
 };
 
 export type SetChannelTopicInput = {

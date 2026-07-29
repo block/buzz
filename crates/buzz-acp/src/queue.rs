@@ -995,6 +995,7 @@ pub struct ContextMessage {
 pub struct PromptChannelInfo {
     pub name: String,
     pub channel_type: String,
+    pub agent_response_policy: Option<buzz_core::channel::AgentResponsePolicy>,
 }
 
 /// Minimal profile fields needed to label users in ACP prompts.
@@ -2976,6 +2977,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "engineering".into(),
             channel_type: "stream".into(),
+            agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
         };
 
         let prompt = format_prompt(
@@ -3007,6 +3009,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
         };
 
         let prompt = format_prompt(
@@ -3117,6 +3120,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
         };
         let ctx = ConversationContext::Dm {
             messages: vec![ContextMessage {
@@ -3373,6 +3377,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
         };
         // Thread context fetched (as the fetch path does for DM replies).
         let ctx = ConversationContext::Thread {
@@ -3430,6 +3435,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
         };
 
         // No context fetched — hints only.
@@ -3925,6 +3931,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
         };
 
         let prompt = format_prompt(
@@ -3988,6 +3995,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
         };
 
         let prompt = format_prompt(

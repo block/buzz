@@ -560,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 25);
+        assert_eq!(migrations.len(), 26);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -899,11 +899,18 @@ mod tests {
             .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
 
+        assert_eq!(migrations[25].version, 26);
+        let agent_response = migrations[25].sql.as_str();
+        assert!(agent_response.contains("ADD COLUMN agent_response_policy"));
+        assert!(agent_response.contains("DEFAULT 'mentions'"));
+        assert!(agent_response.contains("IN ('mentions', 'all')"));
+
         let desired_schema = include_str!("../../../schema/schema.sql");
         assert!(
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
         );
+        assert!(desired_schema.contains("agent_response_policy"));
     }
 
     #[test]

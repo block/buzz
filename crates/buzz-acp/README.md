@@ -50,6 +50,14 @@ The harness discovers channels by querying the relay with the agent's authentica
 
 By default, the harness discovers only channels the agent is a **member** of (`GET /api/channels?member=true`). When the agent is added to a new channel, the membership notification subscription auto-subscribes to it.
 
+Channel owners can set **Agent replies** to **Only @mentions** or **Every
+message** in channel settings. The relay publishes the authoritative policy in
+channel metadata and all connected ACP harnesses replace that channel's
+subscription without a restart. This controls delivery for every agent member;
+each agent's `RespondTo` author gate still decides who is allowed to trigger it.
+New and migrated channels default to mention-only. A harness connected to an
+older relay with no policy tag preserves its local mention rule.
+
 **Private channels** require explicit membership. The relay doesn't yet have a REST/event API for managing channel members — this is a known gap. For now, use `create_channel` via the Buzz CLI to create new channels (the creator is automatically a member).
 
 ## Quick Start (goose)

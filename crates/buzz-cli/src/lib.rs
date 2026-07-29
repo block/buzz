@@ -132,6 +132,32 @@ impl std::fmt::Display for ChannelVisibility {
 }
 
 #[derive(Clone, clap::ValueEnum)]
+pub enum AgentResponsePolicy {
+    #[value(name = "mentions")]
+    Mentions,
+    #[value(name = "all")]
+    All,
+}
+
+impl AgentResponsePolicy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Mentions => "mentions",
+            Self::All => "all",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentResponsePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mentions => write!(f, "mentions"),
+            Self::All => write!(f, "all"),
+        }
+    }
+}
+
+#[derive(Clone, clap::ValueEnum)]
 pub enum PresenceStatus {
     #[value(name = "online")]
     Online,
@@ -570,7 +596,7 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, or ephemeral TTL
+    /// Update channel settings
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -588,6 +614,10 @@ pub enum ChannelsCmd {
         /// Clear an existing TTL, making the channel permanent.
         #[arg(long)]
         no_ttl: bool,
+        /// Agent response behavior for the channel. `all` delivers untagged
+        /// messages to every agent member; `mentions` keeps mention filtering.
+        #[arg(long, value_enum)]
+        agent_response: Option<AgentResponsePolicy>,
     },
     /// Set the channel topic
     Topic {

@@ -1471,7 +1471,12 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    for (channel_id, filter) in &mut channel_filters {
+        if let Some(channel_info) = channel_info_map.get(channel_id) {
+            config::apply_agent_response_policy(filter, channel_info.agent_response_policy);
+        }
+    }
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -1964,10 +1969,20 @@ async fn tokio_main() -> Result<()> {
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if subscribed_channel_ids.contains(&ch) {
-                                        tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
+                                    if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        if let Some(channel_info) = ctx.channel_info.refresh(ch).await {
+                                            config::apply_agent_response_policy(
+                                                &mut filter,
+                                                channel_info.agent_response_policy,
+                                            );
+                                        }
+                                        let was_subscribed = subscribed_channel_ids.contains(&ch);
+                                        tracing::info!(
+                                            channel_id = %ch,
+                                            was_subscribed,
+                                            require_mention = filter.require_mention,
+                                            "membership notification: refreshing channel subscription"
+                                        );
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
@@ -4642,6 +4657,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "dm".into(),
                     channel_type: "dm".into(),
+                    agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
                 },
             ),
             (
@@ -4649,6 +4665,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "stream".into(),
                     channel_type: "stream".into(),
+                    agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
                 },
             ),
         ]);
@@ -4665,6 +4682,7 @@ mod author_gate_tests {
             relay::ChannelInfo {
                 name: "unknown".into(),
                 channel_type: "unknown".into(),
+                agent_response_policy: Some(buzz_core::channel::AgentResponsePolicy::Mentions),
             },
         )]);
         assert!(

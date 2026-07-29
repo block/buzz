@@ -67,6 +67,46 @@ pub enum ChannelType {
     Workflow,
 }
 
+/// Whether agents in a channel receive only explicit mentions or every message.
+///
+/// This is channel-owned policy. Agent-specific author gates still decide who
+/// is allowed to start a turn after a message reaches the harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentResponsePolicy {
+    /// Agents receive messages that explicitly mention their public key.
+    Mentions,
+    /// Agents receive every subscribed message, including untagged messages.
+    All,
+}
+
+impl AgentResponsePolicy {
+    /// Canonical string representation used by the database and Nostr tags.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Mentions => "mentions",
+            Self::All => "all",
+        }
+    }
+}
+
+impl fmt::Display for AgentResponsePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AgentResponsePolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "mentions" => Ok(Self::Mentions),
+            "all" => Ok(Self::All),
+            other => Err(format!("unknown agent response policy: {other:?}")),
+        }
+    }
+}
+
 impl ChannelType {
     /// Canonical string representation (matches DB enum and Nostr tags).
     pub fn as_str(&self) -> &'static str {
@@ -180,7 +220,9 @@ impl FromStr for MemberRole {
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_channel_name;
+    use std::str::FromStr;
+
+    use super::{canonical_channel_name, AgentResponsePolicy};
 
     #[test]
     fn channel_names_trim_whitespace_and_drop_all_leading_hashes() {
@@ -194,5 +236,19 @@ mod tests {
         assert_eq!(canonical_channel_name("# #"), "");
         assert_eq!(canonical_channel_name("### ###"), "");
         assert_eq!(canonical_channel_name("channel#topic"), "channel#topic");
+    }
+
+    #[test]
+    fn agent_response_policy_round_trips_canonical_values() {
+        assert_eq!(
+            AgentResponsePolicy::from_str("mentions").unwrap(),
+            AgentResponsePolicy::Mentions
+        );
+        assert_eq!(
+            AgentResponsePolicy::from_str("all").unwrap(),
+            AgentResponsePolicy::All
+        );
+        assert_eq!(AgentResponsePolicy::All.as_str(), "all");
+        assert!(AgentResponsePolicy::from_str("sometimes").is_err());
     }
 }

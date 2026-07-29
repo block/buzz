@@ -127,12 +127,14 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::ChannelFilter;
+use buzz_core::channel::AgentResponsePolicy;
 
 /// Metadata about a channel, populated at discovery time.
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+    pub agent_response_policy: Option<AgentResponsePolicy>,
 }
 
 pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
@@ -172,7 +174,7 @@ pub(crate) fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut meta_map: HashMap<Uuid, (String, String, Option<AgentResponsePolicy>)> = HashMap::new();
     let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
@@ -183,6 +185,7 @@ pub(crate) fn merge_discovered_channels(
             let mut d_val = None;
             let mut name = None;
             let mut is_archived = false;
+            let mut agent_response_policy = None;
             for tag in tags {
                 if let Some(arr) = tag.as_array() {
                     match arr.first().and_then(|v| v.as_str()) {
@@ -190,6 +193,13 @@ pub(crate) fn merge_discovered_channels(
                         Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
                         Some("archived") => {
                             is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
+                        }
+                        Some("agent_response") => {
+                            agent_response_policy = match arr.get(1).and_then(|v| v.as_str()) {
+                                Some("mentions") => Some(AgentResponsePolicy::Mentions),
+                                Some("all") => Some(AgentResponsePolicy::All),
+                                _ => None,
+                            };
                         }
                         _ => {}
                     }
@@ -203,7 +213,7 @@ pub(crate) fn merge_discovered_channels(
                     }
                     let ch_name = name.unwrap_or("unknown").to_string();
                     let ch_type = channel_type_from_tags(tags);
-                    meta_map.insert(uuid, (ch_name, ch_type));
+                    meta_map.insert(uuid, (ch_name, ch_type, agent_response_policy));
                 }
             }
         }
@@ -214,10 +224,17 @@ pub(crate) fn merge_discovered_channels(
         if archived.contains(&uuid) {
             continue;
         }
-        let (name, channel_type) = meta_map
+        let (name, channel_type, agent_response_policy) = meta_map
             .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
+            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string(), None));
+        map.insert(
+            uuid,
+            ChannelInfo {
+                name,
+                channel_type,
+                agent_response_policy,
+            },
+        );
     }
     map
 }
@@ -4088,6 +4105,7 @@ mod tests {
         let channel = Uuid::new_v4();
         let map = merge_discovered_channels(vec![channel], &serde_json::json!([]));
         assert_eq!(map[&channel].channel_type, "unknown");
+        assert_eq!(map[&channel].agent_response_policy, None);
     }
 
     #[test]
@@ -4096,6 +4114,36 @@ mod tests {
         let meta = serde_json::json!([meta_event(channel, "dm", &["t", "dm"])]);
         let map = merge_discovered_channels(vec![channel], &meta);
         assert_eq!(map[&channel].channel_type, "dm");
+    }
+
+    #[test]
+    fn merge_discovered_channels_reads_agent_response_policy() {
+        let channel = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(
+            channel,
+            "agent-room",
+            &["agent_response", "all"]
+        )]);
+        let map = merge_discovered_channels(vec![channel], &meta);
+        assert_eq!(
+            map[&channel].agent_response_policy,
+            Some(AgentResponsePolicy::All)
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_reads_mentions_policy() {
+        let channel = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(
+            channel,
+            "agent-room",
+            &["agent_response", "mentions"]
+        )]);
+        let map = merge_discovered_channels(vec![channel], &meta);
+        assert_eq!(
+            map[&channel].agent_response_policy,
+            Some(AgentResponsePolicy::Mentions)
+        );
     }
 
     #[test]

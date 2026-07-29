@@ -1,11 +1,6 @@
 //! Nostr event → desktop model converters.
 //!
-//! These pure functions translate raw Nostr protocol events into the
-//! model types expected by the Tauri frontend commands.
-//!
-//! All converters here are I/O-free and deterministic — they take owned
-//! or borrowed events and return models. This makes them trivially
-//! testable with hand-crafted events (see the `tests` module below).
+//! Pure, deterministic conversions keep protocol parsing testable without I/O.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -14,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::models::*;
 
+mod channel_policy;
 mod user_search;
 pub use user_search::{
     list_user_search_results, rank_user_search_results, search_users_from_events,
@@ -157,6 +153,7 @@ pub fn channel_info_from_event(
     // Ephemeral channel TTL — relay emits ["ttl", "<seconds>"] and ["ttl_deadline", "<iso>"].
     let ttl_seconds = first_tag_value(event, "ttl").and_then(|v| v.parse::<i32>().ok());
     let ttl_deadline = first_tag_value(event, "ttl_deadline").map(str::to_string);
+    let agent_response_policy = channel_policy::from_event(event);
 
     Ok(ChannelInfo {
         id,
@@ -175,6 +172,7 @@ pub fn channel_info_from_event(
         is_member: is_member.unwrap_or(true),
         ttl_seconds,
         ttl_deadline,
+        agent_response_policy,
     })
 }
 
@@ -237,6 +235,7 @@ pub fn channel_detail_from_event(event: &Event) -> Result<ChannelDetailInfo, Str
         nip29_group_id: None,
         ttl_seconds: first_tag_value(event, "ttl").and_then(|v| v.parse::<i32>().ok()),
         ttl_deadline: first_tag_value(event, "ttl_deadline").map(str::to_string),
+        agent_response_policy: channel_policy::from_event(event),
     })
 }
 

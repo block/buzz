@@ -18,6 +18,10 @@ import {
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import {
+  agentResponseEmoji,
+  agentResponseLabel,
+} from "@/features/channels/lib/agentResponsePolicy";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
 import {
@@ -270,6 +274,14 @@ export function ChannelMenuButton({
 }) {
   const resolvedLabel = label ?? channel.name;
   const ephemeralDisplay = getEphemeralChannelDisplay(channel);
+  const responsePolicy =
+    channel.channelType === "dm" ? null : channel.agentResponsePolicy;
+  const responseEmoji = responsePolicy
+    ? agentResponseEmoji(responsePolicy)
+    : null;
+  const tooltip = responsePolicy
+    ? `${resolvedLabel} · Agent replies: ${agentResponseLabel(responsePolicy)}`
+    : resolvedLabel;
 
   return (
     <SidebarMenuButton
@@ -286,7 +298,7 @@ export function ChannelMenuButton({
       data-testid={`channel-${channel.name}`}
       isActive={isActive}
       onClick={() => onSelectChannel(channel.id)}
-      tooltip={resolvedLabel}
+      tooltip={tooltip}
       type="button"
     >
       <SidebarChannelIcon
@@ -295,6 +307,11 @@ export function ChannelMenuButton({
         presenceStatus={presenceStatus}
       />
       <span className="min-w-0 flex-1 truncate" data-sidebar-row-label>
+        {responseEmoji ? (
+          <span aria-hidden="true" className="mr-1">
+            {responseEmoji}
+          </span>
+        ) : null}
         {resolvedLabel}
       </span>
       {ephemeralDisplay ? (

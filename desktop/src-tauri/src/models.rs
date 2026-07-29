@@ -129,6 +129,8 @@ pub struct ChannelInfo {
     pub is_member: bool,
     pub ttl_seconds: Option<i32>,
     pub ttl_deadline: Option<String>,
+    #[serde(default = "default_agent_response_policy")]
+    pub agent_response_policy: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -155,6 +157,12 @@ pub struct ChannelDetailInfo {
     pub nip29_group_id: Option<String>,
     pub ttl_seconds: Option<i32>,
     pub ttl_deadline: Option<String>,
+    #[serde(default = "default_agent_response_policy")]
+    pub agent_response_policy: String,
+}
+
+fn default_agent_response_policy() -> String {
+    "mentions".to_string()
 }
 
 #[derive(Serialize, Deserialize)]

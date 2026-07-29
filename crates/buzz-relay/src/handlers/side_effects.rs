@@ -500,6 +500,7 @@ pub async fn validate_admin_event(
                 "purpose",
                 "visibility",
                 "ttl",
+                "agent_response",
             ];
             let has_recognized = event
                 .tags
@@ -507,7 +508,7 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, agent_response)"
                 ));
             }
 
@@ -586,11 +587,33 @@ pub async fn validate_admin_event(
                 }
             }
 
-            // name/about/archived/visibility/ttl require owner/admin;
+            // Validate the channel-owned agent response policy before storage.
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "agent_response" {
+                    match t.content() {
+                        Some("mentions") | Some("all") => {}
+                        Some(v) => {
+                            return Err(anyhow::anyhow!(
+                                "invalid agent_response value: {v} (must be \"mentions\" or \"all\")"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow::anyhow!("agent_response tag must have a value"));
+                        }
+                    }
+                }
+            }
+
+            // name/about/archived/visibility/ttl/agent_response require owner/admin;
             // topic/purpose allow any member.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
-                k == "name" || k == "about" || k == "archived" || k == "visibility" || k == "ttl"
+                k == "name"
+                    || k == "about"
+                    || k == "archived"
+                    || k == "visibility"
+                    || k == "ttl"
+                    || k == "agent_response"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -612,7 +635,7 @@ pub async fn validate_admin_event(
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/agent_response changes"
                         ))
                     }
                 }
@@ -1105,6 +1128,10 @@ pub async fn emit_group_discovery_events(
         if let Some(ref deadline) = channel.ttl_deadline {
             tags.push(Tag::parse(["ttl_deadline", &deadline.to_rfc3339()])?);
         }
+        tags.push(Tag::parse([
+            "agent_response",
+            &channel.agent_response_policy,
+        ])?);
         emit_addressable_discovery_event(
             tenant,
             state,
@@ -1437,6 +1464,7 @@ async fn handle_edit_metadata(
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
     let actor_hex = hex::encode(&actor_bytes);
+    let mut agent_response_changed = false;
 
     for tag in event.tags.iter() {
         let key = tag.kind().to_string();
@@ -1570,6 +1598,29 @@ async fn handle_edit_metadata(
                     )
                     .await?;
                 }
+                "agent_response" => {
+                    state
+                        .db
+                        .update_channel(
+                            tenant.community(),
+                            channel_id,
+                            buzz_db::channel::ChannelUpdate {
+                                agent_response_policy: Some(val.to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    agent_response_changed = true;
+                    emit_system_message(
+                        tenant,
+                        state,
+                        channel_id,
+                        serde_json::json!({
+                            "type": "agent_response_changed", "actor": actor_hex, "policy": val
+                        }),
+                    )
+                    .await?;
+                }
                 "archived" => {
                     match val {
                         "true" => {
@@ -1648,6 +1699,30 @@ async fn handle_edit_metadata(
 
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    }
+
+    if agent_response_changed {
+        // ACP harnesses keep a global membership subscription alive. Reusing
+        // this notification gives every connected agent a durable signal to
+        // refetch metadata and replace its channel subscription immediately.
+        for member in state.db.get_members(tenant.community(), channel_id).await? {
+            if let Err(e) = emit_membership_notification(
+                tenant,
+                state,
+                channel_id,
+                &member.pubkey,
+                &actor_bytes,
+                KIND_MEMBER_ADDED_NOTIFICATION,
+            )
+            .await
+            {
+                warn!(
+                    channel = %channel_id,
+                    error = %e,
+                    "agent-response resubscribe notification failed"
+                );
+            }
+        }
     }
 
     Ok(())

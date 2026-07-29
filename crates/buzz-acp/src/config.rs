@@ -488,6 +488,20 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
+/// Apply a channel-owned response policy to a resolved agent subscription.
+///
+/// When present, the channel-owned policy overrides the agent's local mention
+/// rule in either direction. `None` preserves the local rule for compatibility
+/// with relays that predate channel-owned response policy metadata.
+pub fn apply_agent_response_policy(
+    filter: &mut ChannelFilter,
+    policy: Option<buzz_core::channel::AgentResponsePolicy>,
+) {
+    if let Some(policy) = policy {
+        filter.require_mention = policy == buzz_core::channel::AgentResponsePolicy::Mentions;
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
@@ -1908,6 +1922,42 @@ mod tests {
         let result = resolve_channel_filters(&config, &[ch], &rules);
         let f = result.get(&ch).unwrap();
         assert!(!f.require_mention, "most permissive (false) should win");
+    }
+
+    #[test]
+    fn channel_all_policy_relaxes_mention_filter() {
+        let mut filter = ChannelFilter {
+            kinds: Some(vec![1]),
+            require_mention: true,
+        };
+        apply_agent_response_policy(
+            &mut filter,
+            Some(buzz_core::channel::AgentResponsePolicy::All),
+        );
+        assert!(!filter.require_mention);
+    }
+
+    #[test]
+    fn channel_mentions_policy_overrides_explicit_local_all_rule() {
+        let mut filter = ChannelFilter {
+            kinds: Some(vec![1]),
+            require_mention: false,
+        };
+        apply_agent_response_policy(
+            &mut filter,
+            Some(buzz_core::channel::AgentResponsePolicy::Mentions),
+        );
+        assert!(filter.require_mention);
+    }
+
+    #[test]
+    fn missing_channel_policy_preserves_local_rule_for_older_relays() {
+        let mut filter = ChannelFilter {
+            kinds: Some(vec![1]),
+            require_mention: false,
+        };
+        apply_agent_response_policy(&mut filter, None);
+        assert!(!filter.require_mention);
     }
 
     #[test]
