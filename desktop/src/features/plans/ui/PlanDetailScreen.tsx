@@ -27,9 +27,11 @@ import { KanbanBoard, moveTaskToColumn } from "./KanbanBoard";
 import type { KanbanColumnId } from "../domain/kanban";
 import type { PlanningPlaybookV1 } from "../domain/extendedContracts";
 import type { ScheduledPlaybookTask } from "../domain/playbookSchedule";
+import { requestTaskMove } from "../domain/taskReschedule";
 import { MissionConstraintsPanel } from "./MissionConstraintsPanel";
 import { PlanImportReviewDialog } from "./PlanImportReviewDialog";
 import { PlaybookWorkspace } from "./PlaybookWorkspace";
+import { ReschedulePreviewDialog } from "./ReschedulePreviewDialog";
 import { TaskEditorDialog } from "./TaskEditorDialog";
 import { TaskExecutionPanel } from "./TaskExecutionPanel";
 import { TaskTable } from "./TaskTable";
@@ -111,6 +113,12 @@ export function PlanDetailScreen({
   const [editingConstraint, setEditingConstraint] =
     React.useState<MissionConstraint>();
   const [validationError, setValidationError] = React.useState<string>();
+  const [moveBusy, setMoveBusy] = React.useState(false);
+  const [moveProposal, setMoveProposal] = React.useState<{
+    task: PlanningTask;
+    before: PlanningSchedule;
+    after: PlanningSchedule;
+  }>();
   const [workView, setWorkView] = React.useState<
     "board" | "breakdown" | "playbooks"
   >("board");
@@ -159,6 +167,50 @@ export function PlanDetailScreen({
           : "Task move was not saved. The board has been restored.",
       );
       await plans.refetch();
+    }
+  }
+  async function previewTaskMove(task: PlanningTask, targetDate: string) {
+    if (!project || !schedule.data) return;
+    setValidationError(undefined);
+    try {
+      const locked =
+        details.find((item) => item.taskId === task.id)?.locked ?? false;
+      const moved = requestTaskMove(task, targetDate, locked);
+      const prospective = tasks.map((item) =>
+        item.id === moved.id ? moved : item,
+      );
+      const after = await calculatePlanSchedule({
+        project,
+        tasks: prospective,
+        workingCalendar: {
+          workingWeekdays: [1, 2, 3, 4, 5],
+          excludedDates: [],
+        },
+        today: today(),
+      });
+      setMoveProposal({ task: moved, before: schedule.data, after });
+    } catch (cause) {
+      setValidationError(
+        cause instanceof Error
+          ? cause.message
+          : "The proposed schedule move is invalid.",
+      );
+    }
+  }
+  async function applyTaskMove() {
+    if (!moveProposal) return;
+    setMoveBusy(true);
+    try {
+      await mutations.task.mutateAsync(moveProposal.task);
+      setMoveProposal(undefined);
+    } catch (cause) {
+      setValidationError(
+        cause instanceof Error
+          ? `Schedule change was not saved: ${cause.message}`
+          : "Schedule change was not saved.",
+      );
+    } finally {
+      setMoveBusy(false);
     }
   }
   async function applyPlaybook(
@@ -375,6 +427,16 @@ export function PlanDetailScreen({
         />
         {scheduleValue ? (
           <GanttChart
+            lockedTaskIds={
+              new Set(
+                details
+                  .filter((item) => item.locked)
+                  .map((item) => item.taskId),
+              )
+            }
+            onRequestMove={(task, targetDate) =>
+              void previewTaskMove(task, targetDate)
+            }
             project={project}
             schedule={scheduleValue}
             tasks={tasks}
@@ -504,6 +566,18 @@ export function PlanDetailScreen({
         onOpenChange={setSyncPackOpen}
         open={syncPackOpen}
         pack={syncPack}
+      />
+      <ReschedulePreviewDialog
+        after={moveProposal?.after}
+        before={moveProposal?.before}
+        busy={moveBusy}
+        onApply={applyTaskMove}
+        onOpenChange={(open) => {
+          if (!open) setMoveProposal(undefined);
+        }}
+        open={Boolean(moveProposal)}
+        task={moveProposal?.task}
+        tasks={tasks}
       />
       {executionTask ? (
         <TaskExecutionPanel

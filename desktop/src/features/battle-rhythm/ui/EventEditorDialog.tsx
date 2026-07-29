@@ -91,7 +91,7 @@ export function EventEditorDialog({
     try {
       await onSave({
         schemaVersion: 1,
-        id: event?.id ?? crypto.randomUUID(),
+        id: event?.ownership.kind === "manual" ? event.id : crypto.randomUUID(),
         ownership: { kind: "manual" },
         title: title.trim(),
         description: null,
@@ -108,7 +108,7 @@ export function EventEditorDialog({
         linkedPlanId: null,
         linkedTaskId: null,
         linkedMissionRequirementId: null,
-        parentActivityId: null,
+        parentActivityId: event?.ownership.kind === "source" ? event.id : null,
         recurrence,
         excludedOccurrenceStarts: exclusions
           ? exclusions.split(/\s*,\s*/).filter(Boolean)
@@ -128,9 +128,19 @@ export function EventEditorDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {event ? "Edit manual event" : "New manual event"}
+            {event?.ownership.kind === "source"
+              ? "Create local adjustment"
+              : event
+                ? "Edit manual event"
+                : "New manual event"}
           </DialogTitle>
         </DialogHeader>
+        {event?.ownership.kind === "source" ? (
+          <p className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+            The imported source remains unchanged. Saving creates a local
+            adjustment that replaces it in the working calendar.
+          </p>
+        ) : null}
         <form className="grid gap-3" onSubmit={submit}>
           <label className="grid gap-1 text-sm">
             Event

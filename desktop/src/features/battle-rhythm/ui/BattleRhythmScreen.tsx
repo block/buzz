@@ -23,6 +23,7 @@ import {
   type ProposedCalendarEvent,
 } from "../domain/deterministicChecks";
 import { expandRecurringEvents } from "../domain/occurrences";
+import { applyLocalAdjustments } from "../domain/localAdjustments";
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { deriveShipRoutinePeriods, shipStateAt } from "../domain/shipRoutine";
 import { useBattleRhythmMutations, useBattleRhythmQuery } from "../hooks";
@@ -69,7 +70,11 @@ export function BattleRhythmScreen() {
     range,
   );
   const events = React.useMemo(
-    () => expandRecurringEvents(rhythm.data?.events ?? [], range),
+    () =>
+      expandRecurringEvents(
+        applyLocalAdjustments(rhythm.data?.events ?? []),
+        range,
+      ),
     [range, rhythm.data?.events],
   );
   const routinePeriods = React.useMemo(

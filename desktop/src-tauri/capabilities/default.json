@@ -16,6 +16,7 @@
     "core:window:allow-show",
     "core:window:allow-close",
     "notification:default",
+    "autostart:default",
     "opener:default",
     "websocket:default",
     "window-state:default",

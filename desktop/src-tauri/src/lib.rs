@@ -114,6 +114,10 @@ pub fn run() {
                 }
             }
         }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -299,6 +303,12 @@ pub fn run() {
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            if !cfg!(debug_assertions) {
+                use tauri_plugin_autostart::ManagerExt;
+                if let Err(error) = app.autolaunch().enable() {
+                    eprintln!("command-adviser: could not enable start at login: {error}");
+                }
+            }
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe

@@ -401,3 +401,41 @@ test("Plans previews and applies a routine-aware Pre-Departure playbook", async 
     page.getByRole("cell", { name: "Command readiness review" }),
   ).toBeVisible();
 });
+
+test("Plans previews a Gantt reschedule and only persists after Apply", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-plans-view").click();
+  await page.getByRole("button", { name: "New Plan" }).click();
+  const create = page.getByRole("dialog", { name: "New operational plan" });
+  await create.getByLabel("Plan title").fill("Reschedule rehearsal");
+  await create
+    .getByLabel("Purpose")
+    .fill("Confirm schedule changes before moving dependent work.");
+  await create.getByLabel("Mission-ready date").fill("2026-08-20");
+  await create.getByRole("button", { name: "Create plan" }).click();
+  await addTask(page, {
+    title: "Prepare stores plan",
+    wbs: "1",
+    duration: 2,
+    department: "SO",
+    position: "Supply Officer",
+  });
+
+  const moveDate = page.getByLabel("Move Prepare stores plan to date");
+  await expect(moveDate).toHaveValue("2026-08-03");
+  await moveDate.fill("2026-08-06");
+  const preview = page.getByRole("dialog", { name: "Review schedule change" });
+  await expect(
+    preview.getByText(/Nothing changes until you apply/),
+  ).toBeVisible();
+  await preview.getByRole("button", { name: "Cancel" }).click();
+  await expect(moveDate).toHaveValue("2026-08-03");
+
+  await moveDate.fill("2026-08-06");
+  await preview.getByRole("button", { name: "Apply schedule change" }).click();
+  await expect(preview).toHaveCount(0);
+  await expect(moveDate).toHaveValue("2026-08-06");
+});

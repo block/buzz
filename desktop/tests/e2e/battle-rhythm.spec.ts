@@ -132,11 +132,14 @@ test("Battle Rhythm opens read-only plan milestones without duplicating them", a
   const detail = page.getByTestId("plan-detail-screen");
   await detail.getByRole("button", { name: "Add task" }).click();
   const task = page.getByRole("dialog", { name: "New planning task" });
-  await task.getByLabel("Task").fill("Complete securing for sea rounds");
+  await task
+    .getByLabel("Task", { exact: true })
+    .fill("Complete securing for sea rounds");
   await task.getByLabel("WBS").fill("1.1");
-  await task.getByLabel("Owner").fill("Executive Officer");
+  await task.getByLabel("Department / HOD").fill("XO");
+  await task.getByLabel("Responsible position").fill("Executive Officer");
   await task.getByLabel("Start", { exact: true }).fill("2026-07-29");
-  await task.getByLabel("Due").fill("2026-07-29");
+  await task.getByLabel("Due", { exact: true }).fill("2026-07-29");
   await task.getByLabel("Duration (working days)").fill("1");
   await task.getByRole("button", { name: "Save task" }).click();
 
@@ -217,6 +220,45 @@ test("Battle Rhythm reviews and applies a Shortcast document import", async ({
 
   await expect(dialog).toHaveCount(0);
   await expect(screen.getByText("Navigation brief")).toBeVisible();
+  await screen.getByRole("button", { name: "History" }).click();
+  await expect(
+    page
+      .getByRole("dialog", { name: "Source revisions" })
+      .getByText("Shortcast", { exact: true }),
+  ).toBeVisible();
+});
+
+test("Battle Rhythm adjusts an imported event without rewriting its source revision", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-battle-rhythm-view").click();
+
+  const screen = page.getByTestId("battle-rhythm-screen");
+  await screen.getByRole("button", { name: "Import Document" }).click();
+  let dialog = page.getByRole("dialog", {
+    name: "Import planning document",
+  });
+  await dialog
+    .getByRole("button", { name: "Choose Word, Excel, or PDF" })
+    .click();
+  await dialog.getByRole("button", { name: "Apply approved changes" }).click();
+
+  await screen.getByText("Navigation brief").click();
+  dialog = page.getByRole("dialog", { name: "Create local adjustment" });
+  await expect(
+    dialog.getByText("The imported source remains unchanged"),
+  ).toBeVisible();
+  await dialog.getByLabel("Event").fill("Navigation brief – delayed");
+  await dialog.getByLabel("Start", { exact: true }).fill("2026-07-29T09:00");
+  await dialog.getByLabel("End", { exact: true }).fill("2026-07-29T09:30");
+  await dialog.getByRole("button", { name: "Save event" }).click();
+
+  await expect(screen.getByText("Navigation brief – delayed")).toBeVisible();
+  await expect(
+    screen.getByText("Navigation brief", { exact: true }),
+  ).toHaveCount(0);
   await screen.getByRole("button", { name: "History" }).click();
   await expect(
     page
