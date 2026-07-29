@@ -9,16 +9,23 @@ use zeroize::Zeroize;
 /// 1. Creates a 0700 tempdir with symlinks back to our binary (multicall)
 /// 2. If `NOSTR_PRIVATE_KEY` is set: writes a 0600 keyfile, derives the pubkey,
 ///    builds ephemeral `GIT_CONFIG_*` env vars, then removes the env var
-/// 3. Prepends the shim dir to PATH
+/// 3. If `BUZZ_PRIVATE_KEY` is set: writes it to a separate 0600 keyfile and
+///    exposes the path via `BUZZ_KEYFILE` (the buzz CLI reads keyfiles), then
+///    removes `BUZZ_PRIVATE_KEY` from the process env
+/// 4. Prepends the shim dir to PATH
 ///
-/// Shell children receive `path_env`, `git_env`, and `BUZZ_PRIVATE_KEY` (for
-/// the buzz CLI). `NOSTR_PRIVATE_KEY` is removed from the process env after
-/// the keyfile is written — git helpers read from the keyfile only.
+/// Shell children receive `path_env`, `git_env`, and `buzz_env` (which carries
+/// `BUZZ_KEYFILE` + `BUZZ_RELAY_URL`). Neither `NOSTR_PRIVATE_KEY` nor
+/// `BUZZ_PRIVATE_KEY` survives in the process env after install — shell
+/// children can only read the keys from their respective keyfiles.
 /// Cleaned up on drop (TempDir).
 pub struct Shim {
     _dir: TempDir,
     pub path_env: String,
     pub git_env: Vec<(String, String)>,
+    /// Env vars for the `buzz` CLI: `BUZZ_KEYFILE` (path to the private-key
+    /// keyfile) and `BUZZ_RELAY_URL`. Does **not** contain the raw key.
+    pub buzz_env: Vec<(String, String)>,
 }
 
 impl Shim {
@@ -67,10 +74,48 @@ impl Shim {
             k.zeroize();
         }
 
+        // Same keyfile treatment for BUZZ_PRIVATE_KEY: write to a 0600 file and
+        // pass the path via BUZZ_KEYFILE, then remove the raw key from the
+        // process env so no shell child can read it.
+        let mut buzz_env = Vec::new();
+        let mut buzz_key = std::env::var("BUZZ_PRIVATE_KEY").ok();
+        std::env::remove_var("BUZZ_PRIVATE_KEY");
+        if let Some(ref key) = buzz_key {
+            if !key.is_empty() {
+                let buzz_keyfile = dir.path().join(".buzz-key");
+                match write_keyfile_atomic(&buzz_keyfile, key.as_bytes()) {
+                    Ok(()) => {
+                        if let Some(path) = buzz_keyfile.to_str() {
+                            buzz_env.push(("BUZZ_KEYFILE".to_owned(), path.to_owned()));
+                        } else {
+                            eprintln!(
+                                "buzz-dev-mcp: warning: tempdir path is not valid UTF-8; \
+                                 buzz CLI keyfile disabled"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "buzz-dev-mcp: warning: failed to write buzz keyfile ({e}); \
+                             buzz CLI auth disabled"
+                        );
+                    }
+                }
+            }
+        }
+        // Relay URL is non-secret — pass it through for the buzz CLI.
+        if let Ok(url) = std::env::var("BUZZ_RELAY_URL") {
+            buzz_env.push(("BUZZ_RELAY_URL".to_owned(), url));
+        }
+        if let Some(ref mut k) = buzz_key {
+            k.zeroize();
+        }
+
         Ok(Self {
             _dir: dir,
             path_env,
             git_env,
+            buzz_env,
         })
     }
 }

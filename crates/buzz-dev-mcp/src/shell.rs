@@ -75,7 +75,7 @@ impl SharedState {
 fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
     let buzz_hint =
-        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
+        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_KEYFILE").is_ok() {
             "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
         } else {
             ""
@@ -167,9 +167,13 @@ pub async fn run(
     cmd.arg(shell_arg).arg(&p.command);
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
-    // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
-    // BUZZ_PRIVATE_KEY is intentionally inherited — the buzz CLI needs it.
+    // NOSTR_PRIVATE_KEY and BUZZ_PRIVATE_KEY are already removed from this
+    // process's env (shim.rs). Git helpers read from the nostr keyfile; the
+    // buzz CLI reads from the buzz keyfile via BUZZ_KEYFILE.
     for (k, v) in &state.shim.git_env {
+        cmd.env(k, v);
+    }
+    for (k, v) in &state.shim.buzz_env {
         cmd.env(k, v);
     }
     cmd.stdin(Stdio::null());
