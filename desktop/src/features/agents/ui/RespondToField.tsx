@@ -13,6 +13,11 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  type AgentRunLocation,
+  agentAccessWarningText,
+} from "@/features/agents/lib/agentAccessWarning";
+import { useAgentRunLocation } from "./AgentRunLocationContext";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { PersonaDropdownOption } from "./agentConfigOptions";
 
@@ -27,6 +32,17 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  *
  * `nobody` is intentionally not surfaced — it pairs with a heartbeat-only
  * setup that has no meaningful GUI use case.
+ *
+ * Anyone and Selected people both share the host's access with someone other
+ * than the owner, so both render the persistent warning; only the audience
+ * phrase differs. It leads with the audience so it reads as a warning rather
+ * than an explanation, and stays one sentence — Only me already owns the line
+ * below the control.
+ *
+ * Which machine and stakes it names follow the optional `runLocation` prop, and
+ * an unknown location falls back to the local wording rather than hedging with
+ * "computer or server" — see `lib/agentAccessWarning.ts` for the copy and the
+ * reasoning.
  *
  * Validation is duplicated lightly here for inline UX feedback only; the
  * authoritative validator is `validate_respond_to_allowlist` in
@@ -64,6 +80,7 @@ export function CreateAgentRespondToField({
   ownerPubkey,
   disabled,
   variant,
+  runLocation,
 }: {
   mode: RespondToMode;
   allowlist: string[];
@@ -78,6 +95,12 @@ export function CreateAgentRespondToField({
   disabled?: boolean;
   /** When "persona", uses PersonaDropdownField styling to match the persona dialog. */
   variant?: "default" | "persona";
+  /**
+   * Where the agent's process runs, when the surface can tell. Omit or pass
+   * `null` when it can't — the warning then uses the same "your computer"
+   * wording as a local agent rather than hedging. Never synthesize a value.
+   */
+  runLocation?: AgentRunLocation | null;
 }) {
   const [query, setQuery] = React.useState("");
   const [isDirectEntryOpen, setIsDirectEntryOpen] = React.useState(false);
@@ -132,6 +155,33 @@ export function CreateAgentRespondToField({
 
   const isPersonaVariant = variant === "persona";
 
+  // An explicit prop wins; otherwise inherit from the dialog subtree. Surfaces
+  // inside AgentDialog get it from context (see AgentRunLocationContext for
+  // why), standalone ones like EditRespondToDialog pass the prop.
+  const inheritedRunLocation = useAgentRunLocation();
+  const warningText = agentAccessWarningText(
+    mode,
+    runLocation ?? inheritedRunLocation,
+  );
+
+  // Rendered in two positions: directly below the selector for Anyone, but
+  // after the people picker for Selected people, so it never sits between the
+  // user and the selection they came here to make.
+  const accessWarning = warningText ? (
+    <div
+      className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning-bg px-3 py-2.5"
+      data-testid="agent-access-warning"
+    >
+      <AlertTriangle
+        aria-hidden="true"
+        className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+      />
+      <p aria-live="polite" className="text-xs leading-5 text-warning">
+        {warningText}
+      </p>
+    </div>
+  ) : null;
+
   return (
     <div className="space-y-2" data-testid="agent-respond-to">
       <label
@@ -169,27 +219,12 @@ export function CreateAgentRespondToField({
           ))}
         </select>
       )}
-      {mode === "anyone" ? (
-        <div
-          className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning-bg px-3 py-2.5"
-          data-testid="agent-access-warning"
-        >
-          <AlertTriangle
-            aria-hidden="true"
-            className="mt-0.5 h-4 w-4 shrink-0 text-warning"
-          />
-          <p aria-live="polite" className="text-xs leading-5 text-warning">
-            Anyone will be able to access the computer or server running this
-            agent.
-          </p>
-        </div>
-      ) : (
+      {mode === "anyone" ? accessWarning : null}
+      {mode === "owner-only" ? (
         <p className="text-xs text-muted-foreground">
-          {mode === "allowlist"
-            ? "Only you and the people you choose can send instructions."
-            : "Only you can send instructions."}
+          Only you can send instructions.
         </p>
-      )}
+      ) : null}
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
@@ -218,6 +253,7 @@ export function CreateAgentRespondToField({
           variant={isPersonaVariant ? "persona" : "default"}
         />
       ) : null}
+      {mode === "allowlist" ? accessWarning : null}
     </div>
   );
 }

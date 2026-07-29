@@ -66,7 +66,7 @@ test("open agent access explains the available access before save", async ({
   const warning = page.getByTestId("agent-access-warning");
   await expect(warning).toBeVisible();
   await expect(warning).toContainText(
-    "Anyone will be able to access the computer or server running this agent.",
+    "Anyone can use this agent to access your computer, including files, accounts, and connected tools.",
   );
 
   await waitForAnimations(page);
@@ -96,13 +96,60 @@ test("open agent access explains the available access before save", async ({
 
   await openAgentAccessDialog(page, agent.pubkey);
   await expect(accessSelect).toHaveValue("anyone");
+  // Selected people narrows the audience but not the access, so the warning
+  // persists with its own audience phrase.
   await accessSelect.selectOption("allowlist");
-  await expect(warning).toHaveCount(0);
+  await expect(warning).toBeVisible();
+  await expect(warning).toContainText(
+    "Selected people can use this agent to access your computer, including files, accounts, and connected tools.",
+  );
+  const picker = page.getByTestId("agent-respond-to-allowlist");
   await expect(
-    page
-      .getByTestId("agent-respond-to-allowlist")
-      .getByText("Selected people", { exact: true }),
+    picker.getByText("Selected people", { exact: true }),
   ).toBeVisible();
+
+  // The warning sits below the picker so it never blocks the selection the
+  // user came here to make.
+  await waitForAnimations(page);
+  const pickerBox = await picker.boundingBox();
+  const warningBox = await warning.boundingBox();
+  expect(pickerBox?.y).toBeDefined();
+  expect(warningBox?.y).toBeGreaterThan(pickerBox?.y ?? 0);
+  await page
+    .getByRole("dialog", { name: "Manage agent access" })
+    .screenshot({ path: `${SHOTS}/selected-people-warning.png` });
+
+  // Only me shares nothing, so the warning goes away entirely.
+  await accessSelect.selectOption("owner-only");
+  await expect(warning).toHaveCount(0);
+});
+
+test("a provider-backed agent's warning names the server, not this computer", async ({
+  page,
+}) => {
+  const agent = TEST_IDENTITIES.charlie;
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: agent.pubkey,
+        name: "Remote Helper",
+        status: "running",
+        channelNames: ["general"],
+        respondTo: "owner-only",
+        backend: { type: "provider", id: "blox", config: {} },
+      },
+    ],
+  });
+  await page.goto("/");
+  await openAgentAccessDialog(page, agent.pubkey);
+
+  await page.getByTestId("agent-respond-to-select").selectOption("anyone");
+  const warning = page.getByTestId("agent-access-warning");
+  await expect(warning).toContainText(
+    "Anyone can use this agent to access the server it runs on, including any accounts and tools available there.",
+  );
+  // The local wording must not leak into a remote-backed agent.
+  await expect(warning).not.toContainText("your computer");
 });
 
 test("persona-backed edit warns before saving open access", async ({
@@ -132,7 +179,7 @@ test("persona-backed edit warns before saving open access", async ({
   );
   await choosePersonaAccess(page, "Anyone");
   await expect(dialog.getByTestId("agent-access-warning")).toContainText(
-    "Anyone will be able to access the computer or server running this agent",
+    "Anyone can use this agent to access your computer, including files, accounts, and connected tools.",
   );
 
   const commandsBeforeSave = await page.evaluate(
