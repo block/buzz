@@ -56,4 +56,7 @@ curl -fsS "http://127.0.0.1:$(grep -E '^BUZZ_HTTP_PORT=' .env | cut -d= -f2-)/_l
 ```
 
 ## Always-on agents (any client)
-See [docs/self-host-always-on-agents.md](../../docs/self-host-always-on-agents.md) and [deploy/systemd/](../systemd/).
+
+- Framework: [docs/self-host-backend-framework.md](../../docs/self-host-backend-framework.md)
+- Guide: [docs/self-host-always-on-agents.md](../../docs/self-host-always-on-agents.md)
+- Units: [deploy/systemd/](../systemd/)

@@ -4,6 +4,9 @@ Run **agents and the relay on a machine that stays on**. Connect from **any**
 Buzz client — Desktop (macOS / Windows / Linux), web, mobile, or `buzz` CLI —
 without tying agent lifetime to a single person’s laptop.
 
+**Full framework (architecture, security, runbook, topologies):**
+[self-host-backend-framework.md](./self-host-backend-framework.md).
+
 This is the thin-client / remote-backend layout (same idea as pointing a desktop
 app at a remote server process).
 
