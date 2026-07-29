@@ -261,6 +261,22 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Stream the agent's reply into the channel as it is generated: post once,
+    /// then edit that message as more text arrives. Off by default — it changes
+    /// what every channel sees.
+    #[arg(long, env = "BUZZ_ACP_STREAM_REPLIES")]
+    pub stream_replies: bool,
+
+    /// Minimum milliseconds between streamed edits. The first publish of a turn
+    /// ignores this, so the channel sees the agent start work immediately.
+    #[arg(long, env = "BUZZ_ACP_STREAM_THROTTLE_MS", default_value_t = 1_000)]
+    pub stream_throttle_ms: u64,
+
+    /// Minimum newly-buffered characters before a mid-turn edit is worth a round
+    /// trip. Guards against an edit per token.
+    #[arg(long, env = "BUZZ_ACP_STREAM_MIN_DELTA", default_value_t = 24)]
+    pub stream_min_delta: usize,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -495,6 +511,7 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    pub stream_flush: crate::stream_flush::StreamFlushConfig,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1059,6 +1076,11 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            stream_flush: crate::stream_flush::StreamFlushConfig {
+                enabled: args.stream_replies,
+                throttle_ms: args.stream_throttle_ms,
+                min_delta_chars: args.stream_min_delta,
+            },
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1437,6 +1459,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            stream_flush: crate::stream_flush::StreamFlushConfig::default(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
