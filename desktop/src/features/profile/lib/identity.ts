@@ -64,7 +64,10 @@ function getResolvedProfile(
 export function mergeCurrentProfileIntoLookup(
   profiles: UserProfileLookup | undefined,
   currentProfile:
-    | Pick<Profile, "pubkey" | "displayName" | "avatarUrl" | "nip05Handle">
+    | Pick<
+        Profile,
+        "pubkey" | "name" | "displayName" | "avatarUrl" | "nip05Handle"
+      >
     | null
     | undefined,
 ) {
@@ -76,9 +79,10 @@ export function mergeCurrentProfileIntoLookup(
     ...(profiles ?? {}),
     [normalizePubkey(currentProfile.pubkey)]: {
       displayName: currentProfile.displayName,
-      // `Profile` does not carry the kind-0 `name`; keep whatever the batch
-      // lookup already resolved so mention aliases survive the merge.
-      name: profiles?.[normalizePubkey(currentProfile.pubkey)]?.name ?? null,
+      name:
+        currentProfile.name ??
+        profiles?.[normalizePubkey(currentProfile.pubkey)]?.name ??
+        null,
       avatarUrl: currentProfile.avatarUrl,
       nip05Handle: currentProfile.nip05Handle,
       isAgent: profiles?.[normalizePubkey(currentProfile.pubkey)]?.isAgent,
@@ -116,6 +120,11 @@ export function resolveUserLabel(input: {
   const displayName = profile?.displayName?.trim();
   if (displayName) {
     return displayName;
+  }
+
+  const name = profile?.name?.trim();
+  if (name) {
+    return name;
   }
 
   const nip05Handle = profile?.nip05Handle?.trim();
