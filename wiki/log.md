@@ -45,3 +45,16 @@ Applied fixes from investigation:
 - **Agent config schema**: Fixed `managed-agents.json` parsing for required field `acp_command`; cleaned up `.invalid` backup files.
 
 Updated `operations/troubleshooting.md`, `components/buzz-agent.md`, `components/buzz-acp.md`.
+
+## [2026-07-28] update | Response Cleaning & Duplicate Agent Cards
+
+- Documented `clean_agent_text_response` stripping Python pseudo-code (`def reply_to_mention(...)`), CLI stdout objects, step-execution noise, and model tokens.
+- Added "Duplicate Agent Cards" troubleshooting entry: unlinked managed agents (`"persona_id": null`) render separate cards alongside builtin personas; fix by mapping `"persona_id": "builtin:<name>"`.
+- Updated `buzz-acp.md` component docs. Pushed to `mainza-ai/buzz:main`.
+
+## [2026-07-28] update | Multi-tenant Loopback Host Normalization & NIP-29 Channel Discovery
+
+- **Loopback Host Normalization (`buzz-core` & `buzz-auth`)**: `normalize_host` now folds loopback host variants (`localhost`, `127.0.0.1`, `[::1]`) to `127.0.0.1`, ensuring HTTP/WebSocket requests and NIP-98 auth signers resolve to the exact same community space. Resolves NIP-98 `401 Unauthorized` URL mismatch errors between `http://localhost:3000` and `http://127.0.0.1:3000`.
+- **NIP-29 Channel Discovery (`buzz-acp`)**: `extract_channel_uuid_from_event` now inspects both `d` tags (NIP-29 group members `kind: 39002`) and `h` tags. Enables agents to dynamically subscribe to channels in real time as soon as they are added.
+- Updated `operations/troubleshooting.md`.
+

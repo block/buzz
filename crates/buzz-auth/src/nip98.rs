@@ -149,6 +149,14 @@ fn normalize_url(raw: &str) -> String {
     };
     let path = parsed.path().trim_end_matches('/').to_string();
     parsed.set_path(&path);
+    if let Some(host) = parsed.host_str() {
+        let authority = match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+        let norm_authority = buzz_core::tenant::normalize_host(&authority);
+        let _ = parsed.set_host(Some(&norm_authority));
+    }
     parsed.to_string()
 }
 
@@ -286,30 +294,25 @@ mod tests {
     }
 
     #[test]
-    fn loopback_aliases_are_distinct_hosts() {
-        // Under multi-tenant, the `u`-tag host is the row-zero community
-        // binding. An event signed for `localhost` MUST NOT pass against an
-        // expected URL on `127.0.0.1` (or `::1`) — collapsing the three would
-        // be a host-check side door. Production reconstructs `expected_url`
-        // from the community-bound host; tests do the same.
+    fn loopback_aliases_fold_to_canonical_host() {
+        // Loopback host variants (localhost, 127.0.0.1, [::1]) normalize to 127.0.0.1
+        // so NIP-98 authentication succeeds across equivalent local addresses.
         let keys = Keys::generate();
         let localhost_url = "http://localhost:3000/api/tokens";
         let loopback_url = "http://127.0.0.1:3000/api/tokens";
         let json = make_nip98_event(&keys, localhost_url, TEST_METHOD, None, None);
         let result = verify_nip98_event(&json, loopback_url, TEST_METHOD, None);
         assert!(
-            matches!(result, Err(AuthError::Nip98Invalid(_))),
-            "localhost u-tag must NOT match a 127.0.0.1 expected_url; got {result:?}"
+            result.is_ok(),
+            "localhost u-tag MUST match 127.0.0.1 expected_url; got {result:?}"
         );
 
-        // Symmetric: signed-for-127.0.0.1 against expected localhost — same answer.
         let json2 = make_nip98_event(&keys, loopback_url, TEST_METHOD, None, None);
         let result2 = verify_nip98_event(&json2, localhost_url, TEST_METHOD, None);
         assert!(
-            matches!(result2, Err(AuthError::Nip98Invalid(_))),
-            "127.0.0.1 u-tag must NOT match a localhost expected_url; got {result2:?}"
+            result2.is_ok(),
+            "127.0.0.1 u-tag MUST match localhost expected_url; got {result2:?}"
         );
-
         // And identity still holds — same host on both sides verifies.
         let json3 = make_nip98_event(&keys, loopback_url, TEST_METHOD, None, None);
         assert!(verify_nip98_event(&json3, loopback_url, TEST_METHOD, None).is_ok());

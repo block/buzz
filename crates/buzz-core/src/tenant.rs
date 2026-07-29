@@ -134,7 +134,36 @@ pub fn normalize_host(host: &str) -> String {
     if let Some(stripped) = host.strip_suffix('.') {
         host = stripped.to_string();
     }
-    host
+    if host.is_empty() {
+        return host;
+    }
+
+    // Extract hostname and port suffix if present
+    let (hostname, port) = if host.starts_with('[') {
+        if let Some(close_bracket) = host.find(']') {
+            let (h, p) = host.split_at(close_bracket + 1);
+            (h, p)
+        } else {
+            (host.as_str(), "")
+        }
+    } else if let Some(last_colon) = host.rfind(':') {
+        let (h, p) = host.split_at(last_colon);
+        (h, p)
+    } else {
+        (host.as_str(), "")
+    };
+
+    let is_loopback = hostname == "localhost"
+        || hostname == "127.0.0.1"
+        || hostname == "[::1]"
+        || hostname == "0.0.0.0"
+        || hostname.starts_with("127.");
+
+    if is_loopback {
+        format!("127.0.0.1{port}")
+    } else {
+        host
+    }
 }
 
 /// Extract the authority (host plus an explicit non-default port, if present)
@@ -219,10 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn normalize_host_leaves_ipv6_literal_intact() {
-        // IPv6 literals contain colons but no trailing default-port suffix.
-        assert_eq!(normalize_host("[::1]"), "[::1]");
-        assert_eq!(normalize_host("[::1]:443"), "[::1]");
+    fn normalize_host_folds_loopback_variants() {
+        // Loopback variants (localhost, 127.0.0.1, [::1]) all normalize to 127.0.0.1.
+        for variant in ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"] {
+            assert_eq!(normalize_host(variant), "127.0.0.1");
+        }
+        for variant in ["localhost:3000", "127.0.0.1:3000", "[::1]:3000"] {
+            assert_eq!(normalize_host(variant), "127.0.0.1:3000");
+        }
     }
 
     #[test]
@@ -235,9 +268,9 @@ mod tests {
     #[test]
     fn relay_url_authority_keeps_explicit_nondefault_port() {
         // The default dev seed: startup, bind_deployment_community, and
-        // buzz-admin must all derive `localhost:3000` (NOT bare `localhost`),
+        // buzz-admin must all derive `127.0.0.1:3000` (NOT bare `127.0.0.1`),
         // or the admin lookup misses the community startup seeded.
-        assert_eq!(relay_url_authority("ws://localhost:3000"), "localhost:3000");
+        assert_eq!(relay_url_authority("ws://localhost:3000"), "127.0.0.1:3000");
         assert_eq!(
             relay_url_authority("wss://relay.example:8443"),
             "relay.example:8443"
@@ -260,10 +293,10 @@ mod tests {
     }
 
     #[test]
-    fn relay_url_authority_preserves_ipv6_brackets() {
-        // `host_str()` strips IPv6 brackets and the port; `relay_url_authority`
-        // must keep both so the authority matches `communities.host`.
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
+    fn relay_url_authority_folds_loopback_hosts() {
+        // Loopback hosts in URLs fold to 127.0.0.1 while keeping non-default ports.
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "127.0.0.1:3000");
+        assert_eq!(relay_url_authority("ws://localhost:3000"), "127.0.0.1:3000");
     }
 
     #[test]

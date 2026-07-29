@@ -212,9 +212,27 @@ The desktop app displays a red warning banner `failed to parse agent store (pres
 rm -f ~/Library/Application\ Support/xyz.block.buzz.app.dev.main/agents/managed-agents.json.invalid
 ```
 
+## Agent not responding in newly created channels / Multi-tenant loopback isolation
+
+**Symptoms:**
+- Agent works in `#general` or older channels, but fails to respond or sits idle when mentioned in newly created channels.
+- `buzz-acp` log shows `no channel subscriptions resolved — agent will sit idle` or `relay NOTICE: rate-limited`.
+- NIP-98 authentication returns `401 Unauthorized: URL mismatch: event has http://localhost:3000/query, expected http://127.0.0.1:3000/query`.
+
+**Cause 1 (Host Normalization Mismatch):**
+`buzz-relay` binds community tenant isolation from incoming HTTP/WebSocket `Host` headers. If `buzz-desktop` connects using `localhost:3000` while `buzz-acp` connects using `127.0.0.1:3000`, the relay partitions them into two separate Postgres community records. `buzz-acp` discovers 0 channels in its space and never receives mention events sent to `localhost:3000`.
+
+**Cause 2 (NIP-29 `d` Tag Extraction):**
+Realtime NIP-29 membership notification events (`kind: 39002`) carry the target channel UUID in a `d` tag (`["d", "<channel_uuid>"]`). If `buzz-acp` only inspects `h` tags, realtime membership events are dropped with `membership notification missing h tag — dropping`, preventing dynamic subscription to new channels.
+
+**Fix:**
+- Host folding in `buzz-core` (`normalize_host`) and `buzz-auth` (`normalize_url`) normalizes all local loopback addresses (`localhost`, `127.0.0.1`, `[::1]`) to `127.0.0.1:3000` so HTTP/WebSocket requests and NIP-98 auth signers resolve to the exact same community space.
+- `extract_channel_uuid_from_event` in `buzz-acp` inspects both `d` and `h` tags, allowing instant dynamic channel subscription when an agent is added to a new channel.
+
 **Related:**
 - [DevelopmentSetup](development-setup) — how to start the dev environment
 - [Configuration](configuration) — env var reference
 - [CLIReference](cli-reference) — just commands
 - [Relay](../entities/relay) — relay entity docs
+
 
