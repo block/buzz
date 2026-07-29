@@ -1,7 +1,6 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { toast } from "sonner";
 
 import {
   useAcpRuntimesQuery,
@@ -83,6 +82,10 @@ import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
+import {
+  offerRespondToRestartIfNeeded,
+  offerStartNowPrompt,
+} from "./agentSaveOutcomePrompts";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import {
   ADD_CUSTOM_HARNESS_OPTION,
@@ -737,28 +740,10 @@ export function AgentInstanceEditDialog({
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
       onUpdated?.(result.agent);
-      // The auto-restart policy deliberately never fires for a stopped or
-      // failing agent (a broken agent must not auto-loop), so an edit meant
-      // to FIX one silently waits for a manual start. Offer that start
-      // explicitly instead of relying on the user to know the policy.
       if (!isManagedAgentActive(result.agent)) {
-        const startedName = result.agent.name;
-        toast(`${startedName} saved while stopped.`, {
-          action: {
-            label: "Start now",
-            onClick: () => {
-              startMutation.mutate(result.agent.pubkey, {
-                onSuccess: () => toast.success(`${startedName} started.`),
-                onError: (error) =>
-                  toast.error(
-                    error instanceof Error
-                      ? `${startedName} failed to start: ${error.message}`
-                      : `${startedName} failed to start.`,
-                  ),
-              });
-            },
-          },
-        });
+        offerStartNowPrompt(result.agent, startMutation);
+      } else {
+        offerRespondToRestartIfNeeded(input, result.agent);
       }
     } catch {
       // React Query stores the error; keep dialog open and render it inline.
