@@ -115,21 +115,29 @@ mod macos {
             atomic::{AtomicUsize, Ordering},
             Once,
         },
-        time::Duration,
+        thread,
     };
     use tauri::Emitter;
 
-    const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-    const MAX_DEV_RESPONSE_THREADS: usize = 8;
-    static ACTIVE_DEV_RESPONSE_THREADS: AtomicUsize = AtomicUsize::new(0);
+    const MAX_RESPONSE_THREADS: usize = 8;
+    static ACTIVE_RESPONSE_THREADS: AtomicUsize = AtomicUsize::new(0);
     static CONFIGURE_APPLICATION: Once = Once::new();
 
-    struct DevResponseThreadGuard;
+    struct ResponseThreadGuard;
 
-    impl Drop for DevResponseThreadGuard {
+    impl Drop for ResponseThreadGuard {
         fn drop(&mut self) {
-            ACTIVE_DEV_RESPONSE_THREADS.fetch_sub(1, Ordering::Relaxed);
+            ACTIVE_RESPONSE_THREADS.fetch_sub(1, Ordering::Relaxed);
         }
+    }
+
+    fn try_reserve_response_thread() -> Option<ResponseThreadGuard> {
+        ACTIVE_RESPONSE_THREADS
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+                (active < MAX_RESPONSE_THREADS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| ResponseThreadGuard)
     }
 
     fn configure_application(app: &tauri::AppHandle) {
@@ -161,96 +169,73 @@ mod macos {
     ) {
         configure_application(&app);
 
-        if tauri::is_dev() {
-            show_in_unbundled_dev(app, title, body, target);
-        } else {
-            show_with_async_callback(app, title, body, target);
-        }
-    }
+        let Some(response_thread_guard) = try_reserve_response_thread() else {
+            // Keep memory and OS-thread use bounded. Overflow notifications
+            // still appear, but do not retain a click listener.
+            post_fire_and_forget(&title, body.as_deref());
+            return;
+        };
 
-    fn show_with_async_callback(
-        app: tauri::AppHandle,
-        title: String,
-        body: Option<String>,
-        target: Option<serde_json::Value>,
-    ) {
-        let notification = mac_usernotifications::Notification::new()
-            .title(title)
-            .message(body.unwrap_or_default())
-            .timeout(RESPONSE_TIMEOUT);
-
-        // The modern callback API keeps one process-wide worker thread and
-        // awaits each response without blocking an OS thread. The timeout also
-        // bounds callback state when a notification is never actioned.
-        tauri::async_runtime::spawn(async move {
-            let handle = match notification.send().await {
-                Ok(handle) => handle,
-                Err(error) => {
-                    eprintln!("buzz-desktop: failed to post native notification: {error}");
-                    return;
-                }
-            };
-
-            match handle.response().await {
-                Ok(response) if response.is_default_action() => {
-                    let _ = app.emit(ACTIVATE_EVENT, target);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!(
-                        "buzz-desktop: failed to receive native notification response: {error}"
-                    );
-                }
-            }
-        });
-    }
-
-    fn show_in_unbundled_dev(
-        app: tauri::AppHandle,
-        title: String,
-        body: Option<String>,
-        target: Option<serde_json::Value>,
-    ) {
-        let reserved = ACTIVE_DEV_RESPONSE_THREADS
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
-                (active < MAX_DEV_RESPONSE_THREADS).then_some(active + 1)
-            })
-            .is_ok();
-
-        if !reserved {
-            // UNUserNotificationCenter terminates unbundled binaries, so local
-            // `tauri dev` uses the legacy API. Keep its blocking listeners
-            // bounded; overflow notifications are still posted fire-and-forget.
-            tauri::async_runtime::spawn_blocking(move || {
+        // mac-notification-sys 0.6.15 returns after click or OS dismissal and
+        // drops its internal pending entry. The guard then releases this slot.
+        let spawn_result = thread::Builder::new()
+            .name("buzz-macos-notification".to_string())
+            .spawn(move || {
+                let _response_thread_guard = response_thread_guard;
                 let mut notification = mac_notification_sys::Notification::new();
-                notification.title(&title).asynchronous(true);
+                notification.title(&title).wait_for_click(true);
                 if let Some(body) = body.as_deref() {
                     notification.message(body);
                 }
-                if let Err(error) = notification.send() {
-                    eprintln!("buzz-desktop: failed to post native notification: {error}");
+
+                match notification.send() {
+                    Ok(mac_notification_sys::NotificationResponse::Click) => {
+                        let _ = app.emit(ACTIVATE_EVENT, target);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("buzz-desktop: failed to post native notification: {error}");
+                    }
                 }
             });
-            return;
+
+        if let Err(error) = spawn_result {
+            eprintln!("buzz-desktop: failed to start macOS notification listener: {error}");
         }
+    }
 
-        std::thread::spawn(move || {
-            let _guard = DevResponseThreadGuard;
-            let mut notification = mac_notification_sys::Notification::new();
-            notification.title(&title).wait_for_click(true);
-            if let Some(body) = body.as_deref() {
-                notification.message(body);
-            }
+    fn post_fire_and_forget(title: &str, body: Option<&str>) {
+        let mut notification = mac_notification_sys::Notification::new();
+        notification.title(title).asynchronous(true);
+        if let Some(body) = body {
+            notification.message(body);
+        }
+        if let Err(error) = notification.send() {
+            eprintln!("buzz-desktop: failed to post native notification: {error}");
+        }
+    }
 
-            match notification.send() {
-                Ok(mac_notification_sys::NotificationResponse::Click) => {
-                    let _ = app.emit(ACTIVATE_EVENT, target);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("buzz-desktop: failed to post native notification: {error}");
-                }
-            }
-        });
+    #[cfg(test)]
+    mod tests {
+        use super::{try_reserve_response_thread, ACTIVE_RESPONSE_THREADS, MAX_RESPONSE_THREADS};
+        use std::sync::atomic::Ordering;
+
+        #[test]
+        fn response_threads_are_bounded_and_released() {
+            assert_eq!(ACTIVE_RESPONSE_THREADS.load(Ordering::Relaxed), 0);
+
+            let guards: Vec<_> = (0..MAX_RESPONSE_THREADS)
+                .map(|_| try_reserve_response_thread().expect("slot should be available"))
+                .collect();
+            assert!(try_reserve_response_thread().is_none());
+            assert_eq!(
+                ACTIVE_RESPONSE_THREADS.load(Ordering::Relaxed),
+                MAX_RESPONSE_THREADS
+            );
+
+            drop(guards);
+            assert_eq!(ACTIVE_RESPONSE_THREADS.load(Ordering::Relaxed), 0);
+            assert!(try_reserve_response_thread().is_some());
+        }
     }
 }
