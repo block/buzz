@@ -10,13 +10,15 @@ type DevPromptComposerProps = {
   value: string;
   mode: DevComposerMode;
   placeholder: string;
+  /** Keybinding help line, contextual to the shell state. */
+  hint: string;
   busy: boolean;
   onChange: (value: string) => void;
   onSubmit: () => void;
   /** Tab / Shift+Tab. */
   onCycleMode: (direction: 1 | -1) => void;
-  /** ArrowUp / ArrowDown while the input is empty. */
-  onNavigateSessions: (direction: 1 | -1) => void;
+  /** ArrowUp / ArrowDown while the input is empty — sessions or prompt cards. */
+  onNavigate: (direction: 1 | -1) => void;
   onEscape: () => void;
 };
 
@@ -24,11 +26,12 @@ export function DevPromptComposer({
   value,
   mode,
   placeholder,
+  hint,
   busy,
   onChange,
   onSubmit,
   onCycleMode,
-  onNavigateSessions,
+  onNavigate,
   onEscape,
 }: DevPromptComposerProps) {
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
@@ -46,7 +49,9 @@ export function DevPromptComposer({
 
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (!busy) onSubmit();
+      // Empty-input Enter is also meaningful (opens the selected card's side
+      // chat), so the shell decides; busy only blocks actual sends there.
+      onSubmit();
       return;
     }
 
@@ -58,7 +63,7 @@ export function DevPromptComposer({
 
     if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !value) {
       event.preventDefault();
-      onNavigateSessions(event.key === "ArrowUp" ? -1 : 1);
+      onNavigate(event.key === "ArrowUp" ? -1 : 1);
     }
   };
 
@@ -100,9 +105,7 @@ export function DevPromptComposer({
         >
           {busy ? "working…" : devComposerModeLabel(mode)}
         </span>
-        <span className="select-none">
-          tab: switch target · enter: send · ↑↓: sessions · esc: new session
-        </span>
+        <span className="select-none">{hint}</span>
       </div>
     </div>
   );

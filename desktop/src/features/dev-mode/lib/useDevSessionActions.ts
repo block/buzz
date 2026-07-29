@@ -67,13 +67,19 @@ export function useDevSessionActions(identity: Identity | undefined) {
   );
 
   /**
-   * Send a prompt into a session. In an agent mode, the agent is attached
-   * first when it is not yet a member (membership must land before the
-   * mention or the harness filter drops it) — agents are not limited to a
-   * single channel.
+   * Send a prompt into a session, optionally as a reply inside an existing
+   * thread (`parentEventId`). In an agent mode, the agent is attached first
+   * when it is not yet a member (membership must land before the mention or
+   * the harness filter drops it) — agents are not limited to a single
+   * channel.
    */
   const sendToSession = React.useCallback(
-    async (channel: Channel, prompt: string, mode: DevComposerMode) => {
+    async (
+      channel: Channel,
+      prompt: string,
+      mode: DevComposerMode,
+      parentEventId?: string,
+    ) => {
       if (mode.kind === "agent") {
         const isMember = channel.memberPubkeys.some(
           (pubkey) =>
@@ -89,6 +95,7 @@ export function useDevSessionActions(identity: Identity | undefined) {
         content: prompt,
         mentionPubkeys:
           mode.kind === "agent" ? [mode.target.pubkey] : undefined,
+        parentEventId: parentEventId ?? null,
       });
     },
     [sendMessageMutation],
