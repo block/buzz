@@ -100,6 +100,12 @@ run_unit_tests() {
 
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
+
+  # Remote-deploy provider: infra-free (the deploy tests run the generated
+  # script against a local /bin/sh with a stubbed HOME) and the only place the
+  # shell-injection canary executes.
+  run_test_step "buzz-backend-ssh tests" \
+    cargo test -p buzz-backend-ssh -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

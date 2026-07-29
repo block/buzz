@@ -968,6 +968,13 @@ jobs:
         # Serial: windows_resolver_tests mutate process-global env
         # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
         run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
+      - name: Test (buzz-backend-ssh)
+        # The provider ships to a user PATH on every desktop platform, so its
+        # path resolution (tailscale.exe candidates, ssh.exe lookup) and JSON
+        # parsing only gate if the crate is tested ON Windows. Its shell-script
+        # execution tests are #[cfg(unix)] and cover the remote side, which is
+        # always POSIX.
+        run: cargo test -p buzz-backend-ssh --target $env:TARGET
       # Smoke-test the new host-prereq contract: Git for Windows (which provides
       # bash) is available on the runner, a shell command round-trips, and bash
       # does NOT resolve from System32 (so WSL's launcher is never picked up).
