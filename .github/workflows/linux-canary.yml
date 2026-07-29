@@ -21,7 +21,7 @@ jobs:
     name: Build Linux canary
     if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
-    container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+    container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     timeout-minutes: 60
     permissions:
       contents: read
