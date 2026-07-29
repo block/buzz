@@ -50,6 +50,11 @@ OPENAI_COMPAT_MODEL=gpt-5 \
 OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
   ./target/release/buzz-agent
 
+# Or a local Ollama server (no API key needed)
+BUZZ_AGENT_PROVIDER=ollama \
+OPENAI_COMPAT_MODEL=qwen2.5:7b-instruct \
+  ./target/release/buzz-agent
+
 # Or Databricks model serving via OAuth 2.0 PKCE
 BUZZ_AGENT_PROVIDER=databricks \
 DATABRICKS_HOST=https://dbc-...cloud.databricks.com \
@@ -129,14 +134,14 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openai-compat`, `ollama`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
-| `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
+| `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai/openai-compat. Optional when provider=ollama (Ollama ignores it; a placeholder is sent when unset). |
+| `OPENAI_COMPAT_MODEL` | — | Required when provider=openai/openai-compat/ollama. For Ollama, use a pulled model name from `ollama list` (e.g. `qwen2.5:7b-instruct`). |
+| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` (`http://localhost:11434/v1` for provider=ollama) | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. Set this for a remote Ollama host. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
