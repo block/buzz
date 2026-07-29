@@ -122,43 +122,46 @@ class _MentionSuggestions extends StatelessWidget {
           width: 1,
         ),
       ),
-      child: ListView.separated(
-        shrinkWrap: true,
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-        itemCount: suggestions.length,
-        separatorBuilder: (_, _) => const SizedBox.shrink(),
-        itemBuilder: (context, index) {
-          final candidate = suggestions[index];
-          final name = candidate.label;
-          final avatarUrl =
-              candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
+      child: Material(
+        type: MaterialType.transparency,
+        child: ListView.separated(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          itemCount: suggestions.length,
+          separatorBuilder: (_, _) => const SizedBox.shrink(),
+          itemBuilder: (context, index) {
+            final candidate = suggestions[index];
+            final name = candidate.label;
+            final avatarUrl =
+                candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
-          return ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            leading: AvatarImage(
-              imageUrl: avatarUrl,
-              radius: 18,
-              backgroundColor: context.colors.primaryContainer,
-              fallback: Text(
-                name[0].toUpperCase(),
-                style: context.textTheme.labelMedium?.copyWith(
-                  color: context.colors.onPrimaryContainer,
-                  fontWeight: FontWeight.w600,
+            return ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              leading: AvatarImage(
+                imageUrl: avatarUrl,
+                radius: 18,
+                backgroundColor: context.colors.primaryContainer,
+                fallback: Text(
+                  name[0].toUpperCase(),
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onPrimaryContainer,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
-            title: Text(name, style: context.textTheme.titleSmall),
-            subtitle: _MentionSuggestionInfo.build(
-              context,
-              candidate: candidate,
-              currentPubkey: currentPubkey,
-              isDmChannel: isDmChannel,
-              userCache: userCache,
-            ),
-            onTap: () => onSelect(candidate),
-          );
-        },
+              title: Text(name, style: context.textTheme.titleSmall),
+              subtitle: _MentionSuggestionInfo.build(
+                context,
+                candidate: candidate,
+                currentPubkey: currentPubkey,
+                isDmChannel: isDmChannel,
+                userCache: userCache,
+              ),
+              onTap: () => onSelect(candidate),
+            );
+          },
+        ),
       ),
     );
   }
@@ -272,29 +275,32 @@ class _ChannelSuggestions extends StatelessWidget {
           width: 1,
         ),
       ),
-      child: ListView.separated(
-        shrinkWrap: true,
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-        itemCount: suggestions.length,
-        separatorBuilder: (_, _) => const SizedBox.shrink(),
-        itemBuilder: (context, index) {
-          final channel = suggestions[index];
-          return ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            horizontalTitleGap: 0,
-            leading: SizedBox.square(
-              dimension: 36,
-              child: Icon(
-                LucideIcons.hash,
-                size: 20,
-                color: context.colors.onSurfaceVariant,
+      child: Material(
+        type: MaterialType.transparency,
+        child: ListView.separated(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          itemCount: suggestions.length,
+          separatorBuilder: (_, _) => const SizedBox.shrink(),
+          itemBuilder: (context, index) {
+            final channel = suggestions[index];
+            return ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              horizontalTitleGap: 0,
+              leading: SizedBox.square(
+                dimension: 36,
+                child: Icon(
+                  LucideIcons.hash,
+                  size: 20,
+                  color: context.colors.onSurfaceVariant,
+                ),
               ),
-            ),
-            title: Text(channel.name, style: context.textTheme.bodyLarge),
-            onTap: () => onSelect(channel),
-          );
-        },
+              title: Text(channel.name, style: context.textTheme.bodyLarge),
+              onTap: () => onSelect(channel),
+            );
+          },
+        ),
       ),
     );
   }

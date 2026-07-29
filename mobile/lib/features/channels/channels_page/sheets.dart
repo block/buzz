@@ -306,49 +306,54 @@ class _CreateChannelRadioGroup<T> extends StatelessWidget {
             border: Border.all(color: context.colors.outlineVariant),
             borderRadius: BorderRadius.circular(Radii.lg),
           ),
-          child: RadioGroup<T>(
-            groupValue: value,
-            onChanged: (nextValue) {
-              if (enabled && nextValue != null) {
-                onSelected(nextValue);
-              }
-            },
-            child: Column(
-              children: [
-                for (final (index, option) in options.indexed) ...[
-                  RadioListTile<T>(
-                    key: option.key,
-                    value: option.value,
-                    enabled: enabled,
-                    selected: option.value == value,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: Grid.xs,
-                      vertical: Grid.half,
-                    ),
-                    visualDensity: VisualDensity.standard,
-                    activeColor: context.colors.primary,
-                    title: Text(
-                      option.label,
-                      style: context.textTheme.bodyMedium?.copyWith(
-                        color: enabled
-                            ? context.colors.onSurface
-                            : context.colors.onSurface.withValues(alpha: 0.38),
-                        fontWeight: option.value == value
-                            ? FontWeight.w600
-                            : FontWeight.w400,
+          child: Material(
+            type: MaterialType.transparency,
+            child: RadioGroup<T>(
+              groupValue: value,
+              onChanged: (nextValue) {
+                if (enabled && nextValue != null) {
+                  onSelected(nextValue);
+                }
+              },
+              child: Column(
+                children: [
+                  for (final (index, option) in options.indexed) ...[
+                    RadioListTile<T>(
+                      key: option.key,
+                      value: option.value,
+                      enabled: enabled,
+                      selected: option.value == value,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: Grid.xs,
+                        vertical: Grid.half,
+                      ),
+                      visualDensity: VisualDensity.standard,
+                      activeColor: context.colors.primary,
+                      title: Text(
+                        option.label,
+                        style: context.textTheme.bodyMedium?.copyWith(
+                          color: enabled
+                              ? context.colors.onSurface
+                              : context.colors.onSurface.withValues(
+                                  alpha: 0.38,
+                                ),
+                          fontWeight: option.value == value
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                        ),
                       ),
                     ),
-                  ),
-                  if (index < options.length - 1)
-                    Divider(
-                      height: 1,
-                      indent: Grid.xs,
-                      endIndent: Grid.xs,
-                      color: context.colors.outlineVariant,
-                    ),
+                    if (index < options.length - 1)
+                      Divider(
+                        height: 1,
+                        indent: Grid.xs,
+                        endIndent: Grid.xs,
+                        color: context.colors.outlineVariant,
+                      ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
