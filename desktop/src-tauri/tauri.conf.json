@@ -36,7 +36,7 @@
     ],
     "macOSPrivateApi": true,
     "security": {
-      "csp": null
+      "csp": "default-src 'self' 'unsafe-inline' ipc: http://ipc.localhost; img-src 'self' data: blob: http://127.0.0.1:* https:; media-src 'self' blob: http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* wss://localhost:* http://localhost:* https://* ws://* wss://*; font-src 'self' data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "plugins": {

@@ -261,14 +261,44 @@ fn adapter_terminal_argv(
     fallback_command: &str,
 ) -> Result<Vec<String>, String> {
     let meta_command = terminal_auth_meta_command(method)?;
-    let (command, args): (&str, &[String]) =
-        match meta_command.as_deref().and_then(|argv| argv.split_first()) {
-            Some((command, args)) => (command.as_str(), args),
-            None => match method.command.split_first() {
-                Some((command, args)) => (command.as_str(), args),
-                None => (fallback_command, method.args.as_slice()),
-            },
-        };
+    let (command, args): (&str, &[String]) = match meta_command
+        .as_deref()
+        .and_then(|argv| argv.split_first())
+    {
+        Some((command, args)) => {
+            // Security: the _meta.terminal-auth.command field is supplied by
+            // the ACP adapter at runtime. A malicious or typosquatted adapter
+            // could declare an arbitrary binary here (e.g. /tmp/evil). Reject
+            // any command that doesn't resolve to the adapter's own installed
+            // path (fallback_command), preventing arbitrary code execution.
+            let resolved = resolve_command(command)
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            if resolved != fallback_command && command != fallback_command {
+                return Err(format!(
+                        "{} terminal-auth command '{command}' does not match the adapter's installed path — refusing to execute",
+                        runtime_label
+                    ));
+            }
+            (fallback_command, args)
+        }
+        None => match method.command.split_first() {
+            Some((command, args)) => {
+                // Same check for method.command.
+                let resolved = resolve_command(command)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                if resolved != fallback_command && command != fallback_command {
+                    return Err(format!(
+                            "{} auth method command '{command}' does not match the adapter's installed path — refusing to execute",
+                            runtime_label
+                        ));
+                }
+                (fallback_command, args)
+            }
+            None => (fallback_command, method.args.as_slice()),
+        },
+    };
 
     if command.trim().is_empty() {
         return Err(format!(
