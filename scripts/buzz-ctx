@@ -151,7 +151,9 @@ case "${1:-}" in
     post_result="$("$CLIENT" post "$signer_key" "$relay" "$tmp")" \
       || { rm -f "$tmp"; die "manifest event post failed"; }
     rm -f "$tmp"
-    acceptance="$(printf '%s' "$post_result" | sed 's/^200 //' \
+    # The post receipt is two lines: `200 {json}` then `event_id=…`; only
+    # the first line is the JSON acceptance.
+    acceptance="$(printf '%s' "$post_result" | head -n 1 | sed 's/^200 //' \
       | jq -er 'select(.accepted | type == "boolean") | "\(.accepted) (\(.message // "no message"))"')" \
       || die "manifest event post returned an invalid acceptance receipt"
     case "$acceptance" in
