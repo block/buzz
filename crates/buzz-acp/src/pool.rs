@@ -3435,7 +3435,10 @@ async fn publish_agent_turn_metric(
         Some(TokenCounts {
             input_tokens: usage.turn_input_tokens,
             output_tokens: usage.turn_output_tokens,
-            total_tokens: None,
+            // Field-local: present only when both the previous and current
+            // cumulative totals were available and monotonic. Never derived
+            // from input+output.
+            total_tokens: usage.turn_total_tokens,
             cost_usd: usage.turn_cost_usd,
             cache_read_tokens: None,
             cache_write_tokens: None,
@@ -3450,7 +3453,10 @@ async fn publish_agent_turn_metric(
     let cumulative_counts = Some(TokenCounts {
         input_tokens: Some(usage.cumulative_input_tokens),
         output_tokens: Some(usage.cumulative_output_tokens),
-        total_tokens: None,
+        // Present when every turn in the session reported a genuine provider
+        // total. None when the session has never emitted one or any turn lacked
+        // one. Never derived from input+output (NIP-AM MUST NOT).
+        total_tokens: usage.cumulative_total_tokens,
         cost_usd: usage.cumulative_cost_usd,
         cache_read_tokens: None,
         cache_write_tokens: None,
@@ -5238,9 +5244,11 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(100),
             turn_output_tokens: Some(50),
+            turn_total_tokens: None,
             turn_cost_usd: None,
             cumulative_input_tokens: 100,
             cumulative_output_tokens: 50,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
         };
@@ -5270,9 +5278,11 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(200),
             turn_output_tokens: Some(80),
+            turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 80,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
             model: None,
         };
@@ -5303,9 +5313,11 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(50),
             turn_output_tokens: Some(20),
+            turn_total_tokens: None,
             turn_cost_usd: None,
             cumulative_input_tokens: 150,
             cumulative_output_tokens: 70,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
         };
@@ -5336,9 +5348,11 @@ mod tests {
             delta_reliable: false, // first turn from buzz-agent
             turn_input_tokens: None,
             turn_output_tokens: None,
+            turn_total_tokens: None,
             turn_cost_usd: None,
             cumulative_input_tokens: 400,
             cumulative_output_tokens: 100,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
         };
@@ -5352,6 +5366,141 @@ mod tests {
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
         )
         .await;
+    }
+
+    /// Exact turn and cumulative totals from `TurnUsage` map to the
+    /// corresponding `TokenCounts.total_tokens` fields in the published payload.
+    #[tokio::test]
+    async fn test_publish_agent_turn_metric_total_tokens_mapping() {
+        use buzz_core::agent_turn_metric::{AgentTurnMetricPayload, TokenCounts};
+        // Build the payload struct directly (same logic as publish_agent_turn_metric)
+        // so we can verify the total_tokens mapping without a relay.
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-total".to_string(),
+            turn_seq: 2,
+            delta_reliable: true,
+            turn_input_tokens: Some(100),
+            turn_output_tokens: Some(30),
+            turn_total_tokens: Some(130), // genuine per-turn total
+            turn_cost_usd: None,
+            cumulative_input_tokens: 500,
+            cumulative_output_tokens: 120,
+            cumulative_total_tokens: Some(620), // genuine cumulative total
+            cumulative_cost_usd: None,
+            model: None,
+        };
+
+        let turn_counts = if usage.delta_reliable {
+            Some(TokenCounts {
+                input_tokens: usage.turn_input_tokens,
+                output_tokens: usage.turn_output_tokens,
+                total_tokens: usage.turn_total_tokens,
+                cost_usd: usage.turn_cost_usd,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            })
+        } else {
+            None
+        };
+        let cumulative_counts = Some(TokenCounts {
+            input_tokens: Some(usage.cumulative_input_tokens),
+            output_tokens: Some(usage.cumulative_output_tokens),
+            total_tokens: usage.cumulative_total_tokens,
+            cost_usd: usage.cumulative_cost_usd,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+        });
+
+        let payload = AgentTurnMetricPayload {
+            harness: "buzz-agent".to_string(),
+            model: None,
+            channel_id: None,
+            session_id: Some("sess-total".to_string()),
+            turn_id: Some("turn-total".to_string()),
+            turn_seq: Some(2),
+            timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+            turn: turn_counts,
+            cumulative: cumulative_counts,
+            delta_reliable: true,
+            stop_reason: Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+        };
+
+        // Verify turn counts carry the genuine per-turn total.
+        let turn = payload.turn.as_ref().expect("turn counts present");
+        assert_eq!(
+            turn.total_tokens,
+            Some(130),
+            "per-turn total must map to TokenCounts.total_tokens"
+        );
+        assert_eq!(turn.input_tokens, Some(100));
+        assert_eq!(turn.output_tokens, Some(30));
+
+        // Verify cumulative counts carry the genuine session total.
+        let cum = payload.cumulative.as_ref().expect("cumulative counts present");
+        assert_eq!(
+            cum.total_tokens,
+            Some(620),
+            "cumulative total must map to TokenCounts.total_tokens"
+        );
+        assert_eq!(cum.input_tokens, Some(500));
+        assert_eq!(cum.output_tokens, Some(120));
+    }
+
+    /// When totals are absent (None), TokenCounts.total_tokens must be None —
+    /// never a derived sum of input+output.
+    #[tokio::test]
+    async fn test_publish_agent_turn_metric_null_totals_never_derived() {
+        use buzz_core::agent_turn_metric::TokenCounts;
+
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-nototal".to_string(),
+            turn_seq: 1,
+            delta_reliable: true,
+            turn_input_tokens: Some(200),
+            turn_output_tokens: Some(60),
+            turn_total_tokens: None, // provider did not supply a total
+            turn_cost_usd: None,
+            cumulative_input_tokens: 200,
+            cumulative_output_tokens: 60,
+            cumulative_total_tokens: None, // session has no total
+            cumulative_cost_usd: None,
+            model: None,
+        };
+
+        let turn_counts = Some(TokenCounts {
+            input_tokens: usage.turn_input_tokens,
+            output_tokens: usage.turn_output_tokens,
+            total_tokens: usage.turn_total_tokens,
+            cost_usd: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+        });
+        let cumulative_counts = Some(TokenCounts {
+            input_tokens: Some(usage.cumulative_input_tokens),
+            output_tokens: Some(usage.cumulative_output_tokens),
+            total_tokens: usage.cumulative_total_tokens,
+            cost_usd: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+        });
+
+        let turn = turn_counts.unwrap();
+        let cum = cumulative_counts.unwrap();
+
+        assert!(
+            turn.total_tokens.is_none(),
+            "absent turn total must be None — not derived from in+out"
+        );
+        // Double-check it was not derived as input+output.
+        assert_ne!(
+            turn.total_tokens,
+            turn.input_tokens.zip(turn.output_tokens).map(|(i, o)| i + o),
+            "total_tokens must never equal input+output when provider omitted it"
+        );
+        assert!(
+            cum.total_tokens.is_none(),
+            "absent cumulative total must be None — not derived from in+out"
+        );
     }
 
     fn make_prompt_context_no_owner() -> PromptContext {

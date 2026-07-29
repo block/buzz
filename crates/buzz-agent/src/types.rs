@@ -172,6 +172,13 @@ pub struct LlmResponse {
     /// response carried no usage. Used to accumulate per-turn output counts
     /// for NIP-AM metric publishing.
     pub output_tokens: Option<u64>,
+    /// Provider-reported total tokens for this request, or `None` when the
+    /// provider does not report a genuine total. Present for OpenAI-shaped
+    /// responses (`usage.total_tokens`). Always `None` for Anthropic, which
+    /// reports only category counts; NIP-AM forbids summing categories into a
+    /// total. Callers must not derive this by summing `input_tokens +
+    /// output_tokens` — that is what the UI display approximation is for.
+    pub total_tokens: Option<u64>,
     /// Reasoning/thinking content emitted by the model before its answer, if
     /// any. Non-empty when the provider returns extended-thinking tokens:
     ///
@@ -197,6 +204,56 @@ pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+}
+
+/// Tri-state accumulator for provider-reported total tokens within one ACP turn.
+///
+/// Tracks whether every usage-bearing LLM response in the turn supplied a genuine
+/// provider total. Used to accumulate a reliable per-turn total and contribute to
+/// the session-cumulative total.
+///
+/// - `Unseen`: no usage-bearing response observed yet (initial state for each turn).
+/// - `Exact(n)`: every response so far reported a total; `n` is their sum.
+/// - `Unknown`: at least one response lacked a total — permanently poisoned for
+///   this turn. The session-cumulative also transitions to Unknown when any turn
+///   lands Unknown, and stays there until a new session resets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TurnTotalState {
+    #[default]
+    Unseen,
+    Exact(u64),
+    Unknown,
+}
+
+impl TurnTotalState {
+    /// Fold one provider-reported total into the current state.
+    ///
+    /// `total`: `Some(n)` when the provider included a genuine total on this
+    /// response; `None` when it was absent (e.g. Anthropic, or an OpenAI
+    /// response that omits usage). Absence of a total on any usage-bearing
+    /// response poisons the whole turn.
+    pub fn fold(self, total: Option<u64>) -> TurnTotalState {
+        match (self, total) {
+            // Already poisoned — stays Unknown regardless.
+            (TurnTotalState::Unknown, _) => TurnTotalState::Unknown,
+            // No total from this response — poison the accumulator.
+            (_, None) => TurnTotalState::Unknown,
+            // First response with a total.
+            (TurnTotalState::Unseen, Some(n)) => TurnTotalState::Exact(n),
+            // Subsequent response — checked add to the running sum.
+            (TurnTotalState::Exact(acc), Some(n)) => {
+                TurnTotalState::Exact(acc.saturating_add(n))
+            }
+        }
+    }
+
+    /// Consume the exact value if present; `None` for `Unseen` or `Unknown`.
+    pub fn exact_value(self) -> Option<u64> {
+        match self {
+            TurnTotalState::Exact(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -411,5 +468,68 @@ mod tests {
         assert_eq!(text.estimated_bytes(), text.context_pressure_bytes());
         let item = HistoryItem::User("a user message".into());
         assert_eq!(item.estimated_bytes(), item.context_pressure_bytes());
+    }
+}
+
+#[cfg(test)]
+mod turn_total_state_tests {
+    use super::TurnTotalState;
+
+    // ── TurnTotalState::fold ───────────────────────────────────────────────
+
+    #[test]
+    fn fold_first_response_with_total_becomes_exact() {
+        let state = TurnTotalState::Unseen;
+        assert_eq!(state.fold(Some(100)), TurnTotalState::Exact(100));
+    }
+
+    #[test]
+    fn fold_first_response_without_total_becomes_unknown() {
+        // Missing total on any usage-bearing response poisons the turn.
+        let state = TurnTotalState::Unseen;
+        assert_eq!(state.fold(None), TurnTotalState::Unknown);
+    }
+
+    #[test]
+    fn multiple_provider_rounds_all_with_totals_sum_correctly() {
+        // Multiple rounds all reporting a genuine total → Exact with their sum.
+        let state = TurnTotalState::Unseen;
+        let state = state.fold(Some(100));
+        let state = state.fold(Some(50));
+        let state = state.fold(Some(75));
+        assert_eq!(state, TurnTotalState::Exact(225));
+    }
+
+    #[test]
+    fn mixed_present_and_missing_totals_within_one_turn_poisons_accumulator() {
+        // First round has a total, second does not → Unknown (permanently poisoned).
+        let state = TurnTotalState::Unseen;
+        let state = state.fold(Some(100)); // Exact(100)
+        let state = state.fold(None); // Missing → Unknown
+        assert_eq!(state, TurnTotalState::Unknown);
+        // Further rounds with totals don't un-poison.
+        let state = state.fold(Some(50));
+        assert_eq!(state, TurnTotalState::Unknown);
+    }
+
+    #[test]
+    fn unknown_stays_unknown_regardless_of_subsequent_totals() {
+        // Once poisoned, no subsequent total can recover the state.
+        let state = TurnTotalState::Unknown;
+        assert_eq!(state.fold(Some(999)), TurnTotalState::Unknown);
+        assert_eq!(state.fold(None), TurnTotalState::Unknown);
+    }
+
+    #[test]
+    fn exact_value_returns_some_only_for_exact_variant() {
+        assert_eq!(TurnTotalState::Unseen.exact_value(), None);
+        assert_eq!(TurnTotalState::Unknown.exact_value(), None);
+        assert_eq!(TurnTotalState::Exact(42).exact_value(), Some(42));
+    }
+
+    #[test]
+    fn default_is_unseen() {
+        let state: TurnTotalState = Default::default();
+        assert_eq!(state, TurnTotalState::Unseen);
     }
 }
