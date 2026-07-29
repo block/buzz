@@ -9,6 +9,25 @@ import { Spinner } from "@/shared/ui/spinner";
 
 type BackupTestStage = "drop" | "password" | "success";
 
+/**
+ * Durable progress through the test flow. Owned by the host so navigating
+ * away (e.g. onboarding Back) and returning doesn't force the user to
+ * re-drop the file or retype their attempt.
+ */
+export type BackupTestProgress = {
+  stage: BackupTestStage;
+  /** Name of the accepted file once the drop check passed. */
+  fileName: string | null;
+  /** The password attempt typed so far. */
+  attempt: string;
+};
+
+export const initialBackupTestProgress: BackupTestProgress = {
+  stage: "drop",
+  fileName: null,
+  attempt: "",
+};
+
 type BackupTestFlowProps = {
   /** "spotlight" is the onboarding treatment; "boxed" fits settings cards. */
   variant?: "spotlight" | "boxed";
@@ -21,9 +40,18 @@ type BackupTestFlowProps = {
   isSaving: boolean;
   savedPath: string | null;
   saveError: string | null;
+  /** Host-owned progress so it survives this component unmounting. */
+  progress: BackupTestProgress;
+  onProgressChange: React.Dispatch<React.SetStateAction<BackupTestProgress>>;
   /** Fired once when the user completes the test successfully. */
   onVerified?: () => void;
 };
+
+/**
+ * How long after the last keystroke before a wrong attempt is called out.
+ * Verification itself is instant on match; this only delays the scolding.
+ */
+const MISMATCH_HINT_PAUSE_MS = 900;
 
 const BURST_EMOJIS = ["🎉", "✨", "🐝", "🍯", "🔑", "💛"] as const;
 const BURST_PARTICLE_COUNT = 18;
@@ -108,10 +136,12 @@ export function BackupTestFlow({
   isSaving,
   savedPath,
   saveError,
+  progress,
+  onProgressChange,
   onVerified,
 }: BackupTestFlowProps) {
   const reduceMotion = useReducedMotion() ?? false;
-  const [stage, setStage] = React.useState<BackupTestStage>("drop");
+  const { stage, fileName, attempt } = progress;
   const [isDragActive, setIsDragActive] = React.useState(false);
   // True while a file drag is anywhere over the window — the select button
   // renders as a dropzone only for the duration of the drag.
@@ -145,9 +175,7 @@ export function BackupTestFlow({
       window.removeEventListener("dragend", handleDragEnd);
     };
   }, []);
-  const [fileName, setFileName] = React.useState<string | null>(null);
   const [fileError, setFileError] = React.useState<string | null>(null);
-  const [attempt, setAttempt] = React.useState("");
   const [isRevealed, setIsRevealed] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const passwordInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -166,12 +194,12 @@ export function BackupTestFlow({
   }, [stage]);
 
   const succeed = React.useCallback(() => {
-    setStage("success");
+    onProgressChange((prev) => ({ ...prev, stage: "success" }));
     if (!verifiedFiredRef.current) {
       verifiedFiredRef.current = true;
       onVerified?.();
     }
-  }, [onVerified]);
+  }, [onProgressChange, onVerified]);
 
   const handleFile = React.useCallback(
     async (file: File) => {
@@ -185,9 +213,12 @@ export function BackupTestFlow({
       if (!mountedRef.current) return;
       const trimmed = text.trim();
       if (trimmed === ncryptsec.trim()) {
-        setFileName(file.name);
         setFileError(null);
-        setStage("password");
+        onProgressChange((prev) => ({
+          ...prev,
+          stage: "password",
+          fileName: file.name,
+        }));
       } else if (trimmed.toLowerCase().startsWith("ncryptsec1")) {
         setFileError(
           "That's a Keycase file, but not the one you just downloaded.",
@@ -198,24 +229,34 @@ export function BackupTestFlow({
         );
       }
     },
-    [ncryptsec],
+    [ncryptsec, onProgressChange],
   );
 
   const handlePasswordChange = React.useCallback(
     (value: string) => {
-      setAttempt(value);
+      onProgressChange((prev) => ({ ...prev, attempt: value }));
       if (value === passphrase) succeed();
     },
-    [passphrase, succeed],
+    [onProgressChange, passphrase, succeed],
   );
 
+  // Only scold after the user pauses (or presses Enter), never mid-typing —
+  // and never based on the attempt's length, which would leak how long the
+  // real password is.
+  const [mismatchVisible, setMismatchVisible] = React.useState(false);
+  React.useEffect(() => {
+    setMismatchVisible(false);
+    if (stage !== "password" || attempt.length === 0 || attempt === passphrase)
+      return;
+    const timer = window.setTimeout(
+      () => setMismatchVisible(true),
+      MISMATCH_HINT_PAUSE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [stage, attempt, passphrase]);
+
   const isSpotlight = variant === "spotlight";
-  // Only scold once the attempt is at least as long as the real password —
-  // never mid-typing.
-  const attemptWrong =
-    stage === "password" &&
-    attempt !== passphrase &&
-    [...attempt].length >= [...passphrase].length;
+  const attemptWrong = stage === "password" && mismatchVisible;
 
   if (stage === "success") {
     return (
@@ -384,6 +425,12 @@ export function BackupTestFlow({
               className="h-10 bg-background pr-10 font-mono"
               data-testid="backup-test-password"
               onChange={(event) => handlePasswordChange(event.target.value)}
+              onKeyDown={(event) => {
+                // Enter is an explicit "check it" — no need to wait out the
+                // typing pause before calling out a mismatch.
+                if (event.key === "Enter" && attempt.length > 0)
+                  setMismatchVisible(attempt !== passphrase);
+              }}
               placeholder="Your backup password"
               ref={passwordInputRef}
               type={isRevealed ? "text" : "password"}
@@ -418,9 +465,7 @@ export function BackupTestFlow({
               className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
               data-testid="backup-test-use-different-file"
               onClick={() => {
-                setStage("drop");
-                setFileName(null);
-                setAttempt("");
+                onProgressChange(initialBackupTestProgress);
                 setIsRevealed(false);
               }}
               size="sm"

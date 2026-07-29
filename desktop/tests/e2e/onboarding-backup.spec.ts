@@ -148,9 +148,9 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
 
   await page.getByTestId("encrypted-backup-create").click();
 
-  // Download commits the blob and hands over to the "Now, test your backup"
-  // flow: a select-file button (dropzone while dragging) for the saved file,
-  // then the password to unlock it.
+  // Only a successful save (the mock "picks" a path) advances to the
+  // "Now, test your backup" flow: a select-file button (dropzone while
+  // dragging) for the saved file, then the password to unlock it.
   await expect(
     page.getByRole("heading", { name: "Now, test your backup" }),
   ).toBeVisible();
@@ -160,9 +160,9 @@ test("download happy path: generated password, encrypt, native save, Next", asyn
     "identity.ncryptsec",
   );
 
-  // Until the test passes, Next stays disabled and Skip remains the escape
-  // hatch.
-  await expect(page.getByTestId("onboarding-next")).toBeDisabled();
+  // Until the test passes there is no Next at all — Skip is the only way
+  // forward.
+  await expect(page.getByTestId("onboarding-next")).toHaveCount(0);
   await expect(page.getByTestId("onboarding-skip")).toBeVisible();
 
   await waitForAnimations(page);
@@ -230,6 +230,41 @@ test("download step Back returns to the backup chooser", async ({ page }) => {
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("backup-key-value")).toBeVisible();
   await expect(page.getByTestId("onboarding-next")).toBeVisible();
+});
+
+test("test-view Back returns to the password form with the password intact", async ({
+  page,
+}) => {
+  await enterMachineBackup(page);
+  await page.getByTestId("onboarding-next").click();
+  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
+
+  const input = page.getByTestId("backup-passphrase-input");
+  await input.fill("mock-horse-battery-staple");
+  await page.getByTestId("encrypted-backup-create").click();
+  await expect(
+    page.getByRole("heading", { name: "Now, test your backup" }),
+  ).toBeVisible();
+
+  // Back from the test view rolls back to the password form (same step),
+  // keeping the entered password; only from the form does Back leave the
+  // step.
+  await page.getByTestId("onboarding-back").click();
+  await expect(
+    page.getByRole("heading", { name: "Backup your key with a password" }),
+  ).toBeVisible();
+  await expect(input).toHaveValue("mock-horse-battery-staple");
+
+  // Re-downloading runs the ceremony again instantly from the cached
+  // encryption.
+  await page.getByTestId("encrypted-backup-create").click();
+  await expect(
+    page.getByRole("heading", { name: "Now, test your backup" }),
+  ).toBeVisible();
+
+  await page.getByTestId("onboarding-back").click();
+  await page.getByTestId("onboarding-back").click();
+  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
 });
 
 test("typed password requires 12 characters", async ({ page }) => {

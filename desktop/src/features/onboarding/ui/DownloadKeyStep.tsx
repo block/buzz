@@ -9,10 +9,20 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-import { EncryptedBackupCreator } from "./EncryptedBackupCreator";
+import {
+  type EncryptedBackupSession,
+  backupSessionToPasswordEntry,
+  EncryptedBackupCreator,
+} from "./EncryptedBackupCreator";
 
 type DownloadKeyStepProps = {
   direction: OnboardingTransitionDirection;
+  /**
+   * Backup state owned by the parent flow so Back navigation (which unmounts
+   * this step) doesn't discard the created Keycase, the entered password, or
+   * the backup-test progress.
+   */
+  session: EncryptedBackupSession;
   onBack: () => void;
   onNext: () => void;
 };
@@ -25,16 +35,17 @@ type DownloadKeyStepProps = {
  */
 export function DownloadKeyStep({
   direction,
+  session,
   onBack,
   onNext,
 }: DownloadKeyStepProps) {
   const reduceMotion = useReducedMotion() ?? false;
   // True once the encrypted payload exists — the create button (living in the
   // footer's primary slot) disappears with the form, so Next takes its place.
-  const [hasCreated, setHasCreated] = React.useState(false);
+  const hasCreated = session.created;
   // True once the user has passed the backup test — until then Next stays
   // disabled and "Skip for now" remains the escape hatch.
-  const [hasVerified, setHasVerified] = React.useState(false);
+  const hasVerified = session.verified;
   // Footer slot the creator portals its "Download" button into.
   const [createButtonSlot, setCreateButtonSlot] =
     React.useState<HTMLElement | null>(null);
@@ -73,8 +84,7 @@ export function DownloadKeyStep({
                 <EncryptedBackupCreator
                   createButtonClassName={ONBOARDING_PRIMARY_CTA_CLASS}
                   createButtonPortal={createButtonSlot}
-                  onCreated={() => setHasCreated(true)}
-                  onVerified={() => setHasVerified(true)}
+                  session={session}
                   variant="spotlight"
                 />
               </div>
@@ -85,30 +95,28 @@ export function DownloadKeyStep({
 
       <OnboardingFooter>
         {hasCreated ? (
-          /* Relative row keeps Next truly centered while Skip hangs off its
-             right edge without shifting the center. */
-          <div className="relative flex items-center justify-center">
+          hasVerified ? (
             <Button
               className={ONBOARDING_PRIMARY_CTA_CLASS}
               data-testid="onboarding-next"
-              disabled={!hasVerified}
               onClick={onNext}
               type="button"
             >
               Next
             </Button>
-            {hasVerified ? null : (
-              <Button
-                className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
-                data-testid="onboarding-skip"
-                onClick={onNext}
-                type="button"
-                variant="ghost"
-              >
-                Skip for now
-              </Button>
-            )}
-          </div>
+          ) : (
+            /* No disabled Next while the test is unfinished — skipping is
+               the only way forward until verification succeeds. */
+            <Button
+              className="h-9 whitespace-nowrap rounded-full px-6 hover:bg-foreground/10"
+              data-testid="onboarding-skip"
+              onClick={onNext}
+              type="button"
+              variant="ghost"
+            >
+              Skip for now
+            </Button>
+          )
         ) : (
           /* Relative row keeps the Download CTA truly centered while Skip
              hangs off its right edge without shifting the center. */
@@ -133,12 +141,23 @@ export function DownloadKeyStep({
         <Button
           className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
           data-testid="onboarding-back"
-          onClick={onBack}
+          onClick={
+            // From the test view, Back first returns to the password form;
+            // only from the form does it leave the step entirely.
+            hasCreated ? () => backupSessionToPasswordEntry(session) : onBack
+          }
           type="button"
           variant="ghost"
         >
           Back
         </Button>
+
+        {hasCreated ? null : (
+          <p className="text-xs text-foreground/50">
+            You can back up your key anytime in Settings &rarr; Profile &rarr;
+            Identity.
+          </p>
+        )}
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );

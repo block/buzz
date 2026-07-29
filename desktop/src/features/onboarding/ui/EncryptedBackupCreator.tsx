@@ -20,8 +20,14 @@ import {
   encryptedBackupReducer,
   initialEncryptedBackupState,
   MIN_PASSPHRASE_LEN,
+  type EncryptedBackupEvent,
+  type EncryptedBackupState,
 } from "../lib/encryptedBackup";
-import { BackupTestFlow } from "./BackupTestFlow";
+import {
+  type BackupTestProgress,
+  BackupTestFlow,
+  initialBackupTestProgress,
+} from "./BackupTestFlow";
 
 /** Word-count bounds mirroring `key_backup.rs` (Rust clamps regardless). */
 const MIN_GENERATED_WORDS = 3;
@@ -130,6 +136,81 @@ function PendingDownloadTicker() {
   );
 }
 
+/**
+ * Everything about an in-progress backup that must survive this component
+ * unmounting: the reducer state (passphrase + committed blob), whether the
+ * backup test passed, where the file was saved, the save-once guard, and the
+ * test-flow progress. Hosts that need the state to outlive the creator (the
+ * onboarding flow, where Back unmounts the step) call
+ * `useEncryptedBackupSession` at a longer-lived level and pass it down;
+ * otherwise the creator owns a private session internally.
+ */
+export type EncryptedBackupSession = {
+  state: EncryptedBackupState;
+  dispatch: React.Dispatch<EncryptedBackupEvent>;
+  /**
+   * True once the encrypted payload has been committed AND saved to disk.
+   * Derived so hosts (e.g. DownloadKeyStep) can branch on it without touching
+   * the blob itself — keeping them outside the ncryptsec confinement scan.
+   */
+  created: boolean;
+  /** True once the user has passed the backup test. */
+  verified: boolean;
+  setVerified: React.Dispatch<React.SetStateAction<boolean>>;
+  savedPath: string | null;
+  setSavedPath: React.Dispatch<React.SetStateAction<string | null>>;
+  /** The committed blob a save was already kicked off for (save-once guard). */
+  savedForRef: React.MutableRefObject<string | null>;
+  test: BackupTestProgress;
+  setTest: React.Dispatch<React.SetStateAction<BackupTestProgress>>;
+};
+
+/** Host-side state for `EncryptedBackupCreator` — see `EncryptedBackupSession`. */
+export function useEncryptedBackupSession(): EncryptedBackupSession {
+  const [state, dispatch] = React.useReducer(
+    encryptedBackupReducer,
+    initialEncryptedBackupState,
+  );
+  const [verified, setVerified] = React.useState(false);
+  const [savedPath, setSavedPath] = React.useState<string | null>(null);
+  const savedForRef = React.useRef<string | null>(null);
+  const [test, setTest] = React.useState<BackupTestProgress>(
+    initialBackupTestProgress,
+  );
+  return React.useMemo(
+    () => ({
+      state,
+      dispatch,
+      created: state.ncryptsec !== null && savedPath !== null,
+      verified,
+      setVerified,
+      savedPath,
+      setSavedPath,
+      savedForRef,
+      test,
+      setTest,
+    }),
+    [state, verified, savedPath, test],
+  );
+}
+
+/**
+ * Roll a session back from the post-download test view to the password form
+ * (onboarding Back on "Now, test your backup"). The passphrase and its cached
+ * encryption result survive, so re-downloading is instant; the committed
+ * blob, test progress, verification, and save bookkeeping are discarded so a
+ * re-download runs the full save + test ceremony again.
+ */
+export function backupSessionToPasswordEntry(
+  session: EncryptedBackupSession,
+): void {
+  session.dispatch({ type: "back-to-password" });
+  session.setVerified(false);
+  session.setSavedPath(null);
+  session.savedForRef.current = null;
+  session.setTest(initialBackupTestProgress);
+}
+
 type EncryptedBackupCreatorProps = {
   /** "spotlight" is the onboarding treatment; "boxed" fits settings cards. */
   variant?: "spotlight" | "boxed";
@@ -140,6 +221,11 @@ type EncryptedBackupCreatorProps = {
   createButtonPortal?: HTMLElement | null;
   /** Extra classes for the "Download" button. */
   createButtonClassName?: string;
+  /**
+   * Host-owned session so the backup state survives this component
+   * unmounting (onboarding Back navigation). Omitted = private session.
+   */
+  session?: EncryptedBackupSession;
   /** Fired once the encrypted payload has been created (before saving). */
   onCreated?: () => void;
   /** Fired only after the encrypted key file has been saved successfully. */
@@ -324,22 +410,19 @@ export function EncryptedBackupCreator({
   variant = "spotlight",
   createButtonPortal,
   createButtonClassName,
+  session: sessionProp,
   onCreated,
   onSaved,
   onVerified,
 }: EncryptedBackupCreatorProps) {
-  const [state, dispatch] = React.useReducer(
-    encryptedBackupReducer,
-    initialEncryptedBackupState,
-  );
+  // Hosts without a longer-lived session get a private one (settings card).
+  const fallbackSession = useEncryptedBackupSession();
+  const session = sessionProp ?? fallbackSession;
+  const { state, dispatch, savedPath, setSavedPath, savedForRef } = session;
   const [isRevealed, setIsRevealed] = React.useState(false);
-  const [savedPath, setSavedPath] = React.useState<string | null>(null);
   const [saveError, setSaveError] = React.useState<string | null>(null);
   const [isSaving, setIsSaving] = React.useState(false);
   const mountedRef = React.useRef(true);
-  // The committed blob we've already kicked a save off for — guards the
-  // commit effect against re-running on unrelated re-renders.
-  const savedForRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     mountedRef.current = true;
@@ -363,27 +446,29 @@ export function EncryptedBackupCreator({
     if (!pendingPassphrase) return;
     let cancelled = false;
     const start = () => {
-      if (cancelled || !mountedRef.current) return;
+      if (cancelled) return;
+      // Completions dispatch unguarded: with a host-owned session the KDF
+      // may finish while this component is unmounted (user navigated Back),
+      // and the result must still land in the session. Dispatching to an
+      // unmounted private session is a safe no-op.
       dispatch({ type: "encrypt-started", passphrase: pendingPassphrase });
       void createNcryptsecBackup(pendingPassphrase)
         .then((ncryptsec) => {
-          if (mountedRef.current)
-            dispatch({
-              type: "encrypt-succeeded",
-              passphrase: pendingPassphrase,
-              ncryptsec,
-            });
+          dispatch({
+            type: "encrypt-succeeded",
+            passphrase: pendingPassphrase,
+            ncryptsec,
+          });
         })
         .catch((err: unknown) => {
-          if (mountedRef.current)
-            dispatch({
-              type: "encrypt-failed",
-              passphrase: pendingPassphrase,
-              message:
-                err instanceof Error
-                  ? err.message
-                  : "Failed to encrypt your key.",
-            });
+          dispatch({
+            type: "encrypt-failed",
+            passphrase: pendingPassphrase,
+            message:
+              err instanceof Error
+                ? err.message
+                : "Failed to encrypt your key.",
+          });
         });
     };
     const timer = window.setTimeout(
@@ -394,10 +479,13 @@ export function EncryptedBackupCreator({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [pendingPassphrase, skipDebounce]);
+  }, [dispatch, pendingPassphrase, skipDebounce]);
 
   // Download commit: fires once per committed blob, whether the commit was
-  // instant (encryption already done) or resolved a queued download.
+  // instant (encryption already done) or resolved a queued download. The flow
+  // only advances to the test view once the file is actually on disk — a
+  // canceled save dialog or a save failure rolls the commit back to the
+  // password form so "Download backup" can be clicked again.
   React.useEffect(() => {
     const ncryptsec = state.ncryptsec;
     if (!ncryptsec || savedForRef.current === ncryptsec) return;
@@ -405,14 +493,22 @@ export function EncryptedBackupCreator({
     onCreated?.();
     setIsSaving(true);
     setSaveError(null);
+    const rollBack = () => {
+      savedForRef.current = null;
+      dispatch({ type: "back-to-password" });
+    };
     void saveNcryptsecCopy(ncryptsec)
       .then((path) => {
-        if (mountedRef.current && path) {
+        if (path) {
           setSavedPath(path);
           onSaved?.(path);
+        } else {
+          // User canceled the native save dialog — nothing was downloaded.
+          rollBack();
         }
       })
       .catch((err: unknown) => {
+        rollBack();
         if (mountedRef.current)
           setSaveError(
             err instanceof Error ? err.message : "Failed to save your key.",
@@ -421,7 +517,14 @@ export function EncryptedBackupCreator({
       .finally(() => {
         if (mountedRef.current) setIsSaving(false);
       });
-  }, [onCreated, onSaved, state.ncryptsec]);
+  }, [
+    dispatch,
+    onCreated,
+    onSaved,
+    savedForRef,
+    setSavedPath,
+    state.ncryptsec,
+  ]);
 
   const handleSaveCopy = React.useCallback(async () => {
     if (!state.ncryptsec || isSaving) return;
@@ -441,19 +544,29 @@ export function EncryptedBackupCreator({
     } finally {
       if (mountedRef.current) setIsSaving(false);
     }
-  }, [isSaving, onSaved, state.ncryptsec]);
+  }, [isSaving, onSaved, setSavedPath, state.ncryptsec]);
+
+  const { setVerified, test, setTest } = session;
+  const handleVerified = React.useCallback(() => {
+    setVerified(true);
+    onVerified?.();
+  }, [onVerified, setVerified]);
 
   const issue = passphraseIssue(state.passphrase);
 
-  if (state.ncryptsec) {
+  // The test view requires a successful save, not just a committed blob —
+  // while the native save dialog is open the password form stays put.
+  if (state.ncryptsec && savedPath) {
     return (
       <div data-testid="encrypted-backup-result">
         <BackupTestFlow
           isSaving={isSaving}
           ncryptsec={state.ncryptsec}
+          onProgressChange={setTest}
           onSaveCopy={() => void handleSaveCopy()}
-          onVerified={onVerified}
+          onVerified={handleVerified}
           passphrase={state.passphrase}
+          progress={test}
           saveError={saveError}
           savedPath={savedPath}
           variant={variant}
@@ -524,12 +637,21 @@ export function EncryptedBackupCreator({
         </p>
       ) : null}
 
+      {saveError ? (
+        <p
+          className="text-center text-sm text-destructive"
+          data-testid="encrypted-backup-save-error"
+        >
+          {saveError}
+        </p>
+      ) : null}
+
       {(() => {
         // Absolute spinner: signals the background encryption without
         // shifting the centered button while it appears and disappears.
         const createButton = (
           <div className="relative">
-            {isEncrypting(state) || state.downloadPending ? (
+            {isEncrypting(state) || state.downloadPending || isSaving ? (
               <Spinner
                 aria-label="Encrypting your key"
                 className="absolute right-full top-1/2 mr-3 h-4 w-4 -translate-y-1/2 border-2"
@@ -539,11 +661,15 @@ export function EncryptedBackupCreator({
             <Button
               className={cn("h-9 rounded-full px-6", createButtonClassName)}
               data-testid="encrypted-backup-create"
-              disabled={downloadDisabled(state)}
+              disabled={downloadDisabled(state) || isSaving}
               onClick={() => dispatch({ type: "download-clicked" })}
               type="button"
             >
-              {state.downloadPending ? <PendingDownloadTicker /> : "Backup key"}
+              {state.downloadPending ? (
+                <PendingDownloadTicker />
+              ) : (
+                "Download backup"
+              )}
             </Button>
           </div>
         );

@@ -52,7 +52,13 @@ export type EncryptedBackupEvent =
   | { type: "encrypt-started"; passphrase: string }
   | { type: "encrypt-succeeded"; passphrase: string; ncryptsec: string }
   | { type: "encrypt-failed"; passphrase: string; message: string }
-  | { type: "download-clicked" };
+  | { type: "download-clicked" }
+  /**
+   * Return from the post-download test view to the password form (onboarding
+   * Back). The committed blob is discarded but the passphrase and its cached
+   * encryption result are kept, so re-downloading is instant.
+   */
+  | { type: "back-to-password" };
 
 export function encryptedBackupReducer(
   state: EncryptedBackupState,
@@ -111,6 +117,13 @@ export function encryptedBackupReducer(
       }
       return { ...state, downloadPending: true };
     }
+    case "back-to-password":
+      return {
+        ...state,
+        ncryptsec: null,
+        downloadPending: false,
+        createError: null,
+      };
   }
 }
 

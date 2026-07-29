@@ -211,6 +211,31 @@ test("queued_download_clears_on_failure_so_user_can_retry", () => {
   assert.equal(downloadDisabled(failed), false, "retry allowed after failure");
 });
 
+test("back_to_password_discards_commit_but_keeps_cached_encryption", () => {
+  const back = reduce([
+    { type: "set-passphrase", value: "one-two-three-four" },
+    { type: "encrypt-started", passphrase: "one-two-three-four" },
+    {
+      type: "encrypt-succeeded",
+      passphrase: "one-two-three-four",
+      ncryptsec: "ncryptsec1abc",
+    },
+    { type: "download-clicked" },
+    { type: "back-to-password" },
+  ]);
+  assert.equal(back.ncryptsec, null, "committed blob discarded");
+  assert.equal(back.passphrase, "one-two-three-four", "passphrase kept");
+  assert.equal(
+    pendingEncryptPassphrase(back),
+    null,
+    "cached result means no re-encryption",
+  );
+
+  // Re-downloading the unchanged passphrase commits instantly from cache.
+  const recommitted = reduce([{ type: "download-clicked" }], back);
+  assert.equal(recommitted.ncryptsec, "ncryptsec1abc");
+});
+
 test("download_click_before_encryption_starts_still_queues", () => {
   // Click lands inside the debounce window: nothing started yet, but the
   // pending flag makes the eventual result commit.

@@ -297,11 +297,6 @@ export function BackupStep({ direction, onBack, onDownload }: BackupStepProps) {
           >
             Back
           </Button>
-
-          <p className="text-xs text-foreground/50">
-            You can back up your key anytime in Settings &rarr; Profile &rarr;
-            Identity.
-          </p>
         </OnboardingFooter>
       ) : null}
     </OnboardingSlideTransition>
