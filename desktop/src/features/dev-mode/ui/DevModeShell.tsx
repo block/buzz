@@ -94,6 +94,9 @@ export function DevModeShell({
     null,
   );
   const [paletteOpen, setPaletteOpen] = React.useState(false);
+  const [paletteInitialMode, setPaletteInitialMode] = React.useState<
+    "root" | "members"
+  >("root");
   const [focusSignal, setFocusSignal] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -255,6 +258,7 @@ export function DevModeShell({
     const handleWindowKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "o") {
         event.preventDefault();
+        setPaletteInitialMode("root");
         setPaletteOpen((current) => !current);
       }
     };
@@ -345,6 +349,11 @@ export function DevModeShell({
     setPaletteOpen(false);
     focusComposer();
   }, [focusComposer]);
+
+  const openPalette = React.useCallback((mode: "root" | "members" = "root") => {
+    setPaletteInitialMode(mode);
+    setPaletteOpen(true);
+  }, []);
 
   const openChannel = React.useCallback(
     (channelId: string) => {
@@ -781,7 +790,7 @@ export function DevModeShell({
       onCycleMode={handleCycleMode}
       onEscape={handleEscape}
       onNavigate={handleNavigate}
-      onOpenPalette={() => setPaletteOpen(true)}
+      onOpenPalette={() => openPalette()}
       onStepChannel={stepChannel}
       onReactivate={() => {
         if (cardSelectionActive) setSelectedRootId(null);
@@ -838,7 +847,10 @@ export function DevModeShell({
               </span>
             ) : null}
             {topBarChannel ? (
-              <DevChannelMembers channelId={topBarChannel.id} />
+              <DevChannelMembers
+                channel={topBarChannel}
+                onShowMembers={() => openPalette("members")}
+              />
             ) : null}
           </span>
           <div
@@ -849,7 +861,7 @@ export function DevModeShell({
           >
             <button
               className="cursor-pointer hover:text-foreground"
-              onClick={() => setPaletteOpen(true)}
+              onClick={() => openPalette()}
               type="button"
             >
               palette ⌃O
@@ -960,6 +972,7 @@ export function DevModeShell({
           <DevCommandPalette
             activeChannel={topBarChannel}
             channels={[...sessions].reverse()}
+            initialMode={paletteInitialMode}
             myPubkey={identityQuery.data?.pubkey ?? null}
             onChannelLeft={handleChannelLeft}
             onClose={closePalette}

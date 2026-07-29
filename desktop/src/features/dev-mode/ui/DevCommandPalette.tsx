@@ -17,6 +17,7 @@ import {
   defaultAuthorColor,
   normalizeHexColor,
   setNameColorOverride,
+  useAuthorColorResolver,
 } from "@/features/dev-mode/lib/authorColors";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import {
@@ -41,7 +42,13 @@ type PaletteEntry = {
   run: () => void;
 };
 
-type PaletteMode = "root" | "color" | "add-member";
+type PaletteMode = "root" | "color" | "add-member" | "members";
+
+/**
+ * Channels can have 1000+ members; the browser renders at most this many
+ * rows and tells the user to narrow by typing instead of scrolling.
+ */
+const MEMBERS_RENDER_CAP = 40;
 
 function formatCandidateName(user: UserSearchResult) {
   return (
@@ -73,6 +80,7 @@ export function DevCommandPalette({
   activeChannel,
   parentOfActive,
   myPubkey,
+  initialMode = "root",
   onOpenChannel,
   onNewSession,
   onNewSubChannel,
@@ -86,6 +94,8 @@ export function DevCommandPalette({
   /** Set when the active channel is a `parent--sub` of an existing parent. */
   parentOfActive: Channel | null;
   myPubkey: string | null;
+  /** Open directly into a sub-view, e.g. the top bar's member count. */
+  initialMode?: "root" | "members";
   onOpenChannel: (channelId: string) => void;
   onNewSession: () => void;
   /** Starts a sub-channel draft in the open channel; null when unavailable. */
@@ -96,7 +106,7 @@ export function DevCommandPalette({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [query, setQuery] = React.useState("");
-  const [mode, setMode] = React.useState<PaletteMode>("root");
+  const [mode, setMode] = React.useState<PaletteMode>(initialMode);
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -111,6 +121,7 @@ export function DevCommandPalette({
   const leaveMutation = useLeaveChannelMutation(activeChannelId);
   const archiveMutation = useArchiveChannelMutation(activeChannelId);
   const membersQuery = useChannelMembersQuery(activeChannelId);
+  const resolveColor = useAuthorColorResolver();
 
   // The relay refuses to remove a channel's last owner, so when no other
   // human would remain, "leave" archives the channel instead.
@@ -267,6 +278,39 @@ export function DevCommandPalette({
           );
     }
 
+    if (mode === "members") {
+      const members = membersQuery.data ?? [];
+      const matched = needle
+        ? members.filter((member) =>
+            `${member.displayName ?? ""} ${member.pubkey}`
+              .toLowerCase()
+              .includes(needle),
+          )
+        : members;
+      const memberEntries: PaletteEntry[] = matched
+        .slice(0, MEMBERS_RENDER_CAP)
+        .map((member) => ({
+          id: `member-${member.pubkey}`,
+          label: member.displayName || truncatePubkey(member.pubkey),
+          detail:
+            member.isAgent || member.role === "bot"
+              ? "agent"
+              : member.role !== "member"
+                ? member.role
+                : truncatePubkey(member.pubkey),
+          swatch: resolveColor(member.pubkey),
+          run: () => {},
+        }));
+      if (matched.length > MEMBERS_RENDER_CAP) {
+        memberEntries.push({
+          id: "members-overflow",
+          label: `… ${matched.length - MEMBERS_RENDER_CAP} more — type to narrow`,
+          run: () => {},
+        });
+      }
+      return memberEntries;
+    }
+
     if (mode === "add-member") {
       const memberPubkeys = new Set(
         (membersQuery.data ?? []).map((member) =>
@@ -300,6 +344,18 @@ export function DevCommandPalette({
 
     const channelActions: PaletteEntry[] = activeChannel
       ? [
+          {
+            id: "view-members",
+            label: `view members of # ${activeChannel.name}`,
+            detail: `${activeChannel.memberCount} ${
+              activeChannel.memberCount === 1 ? "member" : "members"
+            }`,
+            run: () => {
+              setMode("members");
+              setQuery("");
+              setSelectedIndex(0);
+            },
+          },
           {
             id: "add-member",
             label: `add someone to # ${activeChannel.name}`,
@@ -442,6 +498,7 @@ export function DevCommandPalette({
     parentOfActive,
     pinnedIds,
     query,
+    resolveColor,
     userSearchResults,
   ]);
 
@@ -508,7 +565,9 @@ export function DevCommandPalette({
               ? "type a hex color or pick a preset…"
               : mode === "add-member"
                 ? `search people & agents to add to # ${activeChannel?.name ?? ""}…`
-                : "search channels and commands…"
+                : mode === "members"
+                  ? `search members of # ${activeChannel?.name ?? ""}…`
+                  : "search channels and commands…"
           }
           spellCheck={false}
           value={query}
@@ -527,7 +586,9 @@ export function DevCommandPalette({
                   : userSearchQuery.isFetching
                     ? "searching…"
                     : "no matches"
-                : "no matches"}
+                : mode === "members" && membersQuery.isLoading
+                  ? "loading members…"
+                  : "no matches"}
             </div>
           ) : null}
           {entries.map((entry, index) => (
