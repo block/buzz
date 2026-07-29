@@ -504,7 +504,10 @@ class _ThreadMessage extends ConsumerWidget {
       child: Material(
         color: Colors.transparent,
         borderRadius: BorderRadius.circular(Radii.md),
-        clipBehavior: Clip.antiAlias,
+        // The media carousel intentionally continues through the list's
+        // trailing gutter. InkWell still clips its ink to [borderRadius],
+        // while leaving overflowing message content visible.
+        clipBehavior: Clip.none,
         child: InkWell(
           key: ValueKey('thread-message-row-${message.id}'),
           borderRadius: BorderRadius.circular(Radii.md),

@@ -540,6 +540,51 @@ Photos
       );
 
       testWidgets(
+        'keeps adjacent carousel images active and ends with a gutter',
+        (tester) async {
+          const first = 'https://example.com/media/gutter-one.png';
+          const second = 'https://example.com/media/gutter-two.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+![image]($first)
+![image]($second)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png'],
+                  ['imeta', 'url $second', 'm image/png'],
+                ],
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final carousel = find.byKey(const ValueKey('message-media-carousel'));
+          final pageViewFinder = find.descendant(
+            of: carousel,
+            matching: find.byType(PageView),
+          );
+          final pageView = tester.widget<PageView>(pageViewFinder);
+
+          expect(pageView.allowImplicitScrolling, isTrue);
+          expect(pageView.clipBehavior, Clip.none);
+
+          pageView.controller!.jumpToPage(1);
+          await tester.pumpAndSettle();
+
+          final lastCard = find.byKey(
+            const ValueKey('message-media-carousel-item:$second'),
+          );
+          expect(
+            tester.getRect(carousel).right - tester.getRect(lastCard).right,
+            Grid.gutter,
+          );
+        },
+      );
+
+      testWidgets(
         'jumps to a selected gallery thumbnail when motion is disabled',
         (tester) async {
           const first = 'https://example.com/media/reduced-motion-one.png';
