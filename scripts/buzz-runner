@@ -1,0 +1,479 @@
+#!/usr/bin/env bash
+# buzz-runner — one-shot executor for journal-native hand-offs.
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: buzz-runner <handoff-open-event-id> [--dry-run] [--isolation host|podman]
+EOF
+}
+
+die() {
+  echo "buzz-runner: $*" >&2
+  exit 1
+}
+
+DRY_RUN=0
+ISOLATION="host"
+OPEN_EVENT_ID=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --isolation)
+      [ "$#" -ge 2 ] || die "--isolation requires host or podman"
+      ISOLATION="$2"
+      shift 2
+      ;;
+    --isolation=*)
+      ISOLATION="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      usage
+      die "unknown option: $1"
+      ;;
+    *)
+      [ -z "$OPEN_EVENT_ID" ] || {
+        usage
+        die "only one handoff event id may be provided"
+      }
+      OPEN_EVENT_ID="$1"
+      shift
+      ;;
+  esac
+done
+
+[ -n "$OPEN_EVENT_ID" ] || {
+  usage
+  die "a handoff:open event id is required"
+}
+[[ "$OPEN_EVENT_ID" =~ ^[0-9a-fA-F]{64}$ ]] \
+  || die "handoff event id must be 64 hexadecimal characters"
+OPEN_EVENT_ID="$(printf '%s' "$OPEN_EVENT_ID" | tr '[:upper:]' '[:lower:]')"
+
+case "$ISOLATION" in
+  host) ;;
+  podman)
+    die "podman isolation is a future contract: it requires a digest-pinned OCI image, a read-only rootfs, dropped capabilities, and no node or agent keys inside the container"
+    ;;
+  *) die "unsupported isolation backend '$ISOLATION' (expected host or podman)" ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null)" \
+  || die "scripts/buzz-runner must be run from a git repository"
+COMMON_GIT_DIR="$(git -C "$SOURCE_ROOT" rev-parse --git-common-dir 2>/dev/null)" \
+  || die "could not resolve the repository's common git directory"
+case "$COMMON_GIT_DIR" in
+  /*) ;;
+  *) COMMON_GIT_DIR="$SOURCE_ROOT/$COMMON_GIT_DIR" ;;
+esac
+COMMON_GIT_DIR="$(cd "$COMMON_GIT_DIR" && pwd)" \
+  || die "could not resolve the repository's common git directory"
+REPOSITORY_HOME="$(dirname "$COMMON_GIT_DIR")"
+
+for dependency in jq git curl sed; do
+  command -v "$dependency" >/dev/null 2>&1 \
+    || die "required command not found on PATH: $dependency"
+done
+
+if [ -n "${BUZZ_RUNNER_BUZZ_CTX:-}" ]; then
+  BUZZ_CTX_BIN="$BUZZ_RUNNER_BUZZ_CTX"
+elif command -v buzz-ctx >/dev/null 2>&1; then
+  BUZZ_CTX_BIN="$(command -v buzz-ctx)"
+elif [ -x "$SCRIPT_DIR/buzz-ctx" ]; then
+  BUZZ_CTX_BIN="$SCRIPT_DIR/buzz-ctx"
+else
+  die "buzz-ctx not found on PATH (and sibling scripts/buzz-ctx is unavailable)"
+fi
+[ -x "$BUZZ_CTX_BIN" ] || die "buzz-ctx is not executable: $BUZZ_CTX_BIN"
+
+CTX_HOME="${BUZZ_CTX_HOME:-${HOME:?HOME must be set}/.buzz-local}"
+LOCAL_URL="${BUZZ_CTX_LOCAL:-http://127.0.0.1:7777}"
+CLOUD_URL="${BUZZ_CTX_CLOUD:-https://buzz-portable-relay.ted-slusser-a00.workers.dev}"
+RUNNER_AGENT="${BUZZ_CTX_AGENT:-unattributed}"
+SOVEREIGN_CLIENT="$CTX_HOME/bin/sovereign-client"
+KEY_PATH="${BUZZ_CTX_KEY:-$CTX_HOME/node.key}"
+
+[ -x "$SOVEREIGN_CLIENT" ] \
+  || die "missing sovereign client at $SOVEREIGN_CLIENT"
+[ -f "$KEY_PATH" ] || die "missing node key at $KEY_PATH"
+
+relay_for_read() {
+  if curl -sf --max-time 2 "$LOCAL_URL/health" >/dev/null; then
+    printf '%s\n' "$LOCAL_URL"
+  else
+    echo "buzz-runner: cloud fallback: local node unreachable, reading $CLOUD_URL" >&2
+    printf '%s\n' "$CLOUD_URL"
+  fi
+}
+
+query_events() {
+  local filter="$1"
+  local relay result
+  relay="$(relay_for_read)" || return 1
+  result="$("$SOVEREIGN_CLIENT" query "$KEY_PATH" "$relay" "$filter")" \
+    || return 1
+  printf '%s' "$result" | sed 's/^200 //'
+}
+
+OPEN_FILTER="$(jq -cn --arg id "$OPEN_EVENT_ID" \
+  '[{kinds:[1], ids:[$id]}]')" \
+  || die "could not build the handoff:open query"
+OPEN_RESULTS="$(query_events "$OPEN_FILTER")" \
+  || die "handoff:open event query failed"
+printf '%s' "$OPEN_RESULTS" | jq -e 'type == "array"' >/dev/null \
+  || die "handoff:open query returned invalid event data"
+OPEN_EVENT="$(printf '%s' "$OPEN_RESULTS" | jq -ce --arg id "$OPEN_EVENT_ID" '
+  [.[] | select((.id | ascii_downcase) == $id)]
+  | unique_by(.id)
+  | select(length == 1)
+  | .[0]
+')" || die "expected exactly one event with id $OPEN_EVENT_ID"
+
+printf '%s' "$OPEN_EVENT" | jq -e '
+  .kind == 1
+  and any(.tags[]?; length >= 2 and .[0] == "t" and .[1] == "handoff:open")
+' >/dev/null || die "event $OPEN_EVENT_ID is not a kind-1 handoff:open event"
+
+HANDOFF_SPEC="$(printf '%s' "$OPEN_EVENT" | jq -ce '
+  .content
+  | fromjson
+  | select(type == "object")
+  | select(.title | type == "string" and length > 0)
+  | select(.scope | type == "string" and length > 0)
+  | select(.base_commit | type == "string" and length > 0)
+  | select(.acceptance | type == "string" and length > 0)
+  | select(.embodiment | type == "object")
+  | select(.embodiment.stdin | type == "string" and length > 0)
+  | select(.embodiment.network | type == "string" and length > 0)
+  | select(.embodiment.trust | type == "string" and length > 0)
+  | select(.embodiment.tooling | type == "string" and length > 0)
+')" || die "handoff event content is not a valid open spec"
+
+ARTIFACTS="$(printf '%s' "$HANDOFF_SPEC" | jq -ce '
+  (if has("artifacts") then .artifacts else [] end)
+  | select(
+      type == "array"
+      and all(.[]; type == "string" and test("^[0-9a-fA-F]{64}$"))
+    )
+')" || die "handoff artifacts must be an array of 64-hex sha256 strings"
+TAG_ARTIFACTS="$(printf '%s' "$OPEN_EVENT" | jq -ce '
+  [.tags[]? | select(length >= 2 and .[0] == "x") | .[1]]
+  | select(all(.[]; type == "string" and test("^[0-9a-fA-F]{64}$")))
+')" || die "handoff event contains an invalid x-tag artifact"
+jq -en --argjson spec "$ARTIFACTS" --argjson tags "$TAG_ARTIFACTS" \
+  '($spec | sort) == ($tags | sort)' >/dev/null \
+  || die "handoff content artifacts do not match the event x tags"
+
+TITLE="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.title')"
+SCOPE="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.scope')"
+ACCEPTANCE="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.acceptance')"
+BASE_COMMIT="$(printf '%s' "$HANDOFF_SPEC" | jq -r '.base_commit')"
+RESOLVED_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse --verify \
+  "${BASE_COMMIT}^{commit}" 2>/dev/null)" \
+  || die "base_commit does not resolve to a local commit: $BASE_COMMIT"
+
+CLAIM_FILTER="$(jq -cn --arg id "$OPEN_EVENT_ID" \
+  '[{kinds:[1], "#t":["handoff:claim"], "#e":[$id]}]')" \
+  || die "could not build the handoff:claim query"
+CLAIM_RESULTS="$(query_events "$CLAIM_FILTER")" \
+  || die "handoff:claim query failed"
+printf '%s' "$CLAIM_RESULTS" | jq -e 'type == "array"' >/dev/null \
+  || die "handoff:claim query returned invalid event data"
+OTHER_CLAIM="$(printf '%s' "$CLAIM_RESULTS" | jq -cr \
+  --arg id "$OPEN_EVENT_ID" --arg runner "$RUNNER_AGENT" '
+    [
+      .[]
+      | select(
+          .kind == 1
+          and any(.tags[]?; length >= 2 and .[0] == "t" and .[1] == "handoff:claim")
+          and any(.tags[]?; length >= 2 and .[0] == "e" and ((.[1] | ascii_downcase) == $id))
+        )
+      | . as $claim
+      | (try (.content | fromjson | .runner) catch null) as $claim_runner
+      | select($claim_runner != $runner)
+      | {
+          id: ($claim.id // "unknown"),
+          runner: ($claim_runner // "(missing runner identity)")
+        }
+    ]
+    | if length == 0 then empty else .[0] | @json end
+  ')" || die "could not evaluate existing handoff claims"
+if [ -n "$OTHER_CLAIM" ]; then
+  CLAIMANT="$(printf '%s' "$OTHER_CLAIM" | jq -r '.runner')"
+  CLAIM_ID="$(printf '%s' "$OTHER_CLAIM" | jq -r '.id')"
+  die "handoff is already claimed by another runner: $CLAIMANT (claim $CLAIM_ID)"
+fi
+
+EVENT_PREFIX="${OPEN_EVENT_ID:0:12}"
+WORKTREE_PATH="$REPOSITORY_HOME/.claude/worktrees/runner-$EVENT_PREFIX"
+[ ! -e "$WORKTREE_PATH" ] \
+  || die "runner worktree path already exists: $WORKTREE_PATH"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  ARTIFACT_COUNT="$(printf '%s' "$ARTIFACTS" | jq 'length')"
+  cat <<EOF
+buzz-runner dry run
+  event:      $OPEN_EVENT_ID
+  title:      $TITLE
+  runner:     $RUNNER_AGENT
+  isolation:  host
+  base:       $BASE_COMMIT ($RESOLVED_COMMIT)
+  worktree:   $WORKTREE_PATH
+  artifacts:  $ARTIFACT_COUNT
+
+Plan:
+  1. Create a detached worktree at the resolved base commit.
+  2. Generate HANDOFF.md and fetch x-tag artifacts through buzz-ctx.
+  3. Claim the handoff through buzz-ctx.
+  4. Run codex exec with stdin closed and workspace-write sandboxing.
+  5. Capture git diff, announce it through buzz-ctx, and post handoff:return.
+
+No worktree, artifact fetch, lifecycle post, or codex execution was performed.
+EOF
+  exit 0
+fi
+
+command -v codex >/dev/null 2>&1 \
+  || die "required command not found on PATH: codex"
+
+STATE_DIR=""
+PROMPT_FILE=""
+LAST_MESSAGE_FILE=""
+RETURN_SPEC_FILE=""
+TEMP_INDEX_FILE=""
+WORKTREE_CREATED=0
+WORKTREE_REPORTED=0
+CLAIM_MAY_EXIST=0
+RETURN_POSTED=0
+DIFF_SHA=""
+FAILURE_REASON="unexpected runner failure"
+
+report_worktree() {
+  if [ "$WORKTREE_CREATED" -eq 1 ] && [ "$WORKTREE_REPORTED" -eq 0 ]; then
+    printf 'worktree: %s\n' "$WORKTREE_PATH"
+    WORKTREE_REPORTED=1
+  fi
+}
+
+cleanup_state() {
+  [ -n "$STATE_DIR" ] || return 0
+  rm -f -- "$PROMPT_FILE" "$LAST_MESSAGE_FILE" "$RETURN_SPEC_FILE" \
+    "$TEMP_INDEX_FILE" "$STATE_DIR/emergency-return.json"
+  rmdir "$STATE_DIR" 2>/dev/null || true
+}
+
+evidence_json() {
+  local summary="$1"
+  {
+    printf '%s\n' "$summary"
+    if [ -s "$LAST_MESSAGE_FILE" ]; then
+      printf '\nCodex last message:\n'
+      cat "$LAST_MESSAGE_FILE"
+    else
+      printf '\nCodex last message: (none)\n'
+    fi
+  } | jq -Rs '
+    if length > 8000
+    then .[0:8000] + "\n…[evidence truncated at 8000 characters]"
+    else .
+    end
+  '
+}
+
+write_return_spec() {
+  local status="$1"
+  local evidence="$2"
+  local sha="$3"
+  local destination="$4"
+  if [ -n "$sha" ]; then
+    jq -n --arg status "$status" --argjson evidence "$evidence" \
+      --arg sha "$sha" \
+      '{status:$status, evidence:$evidence, artifacts:[$sha], diff_sha256:$sha}' \
+      > "$destination"
+  else
+    jq -n --arg status "$status" --argjson evidence "$evidence" \
+      '{status:$status, evidence:$evidence, artifacts:[]}' \
+      > "$destination"
+  fi
+}
+
+emergency_failed_return() {
+  local evidence emergency_spec
+  emergency_spec="$STATE_DIR/emergency-return.json"
+  evidence="$(evidence_json "$FAILURE_REASON")" || {
+    echo "buzz-runner: could not build emergency failure evidence" >&2
+    return 1
+  }
+  write_return_spec "failed" "$evidence" "$DIFF_SHA" "$emergency_spec" || {
+    echo "buzz-runner: could not build emergency failed-return spec" >&2
+    return 1
+  }
+  if "$BUZZ_CTX_BIN" handoff return "$OPEN_EVENT_ID" "$emergency_spec"; then
+    RETURN_POSTED=1
+    echo "buzz-runner: posted failed return from exit guard" >&2
+    return 0
+  fi
+  echo "buzz-runner: CRITICAL: failed to post the exit-guard handoff:return" >&2
+  return 1
+}
+
+on_exit() {
+  local exit_status="$?"
+  trap - EXIT HUP INT TERM
+  set +e
+  if [ "$CLAIM_MAY_EXIST" -eq 1 ] && [ "$RETURN_POSTED" -eq 0 ]; then
+    [ "$exit_status" -ne 0 ] || exit_status=1
+    emergency_failed_return || true
+  fi
+  cleanup_state
+  report_worktree
+  exit "$exit_status"
+}
+trap on_exit EXIT
+trap 'FAILURE_REASON="runner interrupted by SIGHUP after claim"; exit 129' HUP
+trap 'FAILURE_REASON="runner interrupted by SIGINT after claim"; exit 130' INT
+trap 'FAILURE_REASON="runner interrupted by SIGTERM after claim"; exit 143' TERM
+
+mkdir -p "$REPOSITORY_HOME/.claude/worktrees" \
+  || die "could not create the runner worktree parent directory"
+git -C "$SOURCE_ROOT" worktree add --detach "$WORKTREE_PATH" "$RESOLVED_COMMIT" \
+  >/dev/null || die "could not create runner worktree at $WORKTREE_PATH"
+WORKTREE_CREATED=1
+
+[ ! -e "$WORKTREE_PATH/HANDOFF.md" ] \
+  || die "base worktree already contains HANDOFF.md; refusing to overwrite it"
+{
+  printf '# Generated journal handoff\n\n'
+  printf 'This file was generated by `buzz-runner` from handoff event `%s`.\n' \
+    "$OPEN_EVENT_ID"
+  printf 'It is execution context only: do not edit or commit it.\n\n'
+  printf '## Scope boundary\n\n%s\n\n' "$SCOPE"
+  printf '## Acceptance\n\n%s\n\n' "$ACCEPTANCE"
+  printf '## Authoritative event content\n\n```json\n'
+  printf '%s' "$HANDOFF_SPEC" | jq .
+  printf '```\n'
+} > "$WORKTREE_PATH/HANDOFF.md" \
+  || die "could not materialize HANDOFF.md in the runner worktree"
+
+mkdir "$WORKTREE_PATH/handoff-artifacts" \
+  || die "could not create handoff-artifacts in the runner worktree"
+while IFS= read -r artifact_sha; do
+  [ -n "$artifact_sha" ] || continue
+  "$BUZZ_CTX_BIN" fetch "$artifact_sha" \
+    "$WORKTREE_PATH/handoff-artifacts/$artifact_sha" \
+    || die "failed to fetch handoff artifact $artifact_sha"
+done < <(printf '%s' "$ARTIFACTS" | jq -r '.[]')
+
+STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/buzz-runner.XXXXXX")" \
+  || die "could not create runner state directory"
+PROMPT_FILE="$STATE_DIR/prompt.txt"
+LAST_MESSAGE_FILE="$STATE_DIR/last-message.txt"
+RETURN_SPEC_FILE="$STATE_DIR/return.json"
+TEMP_INDEX_FILE="$STATE_DIR/index"
+
+{
+  printf 'Execute journal handoff %s in this isolated worktree.\n\n' \
+    "$OPEN_EVENT_ID"
+  printf 'Read HANDOFF.md first; it contains the generated preamble and authoritative event content.\n'
+  printf 'Treat this scope boundary as authoritative:\n%s\n\n' "$SCOPE"
+  printf 'Acceptance requirement:\n%s\n\n' "$ACCEPTANCE"
+  printf 'Work only inside this worktree. Do not modify HANDOFF.md or handoff-artifacts/.\n'
+  printf 'Do not commit, merge, or alter any other worktree. Leave all implementation changes uncommitted for the orchestrator.\n'
+} > "$PROMPT_FILE" || die "could not write the codex execution prompt"
+CODEX_PROMPT="$(cat "$PROMPT_FILE")" \
+  || die "could not read the codex execution prompt"
+
+FAILURE_REASON="handoff claim command failed; claim acceptance is unknown"
+CLAIM_MAY_EXIST=1
+"$BUZZ_CTX_BIN" handoff claim "$OPEN_EVENT_ID" \
+  "host worktree $WORKTREE_PATH at $RESOLVED_COMMIT" \
+  || die "handoff claim failed"
+FAILURE_REASON="unexpected failure after the handoff was claimed"
+
+set +e
+(
+  cd "$WORKTREE_PATH" || exit 125
+  env -u BUZZ_CTX_KEY -u BUZZ_PRIVATE_KEY -u BUZZ_AGENT_PRIVATE_KEY \
+    -u NOSTR_PRIVATE_KEY \
+    codex exec --skip-git-repo-check --sandbox workspace-write \
+      --output-last-message "$LAST_MESSAGE_FILE" "$CODEX_PROMPT" < /dev/null
+)
+CODEX_STATUS="$?"
+set -e
+
+if [ "$CODEX_STATUS" -eq 0 ] && [ -s "$LAST_MESSAGE_FILE" ]; then
+  RETURN_STATUS="done"
+  OUTCOME_SUMMARY="codex exec completed successfully."
+elif [ "$CODEX_STATUS" -eq 0 ]; then
+  RETURN_STATUS="failed"
+  OUTCOME_SUMMARY="codex exec exited successfully but produced no last-message evidence."
+else
+  RETURN_STATUS="failed"
+  OUTCOME_SUMMARY="codex exec exited with status $CODEX_STATUS."
+fi
+
+make_result_diff() {
+  rm -f -- "$TEMP_INDEX_FILE" || return 1
+  GIT_INDEX_FILE="$TEMP_INDEX_FILE" \
+    git -C "$WORKTREE_PATH" read-tree HEAD || return 1
+  GIT_INDEX_FILE="$TEMP_INDEX_FILE" \
+    git -C "$WORKTREE_PATH" add -A -- . \
+      ':(exclude)HANDOFF.md' \
+      ':(exclude)handoff-artifacts' \
+      ':(exclude)handoff-artifacts/**' \
+      ':(exclude)result.diff' || return 1
+  GIT_INDEX_FILE="$TEMP_INDEX_FILE" \
+    git -C "$WORKTREE_PATH" diff --cached --binary --no-ext-diff HEAD -- \
+      > "$WORKTREE_PATH/result.diff" || return 1
+}
+
+FAILURE_REASON="failed to capture the worktree git diff after claim"
+if ! make_result_diff; then
+  RETURN_STATUS="failed"
+  OUTCOME_SUMMARY="$FAILURE_REASON"
+else
+  FAILURE_REASON="failed to announce the result diff after claim"
+  set +e
+  ANNOUNCE_OUTPUT="$("$BUZZ_CTX_BIN" announce "$WORKTREE_PATH/result.diff" \
+    "handoff $EVENT_PREFIX result diff ($RETURN_STATUS)")"
+  ANNOUNCE_STATUS="$?"
+  set -e
+  if [ "$ANNOUNCE_STATUS" -ne 0 ]; then
+    RETURN_STATUS="failed"
+    OUTCOME_SUMMARY="$FAILURE_REASON"
+  else
+    DIFF_SHA="$(printf '%s\n' "$ANNOUNCE_OUTPUT" \
+      | sed -n 's/^sha256: //p' | head -n 1)"
+    if ! [[ "$DIFF_SHA" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      DIFF_SHA=""
+      RETURN_STATUS="failed"
+      OUTCOME_SUMMARY="buzz-ctx announce returned no valid diff sha256 after claim."
+    fi
+  fi
+fi
+
+EVIDENCE="$(evidence_json "$OUTCOME_SUMMARY")" \
+  || die "could not build handoff return evidence"
+write_return_spec "$RETURN_STATUS" "$EVIDENCE" "$DIFF_SHA" \
+  "$RETURN_SPEC_FILE" || die "could not build handoff return spec"
+
+FAILURE_REASON="handoff return command failed; return acceptance is unknown"
+"$BUZZ_CTX_BIN" handoff return "$OPEN_EVENT_ID" "$RETURN_SPEC_FILE" \
+  || die "handoff return failed"
+RETURN_POSTED=1
+
+report_worktree
+if [ "$RETURN_STATUS" = "done" ]; then
+  exit 0
+fi
+exit 1
