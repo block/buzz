@@ -162,6 +162,48 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   );
 });
 
+test("isAgentIdentityInManagedList: keeps cross-owned agents the current user can invoke (#3125)", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+  const invocableAgentPubkeys = new Set([PUB_A, PUB_B]);
+
+  // Another owner's agent whose allowlist/anyone policy admits us: keep.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+      invocableAgentPubkeys,
+    ),
+    true,
+  );
+  // Case-insensitive on the invocable set too.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B.toUpperCase() },
+      managedAgentPubkeys,
+      invocableAgentPubkeys,
+    ),
+    true,
+  );
+  // Stale identity: neither managed nor invocable — still dropped (#2149).
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_C },
+      managedAgentPubkeys,
+      invocableAgentPubkeys,
+    ),
+    false,
+  );
+  // People are never gated.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: false, pubkey: PUB_C },
+      managedAgentPubkeys,
+      invocableAgentPubkeys,
+    ),
+    true,
+  );
+});
+
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
