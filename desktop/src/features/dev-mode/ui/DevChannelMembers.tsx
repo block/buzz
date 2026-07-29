@@ -34,7 +34,6 @@ export function DevChannelMembers({
       title="View members"
       type="button"
     >
-      ·
       {showNames && members.length > 0 ? (
         members.map((member) => (
           <span

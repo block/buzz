@@ -11,7 +11,6 @@ import {
   groupSessionChannels,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
-import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import {
   aggregateLastActivity,
@@ -816,46 +815,26 @@ export function DevModeShell({
           >
             <span
               className={cn(
-                "pointer-events-none flex min-w-0 items-baseline gap-2 whitespace-nowrap",
+                "pointer-events-none min-w-0 truncate whitespace-nowrap text-foreground",
                 macChrome && "translate-y-[3px]",
               )}
+              data-testid="dev-mode-topbar-channel"
             >
-              {topBarChannel ? (
-                <span
-                  className="truncate text-foreground"
-                  data-testid="dev-mode-topbar-channel"
-                >
-                  # {topBarChannel.name}
-                </span>
-              ) : null}
-              {topBarChannel ? (
+              {topBarChannel ? <># {topBarChannel.name}</> : null}
+            </span>
+            {topBarChannel ? (
+              <span
+                className={cn(
+                  "flex min-w-0 shrink-0 items-baseline",
+                  macChrome && "translate-y-[3px]",
+                )}
+              >
                 <DevChannelMembers
                   channel={topBarChannel}
                   onShowMembers={() => openPalette("members")}
                 />
-              ) : null}
-            </span>
-            <div
-              className={cn(
-                "flex shrink-0 items-center gap-3",
-                macChrome && "translate-y-[3px]",
-              )}
-            >
-              <button
-                className="cursor-pointer hover:text-foreground"
-                onClick={() => openPalette()}
-                type="button"
-              >
-                palette
-              </button>
-              <button
-                className="cursor-pointer hover:text-foreground"
-                onClick={() => setDisplayStyle("standard")}
-                type="button"
-              >
-                standard ui
-              </button>
-            </div>
+              </span>
+            ) : null}
           </div>
         </div>
 
