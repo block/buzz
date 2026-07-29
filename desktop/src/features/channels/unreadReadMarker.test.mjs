@@ -7,15 +7,16 @@ import {
   countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
+  countUnreadTopLevelObservedEvents,
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
 } from "./unreadChannelCounts.ts";
+import { addThreadActivityItems } from "./useUnreadChannels.ts";
 import {
-  addThreadActivityItems,
   channelCatchUpEventKinds,
   resolveChannelReadMarker,
   resolveObservedUnreadRootId,
-} from "./useUnreadChannels.ts";
+} from "./unreadReadMarker.ts";
 import {
   isChannelUnreadTriggerKind,
   withChannelTagFallback,
@@ -329,6 +330,38 @@ test("sidebarPipeline_openedReplyMessageMarkerClearsDelayedReplay", () => {
       observedByChannel.get(channelId),
       afterOpenReadAt,
     ),
+    0,
+  );
+});
+
+test("countUnreadTopLevelObservedEvents_ignoresThreadReplies", () => {
+  // Channel marker covers the newest top-level post (300). Two thread replies
+  // are strictly newer and unread, but a dev-mode channel dot only tracks
+  // channel-level posts, so the top-level count must be zero.
+  const events = new Map([
+    ["reply-a", observed("reply-a", 400, "root-a")],
+    ["reply-b", observed("reply-b", 500, "root-b")],
+  ]);
+  const getReadAt = readAtFor(300, new Map());
+
+  assert.equal(countUnreadObservedEvents(events, getReadAt), 2);
+  assert.equal(countUnreadTopLevelObservedEvents(events, getReadAt), 0);
+});
+
+test("countUnreadTopLevelObservedEvents_countsUnreadChannelLevelPosts", () => {
+  const events = new Map([
+    ["post", observed("post", 400, null)],
+    ["reply", observed("reply", 500, "root-a")],
+  ]);
+
+  // Marker behind the top-level post: it counts; the newer reply never does.
+  assert.equal(
+    countUnreadTopLevelObservedEvents(events, readAtFor(300, new Map())),
+    1,
+  );
+  // Marker at the top-level post: read.
+  assert.equal(
+    countUnreadTopLevelObservedEvents(events, readAtFor(400, new Map())),
     0,
   );
 });

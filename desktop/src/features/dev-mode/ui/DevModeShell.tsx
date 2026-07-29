@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { useAppShell } from "@/app/AppShellContext";
+
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   type ChannelRef,
@@ -147,6 +149,27 @@ export function DevModeShell({
     [messagesQuery.data],
   );
   const selectedRoot = roots.find((root) => root.id === selectedRootId) ?? null;
+
+  // Viewing an open channel marks its channel-level posts read (same passive
+  // NIP-RS path the standard channel screen uses). topLevelOnly keeps thread
+  // replies out of the marker — dev mode's unread dot only tracks top-level
+  // posts, so opening the channel is all it takes to clear it.
+  const { markChannelRead } = useAppShell();
+  const latestRootAt =
+    roots.length > 0 ? roots[roots.length - 1].created_at : null;
+  const activeChannelIdForRead = activeChannel?.isMember
+    ? activeChannel.id
+    : null;
+  React.useEffect(() => {
+    if (!activeChannelIdForRead) return;
+    markChannelRead(
+      activeChannelIdForRead,
+      latestRootAt === null
+        ? null
+        : new Date(latestRootAt * 1_000).toISOString(),
+      { topLevelOnly: true },
+    );
+  }, [activeChannelIdForRead, latestRootAt, markChannelRead]);
 
   // Card selection and the side chat belong to one channel's transcript.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — selection resets only on channel switch

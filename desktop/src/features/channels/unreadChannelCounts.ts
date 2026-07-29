@@ -106,6 +106,25 @@ export function countUnreadAppBadgeObservedEvents(
   return count;
 }
 
+/**
+ * Unread channel-level posts only (rootId === null) — thread replies never
+ * count. Dev mode's channel list uses this so a channel reads as unread only
+ * when a top-level message is unread, not when unopened threads have replies.
+ */
+export function countUnreadTopLevelObservedEvents(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): number {
+  if (!eventsById) return 0;
+  let count = 0;
+  for (const event of eventsById.values()) {
+    if (event.rootId !== null) continue;
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) count += 1;
+  }
+  return count;
+}
+
 export function countUnreadHighPriorityObservedEvents(
   eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
   getReadAt: (event: ObservedUnreadEvent) => number | null,

@@ -334,6 +334,7 @@ export function AppShell() {
     markChannelRead,
     markChannelUnread,
     unreadChannelIds,
+    topLevelUnreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
     unreadChannelNotificationCount,
@@ -776,7 +777,7 @@ export function AppShell() {
                       <div className="flex min-h-0 flex-1 overflow-hidden">
                         <React.Suspense fallback={null}>
                           <LazyDevModeShell
-                            unreadChannelIds={unreadChannelIds}
+                            unreadChannelIds={topLevelUnreadChannelIds}
                           />
                         </React.Suspense>
                       </div>
