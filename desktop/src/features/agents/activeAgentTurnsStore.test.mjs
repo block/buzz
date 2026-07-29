@@ -18,7 +18,7 @@ import {
   getAgentObserverSnapshot,
   resetAgentObserverStore,
 } from "./observerRelayStore.ts";
-import { formatElapsed } from "./ui/agentSessionUtils.ts";
+import { formatAgo, formatElapsed } from "./ui/agentSessionUtils.ts";
 
 const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
@@ -572,7 +572,7 @@ describe("activeAgentTurnsStore", () => {
       assert.equal(getLastTurnFailureForAgent(AGENT), null);
     });
 
-    it("persists outcome/error/code/errorClass/timestamp after a turn_error", () => {
+    it("persists outcome/error/code/errorClass/failedAt after a turn_error", () => {
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
         makeEvent({
@@ -596,7 +596,16 @@ describe("activeAgentTurnsStore", () => {
       assert.equal(failure.error, "Idle timeout — no agent activity for 30s");
       assert.equal(failure.code, null);
       assert.equal(failure.errorClass, "timeout");
-      assert.equal(failure.timestamp, Date.parse("2024-01-01T00:00:05Z"));
+      // `failedAt` is desktop-clock anchored: the agent-host timestamp
+      // translated through the skew offset sampled from these very events.
+      // Both arrive "now" from the desktop's perspective — despite the 2024
+      // host clock — so the failure must land at ~Date.now(), not at the raw
+      // host epoch. That's what makes `now - failedAt` a usable age.
+      const drift = Math.abs(failure.failedAt - Date.now());
+      assert.ok(
+        drift < 1_000,
+        `failedAt must anchor to the desktop clock (off by ${drift}ms)`,
+      );
     });
 
     it("persists after an agent_panic with error_class 'panic'", () => {
@@ -1734,6 +1743,35 @@ describe("formatElapsed", () => {
 
   it("clamps negative input to 0s", () => {
     assert.equal(formatElapsed(-5_000), "0s");
+  });
+});
+
+describe("formatAgo", () => {
+  it("renders sub-minute deltas as 'just now'", () => {
+    assert.equal(formatAgo(0), "just now");
+    assert.equal(formatAgo(59_000), "just now");
+  });
+
+  it("rolls into minutes at exactly 60s", () => {
+    assert.equal(formatAgo(60_000), "1m ago");
+    assert.equal(formatAgo(119_000), "1m ago");
+  });
+
+  it("rolls into hours at exactly 60m", () => {
+    assert.equal(formatAgo(3_599_000), "59m ago");
+    assert.equal(formatAgo(3_600_000), "1h ago");
+  });
+
+  it("rolls into days at exactly 24h", () => {
+    assert.equal(formatAgo(86_399_000), "23h ago");
+    assert.equal(formatAgo(86_400_000), "1d ago");
+    assert.equal(formatAgo(200_000_000), "2d ago");
+  });
+
+  it("clamps a negative delta to 'just now' rather than '-1m ago'", () => {
+    // Reachable when a skew correction lands a recorded moment slightly ahead
+    // of the desktop clock.
+    assert.equal(formatAgo(-5_000), "just now");
   });
 });
 

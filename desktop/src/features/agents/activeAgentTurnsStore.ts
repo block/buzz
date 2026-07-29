@@ -58,8 +58,19 @@ export type TurnFailure = {
    * agent_error/protocol/exited/cancelled/panic/error), or null for payloads
    * from a harness build that predates the field. */
   errorClass: string | null;
-  /** Agent-host clock ms when the failure was recorded (parsed from the event). */
-  timestamp: number;
+  /**
+   * When the failure happened, in DESKTOP-clock ms — the event's agent-host
+   * timestamp translated through that agent's skew offset, so the UI can render
+   * an age against `Date.now()` the same way a working badge does.
+   *
+   * Unlike a live turn's `anchorAt` (derived at read time so a later, tighter
+   * offset retroactively corrects it), this is fixed when the failure is
+   * recorded. A failure is a terminal point in the past rendered at
+   * minute granularity, so sub-second retroactive drift is invisible — and
+   * fixing it at write time keeps the value reference-stable for
+   * `useSyncExternalStore` without a derived-snapshot cache.
+   */
+  failedAt: number;
 };
 
 /** One working channel surfaced to the UI, anchored to the desktop clock. */
@@ -308,15 +319,27 @@ function asFiniteNumber(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Build a `TurnFailure` from a `turn_error`/`agent_panic` observer event. */
-function extractTurnFailure(event: ObserverEvent): TurnFailure {
+/**
+ * Build a `TurnFailure` from a `turn_error`/`agent_panic` observer event.
+ *
+ * `failedAt` is translated into desktop-clock terms with the agent's skew
+ * offset, which `processEvent` has already refined from this very event before
+ * calling here. An unparseable timestamp falls back to the desktop clock
+ * directly — already in the target frame, so no offset applies.
+ */
+function extractTurnFailure(
+  agentKey: string,
+  event: ObserverEvent,
+): TurnFailure {
   const payload = asRecord(event.payload);
+  const hostMs = parseTimestamp(event.timestamp);
+  const offset = clockOffsetByAgent.get(agentKey) ?? 0;
   return {
     outcome: asString(payload.outcome) ?? "error",
     error: asString(payload.error) ?? "Unknown error",
     code: asFiniteNumber(payload.code),
     errorClass: asString(payload.error_class),
-    timestamp: parseTimestamp(event.timestamp) ?? Date.now(),
+    failedAt: hostMs == null ? Date.now() : hostMs + offset,
   };
 }
 
@@ -455,7 +478,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
         event.channelId ?? null,
         Date.parse(event.timestamp),
       );
-      setLastTurnFailure(key, extractTurnFailure(event));
+      setLastTurnFailure(key, extractTurnFailure(key, event));
       notifyListeners();
       return;
     case "acp_read":

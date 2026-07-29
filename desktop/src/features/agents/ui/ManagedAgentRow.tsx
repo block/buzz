@@ -13,7 +13,10 @@ import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import {
+  formatAgo,
+  formatElapsed,
+} from "@/features/agents/ui/agentSessionUtils";
 import { useLastTurnFailure } from "@/features/agents/activeAgentTurnsStore";
 import type { TurnFailure } from "@/features/agents/activeAgentTurnsStore";
 import { useNow } from "@/shared/lib/useNow";
@@ -27,7 +30,9 @@ import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import {
   friendlyAgentLastError,
+  friendlyTurnErrorClass,
   friendlyTurnErrorCopy,
+  shouldShowTurnFailure,
 } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -396,17 +401,32 @@ function StatusBlock({
           {friendlyError.copy}
         </p>
       ) : null}
-      {lastTurnFailure ? (
-        <p
-          className="text-xs text-muted-foreground"
-          data-testid="managed-agent-last-turn-error"
-        >
-          Last turn error (
-          {lastTurnFailure.errorClass ?? lastTurnFailure.outcome}):{" "}
-          {friendlyTurnErrorCopy(lastTurnFailure.error, lastTurnFailure.code)}
-        </p>
+      {lastTurnFailure &&
+      shouldShowTurnFailure(lastTurnFailure, friendlyError != null) ? (
+        <TurnFailureLine failure={lastTurnFailure} />
       ) : null}
     </div>
+  );
+}
+
+/** The age label's finest unit is a minute, so a minute tick is the coarsest
+ * interval that keeps it truthful. Mounted at the leaf so only rows that
+ * actually show a failure own an interval — healthy rows never tick. */
+const FAILURE_AGE_TICK_MS = 60_000;
+
+function TurnFailureLine({ failure }: { failure: TurnFailure }) {
+  const now = useNow(FAILURE_AGE_TICK_MS);
+
+  return (
+    <p
+      className="text-xs text-muted-foreground"
+      data-testid="managed-agent-last-turn-error"
+    >
+      Last turn error (
+      {friendlyTurnErrorClass(failure.errorClass, failure.outcome)},{" "}
+      {formatAgo(now - failure.failedAt)}):{" "}
+      {friendlyTurnErrorCopy(failure.error, failure.code)}
+    </p>
   );
 }
 
