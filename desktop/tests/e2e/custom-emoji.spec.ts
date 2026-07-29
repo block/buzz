@@ -113,6 +113,22 @@ test("emoji autocomplete ranks an exact standard shortcode before a custom subst
   });
 });
 
+test("emoji autocomplete keeps semantic matches ahead of loose shortcode fallbacks", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await input.pressSequentially(":sad");
+
+  const autocomplete = page.getByTestId("emoji-autocomplete");
+  await expect(autocomplete).toBeVisible();
+  await expect(autocomplete.locator("button").first()).not.toContainText(
+    ":sandwich:",
+  );
+});
+
 test("custom emoji deletes as a single unit (like a built-in emoji)", async ({
   page,
 }) => {

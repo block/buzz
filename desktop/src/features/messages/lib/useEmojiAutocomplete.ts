@@ -125,11 +125,13 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
             shown,
           ).map((e) => ({ id: e.id, name: e.name, native: e.native }));
           // Rank exact/prefix shortcode matches across custom and standard emoji
-          // before weaker matches (for example, `joy` before `bufo_joy`).
+          // before semantic and weaker matches (for example, `joy` before
+          // `bufo_joy`). Keep emoji-mart's name/keyword results ahead of loose
+          // substring and subsequence matches.
           setSuggestions(
             rankShortcodeMatchesFirst(
               emojiQuery,
-              [...customMatches, ...standard, ...fuzzy],
+              [...standard, ...customMatches, ...fuzzy],
               (emoji) => emoji.id,
             ),
           );

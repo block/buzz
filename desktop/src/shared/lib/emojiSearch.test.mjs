@@ -93,6 +93,20 @@ test("exact shortcode matches rank ahead of weaker custom shortcode matches", ()
   );
 });
 
+test("semantic results stay ahead of loose shortcode matches", () => {
+  const items = [
+    { code: "frowning_face", source: "semantic" },
+    { code: "sandwich", source: "custom" },
+    { code: "sad", source: "standard" },
+  ];
+  const ranked = rankShortcodeMatchesFirst("sad", items, (item) => item.code);
+
+  assert.deepEqual(
+    ranked.map((item) => item.code),
+    ["sad", "frowning_face", "sandwich"],
+  );
+});
+
 test("fuzzyStandardEmoji surfaces point_up for `pointup`", () => {
   const hits = fuzzyStandardEmoji("pointup", 8, new Set());
   const ids = hits.map((e) => e.id);
