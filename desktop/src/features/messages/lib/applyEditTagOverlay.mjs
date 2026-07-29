@@ -22,6 +22,16 @@
  *     `:shortcode:` that the original rendered fine. Preserving on empty is
  *     strictly safe: an orphaned emoji tag whose shortcode is no longer in the
  *     body resolves nothing, so it can't cause a stale render.
+ *   - `notify` (NIP-CM `@channel`/`@here`) tags follow the same supplied-wins,
+ *     preserve-on-empty rule, for the same reasons. The relay accepts a notify
+ *     tag on an edit for render continuity only (NIP-CM D9), so an edit that
+ *     adds `@channel` to the body must be able to chip it; an edit from a
+ *     client that doesn't emit notify tags must not strip a chip the original
+ *     rendered fine. A supplied tag also replaces the original's, keeping the
+ *     at-most-one-notify invariant. Preserving on empty cannot escalate a
+ *     notification: notification and unread paths read the raw live/feed
+ *     event, never this overlay, and an orphaned notify tag whose token is no
+ *     longer in the body chips nothing.
  *   - all other tag kinds (`h`, `e`, `p` mentions, etc.) come exclusively
  *     from the original — the edit can't rewrite channel membership,
  *     thread refs, or mention targets.
@@ -31,13 +41,20 @@
 export function applyEditTagOverlay(originalTags, editTags) {
   if (!editTags) return originalTags;
   const editEmoji = editTags.filter((t) => t[0] === "emoji");
-  // imeta is always fully replaced by the edit. emoji is replaced only when
-  // the edit actually supplies emoji tags; otherwise the original's are kept.
-  const droppedFromOriginal =
-    editEmoji.length > 0
-      ? (t) => t[0] !== "imeta" && t[0] !== "emoji"
-      : (t) => t[0] !== "imeta";
-  const baseFromOriginal = originalTags.filter(droppedFromOriginal);
+  const editNotify = editTags.filter((t) => t[0] === "notify");
+  // imeta is always fully replaced by the edit. emoji and notify are replaced
+  // only when the edit actually supplies them; otherwise the original's are
+  // kept.
+  const keptFromOriginal = (t) =>
+    t[0] !== "imeta" &&
+    (editEmoji.length === 0 || t[0] !== "emoji") &&
+    (editNotify.length === 0 || t[0] !== "notify");
+  const baseFromOriginal = originalTags.filter(keptFromOriginal);
   const overlaidFromEdit = editTags.filter((t) => t[0] === "imeta");
-  return [...baseFromOriginal, ...overlaidFromEdit, ...editEmoji];
+  return [
+    ...baseFromOriginal,
+    ...overlaidFromEdit,
+    ...editEmoji,
+    ...editNotify,
+  ];
 }

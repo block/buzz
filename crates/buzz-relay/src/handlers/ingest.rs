@@ -905,6 +905,46 @@ async fn validate_forum_vote_target(
     Ok(())
 }
 
+/// NIP-CM: validate a `["notify", "channel"|"here"]` channel-wide mention tag.
+///
+/// Tag shape, mode spelling, at-most-one, and the allowed-kind gate are pure
+/// and live in [`buzz_core::channel_mentions`]. Only the DM rejection needs
+/// the channel row, which is why it is applied here rather than in core.
+fn validate_channel_mention(
+    event: &Event,
+    channel_row: Option<&buzz_db::channel::ChannelRecord>,
+) -> Result<(), String> {
+    use buzz_core::channel_mentions::{event_notify_mode, NotifyTagError};
+
+    if event_notify_mode(event)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Ok(());
+    }
+    if channel_row.is_some_and(|row| row.channel_type == buzz_db::channel::ChannelType::Dm.as_str())
+    {
+        return Err(NotifyTagError::DirectMessage.to_string());
+    }
+    Ok(())
+}
+
+/// NIP-CM: whether this event's notify tag requires the sender to be a member.
+///
+/// True only for a well-formed notify tag on a kind that actually notifies.
+/// Edits (`40003`) re-carry the tag for render continuity and never notify
+/// (see `persists_channel_notification`), so gating them would only break
+/// editing a message that was legitimately notified before the author left the
+/// channel. A malformed tag returns `false` — [`validate_channel_mention`]
+/// rejects those on shape grounds first.
+fn notify_requires_membership(event: &Event) -> bool {
+    event_kind_u32(event) != KIND_STREAM_MESSAGE_EDIT
+        && buzz_core::channel_mentions::event_notify_mode(event)
+            .ok()
+            .flatten()
+            .is_some()
+}
+
 /// Validate kind:40008 diff event metadata tags.
 fn validate_diff_event(event: &Event) -> Result<(), String> {
     // Content max 60KB
@@ -1568,6 +1608,18 @@ async fn ingest_event_inner(
         )));
     }
 
+    // NIP-CM: the pure half of the notify-tag gate — shape, mode spelling,
+    // at-most-one, allowed kind — must run BEFORE every early-return handler
+    // dispatch below (commands, product feedback, reports, moderation
+    // commands). Those handlers answer `accepted: true` without ever reaching
+    // the channel-row gate further down, so without this the sender would be
+    // told the channel was notified while the tag was silently stored (product
+    // feedback and command kinds persist the event's tags verbatim). No kind
+    // handled by those branches is notify-allowed, so this pure check is their
+    // complete gate; the channel-row-dependent rules stay below.
+    buzz_core::channel_mentions::event_notify_mode(&event)
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
@@ -1781,6 +1833,35 @@ async fn ingest_event_inner(
         Some(ch_id) => state.db.get_channel(tenant.community(), ch_id).await.ok(),
         None => None,
     };
+    // NIP-CM: gate the channel-wide mention tag before anything stores or
+    // fans out the event. The shape/kind half already ran above the
+    // early-return handler dispatch, so every kind is covered; this call adds
+    // the DM-channel rule, which needs the channel row. Re-running the pure
+    // check here is a tag scan, and keeps the seam readable in one place.
+    validate_channel_mention(&event, channel_row.as_ref())
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
+    // NIP-CM: only current members may notify a whole channel. The
+    // open-visibility fallback in `check_channel_membership` lets a non-member
+    // post into an open channel; that fallback deliberately does NOT extend to
+    // a notify tag, which would otherwise let anyone blast a channel's roster
+    // without ever appearing on it (no join event, no roster row for
+    // moderators to act on). Edits are exempt — see
+    // `notify_requires_membership`.
+    if notify_requires_membership(&event) {
+        if let Some(ch_id) = channel_id {
+            let is_member = state
+                .is_member_cached(tenant.community(), ch_id, &pubkey_bytes)
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
+            if !is_member {
+                return Err(IngestError::Rejected(
+                    "restricted: only channel members may use @channel or @here".into(),
+                ));
+            }
+        }
+    }
+
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
     // here, through the same `channel_visibility_cached` gate fan-out uses
     // (fence 2: cached `private` wins over the prefetched row; a `private`
@@ -3093,6 +3174,148 @@ mod tests {
         assert!(
             required_scope_for_kind(KIND_PRESENCE_UPDATE, &dummy).is_err(),
             "KIND_PRESENCE_UPDATE should not be in the scope allowlist"
+        );
+    }
+
+    fn make_channel_row(channel_type: &str) -> buzz_db::channel::ChannelRecord {
+        let now = chrono::Utc::now();
+        buzz_db::channel::ChannelRecord {
+            id: uuid::Uuid::new_v4(),
+            name: "test".into(),
+            channel_type: channel_type.into(),
+            visibility: "open".into(),
+            description: None,
+            canvas: None,
+            created_by: vec![0u8; 32],
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+            deleted_at: None,
+            nip29_group_id: None,
+            topic_required: false,
+            max_members: None,
+            topic: None,
+            topic_set_by: None,
+            topic_set_at: None,
+            purpose: None,
+            purpose_set_by: None,
+            purpose_set_at: None,
+            ttl_seconds: None,
+            ttl_deadline: None,
+        }
+    }
+
+    #[test]
+    fn channel_mention_accepted_on_allowed_kinds() {
+        for kind in buzz_core::channel_mentions::NOTIFY_ALLOWED_KINDS {
+            for mode in ["channel", "here"] {
+                let event = make_event_with_tags(kind, "hi", &[&["notify", mode]]);
+                assert!(
+                    validate_channel_mention(&event, Some(&make_channel_row("stream"))).is_ok(),
+                    "kind {kind} mode {mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn channel_mention_rejected_on_other_kinds() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE_V2, "hi", &[&["notify", "channel"]]);
+        assert!(validate_channel_mention(&event, Some(&make_channel_row("stream"))).is_err());
+    }
+
+    #[test]
+    fn channel_mention_rejected_for_bad_mode_and_duplicates() {
+        let bad_mode = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", "everyone"]]);
+        assert!(validate_channel_mention(&bad_mode, Some(&make_channel_row("stream"))).is_err());
+
+        let duplicate = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "hi",
+            &[&["notify", "channel"], &["notify", "here"]],
+        );
+        assert!(validate_channel_mention(&duplicate, Some(&make_channel_row("stream"))).is_err());
+
+        let missing_mode = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify"]]);
+        assert!(
+            validate_channel_mention(&missing_mode, Some(&make_channel_row("stream"))).is_err()
+        );
+    }
+
+    #[test]
+    fn channel_mention_rejected_in_dm_channels() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", "channel"]]);
+        let err = validate_channel_mention(&event, Some(&make_channel_row("dm")))
+            .expect_err("DM channels must reject channel-wide mentions");
+        assert!(err.contains("DM"), "{err}");
+    }
+
+    #[test]
+    fn untagged_events_are_unaffected() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["h", "abc"]]);
+        assert!(validate_channel_mention(&event, Some(&make_channel_row("dm"))).is_ok());
+        let other_kind = make_event_with_tags(1, "hi", &[]);
+        assert!(validate_channel_mention(&other_kind, None).is_ok());
+    }
+
+    #[test]
+    fn notify_tag_rejected_on_kinds_answered_before_the_channel_row_gate() {
+        // These kinds are answered by their own handlers, which return
+        // `accepted: true` before `validate_channel_mention` is reached. The
+        // pure check hoisted above the handler dispatch is therefore their
+        // only gate — and it is sufficient exactly because none of them is
+        // notify-allowed. If that ever changes, this test fails first.
+        for kind in [
+            KIND_PRODUCT_FEEDBACK, // 42000 — sidecar table, tags stored verbatim
+            KIND_REPORT,           // 1984 — mod queue
+            KIND_DM_OPEN,          // 41010 — command kind, event stored verbatim
+            KIND_MODERATION_BAN,   // 9040 — moderation command
+        ] {
+            assert!(
+                !buzz_core::channel_mentions::NOTIFY_ALLOWED_KINDS.contains(&kind),
+                "kind {kind} must stay outside NOTIFY_ALLOWED_KINDS, or the \
+                 hoisted pure check stops being a complete gate for it"
+            );
+            let event = make_event_with_tags(kind, "hi", &[&["notify", "channel"]]);
+            assert_eq!(
+                buzz_core::channel_mentions::event_notify_mode(&event),
+                Err(buzz_core::channel_mentions::NotifyTagError::KindNotAllowed(
+                    kind
+                )),
+                "kind {kind} must reject a notify tag"
+            );
+        }
+    }
+
+    #[test]
+    fn notify_tag_demands_membership_on_notifying_kinds_only() {
+        // Both modes gate: `here` blasts every online member, so it is no more
+        // open than `channel`.
+        for mode in ["channel", "here"] {
+            let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", mode]]);
+            assert!(
+                notify_requires_membership(&event),
+                "mode {mode} must require membership"
+            );
+        }
+        for kind in [KIND_FORUM_POST, KIND_FORUM_COMMENT] {
+            let event = make_event_with_tags(kind, "hi", &[&["notify", "channel"]]);
+            assert!(notify_requires_membership(&event), "kind {kind}");
+        }
+
+        let edit = make_event_with_tags(KIND_STREAM_MESSAGE_EDIT, "hi", &[&["notify", "channel"]]);
+        assert!(
+            !notify_requires_membership(&edit),
+            "edits re-carry the tag for rendering and never notify"
+        );
+
+        let untagged = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["h", "abc"]]);
+        assert!(!notify_requires_membership(&untagged));
+
+        let malformed = make_event_with_tags(KIND_STREAM_MESSAGE, "hi", &[&["notify", "everyone"]]);
+        assert!(
+            !notify_requires_membership(&malformed),
+            "malformed tags are rejected by validate_channel_mention, not by the member gate"
         );
     }
 

@@ -50,7 +50,7 @@ import {
   type MentionSuggestion,
 } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
-import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
+import { ComposerMentionDialogs } from "./ComposerMentionDialogs";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
@@ -1008,14 +1008,9 @@ function MessageComposerImpl({
         </div>
       </footer>
 
-      <NonMemberMentionDialog
-        error={mentionSendFlow.nonMemberPromptError}
-        isInvitePending={mentionSendFlow.isInvitePending}
-        names={mentionSendFlow.pendingNonMemberNames}
-        onDismiss={mentionSendFlow.dismissNonMemberPrompt}
-        onDoNothing={mentionSendFlow.sendWithoutInviting}
-        onInvite={mentionSendFlow.inviteNonMembers}
-        open={mentionSendFlow.pendingNonMemberSend !== null}
+      <ComposerMentionDialogs
+        memberCount={mentions.memberPubkeys.size}
+        sendFlow={mentionSendFlow}
       />
 
       {linkEditor.card}

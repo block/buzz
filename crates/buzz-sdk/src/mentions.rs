@@ -29,6 +29,7 @@
 
 use std::collections::HashSet;
 
+use buzz_core::channel_mentions::is_reserved_mention_token;
 use nostr::{FromBech32, PublicKey};
 
 /// Maximum number of mention p-tags allowed on a single message.
@@ -61,7 +62,31 @@ pub struct MentionProfile<'a> {
 ///
 /// Allowed name characters: ASCII alphanumerics, `.`, `-`, `_`.
 /// Duplicates are removed; first-seen order is preserved.
+///
+/// The reserved channel-wide mention tokens (`@channel`, `@here`) are never
+/// returned — see [`extract_reserved_mention_tokens`].
 pub fn extract_at_names(content: &str) -> Vec<String> {
+    scan_at_tokens(content)
+        .into_iter()
+        .filter(|name| !is_reserved_mention_token(name))
+        .collect()
+}
+
+/// Extract the reserved channel-wide mention tokens (`channel`, `here`) that
+/// appear as `@tokens` in `content`.
+///
+/// Returned lowercased, deduplicated, in first-seen order. Matching is
+/// case-insensitive, so `@Here` is reported as `here`. Callers that care about
+/// code blocks should pass content through [`strip_code_regions`] first.
+pub fn extract_reserved_mention_tokens(content: &str) -> Vec<String> {
+    scan_at_tokens(content)
+        .into_iter()
+        .filter(|name| is_reserved_mention_token(name))
+        .collect()
+}
+
+/// Scan single-word `@tokens`, lowercased, deduplicated, first-seen order.
+fn scan_at_tokens(content: &str) -> Vec<String> {
     if content.is_empty() || !content.contains('@') {
         return vec![];
     }
@@ -104,6 +129,9 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
 /// longest-first (case-insensitive, word-boundary-checked), then falls back
 /// to single-word tokenization. Returns lowercased names in first-seen order,
 /// deduplicated. Empty/whitespace-only entries in `known_names` are ignored.
+///
+/// The reserved channel-wide mention tokens (`channel`, `here`) are never
+/// returned, even when a member is literally named one of them.
 pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Vec<String> {
     if content.is_empty() || !content.contains('@') {
         return vec![];
@@ -144,6 +172,9 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
             rest[..end].to_ascii_lowercase()
         };
 
+        if is_reserved_mention_token(&lower) {
+            continue;
+        }
         if seen.insert(lower.clone()) {
             names.push(lower);
         }
@@ -171,7 +202,9 @@ fn is_word_boundary(s: &str) -> bool {
 /// rather than text-position ordering.
 ///
 /// Profiles whose `content_json` does not parse, or whose `display_name`
-/// (and `name`) are absent or non-string, are silently skipped.
+/// (and `name`) are absent or non-string, are silently skipped. So are
+/// profiles named after a reserved channel-wide mention token (`channel`,
+/// `here`) — those tokens never resolve to an identity.
 ///
 /// Duplicate display names within a channel will produce multiple matches
 /// for a single `@name` — this is by design; resolution is bounded to
@@ -190,7 +223,7 @@ pub fn match_names_to_profiles(names: &[String], profiles: &[MentionProfile<'_>]
             .or_else(|| value.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if name.is_empty() {
+        if name.is_empty() || is_reserved_mention_token(name) {
             continue;
         }
         if names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
@@ -236,68 +269,95 @@ pub fn normalize_mention_pubkeys(pubkeys: &[String], sender_pubkey: Option<&str>
         .collect()
 }
 
+/// Length of the run of `marker` characters starting at byte index `i`.
+fn marker_run_len(content: &str, i: usize, marker: char) -> usize {
+    content[i..].chars().take_while(|&c| c == marker).count()
+}
+
+/// Whether byte index `i` is preceded only by whitespace on its line.
+fn at_line_start(content: &str, i: usize) -> bool {
+    let before = &content[..i];
+    match before.rsplit_once('\n') {
+        Some((_, after_nl)) => after_nl.chars().all(|c| c.is_ascii_whitespace()),
+        None => before.chars().all(|c| c.is_ascii_whitespace()),
+    }
+}
+
+/// If a fenced code block opens at `i`, return the byte index just past it.
+///
+/// A fence is a run of three or more `marker` characters (`` ` `` or `~`) at
+/// the start of a line. It is closed by a run of at least the same length at
+/// the start of a later line, per CommonMark, or by the end of the content.
+fn fence_close_end(content: &str, i: usize, marker: char) -> Option<usize> {
+    let open_len = marker_run_len(content, i, marker);
+    if open_len < 3 || !at_line_start(content, i) {
+        return None;
+    }
+
+    // Skip the rest of the opening fence line (the info string).
+    let after_fence = i + open_len;
+    let mut search_from = content[after_fence..]
+        .find('\n')
+        .map_or(content.len(), |p| after_fence + p + 1);
+
+    loop {
+        let Some(pos) = content[search_from..].find(marker) else {
+            return Some(content.len());
+        };
+        let abs = search_from + pos;
+        let run = marker_run_len(content, abs, marker);
+        if run >= open_len && at_line_start(content, abs) {
+            // Consume the rest of the closing fence line.
+            let after_close = abs + run;
+            return Some(
+                content[after_close..]
+                    .find('\n')
+                    .map_or(content.len(), |p| after_close + p + 1),
+            );
+        }
+        search_from = abs + run;
+    }
+}
+
+/// If an inline code span opens at `i`, return the byte index just past it.
+///
+/// A span opens with a run of `n` backticks and closes with the next run of
+/// *exactly* `n` backticks on the same line (CommonMark's equal-length rule),
+/// so ``` ``@here`` ``` masks its contents just as `` `@here` `` does.
+fn code_span_close_end(content: &str, i: usize) -> Option<usize> {
+    let open_len = marker_run_len(content, i, '`');
+    let after_open = i + open_len;
+    let mut search_from = after_open;
+
+    while let Some(pos) = content[search_from..].find('`') {
+        let abs = search_from + pos;
+        if content[after_open..abs].contains('\n') {
+            return None;
+        }
+        let run = marker_run_len(content, abs, '`');
+        if run == open_len {
+            return Some(abs + run);
+        }
+        search_from = abs + run;
+    }
+    None
+}
+
 /// Remove fenced code blocks and inline code spans from content.
 ///
-/// Returns a copy of `content` with ` ```…``` ` blocks and `` `…` `` spans
-/// replaced by spaces. Used only for mention scanning — the original
+/// Returns a copy of `content` with fenced blocks (three or more backticks
+/// **or** tildes at line start) and backtick code spans of any delimiter
+/// length replaced by spaces. Used only for mention scanning — the original
 /// content is stored verbatim. Preserves valid UTF-8 throughout.
 pub fn strip_code_regions(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut chars = content.char_indices().peekable();
 
     while let Some(&(i, ch)) = chars.peek() {
-        // Fenced code block: ``` at line start (possibly after whitespace)
-        if ch == '`' && content[i..].starts_with("```") {
-            let is_fence_start = if i == 0 {
-                true
-            } else {
-                let before = &content[..i];
-                before.ends_with('\n')
-                    || before.chars().all(|c| c.is_ascii_whitespace())
-                    || before.rsplit_once('\n').is_some_and(|(_, after_nl)| {
-                        after_nl.chars().all(|c| c.is_ascii_whitespace())
-                    })
-            };
-
-            if is_fence_start {
-                // Find end of opening fence line
-                let after_fence = i + 3;
-                let rest = &content[after_fence..];
-                let line_end = rest
-                    .find('\n')
-                    .map_or(content.len(), |p| after_fence + p + 1);
-
-                // Find closing fence
-                let mut search_from = line_end;
-                let close_end = loop {
-                    if search_from >= content.len() {
-                        break content.len();
-                    }
-                    if let Some(pos) = content[search_from..].find("```") {
-                        let abs_pos = search_from + pos;
-                        let at_line_start = abs_pos == 0
-                            || content.as_bytes()[abs_pos - 1] == b'\n'
-                            || content[..abs_pos]
-                                .rsplit_once('\n')
-                                .is_some_and(|(_, after_nl)| {
-                                    after_nl.chars().all(|c| c.is_ascii_whitespace())
-                                });
-                        if at_line_start {
-                            // Skip to end of closing fence line
-                            let after_close = abs_pos + 3;
-                            let end = content[after_close..]
-                                .find('\n')
-                                .map_or(content.len(), |p| after_close + p + 1);
-                            break end;
-                        }
-                        search_from = abs_pos + 3;
-                    } else {
-                        break content.len();
-                    }
-                };
-
+        // Fenced code block: ``` or ~~~ (3+) at line start.
+        if ch == '`' || ch == '~' {
+            if let Some(close_end) = fence_close_end(content, i, ch) {
                 out.push(' ');
-                // Advance chars iterator past the fenced block
                 while let Some(&(ci, _)) = chars.peek() {
                     if ci >= close_end {
                         break;
@@ -308,26 +368,17 @@ pub fn strip_code_regions(content: &str) -> String {
             }
         }
 
-        // Inline code span: `…`
+        // Inline code span: `…`, ``…``, and longer.
         if ch == '`' {
-            let after_tick = i + 1;
-            if after_tick < content.len() {
-                // Find closing backtick on same line
-                if let Some(rel_end) = content[after_tick..].find('`') {
-                    let close_pos = after_tick + rel_end;
-                    // Only treat as code span if no newline between the backticks
-                    if !content[after_tick..close_pos].contains('\n') {
-                        out.push(' ');
-                        // Advance past closing backtick
-                        while let Some(&(ci, _)) = chars.peek() {
-                            if ci > close_pos {
-                                break;
-                            }
-                            chars.next();
-                        }
-                        continue;
+            if let Some(close_end) = code_span_close_end(content, i) {
+                out.push(' ');
+                while let Some(&(ci, _)) = chars.peek() {
+                    if ci >= close_end {
+                        break;
                     }
+                    chars.next();
                 }
+                continue;
             }
         }
 
@@ -424,6 +475,54 @@ mod tests {
         assert!(extract_at_names("user@example.com").is_empty());
         assert!(extract_at_names("hello @ world").is_empty());
         assert!(extract_at_names("hello @").is_empty());
+    }
+
+    #[test]
+    fn reserved_tokens_are_never_extracted_as_names() {
+        assert!(extract_at_names("@channel ship it").is_empty());
+        assert!(extract_at_names("heads up @Here").is_empty());
+        assert_eq!(
+            extract_at_names("@channel and @alice"),
+            vec!["alice"],
+            "regular names alongside a reserved token still resolve"
+        );
+    }
+
+    #[test]
+    fn reserved_tokens_lose_to_no_one_even_a_member_named_here() {
+        // A member whose display name is literally "here" must not be pulled in
+        // by @here — the reserved token wins in every parser.
+        let names = extract_at_mentions_with_known("ping @here now", &["here", "Alice"]);
+        assert!(names.is_empty(), "got {names:?}");
+
+        let profiles = [MentionProfile {
+            pubkey: "aa",
+            content_json: r#"{"display_name":"here"}"#,
+        }];
+        assert!(match_names_to_profiles(&["here".to_string()], &profiles).is_empty());
+    }
+
+    #[test]
+    fn reserved_token_prefixes_are_still_ordinary_names() {
+        assert_eq!(
+            extract_at_names("@channels @herer"),
+            vec!["channels", "herer"]
+        );
+    }
+
+    #[test]
+    fn extract_reserved_mention_tokens_reports_lowercased_tokens() {
+        assert_eq!(
+            extract_reserved_mention_tokens("hey @Channel and @here"),
+            vec!["channel", "here"]
+        );
+        assert!(extract_reserved_mention_tokens("hey @alice").is_empty());
+        assert!(extract_reserved_mention_tokens("user@channel.com").is_empty());
+        assert_eq!(
+            extract_reserved_mention_tokens("@here @HERE"),
+            vec!["here"],
+            "deduplicated case-insensitively"
+        );
     }
 
     #[test]
@@ -697,6 +796,46 @@ mod tests {
         let input = "hello `world";
         let stripped = strip_code_regions(input);
         assert!(stripped.contains("world"));
+    }
+
+    #[test]
+    fn strip_code_regions_removes_tilde_fenced_block() {
+        let stripped = strip_code_regions("before\n~~~\n@here\n~~~\nafter");
+        assert!(!stripped.contains("@here"), "{stripped:?}");
+        assert!(stripped.contains("before") && stripped.contains("after"));
+
+        // A longer closer still closes the fence; a shorter one does not.
+        let longer = strip_code_regions("~~~\n@channel\n~~~~\nafter");
+        assert!(!longer.contains("@channel"), "{longer:?}");
+        assert!(longer.contains("after"));
+        let shorter = strip_code_regions("~~~~\n@channel\n~~~\nstill code");
+        assert!(!shorter.contains("@channel"), "{shorter:?}");
+        assert!(!shorter.contains("still code"), "{shorter:?}");
+
+        // An unclosed fence masks to end of content.
+        let unclosed = strip_code_regions("~~~\n@here never closed");
+        assert!(!unclosed.contains("@here"), "{unclosed:?}");
+
+        // Strikethrough is two tildes — not a fence.
+        let strike = strip_code_regions("~~@here~~ shipped");
+        assert!(strike.contains("@here"), "{strike:?}");
+    }
+
+    #[test]
+    fn strip_code_regions_removes_multi_backtick_span() {
+        let stripped = strip_code_regions("see ``@here`` there");
+        assert!(!stripped.contains("@here"), "{stripped:?}");
+        assert!(stripped.contains("see") && stripped.contains("there"));
+
+        // A shorter run inside the span does not close it.
+        let nested = strip_code_regions("``a `@channel` c`` tail");
+        assert!(!nested.contains("@channel"), "{nested:?}");
+        assert!(nested.contains("tail"));
+
+        // Single-backtick spans keep their existing behavior.
+        let single = strip_code_regions("a `@here` b");
+        assert!(!single.contains("@here"), "{single:?}");
+        assert!(single.contains('a') && single.contains('b'));
     }
 
     const TEST_NPUB1: &str = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";

@@ -20,6 +20,11 @@ import {
   type ImetaMedia,
   mergeOutgoingTags,
 } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  buildNotifyTags,
+  detectNotifyMode,
+  type NotifyMode,
+} from "@/features/messages/lib/channelNotify";
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
@@ -42,6 +47,8 @@ type PendingNonMemberMentionSend = {
   outgoingTags?: string[][];
   preparedManagedAgents?: ManagedAgent[];
   readyAgentPubkeys?: string[];
+  /** Channel-wide notify mode this draft asks for, if any. */
+  notifyMode: NotifyMode | null;
   savedContent: string;
   savedImeta: ImetaMedia[];
   savedSpoileredAttachmentUrls: Set<string>;
@@ -170,6 +177,8 @@ export function useMentionSendFlow({
   const [nonMemberPromptError, setNonMemberPromptError] = React.useState<
     string | null
   >(null);
+  const [pendingChannelNotifySend, setPendingChannelNotifySend] =
+    React.useState<PendingNonMemberMentionSend | null>(null);
   const [isMentionSendPending, setIsMentionSendPending] = React.useState(false);
   const [isCompleteSendPending, setIsCompleteSendPending] =
     React.useState(false);
@@ -390,6 +399,7 @@ export function useMentionSendFlow({
   const clearComposer = React.useCallback(
     (postSendContent = "") => {
       setPendingNonMemberSend(null);
+      setPendingChannelNotifySend(null);
       setNonMemberPromptError(null);
       setContent(postSendContent);
       contentRef.current = postSendContent;
@@ -426,6 +436,7 @@ export function useMentionSendFlow({
 
     previousChannelIdRef.current = channelId;
     setPendingNonMemberSend(null);
+    setPendingChannelNotifySend(null);
     setNonMemberPromptError(null);
   }, [channelId]);
 
@@ -637,6 +648,31 @@ export function useMentionSendFlow({
     ],
   );
 
+  const proceedWithDraft = React.useCallback(
+    async (draft: PendingNonMemberMentionSend) => {
+      if (draft.nonMemberPubkeys.length > 0) {
+        setNonMemberPromptError(null);
+        setPendingNonMemberSend(draft);
+        return;
+      }
+
+      await completeSend(draft, draft.mentionPubkeys);
+    },
+    [completeSend],
+  );
+
+  const confirmChannelNotifySend = React.useCallback(() => {
+    const draft = pendingChannelNotifySend;
+    if (!draft) return;
+
+    setPendingChannelNotifySend(null);
+    void proceedWithDraft(draft);
+  }, [pendingChannelNotifySend, proceedWithDraft]);
+
+  const dismissChannelNotifyPrompt = React.useCallback(() => {
+    setPendingChannelNotifySend(null);
+  }, []);
+
   const sendMessageWithMentionFlow = React.useCallback(
     async ({
       capturedChannelId,
@@ -708,9 +744,13 @@ export function useMentionSendFlow({
           pendingImeta,
           spoileredAttachmentUrls,
         );
+        const notifyMode = detectNotifyMode(finalContent);
         const outgoingTags = mergeOutgoingTags(
-          mediaTags,
-          buildCustomEmojiTags(finalContent, customEmoji),
+          mergeOutgoingTags(
+            mediaTags,
+            buildCustomEmojiTags(finalContent, customEmoji),
+          ),
+          buildNotifyTags(notifyMode),
         );
         const nonMemberPubkeys = getNonMemberMentionPubkeys(pubkeys);
         let promptNonMemberPubkeys = nonMemberPubkeys.filter(
@@ -743,6 +783,7 @@ export function useMentionSendFlow({
             channelType === "dm" && onPrepareSendChannel
               ? []
               : createdPersonaAgentPubkeys,
+          notifyMode,
           savedContent: trimmed,
           savedImeta: [...pendingImeta],
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
@@ -752,20 +793,22 @@ export function useMentionSendFlow({
           explicitAgentPubkeys,
         };
 
-        if (promptNonMemberPubkeys.length > 0) {
+        // Confirm the channel-wide blast before anything else prompts: the
+        // author is choosing whether to notify at all.
+        if (notifyMode) {
           setNonMemberPromptError(null);
-          setPendingNonMemberSend(pendingDraft);
+          setPendingChannelNotifySend(pendingDraft);
           return;
         }
 
-        await completeSend(pendingDraft, pubkeys);
+        await proceedWithDraft(pendingDraft);
       } finally {
         isMentionSendPendingRef.current = false;
         setIsMentionSendPending(false);
       }
     },
     [
-      completeSend,
+      proceedWithDraft,
       channelType,
       createMentionedPersonaAgents,
       customEmoji,
@@ -894,6 +937,9 @@ export function useMentionSendFlow({
   }, []);
 
   return {
+    confirmChannelNotifySend,
+    dismissChannelNotifyPrompt,
+    pendingChannelNotifyMode: pendingChannelNotifySend?.notifyMode ?? null,
     dismissNonMemberPrompt,
     isInvitePending:
       isMentionSendPending ||
@@ -916,3 +962,5 @@ export function useMentionSendFlow({
     inviteNonMembers: handleInviteNonMembers,
   };
 }
+
+export type UseMentionSendFlowResult = ReturnType<typeof useMentionSendFlow>;

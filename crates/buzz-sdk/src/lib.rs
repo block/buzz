@@ -82,6 +82,8 @@ pub use buzz_core::channel::ChannelType as ChannelKind;
 pub use buzz_core::channel::ChannelVisibility as Visibility;
 /// Member role.
 pub use buzz_core::channel::MemberRole;
+/// NIP-CM channel-wide mention mode (`@channel` / `@here`).
+pub use buzz_core::channel_mentions::NotifyMode;
 
 /// Errors returned by SDK builder functions.
 #[derive(Debug, thiserror::Error)]

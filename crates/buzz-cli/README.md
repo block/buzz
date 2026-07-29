@@ -32,6 +32,8 @@ export BUZZ_RELAY_URL="https://relay.example.com"
 buzz messages send --channel <uuid> --content "Hello"
 buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
+buzz messages send --channel <uuid> --content "deploy is done" --notify channel  # @channel
+buzz messages send --channel <uuid> --content "standup now" --notify here        # @here
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages search --query "architecture"

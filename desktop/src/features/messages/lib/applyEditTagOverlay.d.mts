@@ -7,9 +7,10 @@
 export type Tag = string[];
 
 /**
- * Merge an event's tags with an edit's tags: imeta + NIP-30 emoji tags from the
- * edit (full new attachment + custom-emoji set), all other tag kinds from the
- * original. Pass-through when `editTags` is `undefined`.
+ * Merge an event's tags with an edit's tags: imeta from the edit (full new
+ * attachment set), NIP-30 emoji and NIP-CM notify tags from the edit when it
+ * supplies any (otherwise the original's are preserved), all other tag kinds
+ * from the original. Pass-through when `editTags` is `undefined`.
  */
 export function applyEditTagOverlay(
   originalTags: Tag[],

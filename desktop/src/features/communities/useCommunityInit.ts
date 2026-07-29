@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { resetSelfPresenceStatus } from "@/features/presence/lib/selfPresence";
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
 import {
@@ -63,6 +64,7 @@ function resetCommunityState({
   resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
+  resetSelfPresenceStatus();
 }
 
 type CommunityInitResult =

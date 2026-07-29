@@ -3,6 +3,7 @@ import {
   activateRateLimit,
   parseRateLimitHint,
 } from "@/shared/api/relayRateLimitGate";
+import type { NotifyMode } from "@/shared/constants/notify";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -547,6 +548,10 @@ export async function getThreadReplies(
   };
 }
 
+/**
+ * `notify` carries the NIP-CM channel-wide mention mode (`channel` | `here`);
+ * the Rust command validates it and emits the single `["notify", mode]` tag.
+ */
 export async function sendChannelMessage(
   channelId: string,
   content: string,
@@ -556,6 +561,7 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  notify?: NotifyMode | null,
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -568,6 +574,7 @@ export async function sendChannelMessage(
       mentionTags: mentionTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
+      notify: notify ?? null,
     },
   );
 

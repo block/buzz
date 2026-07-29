@@ -144,3 +144,37 @@ test("uppercases in tag pubkeys are normalized", () => {
     alice: PUBKEY,
   });
 });
+
+test("a notify tag renders its mode as an unresolvable chip name", () => {
+  const tags = [["notify", "channel"]];
+
+  assert.deepEqual(resolveMentionNames(tags, {}), ["channel"]);
+  assert.equal(resolveMentionPubkeysByName(tags, {}), undefined);
+});
+
+test("@here renders without any profile lookup available", () => {
+  const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+    [["notify", "here"]],
+    undefined,
+  );
+
+  assert.deepEqual(mentionNames, ["here"]);
+  assert.equal(mentionPubkeysByName, undefined);
+});
+
+test("an unbacked event yields no channel-wide chip name", () => {
+  assert.equal(resolveMentionNames([["h", "channel-id"]], {}), undefined);
+  assert.equal(resolveMentionNames([["notify", "everyone"]], {}), undefined);
+});
+
+test("a member named 'here' never resolves the reserved token", () => {
+  const tags = [["p", PUBKEY]];
+  const profiles = { [PUBKEY]: profile({ displayName: "here", name: "hank" }) };
+
+  const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+    tags,
+    profiles,
+  );
+  assert.deepEqual(mentionNames, ["hank"]);
+  assert.deepEqual(mentionPubkeysByName, { hank: PUBKEY });
+});

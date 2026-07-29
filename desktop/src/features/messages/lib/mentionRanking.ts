@@ -4,7 +4,7 @@ export type MentionCandidateForRanking = {
   displayName: string | null;
   isAgent: boolean;
   isMember: boolean;
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "special";
   personaId?: string | null;
   personaName?: string | null;
   pubkey?: string;
@@ -23,6 +23,8 @@ function getMentionCandidateGroupRank(
   candidate: MentionCandidateForRanking,
   activePersonaIds: ReadonlySet<string>,
 ) {
+  // Channel-wide rows sort with members: they address the whole channel.
+  if (candidate.kind === "special") return 0;
   if (candidate.isMember) return 0;
 
   const isRunnablePersona =

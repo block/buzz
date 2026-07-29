@@ -217,3 +217,44 @@ fn legacy_managed_agent_auth_tag_skips_self_attestation() {
 
     assert_eq!(tag, None);
 }
+
+#[test]
+fn mention_feed_items_use_the_singular_frontend_category() {
+    // The frontend contract is `category: "mention"` (singular) — see
+    // `desktop/src/shared/api/tauri.ts`. The plural "mentions" belongs to the
+    // relay-side `feed_types` namespace only.
+    assert_eq!(MENTION_CATEGORY, "mention");
+
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello")
+        .sign_with_keys(&Keys::generate())
+        .expect("event should sign");
+
+    let item = feed_item_from_event(&event, MENTION_CATEGORY);
+    assert_eq!(item.category, "mention");
+}
+
+#[test]
+fn mentions_feed_filter_requests_bounded_feed() {
+    let pubkey = "aa".repeat(32);
+
+    let filter = mentions_feed_filter(&pubkey, 25, None);
+    assert_eq!(
+        filter["feed_types"],
+        serde_json::json!(["mentions"]),
+        "the Inbox must route to the bounded mentions feed so marker-only @channel rows appear"
+    );
+    assert_eq!(
+        filter["#p"],
+        serde_json::json!([pubkey.clone()]),
+        "#p stays as graceful fallback for relays predating the feed_types extension"
+    );
+    assert_eq!(filter["limit"], serde_json::json!(25));
+    assert!(
+        filter.get("since").is_none(),
+        "no since -> no since key in the filter"
+    );
+
+    let with_since = mentions_feed_filter(&pubkey, 10, Some(1_700_000_000));
+    assert_eq!(with_since["since"], serde_json::json!(1_700_000_000));
+    assert_eq!(with_since["limit"], serde_json::json!(10));
+}

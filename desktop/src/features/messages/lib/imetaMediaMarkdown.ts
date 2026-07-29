@@ -26,6 +26,11 @@
  */
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
+import {
+  NOTIFY_TAG,
+  type NotifyMode,
+  notifyModeFromTags,
+} from "@/shared/constants/notify";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 export type ImetaMedia = BlobDescriptor & {
@@ -349,28 +354,43 @@ export function mergeOutgoingTags(
 
 /**
  * Inverse of `mergeOutgoingTags`: split a merged outgoing tag set back into
- * imeta media tags, NIP-30 `["emoji", ...]` tags, and reference-only mention
- * tags, so the send path can route each to its own validated Tauri arg. Emoji
- * and mention tags must never ride the imeta-only `media` channel (its guard
- * rejects any non-imeta prefix). Any other prefix stays with `mediaTags` — the
- * imeta guard will reject it, which is the intended injection defense.
+ * imeta media tags, NIP-30 `["emoji", ...]` tags, reference-only mention tags,
+ * and the channel-wide `["notify", mode]` marker, so the send path can route
+ * each to its own validated Tauri arg. Emoji, mention, and notify tags must
+ * never ride the imeta-only `media` channel (its guard rejects any non-imeta
+ * prefix). Any other prefix stays with `mediaTags` — the imeta guard will
+ * reject it, which is the intended injection defense.
+ *
+ * `notifyMode` is the validated mode senders pass to the Tauri command;
+ * `notifyTags` is the raw marker, which optimistic cache echoes replay as-is.
  */
 export function splitOutgoingTags(tags: string[][] | undefined): {
   mediaTags: string[][];
   emojiTags: string[][];
   mentionTags: string[][];
+  notifyTags: string[][];
+  notifyMode: NotifyMode | null;
 } {
   const mediaTags: string[][] = [];
   const emojiTags: string[][] = [];
   const mentionTags: string[][] = [];
+  const notifyTags: string[][] = [];
   for (const tag of tags ?? []) {
     if (tag[0] === "emoji") {
       emojiTags.push(tag);
     } else if (tag[0] === "mention") {
       mentionTags.push(tag);
+    } else if (tag[0] === NOTIFY_TAG) {
+      notifyTags.push(tag);
     } else {
       mediaTags.push(tag);
     }
   }
-  return { mediaTags, emojiTags, mentionTags };
+  return {
+    mediaTags,
+    emojiTags,
+    mentionTags,
+    notifyTags,
+    notifyMode: notifyModeFromTags(notifyTags),
+  };
 }

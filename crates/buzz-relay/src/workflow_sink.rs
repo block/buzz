@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
+use buzz_core::channel_mentions::is_reserved_mention_token;
 use buzz_core::kind::KIND_STREAM_MESSAGE;
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
@@ -40,6 +41,10 @@ use crate::state::AppState;
 /// - **Ambiguous names wake no one.** If two or more members share the matched
 ///   display name, no `p` tag is emitted for it — arbitrary selection would
 ///   silently misroute and tagging all of them is a false-wake firehose.
+/// - **Reserved tokens name nobody.** `@channel` and `@here` are NIP-CM
+///   channel-wide mentions; they never resolve to an identity, even when a
+///   member is literally named one of them. Workflows emit no notify tag in v1,
+///   so such text is inert.
 ///
 /// Returns deduplicated pubkey hexes, in first-appearance order in `text`.
 fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
@@ -48,7 +53,7 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     let mut by_name: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     for (name, pubkey) in members {
-        if name.trim().is_empty() {
+        if name.trim().is_empty() || is_reserved_mention_token(name.trim()) {
             continue;
         }
         by_name
@@ -63,7 +68,10 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
 
     // Match longest names first so a longer name consumes its span before a
     // shorter substring name can claim part of it.
-    let mut names: Vec<&(String, String)> = members.iter().collect();
+    let mut names: Vec<&(String, String)> = members
+        .iter()
+        .filter(|(name, _)| !is_reserved_mention_token(name.trim()))
+        .collect();
     names.sort_by_key(|(name, _)| std::cmp::Reverse(name.chars().count()));
 
     let chars: Vec<char> = text.chars().collect();
@@ -399,6 +407,23 @@ mod tests {
     fn ignores_non_member_and_bare_at() {
         let members = vec![m("Robby", &pk('a'))];
         assert!(resolve_mention_pubkeys("hey @Stranger and @", &members).is_empty());
+    }
+
+    #[test]
+    fn reserved_channel_wide_tokens_resolve_to_nobody() {
+        // Even with a member literally named "here", @here is a NIP-CM
+        // channel-wide mention and must never emit a p tag.
+        let members = vec![m("here", &pk('a')), m("channel", &pk('b'))];
+        assert!(resolve_mention_pubkeys("@here @channel @Here", &members).is_empty());
+    }
+
+    #[test]
+    fn reserved_token_does_not_shadow_a_real_mention() {
+        let members = vec![m("here", &pk('a')), m("Robby", &pk('b'))];
+        assert_eq!(
+            resolve_mention_pubkeys("@here @Robby take a look", &members),
+            vec![pk('b')]
+        );
     }
 
     #[test]

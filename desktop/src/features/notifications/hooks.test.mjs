@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildHomeBadgeFeedItems,
+  countHomeBadgeFeedItems,
   isHomeBadgeFeedItemUnread,
   resolveHomeBadgeFeedItemReadAt,
   shouldCountTowardHomeBadgeSubtotal,
@@ -166,5 +167,51 @@ test("home badge subtotal counts locally unread rows before channel exclusion", 
       true,
     ),
     true,
+  );
+});
+
+// The badge shares `feedItemSurvivesChannelMute` with the toast path, so the
+// NIP-CM ladder applies identically on both: @channel/@here are suppressed by
+// a channel mute, a direct mention still pierces it — including when one event
+// carries both (the relay collapses that pair into a single mention row).
+
+const mentionRow = (id, tags) => ({
+  ...feedItem(id, "mention"),
+  channelId: "muted-channel",
+  tags,
+});
+
+const countMuted = (items) =>
+  countHomeBadgeFeedItems(items, {
+    currentPubkey: "me",
+    getChannelReadAt: () => null,
+    getThreadReadAt: () => null,
+    highPriorityChannelIds: new Set(),
+    isHomeActive: false,
+    localUnreadFeedIds: new Set(),
+    mutedChannelIds: new Set(["muted-channel"]),
+    seenFeedIdSet: new Set(),
+  }).homeBadgeCount;
+
+test("home badge drops an @channel row in a muted channel", () => {
+  assert.equal(
+    countMuted([mentionRow("at-channel", [["notify", "channel"]])]),
+    0,
+  );
+});
+
+test("home badge keeps a direct mention in a muted channel", () => {
+  assert.equal(countMuted([mentionRow("direct", [["p", "me"]])]), 1);
+});
+
+test("home badge keeps a direct mention that also carries @channel", () => {
+  assert.equal(
+    countMuted([
+      mentionRow("both", [
+        ["p", "me"],
+        ["notify", "channel"],
+      ]),
+    ]),
+    1,
   );
 });

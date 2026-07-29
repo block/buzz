@@ -8442,6 +8442,7 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    notify?: string | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8461,8 +8462,10 @@ async function handleSendChannelMessage(
   // relay echoes them back on the stored event too, so mirror that here so the
   // emoji renderer keeps resolving `:shortcode:` after the round-trip.
   const emojiTags = args.emojiTags ?? [];
-  // Both kinds end up on the stored event's tag set, just like the real relay.
-  const extraTags = [...mediaTags, ...emojiTags];
+  // NIP-CM channel-wide mention marker, echoed like the relay does.
+  const notifyTags = args.notify ? [["notify", args.notify]] : [];
+  // All three end up on the stored event's tag set, just like the real relay.
+  const extraTags = [...mediaTags, ...emojiTags, ...notifyTags];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);

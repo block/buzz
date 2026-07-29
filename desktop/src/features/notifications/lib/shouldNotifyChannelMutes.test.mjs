@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { hasMentionForEvent, shouldNotifyForEvent } from "./shouldNotify.ts";
+import {
+  hasMentionForEvent,
+  isHighPriorityEventForUser,
+  shouldNotifyForEvent,
+} from "./shouldNotify.ts";
 
 const PUBKEY = "a".repeat(64);
 const OTHER_PUBKEY = "b".repeat(64);
@@ -165,4 +169,110 @@ test("thread in mutedRootIds AND in muted channel is suppressed", () => {
     }),
     false,
   );
+});
+
+const notifyTag = (mode) => ["notify", mode];
+const LIVE = { selfOnline: true, nowSeconds: 1700000000 };
+
+test("@channel in a muted channel is suppressed", () => {
+  const event = makeEvent([hTag(CHANNEL_ID), notifyTag("channel")]);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, {
+      participatedRootIds: EMPTY,
+      followedRootIds: EMPTY,
+      authoredRootIds: EMPTY,
+      mutedChannelIds: new Set([CHANNEL_ID]),
+      channelId: CHANNEL_ID,
+      channelNotify: LIVE,
+    }),
+    false,
+  );
+});
+
+test("@here in a muted channel is suppressed", () => {
+  const event = makeEvent([hTag(CHANNEL_ID), notifyTag("here")]);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, {
+      participatedRootIds: EMPTY,
+      followedRootIds: EMPTY,
+      authoredRootIds: EMPTY,
+      mutedChannelIds: new Set([CHANNEL_ID]),
+      channelId: CHANNEL_ID,
+      channelNotify: LIVE,
+    }),
+    false,
+  );
+});
+
+test("direct mention still pierces a mute alongside a channel mention", () => {
+  const event = makeEvent([
+    hTag(CHANNEL_ID),
+    notifyTag("channel"),
+    pTag(PUBKEY),
+  ]);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, {
+      participatedRootIds: EMPTY,
+      followedRootIds: EMPTY,
+      authoredRootIds: EMPTY,
+      mutedChannelIds: new Set([CHANNEL_ID]),
+      channelId: CHANNEL_ID,
+      channelNotify: LIVE,
+    }),
+    true,
+  );
+});
+
+test("@channel on an unrelated thread reply notifies in an unmuted channel", () => {
+  const event = makeEvent([
+    hTag(CHANNEL_ID),
+    rootTag(ROOT_ID),
+    replyTag(PARENT_ID),
+    notifyTag("channel"),
+  ]);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, {
+      participatedRootIds: EMPTY,
+      followedRootIds: EMPTY,
+      authoredRootIds: EMPTY,
+      channelId: CHANNEL_ID,
+      channelNotify: LIVE,
+    }),
+    true,
+  );
+});
+
+test("@here on an unrelated thread reply stays quiet when offline", () => {
+  const event = makeEvent([
+    hTag(CHANNEL_ID),
+    rootTag(ROOT_ID),
+    replyTag(PARENT_ID),
+    notifyTag("here"),
+  ]);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, {
+      participatedRootIds: EMPTY,
+      followedRootIds: EMPTY,
+      authoredRootIds: EMPTY,
+      channelId: CHANNEL_ID,
+      channelNotify: { selfOnline: false, nowSeconds: 1700000000 },
+    }),
+    false,
+  );
+});
+
+test("@channel is high priority; a stale @here is not", () => {
+  const channelEvent = makeEvent([hTag(CHANNEL_ID), notifyTag("channel")]);
+  const staleHere = makeEvent([hTag(CHANNEL_ID), notifyTag("here")], {
+    created_at: 1700000000 - 600,
+  });
+  assert.equal(isHighPriorityEventForUser(channelEvent, PUBKEY, LIVE), true);
+  assert.equal(isHighPriorityEventForUser(staleHere, PUBKEY, LIVE), false);
+});
+
+test("own @channel message is never high priority for its author", () => {
+  const own = makeEvent([hTag(CHANNEL_ID), notifyTag("channel")], {
+    pubkey: PUBKEY,
+  });
+  assert.equal(isHighPriorityEventForUser(own, PUBKEY, LIVE), false);
 });

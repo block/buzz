@@ -5,6 +5,10 @@ import test from "node:test";
 // post-edit cache-update (useEditMessageMutation) use. No inlined copy → no
 // drift risk between test expectations and production behaviour.
 import { applyEditTagOverlay } from "./applyEditTagOverlay.mjs";
+// The render half of the D9 continuity check: the same helpers MessageRow uses
+// to turn effective tags + body text into mention chips.
+import { buildMentionPattern } from "@/shared/lib/mentionPattern";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 const IMETA = (url) => ["imeta", `url ${url}`, "m image/png", "x x", "size 1"];
 
@@ -176,6 +180,90 @@ test("a tag-less edit still fully replaces imeta (attachments), unlike emoji", (
   assert.equal(out.filter((t) => t[0] === "imeta").length, 0);
   // emoji preserved (edit supplied none → keep original).
   assert.equal(out.filter((t) => t[0] === "emoji").length, 1);
+});
+
+const NOTIFY = (mode) => ["notify", mode];
+
+// NIP-CM D9: the relay accepts a notify tag on a kind-40003 edit for render
+// continuity only. The chip renders off the *effective* tag set, so the tag
+// has to survive the overlay or an edit that adds `@channel` renders plain.
+
+test("an edit's notify tag reaches the merged set (D9 render continuity)", () => {
+  const original = [
+    ["h", "uuid"],
+    ["p", "mention1"],
+  ];
+  const edit = [["h", "uuid"], ["e", "x"], NOTIFY("channel")];
+
+  const out = applyEditTagOverlay(original, edit);
+
+  assert.deepEqual(
+    out.filter((t) => t[0] === "notify"),
+    [NOTIFY("channel")],
+  );
+  assert.ok(out.some((t) => t[0] === "p" && t[1] === "mention1"));
+});
+
+test("a tag-less edit PRESERVES the original's notify tag", () => {
+  // Same cross-client hazard as emoji: first-party edit paths emit no notify
+  // tags, so replacing-always would strip the chip from every edited
+  // `@channel` message.
+  const original = [["h", "uuid"], NOTIFY("channel")];
+  const edit = [
+    ["h", "uuid"],
+    ["e", "x"],
+  ];
+
+  const out = applyEditTagOverlay(original, edit);
+
+  assert.deepEqual(
+    out.filter((t) => t[0] === "notify"),
+    [NOTIFY("channel")],
+  );
+});
+
+test("an edit's notify tag replaces the original's (one notify per event)", () => {
+  const original = [["h", "uuid"], NOTIFY("here")];
+  const edit = [["h", "uuid"], ["e", "x"], NOTIFY("channel")];
+
+  const out = applyEditTagOverlay(original, edit);
+
+  assert.deepEqual(
+    out.filter((t) => t[0] === "notify"),
+    [NOTIFY("channel")],
+  );
+});
+
+/** Chips the renderer would produce for an effective tag set + edited body. */
+function mentionChips(tags, body) {
+  const { mentionNames } = resolveMentionProps(tags, {});
+  return body.match(buildMentionPattern(mentionNames ?? [])) ?? [];
+}
+
+test("an edit that adds @channel chips it, and removing the token un-chips it", () => {
+  const editAdding = [["h", "uuid"], ["e", "x"], NOTIFY("channel")];
+  assert.deepEqual(
+    mentionChips(
+      applyEditTagOverlay([["h", "uuid"]], editAdding),
+      "@channel ship it",
+    ),
+    ["@channel"],
+  );
+
+  // Removal direction: the edited body drops the token while the (now
+  // orphaned) notify tag is preserved — and chips nothing, exactly like an
+  // orphaned emoji tag whose shortcode left the body.
+  const editRemoving = [
+    ["h", "uuid"],
+    ["e", "x"],
+  ];
+  assert.deepEqual(
+    mentionChips(
+      applyEditTagOverlay([["h", "uuid"], NOTIFY("channel")], editRemoving),
+      "ship it",
+    ),
+    [],
+  );
 });
 
 test("imeta and emoji are overlaid together from the edit", () => {

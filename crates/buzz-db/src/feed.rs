@@ -1,7 +1,8 @@
 //! Feed-specific DB queries for the Home Feed feature.
 //!
 //! Aggregates three categories of data:
-//! - **Mentions**: Events where the user's pubkey appears in a `p` tag.
+//! - **Mentions**: Events where the user's pubkey appears in a `p` tag, plus
+//!   NIP-CM `["notify", "channel"]` events in channels the user belongs to.
 //! - **Needs Action**: Approval requests (kind 46010) and reminders (kind 40007) tagged to the user.
 //! - **Activity**: Recent events from channels the user can access.
 //!
@@ -13,6 +14,22 @@
 //! `(community_id, pubkey_hex, event_kind, event_created_at DESC)`.  This replaces the Phase 1
 //! full-table scan with an indexed lookup, keeping feed queries
 //! sub-millisecond at scale (>100k events).
+//!
+//! The NIP-CM branch of `query_mentions` has a deliberately different shape.
+//! `channel_notifications` holds one row per `@channel` *event* (never one per
+//! member), so recipients are resolved at read time by joining the caller's
+//! roster — which means `channel_id` is join-derived, not an equality literal,
+//! and the `(community_id, channel_id, event_created_at DESC)` index cannot
+//! yield community-wide `created_at` order. That branch is therefore a
+//! roster-driven gather plus a bounded top-N sort, not the early-terminating
+//! ordered scan branch 1 gets. Accepted on purpose: the table grows one row per
+//! `@channel` message (`@here` and edits store nothing), so the candidate set
+//! stays far smaller than branch 1's row-per-p-tag index. If `@channel` volume
+//! ever grows large, the escape hatch is an additional
+//! `(community_id, event_created_at DESC)` index, which lets the planner scan
+//! in order and stop at `LIMIT`; it is not added now because it does not
+//! dominate — for a caller in few channels of a busy community it scans past
+//! many non-roster rows.
 //!
 //! **Phase 2 implemented**: the `event_mentions` table is populated by
 //! [`crate::insert_mentions`] on every event insert.  `query_mentions` and
@@ -92,8 +109,9 @@ fn build_mentions_query(
     let limit = limit.min(FEED_MAX_LIMIT);
     let pubkey_hex = hex::encode(pubkey_bytes);
 
+    // Branch 1 — direct `p`-tag mentions.
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
-        "SELECT {EVENT_COLS} FROM events e \
+        "SELECT * FROM ((SELECT {EVENT_COLS} FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
          WHERE e.community_id = "
     ));
@@ -112,16 +130,81 @@ fn build_mentions_query(
     if let Some(s) = since {
         qb.push(" AND m.event_created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY m.event_created_at DESC LIMIT ")
+    // `e.id ASC` is a deterministic tie-break: equal-timestamp rows would
+    // otherwise order arbitrarily, making `LIMIT` pagination unstable.
+    qb.push(" ORDER BY m.event_created_at DESC, e.id ASC LIMIT ")
+        .push_bind(limit);
+
+    // Branch 2 — NIP-CM `["notify", "channel"]` events in channels the caller
+    // is still a member of and had already joined when the relay admitted the
+    // event. `UNION` (not `UNION ALL`) collapses an event that
+    // both p-tags the caller and notifies the channel into one feed row: both
+    // branches project exactly `EVENT_COLS`, so identical event rows collapse.
+    // `@here` is never stored, so it can never surface here.
+    qb.push(format!(
+        ") UNION (SELECT {EVENT_COLS} FROM events e \
+         INNER JOIN channel_notifications n ON e.community_id = n.community_id \
+         AND e.id = n.event_id \
+         INNER JOIN channel_members cm ON cm.community_id = n.community_id \
+         AND cm.channel_id = n.channel_id \
+         WHERE e.community_id = "
+    ));
+    qb.push_bind(*community.as_uuid());
+    qb.push(" AND n.community_id = ")
+        .push_bind(*community.as_uuid());
+    qb.push(" AND cm.pubkey = ")
+        .push_bind(pubkey_bytes.to_vec());
+    qb.push(" AND cm.removed_at IS NULL");
+    // `@channel` addresses the members present at post time: joining later
+    // grants access to the message, not a retroactive mention. The bound is
+    // the relay's admission time (`received_at`), not the client-authored
+    // `created_at`, which is second-truncated and skewable within the
+    // accepted window. The two sides live on different clocks (`joined_at`
+    // is a Postgres transaction timestamp, `received_at` the relay process
+    // clock), so a join landing within clock-skew of an admission can fall
+    // on either side — tolerable, because the bound exists to stop wholesale
+    // history backfill, not to adjudicate millisecond ties. A member who
+    // leaves and rejoins keeps the original `joined_at` (membership upserts
+    // preserve it for roster ordering), so rows from an absence window
+    // reappear on rejoin — accepted trade-off; exact absence accounting
+    // would need membership-interval history.
+    qb.push(" AND cm.joined_at <= e.received_at");
+    qb.push(" AND e.deleted_at IS NULL");
+    // The caller's own announcement is not a mention of the caller.
+    qb.push(" AND e.pubkey <> ")
+        .push_bind(pubkey_bytes.to_vec());
+    qb.push(format!(
+        " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_FORUM_POST}, {KIND_FORUM_COMMENT})"
+    ));
+    push_visible_channel_filter(&mut qb, "e.channel_id", accessible_channel_ids);
+    if let Some(s) = since {
+        qb.push(" AND n.event_created_at >= ").push_bind(s);
+    }
+    qb.push(" ORDER BY n.event_created_at DESC, e.id ASC LIMIT ")
+        .push_bind(limit);
+
+    qb.push(")) u ORDER BY created_at DESC, id ASC LIMIT ")
         .push_bind(limit);
     qb
 }
 
-/// Find events that @mention the given pubkey (have `["p", pubkey_hex]` in tags).
+/// Find events that mention the given pubkey.
 ///
-/// Joins against the `event_mentions` table -- Phase 2 implementation.
-/// **Performance**: community-leading indexed lookup on
-/// `(community_id, pubkey_hex, event_created_at DESC)`.
+/// Two sources, unioned and deduplicated by event id:
+/// - direct `["p", pubkey_hex]` mentions, via the `event_mentions` index;
+/// - NIP-CM `["notify", "channel"]` events (`channel_notifications`) in
+///   channels where the caller is a current member whose `joined_at` is no
+///   later than the event's `received_at` — joining a channel later never
+///   backfills older `@channel` rows into the feed. `["notify", "here"]` is
+///   live-only and never persisted, so it never appears in this feed.
+///
+/// **Performance**: community-leading indexed lookups on
+/// `(community_id, pubkey_hex, event_created_at DESC)` and
+/// `(community_id, channel_id, event_created_at DESC)`. The join-time bound
+/// is evaluated on the joined `events` row, so a reader who joined after most
+/// of a channel's `@channel` history walks and rejects those candidates
+/// before `LIMIT` is satisfied — bounded in practice by `@channel` volume,
+/// which is one row per broadcast, never per member.
 ///
 /// Only returns community-global events and events from `accessible_channel_ids`.
 /// `limit` is capped at [`FEED_MAX_LIMIT`] regardless of the value passed by the caller.
@@ -171,7 +254,8 @@ fn build_needs_action_query(
     if let Some(s) = since {
         qb.push(" AND m.event_created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY m.event_created_at DESC LIMIT ")
+    // `e.id ASC` keeps equal-timestamp rows in a stable order across pages.
+    qb.push(" ORDER BY m.event_created_at DESC, e.id ASC LIMIT ")
         .push_bind(limit);
     qb
 }
@@ -225,7 +309,9 @@ fn build_activity_query(
     if let Some(s) = since {
         qb.push(" AND created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
+    // `id ASC` keeps equal-timestamp rows in a stable order across pages.
+    qb.push(" ORDER BY created_at DESC, id ASC LIMIT ")
+        .push_bind(limit);
     qb
 }
 
@@ -316,6 +402,432 @@ mod tests {
             .await
             .expect("insert mentions");
         event
+    }
+
+    /// Store an event authored by `keys` and run both denormalized indexes
+    /// (`event_mentions`, `channel_notifications`) exactly as the relay does.
+    async fn store_feed_event_as(
+        pool: &PgPool,
+        community: CommunityId,
+        keys: &Keys,
+        kind: u32,
+        content: &str,
+        channel_id: Option<Uuid>,
+        tags: Vec<Tag>,
+    ) -> nostr::Event {
+        let event = EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign event");
+        crate::event::insert_event(pool, community, &event, channel_id)
+            .await
+            .expect("insert feed event");
+        crate::insert_mentions(pool, community, &event, channel_id)
+            .await
+            .expect("insert mentions");
+        crate::insert_channel_notification(pool, community, &event, channel_id)
+            .await
+            .expect("insert channel notification");
+        event
+    }
+
+    async fn add_channel_member(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) {
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(pubkey)
+        .execute(pool)
+        .await
+        .expect("insert channel member");
+    }
+
+    /// Re-anchor a stored event's `received_at` one hour into the *database*
+    /// clock's past. The branch-2 join bound compares `cm.joined_at` (a DB
+    /// transaction timestamp) with `e.received_at` (the relay process clock),
+    /// so tests asserting on the bound must pin both sides to the DB clock —
+    /// otherwise app-vs-DB clock skew larger than the test's runtime flips
+    /// the assertions.
+    async fn rewind_received_at_one_hour(
+        pool: &PgPool,
+        community: CommunityId,
+        event_id: &nostr::EventId,
+    ) {
+        sqlx::query(
+            "UPDATE events SET received_at = NOW() - INTERVAL '1 hour' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(event_id.as_bytes().as_slice())
+        .execute(pool)
+        .await
+        .expect("rewind event received_at");
+    }
+
+    /// Pin a member's `joined_at` relative to a stored event's `received_at`
+    /// (negative = joined before the relay admitted the event). Same clock
+    /// domain as [`rewind_received_at_one_hour`].
+    async fn pin_joined_at_relative_to_event(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        event_id: &nostr::EventId,
+        offset_hours: i32,
+    ) {
+        sqlx::query(
+            "UPDATE channel_members cm \
+             SET joined_at = e.received_at + ($5 * INTERVAL '1 hour') \
+             FROM events e \
+             WHERE e.community_id = $1 AND e.id = $4 \
+               AND cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(pubkey)
+        .bind(event_id.as_bytes().as_slice())
+        .bind(offset_hours)
+        .execute(pool)
+        .await
+        .expect("pin member joined_at");
+    }
+
+    fn notify_tag(mode: &str) -> Tag {
+        Tag::parse(["notify", mode]).expect("notify tag")
+    }
+
+    // -- NIP-CM channel-wide mentions -----------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_reaches_members_and_only_members() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let outsider = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        let outsider_bytes = outsider.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "ship it @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+        rewind_received_at_one_hour(&pool, community, &event.id).await;
+        pin_joined_at_relative_to_event(&pool, community, channel, &member_bytes, &event.id, -1)
+            .await;
+
+        let member_feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("member mentions feed");
+        assert!(
+            member_feed.iter().any(|row| row.event.id == event.id),
+            "channel members must see the @channel event in their mentions feed"
+        );
+
+        let outsider_feed = query_mentions(&pool, community, &outsider_bytes, &[channel], None, 10)
+            .await
+            .expect("outsider mentions feed");
+        assert!(
+            outsider_feed.iter().all(|row| row.event.id != event.id),
+            "non-members must not see the @channel event"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_is_not_backfilled_to_later_joiners() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let early_member = Keys::generate();
+        let late_joiner = Keys::generate();
+        let early_bytes = early_member.public_key().to_bytes().to_vec();
+        let late_bytes = late_joiner.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &early_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "all hands @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+        rewind_received_at_one_hour(&pool, community, &event.id).await;
+        pin_joined_at_relative_to_event(&pool, community, channel, &early_bytes, &event.id, -1)
+            .await;
+
+        // Joins after the relay admitted the event: the fresh row's DB-clock
+        // `joined_at` (NOW()) postdates the rewound `received_at`
+        // (NOW() - 1 hour) in the same clock domain.
+        add_channel_member(&pool, community, channel, &late_bytes).await;
+
+        let early_feed = query_mentions(&pool, community, &early_bytes, &[channel], None, 10)
+            .await
+            .expect("early member mentions feed");
+        assert!(
+            early_feed.iter().any(|row| row.event.id == event.id),
+            "a member who had joined before the event must see the @channel row"
+        );
+
+        let late_feed = query_mentions(&pool, community, &late_bytes, &[channel], None, 10)
+            .await
+            .expect("late joiner mentions feed");
+        assert!(
+            late_feed.iter().all(|row| row.event.id != event.id),
+            "joining a channel must not backfill older @channel rows into the feed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_from_absence_window_reappears_after_rejoin() {
+        // Locks the documented trade-off: membership upserts preserve the
+        // original `joined_at` (it orders rosters), so a member who leaves
+        // and rejoins sees @channel rows posted during the absence. Exact
+        // absence accounting would need membership-interval history. The
+        // rejoin goes through the production `add_member` upsert: if that
+        // ever starts refreshing `joined_at`, the rejoined row lands at DB
+        // NOW(), after the rewound `received_at` (NOW() - 1 hour on the same
+        // clock), and this test fails — a deliberate semantics change that
+        // must update NIP-CM.md alongside it.
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        sqlx::query(
+            "UPDATE channel_members SET removed_at = NOW() \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(&member_bytes)
+        .execute(&pool)
+        .await
+        .expect("remove member");
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "posted while away @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+        rewind_received_at_one_hour(&pool, community, &event.id).await;
+        pin_joined_at_relative_to_event(&pool, community, channel, &member_bytes, &event.id, -1)
+            .await;
+
+        // Rejoin through the production path: removed_at clears, joined_at
+        // keeps its original (pre-event) value.
+        crate::channel::add_member(
+            &pool,
+            community,
+            channel,
+            &member_bytes,
+            crate::channel::MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("rejoin member through production add_member");
+
+        let feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("rejoined member mentions feed");
+        assert!(
+            feed.iter().any(|row| row.event.id == event.id),
+            "rejoin keeps the original joined_at, so absence-window @channel rows reappear (documented trade-off)"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn here_and_edits_never_persist_a_channel_notification() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        let here = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "standup now @here",
+            Some(channel),
+            vec![notify_tag("here")],
+        )
+        .await;
+        let edit = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            buzz_core::kind::KIND_STREAM_MESSAGE_EDIT,
+            "edited @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+
+        let feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("member mentions feed");
+        assert!(
+            feed.iter().all(|row| row.event.id != here.id),
+            "@here is live-only and must never reach the feed"
+        );
+        assert!(
+            feed.iter().all(|row| row.event.id != edit.id),
+            "edits carry the tag for rendering only and must not re-notify"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_is_deduped_with_a_direct_mention_and_excludes_the_author() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let author_bytes = author.public_key().to_bytes().to_vec();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+        add_channel_member(&pool, community, channel, &author_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "heads up @channel",
+            Some(channel),
+            vec![
+                notify_tag("channel"),
+                Tag::parse(["p", &member.public_key().to_hex()]).expect("p tag"),
+            ],
+        )
+        .await;
+
+        let member_feed = query_mentions(&pool, community, &member_bytes, &[channel], None, 10)
+            .await
+            .expect("member mentions feed");
+        assert_eq!(
+            member_feed
+                .iter()
+                .filter(|row| row.event.id == event.id)
+                .count(),
+            1,
+            "an event that is both p-tagged and @channel must appear once"
+        );
+
+        let author_feed = query_mentions(&pool, community, &author_bytes, &[channel], None, 10)
+            .await
+            .expect("author mentions feed");
+        assert!(
+            author_feed.iter().all(|row| row.event.id != event.id),
+            "the author's own @channel event is not a mention of the author"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_respects_visible_channel_scoping() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community, channel, &member_bytes).await;
+
+        let event = store_feed_event_as(
+            &pool,
+            community,
+            &author,
+            KIND_FORUM_POST,
+            "forum @channel",
+            Some(channel),
+            vec![notify_tag("channel")],
+        )
+        .await;
+
+        let scoped_out = query_mentions(&pool, community, &member_bytes, &[], None, 10)
+            .await
+            .expect("mentions feed with no accessible channels");
+        assert!(
+            scoped_out.iter().all(|row| row.event.id != event.id),
+            "an empty accessible-channel list means global-only, never all channels"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_mention_is_scoped_across_communities() {
+        let pool = setup_pool().await;
+        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
+        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel_a = insert_test_channel(&pool, community_a).await;
+        let channel_b = insert_test_channel(&pool, community_b).await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let member_bytes = member.public_key().to_bytes().to_vec();
+        add_channel_member(&pool, community_a, channel_a, &member_bytes).await;
+        add_channel_member(&pool, community_b, channel_b, &member_bytes).await;
+
+        let event_b = store_feed_event_as(
+            &pool,
+            community_b,
+            &author,
+            KIND_STREAM_MESSAGE,
+            "community-b @channel",
+            Some(channel_b),
+            vec![notify_tag("channel")],
+        )
+        .await;
+
+        let feed_a = query_mentions(
+            &pool,
+            community_a,
+            &member_bytes,
+            &[channel_a, channel_b],
+            None,
+            10,
+        )
+        .await
+        .expect("community A mentions feed");
+        assert!(
+            feed_a.iter().all(|row| row.event.id != event_b.id),
+            "community B channel mention must not appear in community A feed"
+        );
     }
 
     // -- Postgres tenant-scope regressions ------------------------------------
@@ -785,6 +1297,86 @@ mod tests {
                 && sql.contains(&KIND_GIT_ISSUE.to_string())
                 && sql.contains(&KIND_TEXT_NOTE.to_string()),
             "mentions feed must include Buzz Git roots and comments: {sql}"
+        );
+    }
+
+    #[test]
+    fn mentions_query_unions_channel_notifications_for_member_channels() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let pubkey = vec![0x42; 32];
+        let channel_id = Uuid::new_v4();
+        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, 10);
+        let query = qb.build();
+        let sql_str = sqlx::Execute::sql(query);
+        let sql = sql_str.as_str();
+
+        assert!(
+            sql.contains("INNER JOIN channel_notifications n ON e.community_id = n.community_id"),
+            "mentions must union NIP-CM channel notifications on the composite tenant/event key: {sql}"
+        );
+        assert!(
+            sql.contains("INNER JOIN channel_members cm ON cm.community_id = n.community_id"),
+            "channel notifications must resolve recipients through channel_members: {sql}"
+        );
+        assert!(
+            sql.contains("AND cm.removed_at IS NULL"),
+            "removed members must not receive channel mentions: {sql}"
+        );
+        assert!(
+            sql.contains("AND cm.joined_at <= e.received_at"),
+            "@channel rows must be bounded to members who joined before the relay admitted the event: {sql}"
+        );
+        assert!(
+            sql.contains(") UNION (")
+                && sql.contains(")) u ORDER BY created_at DESC, id ASC LIMIT "),
+            "both branches must be deduplicated and ordered together: {sql}"
+        );
+        assert!(
+            !sql.contains(" AS feed_created_at"),
+            "both branches must project exactly EVENT_COLS or UNION cannot dedupe: {sql}"
+        );
+        assert!(
+            !sql.contains("UNION ALL"),
+            "UNION (not UNION ALL) is what dedupes an event that is both p-tagged and @channel: {sql}"
+        );
+        assert_eq!(
+            sql.matches("LIMIT ").count(),
+            3,
+            "each branch and the outer query must carry the feed limit: {sql}"
+        );
+    }
+
+    #[test]
+    fn feed_queries_order_by_created_at_with_an_id_tie_break() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let pubkey = vec![0x42; 32];
+        let channel_id = Uuid::new_v4();
+
+        let mut mentions = build_mentions_query(community, &pubkey, &[channel_id], None, 10);
+        let mentions_query = mentions.build();
+        let mentions_sql = sqlx::Execute::sql(mentions_query).as_str().to_string();
+        assert!(
+            mentions_sql.contains("ORDER BY m.event_created_at DESC, e.id ASC")
+                && mentions_sql.contains("ORDER BY n.event_created_at DESC, e.id ASC")
+                && mentions_sql.contains("ORDER BY created_at DESC, id ASC"),
+            "every mentions ordering needs an id tie-break for stable pagination: {mentions_sql}"
+        );
+
+        let mut needs_action =
+            build_needs_action_query(community, &pubkey, &[channel_id], None, 10);
+        let needs_action_query = needs_action.build();
+        let needs_action_sql = sqlx::Execute::sql(needs_action_query).as_str().to_string();
+        assert!(
+            needs_action_sql.contains("ORDER BY m.event_created_at DESC, e.id ASC"),
+            "needs_action ordering needs an id tie-break: {needs_action_sql}"
+        );
+
+        let mut activity = build_activity_query(community, &[channel_id], None, 10);
+        let activity_query = activity.build();
+        let activity_sql = sqlx::Execute::sql(activity_query).as_str().to_string();
+        assert!(
+            activity_sql.contains("ORDER BY created_at DESC, id ASC"),
+            "activity ordering needs an id tie-break: {activity_sql}"
         );
     }
 

@@ -667,12 +667,31 @@ const MENTION_REF = [
   "1111111111111111111111111111111111111111111111111111111111111111",
 ];
 
-test("splitOutgoingTags: undefined input yields three empty arrays", () => {
+test("splitOutgoingTags: undefined input yields four empty arrays", () => {
   assert.deepEqual(splitOutgoingTags(undefined), {
     mediaTags: [],
     emojiTags: [],
     mentionTags: [],
+    notifyTags: [],
+    notifyMode: null,
   });
+});
+
+test("splitOutgoingTags: separates the channel-wide notify marker", () => {
+  const notify = ["notify", "channel"];
+  const { mediaTags, emojiTags, mentionTags, notifyTags, notifyMode } =
+    splitOutgoingTags([IMETA, notify]);
+  assert.deepEqual(mediaTags, [IMETA]);
+  assert.deepEqual(emojiTags, []);
+  assert.deepEqual(mentionTags, []);
+  assert.deepEqual(notifyTags, [notify]);
+  assert.equal(notifyMode, "channel");
+});
+
+test("splitOutgoingTags: a malformed notify marker reads as no mention", () => {
+  const { notifyTags, notifyMode } = splitOutgoingTags([["notify", "all"]]);
+  assert.deepEqual(notifyTags, [["notify", "all"]]);
+  assert.equal(notifyMode, null);
 });
 
 test("splitOutgoingTags: separates emoji tags from imeta tags", () => {

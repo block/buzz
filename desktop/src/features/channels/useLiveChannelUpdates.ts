@@ -135,6 +135,12 @@ export function useLiveChannelUpdates(
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
+  // One event can match both the general `#h` subscription and the `#p`
+  // mention subscription (a message that p-tags the reader and carries a
+  // notify tag, say). The relay delivers one frame per subscription, so both
+  // converge on handleIncomingMessage — this set makes its side effects
+  // (unread recording, notification callbacks) run once per event.
+  const seenIncomingEventIdsRef = React.useRef(new Set<string>());
   const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
   if (channelsInvalidateRef.current === null) {
     channelsInvalidateRef.current = createTrailingDebounce(() => {
@@ -221,6 +227,10 @@ export function useLiveChannelUpdates(
   });
 
   const handleIncomingMessage = React.useEffectEvent((event: RelayEvent) => {
+    if (!trackSeenEvent(seenIncomingEventIdsRef.current, event.id)) {
+      return;
+    }
+
     const channelId = getChannelIdFromTags(event.tags);
     if (!channelId) {
       return;

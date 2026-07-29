@@ -1,8 +1,10 @@
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { notifyModeForTags } from "@/features/notifications/lib/channelNotifyEscalation";
 import {
   formatNotificationTitle,
   truncateNotificationBody,
 } from "@/features/notifications/lib/notificationFormat";
+import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 
 export type NotificationChannel = Pick<Channel, "id" | "name" | "channelType">;
 
@@ -29,6 +31,36 @@ export function enrichFeedItemChannel(
     channelName: needsName ? channel.name : item.channelName,
     channelType: needsType ? channel.channelType : item.channelType,
   };
+}
+
+/**
+ * Whether a feed item still notifies once channel mutes are applied.
+ *
+ * Direct mentions pierce a channel mute; channel-wide mentions (NIP-CM) do
+ * not — the mute is the opt-out for `@channel`, so a muted channel's marker
+ * events are dropped here even though the relay files them under `mention`.
+ *
+ * One event can be both: a `p` tag for the reader *and* a notify tag, which
+ * the relay collapses into a single mention row. The NIP-CM ladder puts the
+ * direct mention above the mute rung, so such a row survives — only
+ * notify-only rows are dropped. Pass the reader's lowercased pubkey to get
+ * that discrimination; without it the row is treated as notify-only.
+ */
+export function feedItemSurvivesChannelMute(
+  item: FeedItem,
+  mutedChannelIds: ReadonlySet<string> | undefined,
+  currentPubkey = "",
+): boolean {
+  if (!item.channelId || !mutedChannelIds?.has(item.channelId)) {
+    return true;
+  }
+  if (item.category !== "mention") {
+    return false;
+  }
+  if (hasMentionForEvent(item, currentPubkey)) {
+    return true;
+  }
+  return notifyModeForTags(item.tags) === null;
 }
 
 export function notificationTitle(item: FeedItem, senderName?: string) {

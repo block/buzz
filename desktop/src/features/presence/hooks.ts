@@ -13,6 +13,7 @@ import {
   presenceQueryWantsPubkey,
   resolveAutomaticPresenceStatus,
 } from "@/features/presence/lib/presence";
+import { setSelfPresenceStatus } from "@/features/presence/lib/selfPresence";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
 const PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -355,6 +356,12 @@ export function usePresenceSession(pubkey?: string) {
       return;
     });
   });
+
+  React.useEffect(() => {
+    setSelfPresenceStatus(
+      normalizedPubkey.length === 0 ? "offline" : currentStatus,
+    );
+  }, [currentStatus, normalizedPubkey]);
 
   React.useEffect(() => {
     if (normalizedPubkey.length === 0) {

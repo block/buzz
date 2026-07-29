@@ -168,6 +168,53 @@ pub async fn insert_mentions(
     Ok(())
 }
 
+/// Record a NIP-CM `["notify", "channel"]` event in `channel_notifications`.
+///
+/// One row per event — the member roster is resolved at read time by the
+/// mentions feed, never denormalized here. No-ops unless the event carries a
+/// valid notify tag whose mode persists (see
+/// [`buzz_core::channel_mentions::persists_channel_notification`]) and the
+/// event is channel-scoped. Like [`insert_mentions`], this is a denormalized
+/// index: callers log failures rather than failing the event insert.
+pub async fn insert_channel_notification(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &nostr::Event,
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    use buzz_core::channel_mentions::{event_notify_mode, persists_channel_notification};
+
+    let Some(channel_id) = channel_id else {
+        return Ok(());
+    };
+    let kind = event.kind.as_u16() as u32;
+    let Ok(Some(mode)) = event_notify_mode(event) else {
+        return Ok(());
+    };
+    if !persists_channel_notification(kind, mode) {
+        return Ok(());
+    }
+
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(crate::error::DbError::InvalidTimestamp(created_at_secs))?;
+
+    sqlx::query(
+        "INSERT INTO channel_notifications \
+         (community_id, channel_id, event_id, mode, event_created_at) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(event.id.as_bytes().as_slice())
+    .bind(mode.as_str())
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Database handle. Clone is cheap (Arc-backed pool).
 #[derive(Clone, Debug)]
 pub struct Db {
@@ -1089,6 +1136,11 @@ impl Db {
             if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
                 tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
             }
+            if let Err(e) =
+                insert_channel_notification(&self.pool, community_id, event, channel_id).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert channel notification: {e}");
+            }
         }
         Ok(result)
     }
@@ -1396,6 +1448,11 @@ impl Db {
         if result.1 {
             if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
                 tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+            if let Err(e) =
+                insert_channel_notification(&self.pool, community_id, event, channel_id).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert channel notification: {e}");
             }
         }
         Ok(result)

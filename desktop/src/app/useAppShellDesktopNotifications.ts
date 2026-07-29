@@ -5,6 +5,10 @@ import {
   toSearchHit,
 } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  channelNotifyEscalates,
+  notifyModeForTags,
+} from "@/features/notifications/lib/channelNotifyEscalation";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
@@ -40,10 +44,50 @@ export function useAppShellDesktopNotifications({
   ) => Promise<unknown>;
   pubkey?: string;
 }) {
+  // `@here` is live-only, so it never reaches the home feed the `@channel`
+  // toast comes from — this is its only notification path. Callers have
+  // already applied mute, author, and freshness filters.
+  const notifyForLiveChannelMention = React.useEffectEvent(
+    (channelId: string, event: RelayEvent) => {
+      if (!notificationSettings.slotAlertsEnabled.mention) return;
+      if (notifyModeForTags(event.tags) !== "here") return;
+      if (!channelNotifyEscalates(event, pubkey?.trim().toLowerCase() ?? "")) {
+        return;
+      }
+
+      const resolvedChannel = channels.find((c) => c.id === channelId);
+      const channelName = resolvedChannel?.name?.trim() ?? null;
+
+      void sendDesktopNotification({
+        title: formatNotificationTitle({
+          prefix: "@here",
+          channelLabel: channelName ? `#${channelName}` : null,
+        }),
+        body: truncateNotificationBody(event.content, "New message"),
+        target: {
+          channelId,
+          channelName,
+          content: event.content,
+          createdAt: event.created_at,
+          eventId: event.id,
+          kind: event.kind,
+          pubkey: event.pubkey,
+          threadRootId: getThreadReference(event.tags).rootId ?? null,
+        },
+      }).then((didSend) => {
+        if (!didSend) return;
+        playNotificationSound(
+          resolveSlotSound(notificationSettings, "mention"),
+        );
+      });
+    },
+  );
+
   const handleChannelNotification = React.useEffectEvent(
-    (_channelId: string, event: RelayEvent) => {
-      if (!shouldBounceForChannelNotification(event.tags)) return;
+    (channelId: string, event: RelayEvent) => {
       if (!notificationSettings.desktopEnabled) return;
+      notifyForLiveChannelMention(channelId, event);
+      if (!shouldBounceForChannelNotification(event.tags)) return;
       void requestDockBounce();
     },
   );
@@ -93,8 +137,13 @@ export function useAppShellDesktopNotifications({
 
       // Replies that @-mention the user are owned by the home-feed mention
       // path — skip them here so they don't notify (and sound) twice.
+      // Channel-wide mentions are owned by the feed (`@channel`) and the live
+      // channel path (`@here`) for the same reason.
       const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
-      if (hasMentionForEvent(event, normalizedPubkey)) {
+      if (
+        hasMentionForEvent(event, normalizedPubkey) ||
+        notifyModeForTags(event.tags) !== null
+      ) {
         return;
       }
 
