@@ -268,28 +268,11 @@ export type GetHomeFeedInput = {
   types?: string;
 };
 
-export type SearchMessagesInput = {
-  q: string;
-  limit?: number;
-  channelId?: string;
-};
-
-export type SearchHit = {
-  eventId: string;
-  content: string;
-  kind: number;
-  pubkey: string;
-  channelId: string | null;
-  channelName: string | null;
-  createdAt: number;
-  score: number;
-  threadRootId?: string | null;
-};
-
-export type SearchMessagesResponse = {
-  hits: SearchHit[];
-  found: number;
-};
+export type {
+  SearchHit,
+  SearchMessagesInput,
+  SearchMessagesResponse,
+} from "./searchTypes";
 
 // ── Relay Members ────────────────────────────────────────────────────────────
 
@@ -343,6 +326,12 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
+  /**
+   * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
+   * `null` means the agent inherits its harness from the linked persona.
+   * Used to count agents referencing a harness definition (delete confirm).
+   */
+  runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
@@ -363,6 +352,7 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
+  modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
   /**
@@ -548,6 +538,8 @@ export type AcpRuntimeCatalogEntry = {
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
+  /** True when the runtime depends on a separately installed vendor CLI. */
+  requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;
@@ -555,6 +547,21 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
+  /**
+   * Whether this entry is compiled into the app ("builtin"), a bundled preset
+   * ("preset" — PATH-probed, not editable/deletable), or loaded from a user
+   * JSON file in `custom_harnesses/` ("custom"). Controls editability in the
+   * UI — only "custom" entries can be edited or deleted.
+   */
+  source: "builtin" | "preset" | "custom";
+  /**
+   * Definition-level environment variables for `source: custom` entries.
+   *
+   * Populated by the backend from `HarnessDefinition.env` so the edit form can
+   * read them back without losing existing env vars on save. Always absent/empty
+   * for `builtin` and `preset` entries.
+   */
+  definitionEnv?: Record<string, string>;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
@@ -746,10 +753,17 @@ export type AgentPersona = {
   namePool: string[];
   isBuiltIn: boolean;
   isActive: boolean;
+  /** Whether this persona is discoverable in the active community catalog. */
+  shared: boolean;
   /** Team ID if this persona was imported from a team directory. Team personas are non-editable. */
   sourceTeam?: string | null;
-  /** Environment variables injected for agents created from this persona.
-   * Layered as: desktop parent env < persona envVars < agent envVars. */
+  /**
+   * Set only on a local copy of another owner's shared catalog entry. A copy
+   * carries a fresh local `id`, so this coordinate is the only thing that can
+   * answer "is this catalog entry already added" without minting a duplicate.
+   */
+  catalogSource?: CatalogSourceCoordinate | null;
+  /** Agent environment variables, layered after desktop parent and persona values. */
   envVars: Record<string, string>;
   /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
   respondTo: RespondToMode | null;
@@ -760,9 +774,18 @@ export type AgentPersona = {
 };
 
 /**
- * NIP-AP behavioral group for a definition, sent as one group: absent = don't
- * touch the stored behavior group (legacy callers), present = replace the fields as a
- * unit. Mirrors `PersonaBehaviorRequest`.
+ * A catalog publication's coordinate: the owner who published it and the
+ * `d`-tag identifying the persona within that owner's catalog. Mirrors the
+ * backend `CatalogSource`.
+ */
+export type CatalogSourceCoordinate = {
+  ownerPubkey: string;
+  personaId: string;
+};
+
+/**
+ * NIP-AP behavioral group for a definition: absent preserves the stored group
+ * for legacy callers; present replaces it as a unit. Mirrors `PersonaBehaviorRequest`.
  */
 export type PersonaBehaviorInput = {
   respondTo?: RespondToMode;
@@ -780,6 +803,11 @@ export type CreatePersonaInput = {
   namePool?: string[];
   envVars?: Record<string, string>;
   behavior?: PersonaBehaviorInput;
+  /**
+   * Set when this persona is a copy of another owner's shared catalog entry,
+   * so the catalog can tell an already-added foreign entry from a new one.
+   */
+  catalogSource?: CatalogSourceCoordinate;
 };
 
 export type UpdatePersonaInput = {

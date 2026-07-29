@@ -1,9 +1,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
-import { signProjectPullRequestReviewRequest } from "@/shared/api/projectGit";
+import {
+  signProjectPullRequestReviewRequest,
+  signProjectPullRequestStatus,
+} from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   KIND_GIT_STATUS_CLOSED,
   KIND_GIT_STATUS_DRAFT,
@@ -40,12 +44,29 @@ const PR_STATUS_KIND_BY_LIFECYCLE: Record<
 async function updateProjectPullRequestStatus({
   project,
   pullRequest,
+  signAsManagedOwner,
   status,
 }: {
   project: Project;
   pullRequest: ProjectPullRequest;
+  signAsManagedOwner: boolean;
   status: ProjectPullRequestLifecycleStatus;
 }): Promise<void> {
+  const createdAt = nextProjectPullRequestStatusCreatedAt(
+    pullRequest,
+    Math.floor(Date.now() / 1_000),
+  );
+  if (signAsManagedOwner) {
+    await signProjectPullRequestStatus({
+      targetOwner: project.owner,
+      repoAddress: project.repoAddress,
+      pullRequestId: pullRequest.id,
+      pullRequestAuthor: pullRequest.author,
+      status,
+      createdAt,
+    });
+    return;
+  }
   const recipients = new Set([
     project.owner.toLowerCase(),
     pullRequest.author.toLowerCase(),
@@ -53,10 +74,7 @@ async function updateProjectPullRequestStatus({
   const event = await signRelayEvent({
     kind: PR_STATUS_KIND_BY_LIFECYCLE[status],
     content: "",
-    createdAt: nextProjectPullRequestStatusCreatedAt(
-      pullRequest,
-      Math.floor(Date.now() / 1_000),
-    ),
+    createdAt,
     tags: [
       ["e", pullRequest.id, "", "root"],
       ["a", project.repoAddress],
@@ -125,6 +143,29 @@ async function requestProjectPullRequestReview({
 
 type ProjectPullRequestReviewDecision = "approve" | "request-changes";
 
+/** Whether a viewer may submit a review decision for this pull request. */
+export function canReviewProjectPullRequest(
+  project: Project,
+  pullRequest: ProjectPullRequest,
+  viewerPubkey: string | null | undefined,
+) {
+  if (
+    !viewerPubkey ||
+    !pullRequest.commit ||
+    (pullRequest.status !== "Open" && pullRequest.status !== "Draft")
+  ) {
+    return false;
+  }
+  const viewer = normalizePubkey(viewerPubkey);
+  if (viewer === normalizePubkey(pullRequest.author)) return false;
+  return (
+    viewer === normalizePubkey(project.owner) ||
+    pullRequest.reviewers.some(
+      (reviewer) => normalizePubkey(reviewer) === viewer,
+    )
+  );
+}
+
 const REVIEW_DECISION_DETAILS: Record<
   ProjectPullRequestReviewDecision,
   {
@@ -149,11 +190,13 @@ const REVIEW_DECISION_DETAILS: Record<
 };
 
 async function submitProjectPullRequestReview({
+  content,
   createdAt,
   decision,
   project,
   pullRequest,
 }: {
+  content?: string;
   createdAt: number;
   decision: ProjectPullRequestReviewDecision;
   project: Project;
@@ -169,7 +212,7 @@ async function submitProjectPullRequestReview({
   ]);
   const event = await signRelayEvent({
     kind: KIND_TEXT_NOTE,
-    content: details.content,
+    content: content?.trim() || details.content,
     createdAt,
     tags: [
       ["e", pullRequest.id, "", "root"],
@@ -212,13 +255,20 @@ export function useUpdateProjectPullRequestStatusMutation(
   return useMutation({
     mutationFn: ({
       pullRequest,
+      signAsManagedOwner = false,
       status,
     }: {
       pullRequest: ProjectPullRequest;
+      signAsManagedOwner?: boolean;
       status: ProjectPullRequestLifecycleStatus;
     }) => {
       if (!project) throw new Error("No project selected.");
-      return updateProjectPullRequestStatus({ project, pullRequest, status });
+      return updateProjectPullRequestStatus({
+        project,
+        pullRequest,
+        signAsManagedOwner,
+        status,
+      });
     },
     onSuccess: invalidate,
   });
@@ -262,14 +312,17 @@ function useProjectPullRequestReviewDecisionMutation(
 
   return useMutation({
     mutationFn: ({
+      content,
       createdAt,
       pullRequest,
     }: {
+      content?: string;
       createdAt: number;
       pullRequest: ProjectPullRequest;
     }) => {
       if (!project) throw new Error("No project selected.");
       return submitProjectPullRequestReview({
+        content,
         createdAt,
         decision,
         project,

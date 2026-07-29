@@ -9,6 +9,9 @@
 #   drops deleted paths from push-file discovery (`extractFiles` existence
 #   check, repository.go). CI's dorny/paths-filter catches deletions.
 #   Deliberate — accepted, not worked around.
+# - `commit-msg` has no glob: it rewrites the commit message, not files. Note
+#   Git only runs it for `git commit` and `git merge` — other flows need their own
+#   flag: `git rebase --signoff`, `git cherry-pick -s`.
 pre-commit:
   parallel: true
   commands:
@@ -33,6 +36,14 @@ pre-commit:
       glob: ["mobile/**"]
       run: just mobile-fix
       stage_fixed: true
+
+# Appends the DCO Signed-off-by trailer the required "DCO Check" enforces.
+# `--if-exists doNothing` makes it idempotent and preserves an existing
+# sign-off (including `git commit -s` and a different signer's trailer).
+commit-msg:
+  commands:
+    signoff:
+      run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place {1}'
 
 pre-push:
   parallel: true

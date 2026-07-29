@@ -139,6 +139,17 @@ pub struct LlmResponse {
     /// tokens, so reading it alone would undercount). Used to gate handoff on
     /// the real token budget rather than a byte estimate.
     pub input_tokens: Option<u64>,
+    /// The portion of `input_tokens` the provider served from its prompt cache,
+    /// or `None` when the response reported no cache split. Providers bill this
+    /// slice at a large discount (roughly 10x for both OpenAI and Anthropic),
+    /// so a consumer that prices all of `input_tokens` at the full rate
+    /// *overstates* cost — by a lot on an append-only agent loop, where most of
+    /// each request is a prefix the provider already has.
+    ///
+    /// This is a subset of `input_tokens`, never an addition to it: every
+    /// provider we speak to reports an inclusive input total, so adding this
+    /// would double-count.
+    pub cached_input_tokens: Option<u64>,
     /// Output tokens the provider reported for this request, or `None` if the
     /// response carried no usage. Used to accumulate per-turn output counts
     /// for NIP-AM metric publishing.

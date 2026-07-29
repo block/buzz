@@ -304,6 +304,22 @@ pub async fn cmd_set_presence(client: &BuzzClient, status: &str) -> Result<(), C
     Ok(())
 }
 
+/// Set user status — sign and submit a NIP-38 kind:30315 user status event.
+///
+/// Uses the `d:general` coordinate that the desktop client reads for the
+/// profile status line. A blank `text` with no `emoji` clears the status.
+pub async fn cmd_set_status(
+    client: &BuzzClient,
+    text: &str,
+    emoji: Option<&str>,
+) -> Result<(), CliError> {
+    let builder = buzz_sdk::build_user_status(text, emoji).map_err(crate::validate::sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
 pub async fn dispatch(
     cmd: crate::UsersCmd,
     client: &BuzzClient,
@@ -331,6 +347,16 @@ pub async fn dispatch(
         }
         UsersCmd::Presence { pubkeys } => cmd_get_presence(client, &pubkeys).await,
         UsersCmd::SetPresence { status } => cmd_set_presence(client, &status.to_string()).await,
+        UsersCmd::SetStatus { text, emoji, clear } => {
+            // `--clear` is mutually exclusive with `--text`/`--emoji`: publish the
+            // empty `d:general` event that clients read as "no status".
+            let (text, emoji) = if clear {
+                ("", None)
+            } else {
+                (text.as_deref().unwrap_or_default(), emoji.as_deref())
+            };
+            cmd_set_status(client, text, emoji).await
+        }
     }
 }
 

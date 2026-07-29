@@ -1,0 +1,69 @@
+name: Publish Mobile Release Candidate
+run-name: Publish mobile-v${{ inputs.version }}-rc.${{ inputs.candidate_number }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Mobile marketing version (X.Y.Z)
+        required: true
+        type: string
+      candidate_number:
+        description: Expected next release-candidate number
+        required: true
+        type: string
+      target_sha:
+        description: Exact current block/buzz main commit
+        required: true
+        type: string
+
+concurrency:
+  group: mobile-release-candidate-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the reviewed workflow from main
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          if [ "$DISPATCH_REF" != "refs/heads/main" ]; then
+            echo "::error::Mobile candidates must be dispatched from main, not $DISPATCH_REF"
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require canonical repository
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ "$REPOSITORY" != "block/buzz" ]; then
+            echo "::error::Mobile candidate publication is restricted to block/buzz"
+            exit 1
+          fi
+
+      - name: Create release tagger token
+        id: release-tagger
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.BUZZ_RELEASE_TAGGER_CLIENT_ID }}
+          private-key: ${{ secrets.BUZZ_RELEASE_TAGGER_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Publish annotated candidate tag
+        env:
+          GH_TOKEN: ${{ steps.release-tagger.outputs.token }}
+          MOBILE_VERSION: ${{ inputs.version }}
+          CANDIDATE_NUMBER: ${{ inputs.candidate_number }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: scripts/publish-mobile-release-candidate.sh "$MOBILE_VERSION" "$CANDIDATE_NUMBER" "$TARGET_SHA"

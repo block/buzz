@@ -167,7 +167,7 @@ test("native emoji-only messages leave space below the author metadata", async (
 //
 // The bug (shipped in the custom-emoji launch, PR #816): the reaction renderer
 // put the relay emoji URL straight into <img src> without going through
-// rewriteRelayUrl(). WKWebView bypasses WARP, so the direct relay URL gets a
+// rewriteRelayUrl(). WKWebView bypasses the VPN tunnel, so the direct relay URL gets a
 // Cloudflare Access 403 and shows a broken image — even though the same emoji
 // rendered fine inline in chat (that path rewrites). The chat path was covered
 // by the tests above; the reaction path was not, which is why it slipped.

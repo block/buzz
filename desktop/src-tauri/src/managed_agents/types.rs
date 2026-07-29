@@ -40,6 +40,13 @@ pub struct AgentDefinition {
     pub is_builtin: bool,
     #[serde(default = "default_record_active")]
     pub is_active: bool,
+    /// Whether this persona is discoverable in the currently active community.
+    ///
+    /// This is a command/view projection only. Durable share state lives in
+    /// the relay+owner-scoped retention head so one workspace's choice cannot
+    /// leak into another workspace's definition record.
+    #[serde(default)]
+    pub shared: bool,
     /// Team ID if this persona was imported from a team directory.
     /// Team personas are non-editable (system_prompt, model locked).
     #[serde(
@@ -57,6 +64,13 @@ pub struct AgentDefinition {
         alias = "source_pack_persona_slug"
     )]
     pub source_team_persona_slug: Option<String>,
+    /// Provenance of a persona copied from another owner's shared catalog.
+    ///
+    /// Set only on the copy, never on the original. It is what makes
+    /// "already added" answerable for a foreign catalog entry: the copy carries
+    /// a new local id, so the only link back to the publication is this pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_source: Option<CatalogSource>,
     /// Harness-level configuration passed to the agent subprocess as environment variables.
     /// Opaque to Buzz — keys and values are runtime-specific.
     ///
@@ -130,8 +144,11 @@ impl AgentDefinition {
             name_pool: self.name_pool,
             is_builtin: self.is_builtin,
             is_active: self.is_active,
+            // Catalog visibility is relay+owner scoped, not definition-global.
+            shared: false,
             source_team: self.source_team,
             source_team_persona_slug: self.source_team_persona_slug,
+            catalog_source: self.catalog_source,
             definition_respond_to: self.respond_to,
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
@@ -161,8 +178,11 @@ impl ManagedAgentRecord {
             name_pool: self.name_pool.clone(),
             is_builtin: self.is_builtin,
             is_active: self.is_active,
+            // Projected by `list_personas` from the active retention scope.
+            shared: false,
             source_team: self.source_team.clone(),
             source_team_persona_slug: self.source_team_persona_slug.clone(),
+            catalog_source: self.catalog_source.clone(),
             env_vars: self.env_vars.clone(),
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
@@ -259,13 +279,19 @@ pub struct ManagedAgentRecord {
     /// Desired LLM model ID. Matches AgentModelInfo.id from discovery.
     /// The harness re-discovers the correct ACP switching metadata at session
     /// creation by matching this ID against the fresh session/new response.
+    /// For a linked instance this is a legacy/display snapshot only — spawn
+    /// and deploy resolve the effective model from the definition, never
+    /// from this field (see `effective_config::resolve_effective_config`).
+    /// For a definition-less instance this field is authoritative.
     #[serde(default)]
     pub model: Option<String>,
-    /// LLM inference provider snapshotted from the persona at create time
-    /// (e.g. 'databricks', 'anthropic'). Spawn and deploy read this, never the
-    /// live persona — so the agent stays pinned to the provider it was created
-    /// with across restarts. `#[serde(default)]` so pre-existing records
-    /// deserialize as `None` and get backfilled on first load.
+    /// LLM inference provider. For a linked instance this is a legacy/display
+    /// snapshot only — spawn and deploy resolve the effective provider from
+    /// the definition, never from this field (see
+    /// `effective_config::resolve_effective_config`). For a definition-less
+    /// instance this field is authoritative. `#[serde(default)]` so
+    /// pre-existing records deserialize as `None` and get backfilled on
+    /// first load.
     #[serde(default)]
     pub provider: Option<String>,
     /// Content hash of the persona at the time this agent was created — the
@@ -362,6 +388,13 @@ pub struct ManagedAgentRecord {
     /// definition hidden from pickers. Defaults `true` for existing records.
     #[serde(default = "default_record_active")]
     pub is_active: bool,
+    /// Legacy process-global catalog visibility field.
+    ///
+    /// New writes omit it and definition views ignore it. It remains
+    /// deserializable for branch-era stores, but active visibility is projected
+    /// from the relay+owner-scoped retention database instead.
+    #[serde(default, skip_serializing)]
+    pub shared: bool,
     /// Absorbed from `AgentDefinition.source_team` — team ID when this
     /// definition was imported from a team directory (team definitions are
     /// non-editable). Distinct from `persona_team_dir`/`persona_name_in_team`,
@@ -372,6 +405,10 @@ pub struct ManagedAgentRecord {
     /// definition's slug within its source team.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_team_persona_slug: Option<String>,
+    /// Absorbed from `AgentDefinition.catalog_source` — the publication this
+    /// definition was copied from, when it came from another owner's catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_source: Option<CatalogSource>,
     /// NIP-AP definition-level behavioral defaults, absorbed from
     /// `AgentDefinition` in WIRE shape (kebab-case string / optional u32),
     /// distinct from the instance-side `respond_to`/`respond_to_allowlist`/
@@ -390,12 +427,15 @@ pub struct ManagedAgentRecord {
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
     ///
-    /// This is the source of truth for "is this a mesh agent + which model" —
-    /// replacing the old practice of sniffing it back out of `env_vars`
-    /// (`relay_mesh_config`). Spawn-time env vars are *derived from* this, not
-    /// the other way around. `#[serde(default)]` so pre-existing saved records
-    /// deserialize as `None` and are resolved via the env-var fallback until
-    /// they are rewritten with this field.
+    /// Not the source of truth. `provider == "relay-mesh"` is, resolved through
+    /// `effective_config::resolve_effective_config`; spawn-time env vars are
+    /// derived from that resolution. This field is retained solely as a
+    /// backward-compatibility signal for records written before the record had
+    /// a `provider` field, and is consulted only for definition-less records
+    /// that carry no provider — after which the env-var preset is the last
+    /// fallback. A linked instance's marker is never read: its definition is
+    /// authoritative. `#[serde(default)]` so records predating the field
+    /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
 }
@@ -456,6 +496,10 @@ pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,
+    /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`).
+    /// Lets the UI count agents referencing a harness definition (e.g. in the
+    /// delete-confirmation flow). `None` = inherit from the linked persona.
+    pub runtime: Option<String>,
     pub team_id: Option<String>,
     pub relay_url: String,
     pub acp_command: String,
@@ -478,7 +522,11 @@ pub struct ManagedAgentSummary {
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
     pub model: Option<String>,
-    /// LLM inference provider, from the agent's pinned record snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<super::effective_config::ConfigSource>,
+    /// LLM inference provider, resolved the same way as `model`/`model_source`
+    /// (definition → global for linked instances; instance → global for
+    /// definition-less instances). `None` for an orphaned instance.
     pub provider: Option<String>,
     /// `true` when the linked persona has been edited since this agent was
     /// created — the running agent uses the older pinned snapshot. The UI
@@ -487,9 +535,11 @@ pub struct ManagedAgentSummary {
     /// persona is gone, so there is nothing newer to drift toward).
     pub persona_out_of_date: bool,
     /// `true` when the agent was created from a persona that no longer exists.
-    /// Distinct from out-of-date: there is no current persona to respawn into,
-    /// so the UI should not prompt a respawn — the pinned snapshot is all the
-    /// config that remains.
+    /// Distinct from out-of-date: there is no current persona to respawn into.
+    /// An orphaned agent also cannot be (re)started — `spawn_agent_child`
+    /// refuses it (see `effective_config::resolve_effective_config`'s
+    /// `OrphanedInstance` arm via `require_resolved`) — so the UI
+    /// should surface that it's stuck, not merely stale.
     pub persona_orphaned: bool,
     /// `true` when the running process was spawned with a config that no
     /// longer matches what a spawn would use today — a plain restart would
@@ -565,6 +615,19 @@ pub enum AuthStatus {
     Unknown,
 }
 
+/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string
+/// so the TypeScript consumer can switch on it without numeric comparisons.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessSource {
+    /// Compiled into the app — one of the four first-class runtimes.
+    Builtin,
+    /// Static preset entry with bundled logo, PATH-probed, not editable/deletable.
+    Preset,
+    /// Loaded at runtime from the user's `custom_harnesses/` directory.
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpRuntimeCatalogEntry {
     pub id: String,
@@ -585,6 +648,8 @@ pub struct AcpRuntimeCatalogEntry {
     pub install_instructions_url: String,
     /// true when at least one automated install step is available
     pub can_auto_install: bool,
+    /// true when this runtime depends on a separately installed vendor CLI.
+    pub requires_external_cli: bool,
     pub underlying_cli_path: Option<String>,
     /// true when an npm adapter step is pending but Node.js / npm is absent.
     /// The UI hides the Install button and shows a Node.js install callout.
@@ -594,6 +659,19 @@ pub struct AcpRuntimeCatalogEntry {
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
+    /// Whether this entry came from the compiled-in catalog or a user-supplied
+    /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
+    pub source: HarnessSource,
+    /// Definition-level environment variables for `source: custom` entries.
+    ///
+    /// Populated from `HarnessDefinition.env` so the edit form can read them
+    /// back and the user doesn't silently lose env vars when saving.  Always
+    /// empty for `builtin` and `preset` entries (those env values come from the
+    /// runtime metadata path, not user-editable JSON).
+    ///
+    /// Skipped in serialization when empty to keep the catalog payload compact.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definition_env: BTreeMap<String, String>,
 }
 
 /// Result of a single install step (CLI or adapter).
@@ -728,7 +806,7 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 10;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM
@@ -907,6 +985,8 @@ pub fn resolve_mint_behavioral_defaults(
     })
 }
 
+mod catalog_source;
+pub use catalog_source::CatalogSource;
 mod requests;
 pub use requests::*;
 

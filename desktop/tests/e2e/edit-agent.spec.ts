@@ -153,6 +153,64 @@ test.describe("edit agent dialog", () => {
     );
   });
 
+  test("keeps the custom command visible without opening Advanced", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    const advanced = page.getByRole("button", {
+      name: "Advanced",
+      exact: true,
+    });
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await pickDropdownOption(page, "edit-agent-runtime", "Custom command");
+    await expect(page.locator("#edit-agent-command")).toBeVisible();
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("marks a missing advanced credential without opening Advanced", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    const advanced = page.getByRole("button", {
+      name: "Advanced",
+      exact: true,
+    });
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await pickDropdownOption(page, "edit-agent-llm-provider", "Databricks v2");
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByTestId("edit-agent-advanced-required-badge"),
+    ).toHaveText("Required");
+    await expect(page.getByTestId("edit-agent-dialog-submit")).toBeDisabled();
+
+    await advanced.click();
+    await expect(page.getByLabel("Value for DATABRICKS_HOST")).toBeVisible();
+  });
+
   test("shows baked defaults in the instance editor", async ({ page }) => {
     await installMockBridge(page, {
       bakedBuildEnv: BAKED_DEFAULTS,

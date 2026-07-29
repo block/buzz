@@ -41,3 +41,26 @@ export function shouldScheduleReconnect(inputs: RelayReconnectInputs): boolean {
 export function shouldRefuseConnect(inputs: { terminal: boolean }): boolean {
   return inputs.terminal;
 }
+
+export function isWebSocketClose(
+  message: unknown,
+): message is { type: "Close"; data?: unknown } {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "type" in message &&
+    message.type === "Close"
+  );
+}
+
+export function isServiceRestartClose(message: unknown): boolean {
+  if (!isWebSocketClose(message)) return false;
+  if (!("data" in message)) return false;
+  const data = message.data;
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "code" in data &&
+    data.code === 1012
+  );
+}

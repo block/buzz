@@ -1,6 +1,16 @@
 import 'package:flutter/material.dart';
 
 const _fontFamily = 'Inter';
+const _chatLineHeight = 22 / 16;
+
+/// Optional 12sp body style for compact secondary metadata.
+const bodyExtraSmallTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 12,
+  fontWeight: FontWeight.w400,
+  height: 1.25,
+  letterSpacing: 0,
+);
 
 const textTheme = TextTheme(
   displayLarge: TextStyle(
@@ -63,7 +73,7 @@ const textTheme = TextTheme(
     fontFamily: _fontFamily,
     fontSize: 16,
     fontWeight: FontWeight.w500,
-    height: 1.35,
+    height: _chatLineHeight,
     letterSpacing: 0,
   ),
   labelLarge: TextStyle(
@@ -91,7 +101,7 @@ const textTheme = TextTheme(
     fontFamily: _fontFamily,
     fontSize: 16,
     fontWeight: FontWeight.w400,
-    height: 1.38,
+    height: 20 / 16,
     letterSpacing: 0,
   ),
   bodyMedium: TextStyle(
@@ -103,7 +113,7 @@ const textTheme = TextTheme(
   ),
   bodySmall: TextStyle(
     fontFamily: _fontFamily,
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: FontWeight.w400,
     height: 1.25,
     letterSpacing: 0,

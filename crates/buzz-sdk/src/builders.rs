@@ -11,8 +11,8 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_USER_STATUS,
+        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -620,9 +620,18 @@ pub fn build_update_channel(
             ));
         }
     }
+    if name
+        .map(buzz_core::channel::canonical_channel_name)
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(SdkError::InvalidTag("channel name is required".into()));
+    }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(n) = name {
-        tags.push(tag(&["name", n])?);
+        tags.push(tag(&[
+            "name",
+            buzz_core::channel::canonical_channel_name(n),
+        ])?);
     }
     if let Some(a) = about {
         tags.push(tag(&["about", a])?);
@@ -670,6 +679,10 @@ pub fn build_create_channel(
     about: Option<&str>,
     ttl: Option<i32>,
 ) -> Result<EventBuilder, SdkError> {
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.trim().is_empty() {
+        return Err(SdkError::InvalidTag("channel name is required".into()));
+    }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["name", name])?];
     if let Some(v) = visibility {
         tags.push(tag(&["visibility", v.as_str()])?);
@@ -1293,6 +1306,8 @@ pub struct GitPullRequestMeta {
     pub euc: Option<String>,
     /// Additional pubkeys to `p`-tag besides the repo owner.
     pub recipients: Vec<String>,
+    /// NIP-29 channel where the pull request originated (`h` tag).
+    pub channel_id: Option<String>,
     /// PR subject line (`subject` tag) — required, used as the header.
     pub subject: String,
     /// Labels (`t` tags).
@@ -1352,6 +1367,11 @@ pub fn build_git_pull_request(
         tags.push(tag(&["t", label])?);
     }
     tags.push(tag(&["c", &meta.commit])?);
+    if let Some(ref channel_id) = meta.channel_id {
+        let channel_id = Uuid::parse_str(channel_id)
+            .map_err(|e| SdkError::InvalidInput(format!("channel_id must be a valid UUID: {e}")))?;
+        tags.push(tag(&["h", &channel_id.to_string()])?);
+    }
     let mut clone_tag = vec!["clone"];
     clone_tag.extend(meta.clone_urls.iter().map(String::as_str));
     tags.push(tag(&clone_tag)?);
@@ -1558,6 +1578,22 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
     }
     let tags = vec![tag(&["status", status])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status).tags(tags))
+}
+
+/// Build a NIP-38 user status event (kind 30315) on the `d:general` coordinate.
+///
+/// `text` becomes the event content and `emoji`, when non-blank, an
+/// `["emoji", ...]` tag; both are trimmed. Blank text with no emoji clears the
+/// status — kind 30315 is parameterized-replaceable, so an event carrying
+/// neither is what clients read as "no status".
+pub fn build_user_status(text: &str, emoji: Option<&str>) -> Result<EventBuilder, SdkError> {
+    let text = text.trim();
+    check_content(text, 64 * 1024)?;
+    let mut tags = vec![tag(&["d", "general"])?];
+    if let Some(emoji) = emoji.map(str::trim).filter(|e| !e.is_empty()) {
+        tags.push(tag(&["emoji", emoji])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_USER_STATUS as u16), text).tags(tags))
 }
 
 // ---------------------------------------------------------------------------
@@ -2382,6 +2418,21 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_strips_all_leading_hashes_from_name() {
+        let ev =
+            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
+        assert!(has_tag(&ev, "name", "new-name"));
+    }
+
+    #[test]
+    fn update_channel_rejects_hash_only_name() {
+        assert!(matches!(
+            build_update_channel(uuid(), Some("  ###  "), None, None, None),
+            Err(SdkError::InvalidTag(_))
+        ));
+    }
+
+    #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
         let ev =
@@ -2469,6 +2520,37 @@ mod tests {
         );
         assert_eq!(ev.kind.as_u16(), 9007);
         assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_strips_all_leading_hashes_from_name() {
+        let ev = sign(
+            build_create_channel(
+                uuid(),
+                "  ###dev  ",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_rejects_hash_only_name() {
+        assert!(matches!(
+            build_create_channel(
+                uuid(),
+                "  ###  ",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            ),
+            Err(SdkError::InvalidTag(_))
+        ));
     }
 
     #[test]
@@ -3325,6 +3407,53 @@ mod tests {
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
+    // ── build_user_status ─────────────────────────────────────────────────────
+
+    #[test]
+    fn user_status_carries_text_and_emoji_on_d_general() {
+        let ev = sign(build_user_status("shipping the CLI", Some("🚀")).unwrap());
+        assert_eq!(ev.kind.as_u16(), 30315);
+        assert_eq!(ev.content, "shipping the CLI");
+        assert_eq!(tag_values(&ev, "d"), vec!["general"]);
+        assert_eq!(tag_values(&ev, "emoji"), vec!["🚀"]);
+    }
+
+    #[test]
+    fn user_status_trims_text_and_emoji() {
+        let ev = sign(build_user_status("  heads down  ", Some("  🎧 ")).unwrap());
+        assert_eq!(ev.content, "heads down");
+        assert_eq!(tag_values(&ev, "emoji"), vec!["🎧"]);
+    }
+
+    #[test]
+    fn user_status_omits_blank_emoji_tag() {
+        let ev = sign(build_user_status("on call", Some("   ")).unwrap());
+        assert_eq!(ev.content, "on call");
+        assert!(tag_values(&ev, "emoji").is_empty());
+    }
+
+    #[test]
+    fn user_status_keeps_emoji_when_text_is_blank() {
+        let ev = sign(build_user_status("", Some("🎶")).unwrap());
+        assert_eq!(ev.content, "");
+        assert_eq!(tag_values(&ev, "emoji"), vec!["🎶"]);
+    }
+
+    #[test]
+    fn user_status_clear_shape_is_empty_content_and_d_tag_only() {
+        let ev = sign(build_user_status("", None).unwrap());
+        assert_eq!(ev.kind.as_u16(), 30315);
+        assert_eq!(ev.content, "");
+        assert_eq!(tag_values(&ev, "d"), vec!["general"]);
+        assert_eq!(ev.tags.len(), 1);
+    }
+
+    #[test]
+    fn user_status_rejects_oversize_text() {
+        let err = build_user_status(&"x".repeat(64 * 1024 + 1), None).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
+    }
+
     // ── build_git_pull_request / build_git_pr_update ──────────────────────────
 
     fn pr_repo() -> GitRepoCoord {
@@ -3351,6 +3480,7 @@ mod tests {
             clone_urls: vec!["https://example.com/repo.git".to_string()],
             branch_name: Some("feat/x".to_string()),
             labels: vec!["enhancement".to_string()],
+            channel_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             ..Default::default()
         };
         let ev = sign(build_git_pull_request(&pr_repo(), "PR body", &meta).unwrap());
@@ -3361,6 +3491,7 @@ mod tests {
         assert!(has_tag(&ev, "subject", "Add feature X"));
         assert!(has_tag(&ev, "c", &"c".repeat(40)));
         assert!(has_tag(&ev, "t", "enhancement"));
+        assert!(has_tag(&ev, "h", "11111111-1111-4111-8111-111111111111"));
         assert!(has_tag(&ev, "branch-name", "feat/x"));
         assert_eq!(
             full_clone_tag(&ev),
@@ -3417,6 +3548,34 @@ mod tests {
         };
         let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_rejects_invalid_channel_id() {
+        for channel_id in ["not-a-uuid", " 11111111-1111-4111-8111-111111111111 "] {
+            let meta = GitPullRequestMeta {
+                subject: "s".to_string(),
+                commit: "c".repeat(40),
+                clone_urls: vec!["https://example.com/repo.git".to_string()],
+                channel_id: Some(channel_id.to_string()),
+                ..Default::default()
+            };
+            let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
+    fn git_pr_canonicalizes_channel_id() {
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            channel_id: Some("AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE".to_string()),
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "body", &meta).unwrap());
+        assert!(has_tag(&ev, "h", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
     }
 
     #[test]

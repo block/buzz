@@ -32,7 +32,7 @@ import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
-import { parseImetaTags } from "@/features/messages/lib/parseImeta";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
@@ -505,9 +505,7 @@ export const MessageRow = React.memo(
       message.pending || message.edited ? (
         <>
           {message.pending ? (
-            <p className="font-medium uppercase tracking-[0.14em] text-primary/80">
-              Sending
-            </p>
+            <p className="font-medium text-primary/80">Sending</p>
           ) : null}
           {message.edited ? (
             <Tooltip>

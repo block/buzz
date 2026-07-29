@@ -14,6 +14,7 @@ import {
   WELCOME_SURFACE_READY_EVENT,
 } from "@/features/onboarding/welcome";
 import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
+import { registerAvatarWhenReady } from "@/features/profile/avatarProfileSync";
 import { profileQueryKey } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
@@ -152,6 +153,7 @@ export function CommunityOnboardingFlow({
   const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
+  const avatarPresentation = useAvatarPresentation(avatarUrl);
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
   const [starterPersonas, setStarterPersonas] = React.useState<AgentPersona[]>(
@@ -380,10 +382,34 @@ export function CommunityOnboardingFlow({
     if (!displayName.trim()) return;
     setIsPending(true);
     try {
-      await updateProfile({
-        displayName: displayName.trim(),
-        avatarUrl: avatarUrl.trim() || undefined,
-      });
+      const candidateAvatarUrl = avatarUrl.trim();
+      const presentationState = avatarPresentation?.state;
+      const shouldSaveCandidate =
+        candidateAvatarUrl.length > 0 &&
+        presentationState !== "failed" &&
+        presentationState !== "pending";
+
+      const deferredAvatar =
+        candidateAvatarUrl && presentationState && presentationState !== "ready"
+          ? registerAvatarWhenReady({
+              avatarUrl: candidateAvatarUrl,
+              relayUrl: transaction.relayUrl,
+            })
+          : null;
+
+      try {
+        const profile = await updateProfile({
+          displayName: displayName.trim(),
+          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
+        });
+        deferredAvatar?.release({
+          expectedPubkey: profile.pubkey,
+          expectedAvatarUrl: profile.avatarUrl,
+        });
+      } catch (error) {
+        deferredAvatar?.cancel();
+        throw error;
+      }
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
       if (isRelayMembershipDeniedError(error)) {

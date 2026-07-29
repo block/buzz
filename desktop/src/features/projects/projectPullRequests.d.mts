@@ -3,6 +3,7 @@ import type { RelayEvent } from "@/shared/api/types";
 export type ProjectPullRequestUpdate = {
   id: string;
   content: string;
+  tags: string[][];
   author: string;
   createdAt: number;
   commit: string | null;
@@ -12,6 +13,7 @@ export type ProjectPullRequestUpdate = {
 export type ProjectPullRequestComment = {
   id: string;
   content: string;
+  tags: string[][];
   author: string;
   createdAt: number;
   commit: string | null;
@@ -70,9 +72,12 @@ export type ProjectPullRequest = {
   id: string;
   title: string;
   content: string;
+  tags: string[][];
   author: string;
   createdAt: number;
   repoAddress: string | null;
+  /** Channel where the pull request originated (`h` tag), when provided. */
+  channelId: string | null;
   labels: string[];
   recipients: string[];
   /** Requested reviewers (root `p` tags + trusted review-request comments). */

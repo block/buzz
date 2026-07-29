@@ -25,6 +25,18 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
 {
+    // Install ring as the process-level rustls CryptoProvider. Required because the
+    // release workflow builds all binaries in one cargo invocation, which unifies
+    // features across the workspace and enables *both* ring (from buzz-acp/buzz-dev-mcp)
+    // and aws-lc-rs (from reqwest's rustls feature via hyper-rustls). With both on,
+    // rustls cannot auto-select a provider, and any code that reaches
+    // ClientConfig::builder() — specifically the WSS path in publish_ephemeral_event
+    // used by `agents draft-create`, `agents draft-update`, and `users set-presence`
+    // — panics at rustls crypto/mod.rs. The `let _ =` swallow is intentional: when
+    // buzz-dev-mcp delegates to run_from_args, it has already installed ring; the
+    // double-install returns Err and is harmless.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
@@ -826,6 +838,19 @@ pub enum UsersCmd {
         #[arg(long, value_enum)]
         status: PresenceStatus,
     },
+    /// Set your user status (NIP-38 kind:30315 — the "status" line on your profile)
+    #[command(name = "set-status")]
+    SetStatus {
+        /// Status text (required unless --clear)
+        #[arg(long, required_unless_present = "clear")]
+        text: Option<String>,
+        /// Optional emoji shown before the status text
+        #[arg(long)]
+        emoji: Option<String>,
+        /// Remove your status entirely
+        #[arg(long, conflicts_with_all = ["text", "emoji"])]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1326,6 +1351,9 @@ pub enum PrCmd {
         /// Additional recipient pubkey(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
+        /// Channel where this pull request originated (NIP-29 h-tag)
+        #[arg(long)]
+        channel: Option<String>,
         /// Root patch event id this PR revises
         #[arg(long)]
         revision_of: Option<String>,
@@ -1789,6 +1817,30 @@ mod tests {
     }
 
     #[test]
+    fn set_status_clear_rejects_text_and_emoji() {
+        for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
+            let args = ["buzz", "users", "set-status", "--clear"]
+                .into_iter()
+                .chain(extra);
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "--clear must conflict with {}",
+                extra[0]
+            );
+        }
+    }
+
+    #[test]
+    fn set_status_requires_text_or_clear() {
+        assert!(Cli::try_parse_from(["buzz", "users", "set-status"]).is_err());
+        assert!(
+            Cli::try_parse_from(["buzz", "users", "set-status", "--emoji", "🎶"]).is_err(),
+            "--emoji alone must not imply a status"
+        );
+        assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
@@ -1909,7 +1961,13 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "users"),
-            vec!["get", "presence", "set-presence", "set-profile"]
+            vec![
+                "get",
+                "presence",
+                "set-presence",
+                "set-profile",
+                "set-status"
+            ]
         );
         assert_eq!(
             names(&cmd, "workflows"),
@@ -1996,7 +2054,7 @@ mod tests {
             ("repos", 4),
             ("social", 7),
             ("upload", 1),
-            ("users", 4),
+            ("users", 5),
             ("workflows", 8),
         ];
 

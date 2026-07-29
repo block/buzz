@@ -7,6 +7,7 @@ import json
 
 import coincurve
 import pytest
+
 from harbor_buzz_testbed.provisioner import (
     BuzzTrialProvisioner,
     ProvisioningError,
@@ -17,13 +18,13 @@ OWNER_SECRET = "0" * 63 + "3"
 
 
 def config(**overrides) -> TestbedConfig:
-    defaults = dict(
-        relay_http_url="http://localhost:3000",
-        relay_ws_url="ws://host.docker.internal:3000",
-        owner_secret_key=OWNER_SECRET,
-        postgres_dsn="postgresql://unused",
-        llm_api_keys={"databricks/glm": "glm-key", "databricks/opus": "opus-key"},
-    )
+    defaults = {
+        "relay_http_url": "http://localhost:3000",
+        "relay_ws_url": "ws://host.docker.internal:3000",
+        "owner_secret_key": OWNER_SECRET,
+        "postgres_dsn": "postgresql://unused",
+        "llm_api_keys": {"databricks/glm": "glm-key", "databricks/opus": "opus-key"},
+    }
     defaults.update(overrides)
     return TestbedConfig(**defaults)
 

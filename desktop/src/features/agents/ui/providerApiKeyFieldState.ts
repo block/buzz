@@ -105,26 +105,20 @@ export function useProviderApiKeyFieldState({
   envVars,
   fileSatisfiedEnvKeys,
   globalEnvVars,
-  open,
   personaSatisfied,
   provider,
   requiredEnvKeys,
-  satisfactionSettled = true,
-  setShowAdvancedFields,
 }: {
   bakedEnvKeys: readonly string[] | undefined;
   effectiveEnvVars: EnvVarsValue;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys?: readonly string[];
   globalEnvVars: EnvVarsValue;
-  open: boolean;
   personaSatisfied?: boolean;
   provider: string;
   requiredEnvKeys: readonly string[];
-  satisfactionSettled?: boolean;
-  setShowAdvancedFields: React.Dispatch<React.SetStateAction<boolean>>;
 }): ProviderApiKeyFieldState {
-  const fieldState = React.useMemo(
+  return React.useMemo(
     () =>
       getProviderApiKeyFieldState({
         bakedEnvKeys,
@@ -147,26 +141,4 @@ export function useProviderApiKeyFieldState({
       requiredEnvKeys,
     ],
   );
-  const hasAutoOpenedAdvancedRef = React.useRef(false);
-  React.useEffect(() => {
-    if (!open) {
-      hasAutoOpenedAdvancedRef.current = false;
-      return;
-    }
-    if (
-      satisfactionSettled &&
-      fieldState.advancedRequiredEnvKeys.length > 0 &&
-      !hasAutoOpenedAdvancedRef.current
-    ) {
-      hasAutoOpenedAdvancedRef.current = true;
-      setShowAdvancedFields(true);
-    }
-  }, [
-    fieldState.advancedRequiredEnvKeys.length,
-    open,
-    satisfactionSettled,
-    setShowAdvancedFields,
-  ]);
-
-  return fieldState;
 }

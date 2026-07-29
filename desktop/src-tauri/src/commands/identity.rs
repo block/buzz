@@ -55,6 +55,27 @@ pub fn get_default_relay_url() -> String {
 }
 
 #[tauri::command]
+pub fn auto_connect_default_relay_enabled() -> bool {
+    option_env!("BUZZ_DESKTOP_BUILD_AUTO_CONNECT_DEFAULT_RELAY").is_some()
+}
+
+#[cfg(test)]
+mod auto_connect_default_relay_tests {
+    use super::auto_connect_default_relay_enabled;
+
+    #[test]
+    #[ignore]
+    fn compiled_flag_matches_expected() {
+        let expected = std::env::var("BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY")
+            .expect("compiled-flag test requires an expected value");
+        assert_eq!(
+            auto_connect_default_relay_enabled(),
+            expected == "true" || expected == "1"
+        );
+    }
+}
+
+#[tauri::command]
 pub fn is_shared_identity() -> bool {
     std::env::var("BUZZ_SHARE_IDENTITY")
         .map(|v| v == "1")

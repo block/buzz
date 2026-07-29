@@ -8,7 +8,7 @@ import type { RelayEvent } from "@/shared/api/types";
  * - `connected`    — socket open and AUTH'd.
  * - `reconnecting` — socket dropped, waiting for the backoff timer.
  * - `stalled`      — socket is *open* per the WS layer but no inbound frames
- *                    for a long time (half-open / Warp split-brain). We
+ *                    for a long time (half-open socket / VPN split-brain). We
  *                    surface this so the UI can warn even though tungstenite
  *                    hasn't reported anything wrong yet.
  * - `disconnected` — final/terminal disconnect (auth rejected, community
@@ -46,6 +46,14 @@ type HistorySubscription = {
   timeout: number;
 };
 
+type FirstEventSubscription = {
+  mode: "first";
+  onEvent: (event: RelayEvent) => void;
+  resolve: (event: RelayEvent | null) => void;
+  reject: (error: Error) => void;
+  timeout: number;
+};
+
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
@@ -63,7 +71,10 @@ export type PendingEvent = {
   timeout: number;
 };
 
-export type RelaySubscription = HistorySubscription | LiveSubscription;
+export type RelaySubscription =
+  | HistorySubscription
+  | FirstEventSubscription
+  | LiveSubscription;
 
 export function sortEvents(events: RelayEvent[]) {
   return [...events].sort((left, right) => {

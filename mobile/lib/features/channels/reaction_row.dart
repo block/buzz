@@ -4,7 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
-import '../custom_emoji/custom_emoji_render.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'channel_management_provider.dart';
@@ -75,11 +75,10 @@ class ReactionRow extends StatelessWidget {
                       const SizedBox(width: Grid.quarter),
                       Text(
                         '${reaction.count}',
-                        style: context.textTheme.labelSmall?.copyWith(
+                        style: reactionCountTextStyle.copyWith(
                           color: reaction.reactedByCurrentUser
                               ? context.colors.primary
                               : context.colors.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ],

@@ -5,7 +5,6 @@ import {
   Rocket,
   Share2,
   Trash2,
-  Upload,
 } from "lucide-react";
 
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
@@ -23,7 +22,7 @@ import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
 
 const TEAM_CARD_COLUMN_CLASS = "w-full";
-const TEAM_CARD_GRID_CLASS = `${TEAM_CARD_COLUMN_CLASS} grid grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-start gap-3`;
+const TEAM_CARD_GRID_CLASS = `${TEAM_CARD_COLUMN_CLASS} mx-auto grid max-w-[996px] grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-center gap-3`;
 
 type TeamsSectionProps = {
   teams: AgentTeam[];
@@ -201,11 +200,7 @@ function NewTeamCard({
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <CreateIdentityCard
-          ariaLabel="New team"
-          dataTestId="new-team-card"
-          label="New team"
-        />
+        <CreateIdentityCard ariaLabel="New team" dataTestId="new-team-card" />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
@@ -215,8 +210,7 @@ function NewTeamCard({
           Create team
         </DropdownMenuItem>
         <DropdownMenuItem disabled={isPending} onClick={onImport}>
-          <Upload className="h-4 w-4" />
-          Import team snapshot
+          Import
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -87,7 +88,9 @@ type MockPersonaSeed = {
   displayName: string;
   avatarUrl?: string | null;
   systemPrompt: string;
+  updatedAt?: string;
   isActive?: boolean;
+  shared?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
   /**
@@ -102,6 +105,8 @@ type MockPersonaSeed = {
   /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockTeamSeed = {
@@ -133,6 +138,13 @@ type MockBridgeOptions = {
   relaySelf?: string | null;
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
   builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
+  /** Optional policy returned by the native join-policy discovery command. */
+  joinPolicy?: {
+    terms_markdown?: string;
+    privacy_markdown?: string;
+    age_attestation_required: boolean;
+    version: string;
+  } | null;
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
   builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
   /** Communities owned by the mocked Builderlab account. */
@@ -153,6 +165,8 @@ type MockBridgeOptions = {
   acpRuntimesDelayMs?: number;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;
+  /** When set, the `delete_custom_harness` mock command throws with this message. */
+  deleteCustomHarnessError?: string;
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
   connectAcpRuntimeError?: string;
@@ -210,15 +224,22 @@ type MockBridgeOptions = {
       | "stopped";
   }>;
   personas?: MockPersonaSeed[];
+  /** Community catalog replaceable-event heads returned by relay queries. */
+  personaCatalogEvents?: RelayEvent[];
+  /** Outcomes for successive explicit persona share publications. */
+  personaSharePublicationStatuses?: Array<"published" | "queued">;
   teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
+  channelTemplates?: ChannelTemplate[];
   addChannelMembersDelayMs?: number;
   /** Sequenced add-member failures. A string fails that call; null succeeds. */
   addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
   channelsReadError?: string;
+  /** Reject successive mock `get_channels` calls, then resume. */
+  channelsReadErrors?: (string | null)[];
   /** Reject successive mock `create_channel` calls, then resume. */
   createChannelErrors?: string[];
   /** Reject successive mock `ensure_starter_channels` calls, then resume. */
@@ -261,6 +282,8 @@ type MockBridgeOptions = {
   openerError?: string;
   /** Delay binding signatures so specs can exercise request supersession. */
   nostrBindSignDelayMs?: number;
+  /** Reject successive mock WebSocket connect attempts, then resume. */
+  websocketConnectErrors?: string[];
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   /**
@@ -295,6 +318,8 @@ type MockBridgeOptions = {
   oaOwnerIsMe?: boolean;
   /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
   relayRequiresMembership?: boolean;
+  /** Delay EOSE for membership snapshots after delivering the event. */
+  relayMembershipEoseDelayMs?: number;
   /**
    * Active identity's role in the seeded `mockRelayMembers`. `null` removes
    * the active identity from the membership list entirely (admin-path branch
@@ -314,6 +339,8 @@ type MockBridgeOptions = {
   /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
    *  fail-closed race: DMs are withheld while classification is unresolved. */
   relaySelfDelayMs?: number;
+  /** Delay (ms) applied to `start_pairing` so pairing loading UI is observable. */
+  pairingStartDelayMs?: number;
   /**
    * Sequenced results for `confirm_team_snapshot_import`. String = throw
    * with that message; null = succeed. Call N uses results[N]; last entry
@@ -393,6 +420,15 @@ type MockBridgeOptions = {
     model: string | null;
     preferred_runtime?: string | null;
   };
+  /** File-layer config returned by runtime id. */
+  runtimeFileConfigs?: Record<
+    string,
+    {
+      provider: string | null;
+      model: string | null;
+      satisfiedEnvKeys: string[];
+    } | null
+  >;
   bakedBuildEnv?: Array<{
     key: string;
     masked: boolean;
@@ -431,6 +467,27 @@ type MockBridgeOptions = {
    * test can interleave edits and exercise the mid-save race handling.
    */
   globalConfigSaveDelayMs?: number;
+  /**
+   * Override the `discover_agent_models` mock response. When set, the bridge
+   * returns this catalog instead of the default per-harness model list.
+   * Use `{ models: [], supportsSwitching: false }` to exercise empty discovery
+   * (e.g. optional harnesses that omit the Model control).
+   */
+  discoverAgentModels?: {
+    models: Array<{
+      id: string;
+      name: string | null;
+      description?: string | null;
+    }>;
+    supportsSwitching: boolean;
+    agentDefaultModel?: string | null;
+    selectedModel?: string | null;
+  };
+  /**
+   * When set, `discover_agent_models` throws with this message instead of
+   * returning a catalog. Exercises the discovery-failure UI path.
+   */
+  discoverAgentModelsError?: string;
 };
 
 type BridgeOptions = {
@@ -438,6 +495,7 @@ type BridgeOptions = {
   mock?: MockBridgeOptions;
   relayHttpUrl?: string;
   relayWsUrl?: string;
+  autoConnectDefaultRelay?: boolean;
   skipOnboardingSeed?: boolean;
   skipCommunitySeed?: boolean;
   /**
@@ -689,7 +747,14 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   }
 
   await page.addInitScript(
-    ({ identity: bridgeIdentity, mock, mode, relayHttpUrl, relayWsUrl }) => {
+    ({
+      identity: bridgeIdentity,
+      mock,
+      mode,
+      relayHttpUrl,
+      relayWsUrl,
+      autoConnectDefaultRelay,
+    }) => {
       const notificationLog: Array<{
         body: string | null;
         title: string;
@@ -746,6 +811,8 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         mode,
         relayHttpUrl: relayHttpUrl ?? currentConfig.relayHttpUrl,
         relayWsUrl: relayWsUrl ?? currentConfig.relayWsUrl,
+        autoConnectDefaultRelay:
+          autoConnectDefaultRelay ?? currentConfig.autoConnectDefaultRelay,
       };
       testWindow.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
       testWindow.__BUZZ_E2E_APP_BADGE_STATE__ = "none";
@@ -768,6 +835,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       mode: options.mode,
       relayHttpUrl: options.relayHttpUrl,
       relayWsUrl: options.relayWsUrl,
+      autoConnectDefaultRelay: options.autoConnectDefaultRelay,
     },
   );
 }
@@ -777,6 +845,7 @@ export async function installMockBridge(
   mock?: MockBridgeOptions,
   options?: {
     relayWsUrl?: string;
+    autoConnectDefaultRelay?: boolean;
     skipOnboardingSeed?: boolean;
     skipCommunitySeed?: boolean;
     seedPreviewFeatures?: boolean;
@@ -786,6 +855,7 @@ export async function installMockBridge(
     mode: "mock",
     mock,
     relayWsUrl: options?.relayWsUrl,
+    autoConnectDefaultRelay: options?.autoConnectDefaultRelay,
     skipOnboardingSeed: options?.skipOnboardingSeed,
     skipCommunitySeed: options?.skipCommunitySeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,

@@ -5,6 +5,7 @@ import {
   MODEL_NO_MODELS_VALUE,
   appendNoModelsSentinel,
   resolveDefaultModelLabel,
+  resolveModelFieldStatusMessage,
 } from "./agentConfigControls.tsx";
 
 test("uses the harness-discovered default model label for an unset model", () => {
@@ -43,6 +44,16 @@ test("an explicit inherited default label wins over harness discovery", () => {
   );
 });
 
+test("shared compute describes Auto's collective behavior", () => {
+  assert.equal(
+    resolveDefaultModelLabel({
+      discoveredModelOptions: null,
+      isSharedCompute: true,
+    }),
+    "Auto (collective when available)",
+  );
+});
+
 // ── appendNoModelsSentinel ─────────────────────────────────────────────────────
 
 test("appendNoModelsSentinel_emptyOptionsDiscoveryFinished_addsDisabledRow", () => {
@@ -65,4 +76,42 @@ test("appendNoModelsSentinel_nonEmptyOptionsDiscoveryFinished_doesNotAddRow", ()
   );
   assert.equal(options.length, 1);
   assert.equal(options[0].label, "Default model");
+});
+
+test("model status omits provider selection guidance before discovery", () => {
+  assert.equal(
+    resolveModelFieldStatusMessage({
+      discoveredModelOptions: null,
+      loading: false,
+      status: null,
+    }),
+    null,
+  );
+});
+
+test("model status preserves loading, discovery, and saved-state messages", () => {
+  assert.equal(
+    resolveModelFieldStatusMessage({
+      discoveredModelOptions: null,
+      loading: true,
+      status: null,
+    }),
+    "Loading models...",
+  );
+  assert.equal(
+    resolveModelFieldStatusMessage({
+      discoveredModelOptions: null,
+      loading: false,
+      status: { message: "Couldn't load models", tone: "warning" },
+    }),
+    "Couldn't load models",
+  );
+  assert.equal(
+    resolveModelFieldStatusMessage({
+      discoveredModelOptions: [],
+      loading: false,
+      status: null,
+    }),
+    "Saved changes take effect on the next start.",
+  );
 });

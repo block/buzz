@@ -126,6 +126,18 @@ pub struct ProjectPullRequestReviewRequestInput {
     reviewer_label: String,
 }
 
+/// Repository-scoped metadata for an agent-signed lifecycle status.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPullRequestStatusInput {
+    target_owner: String,
+    repo_address: String,
+    pull_request_id: String,
+    pull_request_author: String,
+    status: String,
+    created_at: u64,
+}
+
 /// A previously signed merged-status event that needs publishing again.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -247,6 +259,44 @@ fn build_merged_status_event(
         .sign_with_keys(keys)
         .map(|event| event.as_json())
         .map_err(|error| format!("sign merged pull request status: {error}"))
+}
+
+fn build_pull_request_status_event(
+    keys: &Keys,
+    repo_address: &str,
+    pull_request_id: &str,
+    pull_request_author: &str,
+    status: &str,
+    created_at: u64,
+) -> Result<String, String> {
+    let owner = keys.public_key().to_hex();
+    let (pull_request_id, pull_request_author) =
+        validate_merge_status_metadata(repo_address, &owner, pull_request_id, pull_request_author)?;
+    let kind = match status {
+        "open" => Kind::Custom(1630),
+        "closed" => Kind::Custom(1632),
+        "draft" => Kind::Custom(1633),
+        _ => return Err("Invalid pull request lifecycle status.".to_string()),
+    };
+    let mut raw_tags = vec![
+        vec!["e", pull_request_id.as_str(), "", "root"],
+        vec!["a", repo_address],
+        vec!["p", owner.as_str()],
+    ];
+    if pull_request_author != owner {
+        raw_tags.push(vec!["p", pull_request_author.as_str()]);
+    }
+    let tags = raw_tags
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("build pull request status tags: {error}"))?;
+    EventBuilder::new(kind, "")
+        .tags(tags)
+        .custom_created_at(Timestamp::from(created_at.max(Timestamp::now().as_secs())))
+        .sign_with_keys(keys)
+        .map(|event| event.as_json())
+        .map_err(|error| format!("sign pull request status: {error}"))
 }
 
 fn build_review_request_event(
@@ -431,6 +481,31 @@ pub async fn clone_project_repository(
     })
     .await
     .map_err(|error| format!("repo clone task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn sign_project_pull_request_status(
+    input: ProjectPullRequestStatusInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target_owner = input.target_owner.trim().to_ascii_lowercase();
+    if normalize_event_id(&target_owner).is_none() {
+        return Err("Invalid target repository owner.".to_string());
+    }
+    let identity = project_owner_identity(&app, &state, &target_owner)?;
+    let event = Event::from_json(build_pull_request_status_event(
+        &identity.keys,
+        &input.repo_address,
+        &input.pull_request_id,
+        &input.pull_request_author,
+        &input.status,
+        input.created_at,
+    )?)
+    .map_err(|error| format!("parse signed pull request status: {error}"))?;
+    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -663,9 +738,9 @@ pub async fn merge_project_pull_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        align_unborn_head_branch, build_merged_status_event, build_review_request_event,
-        classify_merge_error, normalize_commit, same_repository, validate_merge_status_metadata,
-        ProjectPullRequestMergeError,
+        align_unborn_head_branch, build_merged_status_event, build_pull_request_status_event,
+        build_review_request_event, classify_merge_error, normalize_commit, same_repository,
+        validate_merge_status_metadata, ProjectPullRequestMergeError,
     };
     use crate::commands::project_git_exec::{build_test_git_auth_config, run_git};
     use nostr::{Event, JsonUtil, Keys, Timestamp};
@@ -830,6 +905,49 @@ mod tests {
             &owner,
             &"d".repeat(64),
             "not-an-author",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn lifecycle_status_is_signed_by_repository_owner() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let author = "b".repeat(64);
+        let event = Event::from_json(
+            build_pull_request_status_event(
+                &keys,
+                &format!("30617:{owner}:buzz"),
+                &"d".repeat(64),
+                &author,
+                "closed",
+                Timestamp::now().as_secs(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(event.kind.as_u16(), 1632);
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", author.as_str()]));
+        assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn lifecycle_status_rejects_merged_alias() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+
+        assert!(build_pull_request_status_event(
+            &keys,
+            &format!("30617:{owner}:buzz"),
+            &"d".repeat(64),
+            &"b".repeat(64),
+            "merged",
+            Timestamp::now().as_secs(),
         )
         .is_err());
     }

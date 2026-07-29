@@ -23,8 +23,12 @@ const REMOVE_AFTER_MS = LIVENESS_INTERVAL_MS * 2.5;
 const FRAME_GAP_PAUSE_MS = LIVENESS_INTERVAL_MS * 2;
 /** A silent agent is treated as dead after this bounded prune pause. */
 const PRUNE_PAUSE_MAX_MS = 3 * 60_000;
-/** Maximum concurrent active turns tracked per agent (matches pool size). */
-const MAX_TURNS_PER_AGENT = 4;
+/** Maximum concurrent active turns tracked per agent. Purely an unbounded-growth
+ * guard, so it sits at the harness's hard upper bound for parallel agent
+ * subprocesses (`--agents` / `BUZZ_ACP_AGENTS` accepts `1..=32`) rather than the
+ * Desktop default of 24 — any lower value silently evicts a live turn, dropping
+ * its working badge. */
+const MAX_TURNS_PER_AGENT = 32;
 /** Cap on per-agent terminal tombstones (A's resurrection guard). Only the
  * most recently completed turns can be raced by a late liveness frame; older
  * ones are already below the watermark, so a small multiple of the live cap is
@@ -572,6 +576,36 @@ export function useActiveAgentTurnsBridge(
     syncAll();
     return subscribeAgentObserverStore(syncAll);
   }, [agents]);
+}
+
+/**
+ * Immediately clear all active turns for a specific agent — called when
+ * Desktop itself stops or restarts the agent, so the turn store doesn't
+ * have to wait for the 3-minute prune-pause backstop.
+ *
+ * Preserves `lastProcessed` (the watermark) so a full-buffer replay after
+ * the clear is still a no-op — without the watermark a replayed
+ * `turn_started` would immediately resurrect the badge.  Preserves
+ * `clockOffsetByAgent` — the offset remains valid and harmless.
+ *
+ * Tombstones every cleared turn (C) so an in-flight `turn_liveness` frame
+ * already on the wire at kill time cannot resurrect the badge via
+ * `resurrectTurn`.  A restarted agent's genuinely new turns carry new
+ * turnIds / newer timestamps, so the tombstones don't block them.
+ */
+export function clearActiveTurnsForAgent(agentPubkey: string): void {
+  const key = normalizePubkey(agentPubkey);
+  const agentTurns = activeTurnsByAgent.get(key);
+  if (!agentTurns || agentTurns.size === 0) return;
+
+  const agentClockNow = Date.now() - (clockOffsetByAgent.get(key) ?? 0);
+  for (const turnId of agentTurns.keys()) {
+    recordTerminal(key, turnId, agentClockNow);
+  }
+
+  activeTurnsByAgent.delete(key);
+  invalidateCache(key);
+  notifyListeners();
 }
 
 /**

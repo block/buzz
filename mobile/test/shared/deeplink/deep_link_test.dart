@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   _inviteTests();
+  _buildMessageLinkTests();
 
   group('parseMessageDeepLink', () {
     test('parses channel and id', () {
@@ -104,6 +105,23 @@ void _inviteTests() {
       );
     });
 
+    test('normalizes trailing slash in buzz join handoff', () {
+      final link = parseInviteDeepLink(
+        Uri.parse(
+          'buzz://join?relay=wss%3A%2F%2Frelay.example.com%2F&code=abc123',
+        ),
+      );
+      expect(link?.relayUrl, 'wss://relay.example.com');
+    });
+
+    test('rejects plaintext public buzz join handoff', () {
+      final relay = Uri.encodeQueryComponent('ws://relay.example.com');
+      expect(
+        parseInviteDeepLink(Uri.parse('buzz://join?relay=$relay&code=abc')),
+        isNull,
+      );
+    });
+
     test('preserves policy receipt in buzz join handoff', () {
       final link = parseInviteDeepLink(
         Uri.parse(
@@ -177,6 +195,18 @@ void _inviteTests() {
       );
     });
 
+    test('rejects non-public invite relay destinations', () {
+      for (final url in [
+        'https://127.0.0.1/invite/abc',
+        'https://169.254.169.254/invite/abc',
+        'https://192.168.1.1/invite/abc',
+        'https://[::1]/invite/abc',
+        'https://[::ffff:127.0.0.1]/invite/abc',
+      ]) {
+        expect(parseInviteDeepLink(Uri.parse(url)), isNull, reason: url);
+      }
+    });
+
     test('rejects buzz join with dangerous relay schemes', () {
       // The `relay=` param is an allowlist — only `ws` / `wss` are safe to
       // hand to a Nostr relay session. Anything else must be dropped by the
@@ -199,6 +229,67 @@ void _inviteTests() {
           reason: 'must reject relay scheme in $hostile',
         );
       }
+    });
+  });
+}
+
+void _buildMessageLinkTests() {
+  group('buildMessageLink', () {
+    test('builds channel + id link', () {
+      expect(
+        buildMessageLink(channelId: 'd14cd131', messageId: 'abc123'),
+        'buzz://message?channel=d14cd131&id=abc123',
+      );
+    });
+
+    test('includes thread root when present', () {
+      expect(
+        buildMessageLink(
+          channelId: 'd14cd131',
+          messageId: 'abc123',
+          threadRootId: 'root99',
+        ),
+        'buzz://message?channel=d14cd131&id=abc123&thread=root99',
+      );
+    });
+
+    test('treats empty thread root as absent', () {
+      expect(
+        buildMessageLink(
+          channelId: 'd14cd131',
+          messageId: 'abc123',
+          threadRootId: '',
+        ),
+        'buzz://message?channel=d14cd131&id=abc123',
+      );
+    });
+
+    test('round-trips through parseMessageDeepLink', () {
+      final url = buildMessageLink(
+        channelId: 'chan-1',
+        messageId: 'msg-1',
+        threadRootId: 'root-1',
+      );
+      final parsed = parseMessageDeepLink(Uri.parse(url));
+      expect(
+        parsed,
+        const MessageDeepLink(
+          channelId: 'chan-1',
+          messageId: 'msg-1',
+          threadRootId: 'root-1',
+        ),
+      );
+    });
+
+    test('throws on empty channel or id', () {
+      expect(
+        () => buildMessageLink(channelId: '', messageId: 'abc'),
+        throwsArgumentError,
+      );
+      expect(
+        () => buildMessageLink(channelId: 'chan', messageId: ''),
+        throwsArgumentError,
+      );
     });
   });
 }

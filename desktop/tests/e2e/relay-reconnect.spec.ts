@@ -35,6 +35,20 @@ async function disconnectMockWebsockets(page: import("@playwright/test").Page) {
   expect(disconnected).toBeGreaterThan(0);
 }
 
+async function restartMockWebsockets(page: import("@playwright/test").Page) {
+  const restarted = await page.evaluate(() => {
+    const restart = (
+      window as Window & {
+        __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
+      }
+    ).__BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__;
+    if (!restart)
+      throw new Error("E2E websocket restart seam is not installed.");
+    return restart();
+  });
+  expect(restarted).toBeGreaterThan(0);
+}
+
 async function emitMockMessages(
   page: import("@playwright/test").Page,
   messages: Array<{ content: string; createdAt: number }>,
@@ -78,6 +92,54 @@ async function driveConnectionDegraded(
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
+});
+
+test("failed initial relay dial retries automatically", async ({ page }) => {
+  await installMockBridge(page, {
+    websocketConnectErrors: ["mock relay pod unavailable"],
+  });
+  await page.goto("/");
+
+  // App-shell preconnect owns a keep-alive request. The first native dial is
+  // rejected before a socket ID exists; the session must still enter its
+  // backoff loop and recover without a click, query, or reload.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const getState = (
+            window as Window & {
+              __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+            }
+          ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__;
+          if (!getState) throw new Error("Relay state seam is not installed.");
+          return getState();
+        }),
+      { timeout: 10_000 },
+    )
+    .toBe("connected");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+});
+
+test("service restart close resets accumulated backoff", async ({ page }) => {
+  await installMockBridge(page, {
+    websocketConnectErrors: ["down 1", "down 2", "down 3"],
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible({
+    timeout: 15_000,
+  });
+
+  const startedAt = Date.now();
+  await restartMockWebsockets(page);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 2_500 },
+    )
+    .toBe("connected");
+  expect(Date.now() - startedAt).toBeLessThan(2_500);
 });
 
 test("passive relay watchdog does not write while the websocket is half-open", async ({

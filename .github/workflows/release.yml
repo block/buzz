@@ -629,7 +629,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Fix AppImage (remove infra libs, symlink system GStreamer)
+      - name: Fix AppImage (remove infra libs, shim host GStreamer)
         run: |
           mapfile -t APPIMAGES < <(find desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f)
           if [[ ${#APPIMAGES[@]} -eq 0 ]]; then

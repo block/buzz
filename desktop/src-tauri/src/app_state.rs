@@ -108,6 +108,8 @@ pub struct AppState {
     /// In-process mesh-llm node started by Buzz Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
+    #[cfg(feature = "mesh-llm")]
+    pub mesh_recovery: crate::mesh_llm::MeshRecoveryState,
     /// Runtime-owned shared-compute coordinator. It publishes member-signed
     /// discovery status and reconciles MeshLLM's admission roster; MeshLLM
     /// itself owns direct QUIC/iroh connection establishment.
@@ -222,6 +224,8 @@ pub fn build_app_state() -> AppState {
         reset_failed: AtomicBool::new(false),
         #[cfg(feature = "mesh-llm")]
         mesh_llm_runtime: AsyncMutex::new(None),
+        #[cfg(feature = "mesh-llm")]
+        mesh_recovery: crate::mesh_llm::MeshRecoveryState::default(),
         #[cfg(feature = "mesh-llm")]
         mesh_coordinator: AsyncMutex::new(None),
         pending_owned_channels: Mutex::new(std::collections::HashSet::new()),

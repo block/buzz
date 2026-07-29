@@ -48,19 +48,42 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'justfile'
             desktop:
+              - 'scripts/check-file-sizes-core.mjs'
+              - 'scripts/check-file-sizes-core.test.mjs'
               - 'desktop/**'
               - '!desktop/src-tauri/**'
               - 'pnpm-lock.yaml'
             desktop-rust:
               - 'desktop/src-tauri/**'
             web:
+              - 'scripts/check-file-sizes-core.mjs'
+              - 'scripts/check-file-sizes-core.test.mjs'
               - 'web/**'
               - 'pnpm-lock.yaml'
             mobile:
+              - 'scripts/check-file-sizes-core.mjs'
+              - 'scripts/check-file-sizes-core.test.mjs'
               - 'mobile/**'
+              - 'scripts/mobile-release.sh'
+              - 'scripts/mobile-worktree-overrides.sh'
+              - 'scripts/mobile-worktree-clean.sh'
+              - 'scripts/publish-mobile-release-candidate.sh'
+              - 'scripts/release-rulesets.sh'
+              - 'scripts/test-mobile-release-contract.sh'
+              - 'scripts/test-mobile-release-candidate-publisher.sh'
+              - 'scripts/test-mobile-worktree-overrides.sh'
+              - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
+      - name: Mobile release contract
+        run: |
+          scripts/test-mobile-release-contract.sh
+          scripts/test-mobile-release-candidate-publisher.sh
+      - name: Mobile worktree identity contract
+        run: scripts/test-mobile-worktree-overrides.sh
+      - name: File size ratchet unit tests
+        run: node --test scripts/check-file-sizes-core.test.mjs
 
   rust-lint:
     name: Rust Lint
@@ -115,6 +138,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -198,7 +223,7 @@ jobs:
   desktop-smoke-e2e:
     name: Desktop Smoke E2E (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     strategy:
@@ -325,6 +350,7 @@ jobs:
           cargo build --profile ci -p buzz-relay -p git-credential-nostr
           cargo nextest archive \
             --cargo-profile ci \
+            -p buzz-db \
             -p buzz-relay \
             -p buzz-test-client \
             --lib \
@@ -656,11 +682,11 @@ jobs:
           done
           cat /tmp/buzz-relay.log
           exit 1
-      - name: Invite claim security tests
+      - name: Invite security tests
         run: |
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E 'package(buzz-relay) and test(claim_)' \
+            -E '(package(buzz-db) and test(/relay_invite::tests/)) or (package(buzz-relay) and test(/api::invites::tests/))' \
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
@@ -735,6 +761,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
@@ -768,6 +796,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Compute Hermit cache key
         id: hermit-bin-hash
@@ -806,6 +836,8 @@ jobs:
         with:
           path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+      - name: File size ratchet
+        run: node mobile/scripts/check-file-sizes.mjs
       - name: Format check
         run: cd mobile && dart format --output=none --set-exit-if-changed .
       - name: Analyze

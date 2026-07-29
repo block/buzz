@@ -161,8 +161,84 @@ pub const P_GATED_KINDS: &[u32] = &[
 /// `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
 /// Content is a JSON body containing persona fields (system_prompt,
 /// display_name, avatar_url, runtime, model, provider, name_pool).
-/// Designed for discoverability and sharing — d-tag is not blinded.
+///
+/// # Access control: author-only-unless-shared
+///
+/// Kind 30175 uses **shared-tag-gated** read semantics to protect system
+/// prompts and `respond_to_allowlist` pubkeys from being visible to all
+/// community members as a side-effect of device sync:
+///
+/// - Events WITHOUT a `["shared", "true"]` tag are readable only by their
+///   author. Foreign REQ/COUNT/fan-out/ids-lookup requests silently omit them.
+/// - Events WITH exactly `["shared", "true"]` are readable community-wide,
+///   enabling the opt-in agent catalog (`{kinds:[30175]}` all-authors).
+///
+/// Device sync already queries `authors:[self]`, so this gate never affects
+/// self-reads. The `shared` tag is a tag (not a content field) so toggling
+/// sharing does not change content bytes or the drift/`source_version` hash
+/// (`persona_content_hash`) used by persona sync.
+///
+/// Ingest rejects malformed `shared` tags (any value other than `"true"`,
+/// or more than one `shared` tag) so no ambiguous heads can exist.
 pub const KIND_PERSONA: u32 = 30175;
+
+/// Returns `true` if `kind` uses the author-only-unless-shared read model
+/// (currently only `KIND_PERSONA` / 30175).
+///
+/// Events of these kinds may only be delivered to foreign readers when the
+/// event carries exactly `["shared", "true"]`. Used by all relay read
+/// chokepoints: REQ historical delivery, live fan-out, COUNT fallback,
+/// and the `ids`-lookup result gate.
+pub fn is_persona_shared_kind(kind: u32) -> bool {
+    kind == KIND_PERSONA
+}
+
+/// Returns `true` if the event is a persona-shared-catalog kind AND the
+/// requester is NOT the author AND the event does NOT carry `["shared",
+/// "true"]`. All three conditions must hold to withhold the event.
+///
+/// This is the per-event gate used by REQ historical delivery, live fan-out,
+/// and COUNT fallback paths. It is intentionally independent of
+/// `is_author_only_event` — persona events with `["shared", "true"]` MUST
+/// reach foreign readers; stripping them at the author-only layer would break
+/// the catalog query.
+pub fn is_unshared_persona_event(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+    let kind = event.kind.as_u16() as u32;
+    if !is_persona_shared_kind(kind) {
+        return false;
+    }
+    // Author reads are always allowed.
+    if event.pubkey.to_bytes() == requester_pubkey_bytes {
+        return false;
+    }
+    // Foreign reader: allowed only if the event is explicitly shared.
+    !persona_event_is_shared(event)
+}
+
+/// Returns `true` if the event carries exactly one `["shared", "true"]` tag.
+///
+/// Requires the tag to have exactly two elements so that a three-element shape
+/// like `["shared","true","extra"]` is NOT treated as shared. Ingest enforces
+/// the same exact shape, so a well-stored event either has no `shared` tag
+/// (author-only) or exactly one with precisely two elements and value `"true"`
+/// (community-readable). This helper fails closed on any non-exact shape
+/// independently of ingest guarantees.
+pub fn persona_event_is_shared(event: &nostr::Event) -> bool {
+    let mut count = 0usize;
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() == 2 && parts[0].as_str() == "shared" {
+            if parts[1].as_str() != "true" {
+                return false;
+            }
+            count += 1;
+        } else if !parts.is_empty() && parts[0].as_str() == "shared" {
+            // Non-exact shape (wrong length) — fail closed: not shared.
+            return false;
+        }
+    }
+    count == 1
+}
 
 /// NIP-AP: Agent Team (parameterized replaceable, owner-authored).
 ///
@@ -780,5 +856,100 @@ mod tests {
                 "kind {kind} is both replaceable and parameterized replaceable"
             );
         }
+    }
+
+    // ── persona_event_is_shared / is_unshared_persona_event ──────────────
+
+    fn make_persona_event(tags: &[&[&str]]) -> nostr::Event {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        let keys = Keys::generate();
+        let tag_vec: Vec<Tag> = tags
+            .iter()
+            .map(|parts| Tag::parse(parts.iter().copied()).unwrap())
+            .collect();
+        EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "")
+            .tags(tag_vec)
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn persona_event_is_shared_true_tag() {
+        let ev = make_persona_event(&[&["d", "my-agent"], &["shared", "true"]]);
+        assert!(persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn persona_event_is_shared_no_tag() {
+        let ev = make_persona_event(&[&["d", "my-agent"]]);
+        assert!(!persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn persona_event_is_shared_wrong_value() {
+        let ev = make_persona_event(&[&["d", "my-agent"], &["shared", "false"]]);
+        assert!(!persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn persona_event_is_shared_duplicate_shared_tags() {
+        // Two ["shared","true"] tags → ambiguous; not considered shared.
+        let ev =
+            make_persona_event(&[&["d", "my-agent"], &["shared", "true"], &["shared", "true"]]);
+        assert!(!persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn persona_event_is_shared_three_element_tag_not_shared() {
+        // ["shared","true","extra"] — three elements — must NOT be treated as shared.
+        // The helper fails closed on any non-exact shape independently of ingest guarantees.
+        let ev = make_persona_event(&[&["d", "my-agent"], &["shared", "true", "extra"]]);
+        assert!(!persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn persona_event_is_shared_one_element_tag_not_shared() {
+        // ["shared"] — only one element — not shared (fails the == 2 check).
+        let ev = make_persona_event(&[&["d", "my-agent"], &["shared"]]);
+        assert!(!persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn is_unshared_persona_event_author_always_allowed() {
+        // Even without a shared tag the event author should not be blocked.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        let keys = Keys::generate();
+        let ev = EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "")
+            .tags(vec![Tag::parse(["d", "my-agent"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let author_bytes = keys.public_key().to_bytes();
+        assert!(!is_unshared_persona_event(&ev, &author_bytes));
+    }
+
+    #[test]
+    fn is_unshared_persona_event_foreign_no_tag() {
+        let ev = make_persona_event(&[&["d", "my-agent"]]);
+        let foreign = [0u8; 32];
+        assert!(is_unshared_persona_event(&ev, &foreign));
+    }
+
+    #[test]
+    fn is_unshared_persona_event_foreign_shared_tag() {
+        let ev = make_persona_event(&[&["d", "my-agent"], &["shared", "true"]]);
+        let foreign = [0u8; 32];
+        assert!(!is_unshared_persona_event(&ev, &foreign));
+    }
+
+    #[test]
+    fn is_unshared_persona_event_non_persona_kind_passthrough() {
+        use nostr::{EventBuilder, Keys, Kind};
+        let keys = Keys::generate();
+        let ev = EventBuilder::new(Kind::Custom(KIND_TEAM as u16), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let foreign = [0u8; 32];
+        // Non-persona kinds are never blocked by this gate.
+        assert!(!is_unshared_persona_event(&ev, &foreign));
     }
 }
