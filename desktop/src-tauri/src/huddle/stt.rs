@@ -31,6 +31,8 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
+use super::models::SttFamily;
+
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
 /// Bounded audio queue capacity.
@@ -85,6 +87,7 @@ impl SttPipeline {
     /// thread on every `recv_timeout` call).
     pub fn new(
         model_dir: PathBuf,
+        family: SttFamily,
         tts_active: Arc<AtomicBool>,
         tts_cancel: Option<Arc<AtomicBool>>,
         ptt_active: Option<Arc<AtomicBool>>,
@@ -101,6 +104,7 @@ impl SttPipeline {
             .spawn(move || {
                 stt_worker(
                     model_dir,
+                    family,
                     audio_rx,
                     text_tx,
                     shutdown_worker,
@@ -201,8 +205,10 @@ const TTS_COOLDOWN: Duration = Duration::from_millis(50);
 /// shows it's safe on the minimum-spec target.
 const STT_NUM_THREADS: i32 = 1;
 
+#[allow(clippy::too_many_arguments)]
 fn stt_worker(
     model_dir: PathBuf,
+    family: SttFamily,
     audio_rx: Receiver<Vec<u8>>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
@@ -228,18 +234,21 @@ fn stt_worker(
 
     // ── 3. Initialise sherpa-onnx recognizer ─────────────────────────────────
     //
-    // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
-    // `tokens.txt`. sherpa-onnx infers the model family from which inner config
-    // has a `model` path set, so we don't need to set `model_type` explicitly.
-    // (See rust-api-examples/parakeet_tdt_ctc_simulate_streaming_microphone.rs
-    // in k2-fsa/sherpa-onnx.)
+    // sherpa-onnx infers the model family from which inner config has model
+    // paths set, so we populate exactly one family sub-config (issue #2478):
+    //
+    //   NemoCtc     — single `model.int8.onnx` (CTC head), e.g. Parakeet 110M en.
+    //   Transducer  — `encoder/decoder/joiner.int8.onnx`, e.g. Parakeet 0.6B v3
+    //                 (multilingual). See k2-fsa/sherpa-onnx offline-transducer
+    //                 NeMo examples.
+    //
+    // `tokens.txt` is shared by every family and lives on the parent config.
     use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
     let tokens_path = model_dir.join("tokens.txt");
-    let model_path = model_dir.join("model.int8.onnx");
-    if !tokens_path.exists() || !model_path.exists() {
+    if !tokens_path.exists() {
         eprintln!(
-            "buzz-desktop: STT model not found at {} — STT disabled",
+            "buzz-desktop: STT tokens.txt not found at {} — STT disabled",
             model_dir.display()
         );
         drain_until_shutdown(audio_rx, &shutdown);
@@ -247,7 +256,37 @@ fn stt_worker(
     }
 
     let mut cfg = OfflineRecognizerConfig::default();
-    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+    match family {
+        SttFamily::NemoCtc => {
+            let model_path = model_dir.join("model.int8.onnx");
+            if !model_path.exists() {
+                eprintln!(
+                    "buzz-desktop: STT model.int8.onnx not found at {} — STT disabled",
+                    model_dir.display()
+                );
+                drain_until_shutdown(audio_rx, &shutdown);
+                return;
+            }
+            cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+        }
+        SttFamily::Transducer => {
+            let encoder = model_dir.join("encoder.int8.onnx");
+            let decoder = model_dir.join("decoder.int8.onnx");
+            let joiner = model_dir.join("joiner.int8.onnx");
+            if !encoder.exists() || !decoder.exists() || !joiner.exists() {
+                eprintln!(
+                    "buzz-desktop: STT transducer files (encoder/decoder/joiner) missing at {} \
+                     — STT disabled",
+                    model_dir.display()
+                );
+                drain_until_shutdown(audio_rx, &shutdown);
+                return;
+            }
+            cfg.model_config.transducer.encoder = Some(encoder.to_string_lossy().into_owned());
+            cfg.model_config.transducer.decoder = Some(decoder.to_string_lossy().into_owned());
+            cfg.model_config.transducer.joiner = Some(joiner.to_string_lossy().into_owned());
+        }
+    }
     cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
     cfg.model_config.num_threads = STT_NUM_THREADS;
     // Explicit — defaults are not part of the API contract, and noisy debug

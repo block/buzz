@@ -1,7 +1,11 @@
-//! Model download manager for STT (Parakeet TDT-CTC 110M) and TTS (Pocket TTS) models.
+//! Model download manager for STT (Parakeet family) and TTS (Pocket TTS) models.
+//!
+//! The STT model is selectable via the `STT_MODELS` registry (issue #2478):
+//! the English Parakeet TDT-CTC 110M default, or the multilingual Parakeet TDT
+//! 0.6B v3, chosen by `BUZZ_STT_MODEL` / system locale in `selected_stt_model`.
 //!
 //! Mental model:
-//!   app launch → start_stt_download (background) → ~/.buzz/models/parakeet-tdt-ctc-110m-en/
+//!   app launch → start_stt_download (background) → ~/.buzz/models/<selected>/
 //!   app launch → start_tts_download (background) → ~/.buzz/models/pocket-tts/
 //!   STT pipeline → is_stt_ready() → stt_model_dir() → run inference
 //!   TTS pipeline → is_tts_ready() → tts_model_dir() → run synthesis
@@ -26,17 +30,17 @@ use sha2::{Digest, Sha256};
 
 // ── Integrity verification ────────────────────────────────────────────────────
 //
-// All model artifacts are verified against pinned SHA-256 hashes before
+// Model artifacts are verified against pinned SHA-256 hashes before
 // installation. This is defense-in-depth: HTTPS protects the transport,
 // hashes protect the content.
 //
 // To recompute hashes: download each file, run `shasum -a 256 <file>`, and
 // update the corresponding constant.
-
-/// SHA-256 hash of the STT archive
-/// (sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2).
-/// Computed from a known-good download. Update when upgrading model versions.
-const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
+//
+// STT archive hashes are pinned per model in the `STT_MODELS` registry below
+// (`SttModel::archive_sha256`). Both shipped models are pinned; the field is
+// `Option` so a model may temporarily ship `None` (size cap + safe extraction
+// + expected-files verification still apply) before its hash is computed.
 
 /// HuggingFace base URL for the sherpa-onnx Pocket TTS fp32 repackage.
 ///
@@ -85,12 +89,8 @@ const TTS_FILE_HASHES: &[(&str, &str)] = &[
 // If the on-disk manifest doesn't match the compiled-in version, the model is
 // considered stale and re-downloaded. Increment when upgrading model files.
 
-/// Model manifest version for the STT model. Increment when upgrading model files.
-/// Bumped from "1" → "2" alongside the migration from Moonshine Tiny to
-/// Parakeet TDT-CTC 110M — the model directory name also changed, so this
-/// is technically belt-and-suspenders, but it keeps the manifest semantics
-/// honest (each version tag identifies one specific set of model bytes).
-const STT_MODEL_VERSION: &str = "2";
+// STT manifest versions are per model — see `SttModel::version` in the
+// `STT_MODELS` registry below.
 
 /// Model manifest version for Pocket TTS. Increment when upgrading model files.
 /// Bumped "1" → "2" when the bundled reference voice changed from KevinAHM's
@@ -107,44 +107,214 @@ const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Maximum expected STT archive size (200 MB — actual is ~100 MB).
-const MAX_STT_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
-
 /// Maximum expected Pocket TTS file size (400 MB per file — largest is
 /// `lm_main.onnx` at ~303 MB fp32).
 const MAX_TTS_FILE_BYTES: u64 = 400 * 1024 * 1024;
 
-/// NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx by
-/// k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
-/// the OpenASR-style benchmarks; ~half the WER of Moonshine Tiny at ~2× the
-/// disk footprint. CTC blank-token decoding eliminates the silence/cut-audio
-/// hallucination class that hurts encoder-decoder models on noisy huddle audio.
-/// License: CC-BY-4.0 (attribution required — see About dialog).
-const STT_DOWNLOAD_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
-     sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2";
+// ── STT model registry (multilingual — issue #2478) ───────────────────────────
+//
+// Historically the huddle STT model was hard-pinned to an English-only build,
+// so non-English speech transcribed as garbage (issue #2478). The registry
+// makes the model selectable: the English default stays the default, and a
+// multilingual model is picked automatically for non-English locales (or
+// forced with the `BUZZ_STT_MODEL` env override). Adding a model is pure data
+// here plus, for a new sherpa-onnx model family, one match arm in `stt.rs`.
 
-/// Subdirectory name produced by `tar xjf` on the archive.
-const STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8";
+/// Attribution sidecar filename written next to every STT model's files.
+const STT_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
 
-/// Final directory name under `~/.buzz/models/`.
-const STT_MODEL_DIR_NAME: &str = "parakeet-tdt-ctc-110m-en";
+/// sherpa-onnx model family — decides how the offline recognizer is configured
+/// (`stt.rs`) and which ONNX files must be present on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttFamily {
+    /// Single-file NeMo CTC head (e.g. Parakeet TDT-CTC 110M English).
+    NemoCtc,
+    /// NeMo transducer: encoder + decoder + joiner (e.g. Parakeet TDT 0.6B v3).
+    Transducer,
+}
 
-/// All files that must be present for the model to be considered ready.
+/// One selectable speech-to-text model. `STT_MODELS` is the single source of
+/// truth; `select_stt_model` picks one at startup.
+pub struct SttModel {
+    /// Stable id used by the `BUZZ_STT_MODEL` override and in logs.
+    pub id: &'static str,
+    /// Directory name under `~/.buzz/models/`.
+    pub dir_name: &'static str,
+    /// Download URL for the `.tar.bz2` archive.
+    pub download_url: &'static str,
+    /// Directory name produced by `tar xjf` on the archive.
+    pub archive_subdir: &'static str,
+    /// SHA-256 of the archive, or `None` if not yet pinned. `None` still
+    /// enforces the size cap, safe extraction, and expected-files check — it
+    /// only skips the content hash. The English default is always `Some`.
+    pub archive_sha256: Option<&'static str>,
+    /// Hard cap on the downloaded archive size, in bytes.
+    pub max_download_bytes: u64,
+    /// Model files (excluding the license sidecar) required for "ready".
+    pub model_files: &'static [&'static str],
+    /// sherpa-onnx model family.
+    pub family: SttFamily,
+    /// Manifest version — bump to force re-download of this model.
+    pub version: &'static str,
+    /// CC-BY-4.0 §3(a)(1) attribution written next to the model bytes.
+    pub license_text: &'static str,
+    /// Human-readable language coverage (About dialog / logs).
+    pub languages: &'static str,
+    /// `true` when multilingual — used by the non-English locale auto-select.
+    pub multilingual: bool,
+}
+
+/// Registry of selectable STT models. Index 0 is the default (English).
+static STT_MODELS: &[SttModel] = &[
+    // NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx
+    // by k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
+    // the OpenASR-style benchmarks; CTC blank-token decoding eliminates the
+    // silence/cut-audio hallucination class that hurts encoder-decoder models
+    // on noisy huddle audio. This remains the default for English.
+    SttModel {
+        id: "parakeet-en",
+        dir_name: "parakeet-tdt-ctc-110m-en",
+        download_url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
+             sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2",
+        archive_subdir: "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8",
+        archive_sha256: Some("17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b"),
+        max_download_bytes: 200 * 1024 * 1024,
+        model_files: &["model.int8.onnx", "tokens.txt"],
+        family: SttFamily::NemoCtc,
+        version: "2",
+        license_text: STT_EN_LICENSE_TEXT,
+        languages: "English",
+        multilingual: false,
+    },
+    // NVIDIA Parakeet TDT 0.6B v3 (multilingual, int8) — packaged for
+    // sherpa-onnx by k2-fsa. Transducer family (encoder/decoder/joiner). Auto
+    // language-ID + punctuation across 25 European languages. This is the
+    // multilingual default for non-English locales (issue #2478).
+    //
+    // Coverage note: Parakeet v3 covers European languages only. CJK/Korean
+    // (the concrete case in #2478) is not covered by this model; the registry
+    // makes adding a CJK model (e.g. SenseVoice-Small) a follow-up — one data
+    // entry, no engine change beyond a family already handled here.
+    //
+    // Checksum: upstream publishes no SHA-256, so this hash was computed from
+    // the k2-fsa `asr-models` release archive
+    // (sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2, ~465 MB) with
+    // `shasum -a 256`. Recompute and re-pin if k2-fsa republishes the asset.
+    SttModel {
+        id: "parakeet-v3",
+        dir_name: "parakeet-tdt-0.6b-v3",
+        download_url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
+             sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+        archive_subdir: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+        archive_sha256: Some("5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf"),
+        max_download_bytes: 800 * 1024 * 1024,
+        model_files: &[
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+        ],
+        family: SttFamily::Transducer,
+        version: "1",
+        license_text: STT_V3_LICENSE_TEXT,
+        languages: "25 European languages (auto-detected): Bulgarian, Croatian, \
+                    Czech, Danish, Dutch, English, Estonian, Finnish, French, \
+                    German, Greek, Hungarian, Italian, Latvian, Lithuanian, \
+                    Maltese, Polish, Portuguese, Romanian, Russian, Slovak, \
+                    Slovenian, Spanish, Swedish, Ukrainian",
+        multilingual: true,
+    },
+];
+
+/// The default STT model (English). Used when no override/locale applies.
+fn default_stt_model() -> &'static SttModel {
+    &STT_MODELS[0]
+}
+
+/// Look up a model by id (case-insensitive). `None` if unknown.
+fn stt_model_by_id(id: &str) -> Option<&'static SttModel> {
+    STT_MODELS.iter().find(|m| m.id.eq_ignore_ascii_case(id))
+}
+
+/// Files that must be present for a model to be "ready": its model files plus
+/// the Buzz-written attribution sidecar (the upstream archives ship no LICENSE,
+/// so readiness requires the local CC-BY-4.0 notice to travel with the bytes).
+fn stt_expected_files(model: &SttModel) -> Vec<&'static str> {
+    let mut files = model.model_files.to_vec();
+    files.push(STT_LICENSE_FILE_NAME);
+    files
+}
+
+/// Pick the STT model from an explicit override id and a best-effort locale.
 ///
-/// Includes the attribution sidecar written by Buzz during install. The
-/// upstream archive does not ship a license file, so readiness should require
-/// the local CC-BY-4.0 attribution to travel with the cached model bytes.
-const STT_EXPECTED_FILES: &[&str] = &["model.int8.onnx", "tokens.txt", STT_LICENSE_FILE_NAME];
-
-/// CC-BY-4.0 §3(a)(1) attribution block written next to the STT model files
-/// after install. Travels with the bytes — if a user copies the model
-/// directory, the attribution comes with it. Mirrored in About/Credits.
+/// Precedence (issue #2478 options 2 + 3):
+///   1. `override_id` (from `BUZZ_STT_MODEL`) when it names a known model.
+///   2. a non-English locale → the multilingual model.
+///   3. otherwise the English default.
 ///
+/// Pure and dependency-free so it is unit-testable without touching disk/env.
+pub fn select_stt_model(override_id: Option<&str>, locale: Option<&str>) -> &'static SttModel {
+    if let Some(id) = override_id {
+        let id = id.trim();
+        if !id.is_empty() {
+            if let Some(model) = stt_model_by_id(id) {
+                return model;
+            }
+            eprintln!(
+                "buzz-desktop: BUZZ_STT_MODEL='{id}' is not a known STT model id — ignoring \
+                 (valid ids: {})",
+                STT_MODELS
+                    .iter()
+                    .map(|m| m.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    if let Some(locale) = locale {
+        // Take the primary language subtag: "de-DE"/"uk_UA" → "de"/"uk".
+        let lang = locale
+            .split(['-', '_', '.'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !lang.is_empty() && lang != "en" {
+            if let Some(model) = STT_MODELS.iter().find(|m| m.multilingual) {
+                return model;
+            }
+        }
+    }
+    default_stt_model()
+}
+
+/// Best-effort system locale from the environment (dependency-free).
+///
+/// Reads the standard POSIX locale variables in precedence order. Returns
+/// `None` when unset or set to the neutral `C`/`POSIX` locale, in which case
+/// selection falls back to the English default.
+fn detect_locale() -> Option<String> {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() && value != "C" && value != "POSIX" {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the STT model to use for this process: `BUZZ_STT_MODEL` override,
+/// else system-locale auto-select, else English default.
+fn selected_stt_model() -> &'static SttModel {
+    let override_id = std::env::var("BUZZ_STT_MODEL").ok();
+    select_stt_model(override_id.as_deref(), detect_locale().as_deref())
+}
+
+/// CC-BY-4.0 §3(a)(1) attribution for Parakeet TDT-CTC 110M (English).
 /// Covers all five §3(a)(1) bullets: creator, copyright notice, license
 /// notice, warranty disclaimer reference, and URI to the source material.
-const STT_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
-const STT_LICENSE_TEXT: &str = "\
+const STT_EN_LICENSE_TEXT: &str = "\
 NVIDIA Parakeet TDT-CTC 110M (English)
 © NVIDIA Corporation.
 
@@ -152,6 +322,23 @@ Licensed under the Creative Commons Attribution 4.0 International License
 (CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
 
 Original model: https://huggingface.co/nvidia/parakeet-tdt_ctc-110m
+Converted to ONNX with int8 quantization by the sherpa-onnx project
+(https://github.com/k2-fsa/sherpa-onnx); Buzz ships this conversion
+unmodified.
+
+Provided \"AS IS\", without warranty of any kind, express or implied. See the
+license text for full warranty disclaimer.
+";
+
+/// CC-BY-4.0 §3(a)(1) attribution for Parakeet TDT 0.6B v3 (multilingual).
+const STT_V3_LICENSE_TEXT: &str = "\
+NVIDIA Parakeet TDT 0.6B v3 (multilingual)
+© NVIDIA Corporation.
+
+Licensed under the Creative Commons Attribution 4.0 International License
+(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
+
+Original model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 Converted to ONNX with int8 quantization by the sherpa-onnx project
 (https://github.com/k2-fsa/sherpa-onnx); Buzz ships this conversion
 unmodified.
@@ -401,9 +588,9 @@ where
 /// Per-model state + config. `ModelManager` owns two of these (stt, tts).
 #[derive(Clone)]
 struct ModelSlot {
-    dir_name: &'static str,                  // subdir under ~/.buzz/models/
-    expected_files: &'static [&'static str], // files required for "ready"
-    version: &'static str,                   // manifest version; increment to force re-download
+    dir_name: &'static str,            // subdir under ~/.buzz/models/
+    expected_files: Vec<&'static str>, // files required for "ready"
+    version: &'static str,             // manifest version; increment to force re-download
     status: Arc<Mutex<ModelStatus>>,
     just_ready: Arc<AtomicBool>, // fires once when download completes
 }
@@ -411,7 +598,7 @@ struct ModelSlot {
 impl ModelSlot {
     fn new(
         dir_name: &'static str,
-        expected_files: &'static [&'static str],
+        expected_files: Vec<&'static str>,
         version: &'static str,
     ) -> Self {
         Self {
@@ -551,6 +738,8 @@ impl ModelSlot {
 pub struct ModelManager {
     /// `~/.buzz/models/`
     models_dir: PathBuf,
+    /// The STT model selected for this process (override / locale / default).
+    stt_model: &'static SttModel,
     stt: ModelSlot,
     tts: ModelSlot,
 }
@@ -558,17 +747,40 @@ pub struct ModelManager {
 impl ModelManager {
     /// Create a new `ModelManager` rooted at `~/.buzz/models/`.
     ///
+    /// The STT model is resolved once here from `BUZZ_STT_MODEL`, then the
+    /// system locale, then the English default (issue #2478).
+    ///
     /// Returns `None` if the home directory cannot be resolved.
     pub fn new() -> Option<Self> {
         let models_dir = dirs::home_dir()?.join(".buzz").join("models");
+        let stt_model = selected_stt_model();
+        eprintln!(
+            "buzz-desktop: STT model '{}' selected ({})",
+            stt_model.id, stt_model.languages
+        );
         Some(Self {
             models_dir,
-            stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
-            tts: ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION),
+            stt_model,
+            stt: ModelSlot::new(
+                stt_model.dir_name,
+                stt_expected_files(stt_model),
+                stt_model.version,
+            ),
+            tts: ModelSlot::new(
+                TTS_MODEL_DIR_NAME,
+                TTS_EXPECTED_FILES.to_vec(),
+                TTS_MODEL_VERSION,
+            ),
         })
     }
 
     // ── STT accessors ────────────────────────────────────────────────────────
+
+    /// The sherpa-onnx model family of the selected STT model. The huddle STT
+    /// pipeline uses this to configure the offline recognizer.
+    pub fn stt_family(&self) -> SttFamily {
+        self.stt_model.family
+    }
 
     /// Path to the STT model directory, or `None` if not ready.
     pub fn stt_model_dir(&self) -> Option<PathBuf> {
@@ -659,19 +871,21 @@ impl ModelManager {
 
         // Temp filenames derive from the final directory name to avoid colliding
         // with leftovers from any previous STT model (e.g. moonshine-tiny.*).
-        let archive_path = self
-            .models_dir
-            .join(format!("{STT_MODEL_DIR_NAME}.tar.bz2"));
-        let temp_dir = self.models_dir.join(format!("{STT_MODEL_DIR_NAME}.tmp"));
+        let model = self.stt_model;
+        let archive_path = self.models_dir.join(format!("{}.tar.bz2", model.dir_name));
+        let temp_dir = self.models_dir.join(format!("{}.tmp", model.dir_name));
 
-        eprintln!("buzz-desktop: downloading STT model from {STT_DOWNLOAD_URL}");
-        let response = fetch_url(&http_client, STT_DOWNLOAD_URL, "stt archive").await?;
+        eprintln!(
+            "buzz-desktop: downloading STT model '{}' from {}",
+            model.id, model.download_url
+        );
+        let response = fetch_url(&http_client, model.download_url, "stt archive").await?;
 
         let slot = self.stt.clone();
         let bytes = download_file(
             response,
             &archive_path,
-            MAX_STT_DOWNLOAD_BYTES,
+            model.max_download_bytes,
             "stt archive",
             |downloaded, content_length| {
                 if let Some(pct) =
@@ -686,13 +900,27 @@ impl ModelManager {
         .await?;
         eprintln!("buzz-desktop: downloaded {bytes} bytes, wrote to disk");
 
-        // Verify archive integrity before extraction.
-        let hash = sha256_file(&archive_path).await?;
-        if hash != STT_ARCHIVE_SHA256 {
-            let _ = tokio::fs::remove_file(&archive_path).await;
-            return Err(format!(
-                "STT archive integrity check failed: expected {STT_ARCHIVE_SHA256}, got {hash}"
-            ));
+        // Verify archive integrity before extraction. Models with a pinned
+        // hash are content-verified; a `None` hash relies on the size cap
+        // (already enforced above), safe extraction, and the expected-files
+        // check in `verify_and_install`.
+        match model.archive_sha256 {
+            Some(expected) => {
+                let hash = sha256_file(&archive_path).await?;
+                if hash != expected {
+                    let _ = tokio::fs::remove_file(&archive_path).await;
+                    return Err(format!(
+                        "STT archive integrity check failed: expected {expected}, got {hash}"
+                    ));
+                }
+            }
+            None => {
+                eprintln!(
+                    "buzz-desktop: STT model '{}' has no pinned SHA-256 — \
+                     skipping content hash (size cap + safe extraction still enforced)",
+                    model.id
+                );
+            }
         }
 
         self.stt.set_status(ModelStatus::Downloading {
@@ -706,11 +934,12 @@ impl ModelManager {
             .await
             .map_err(|e| format!("tar task panicked: {e}"))??;
 
-        let extracted_subdir = temp_dir.join(STT_ARCHIVE_SUBDIR);
+        let extracted_subdir = temp_dir.join(model.archive_subdir);
         if !extracted_subdir.is_dir() {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             return Err(format!(
-                "expected subdir '{STT_ARCHIVE_SUBDIR}' not found after extraction"
+                "expected subdir '{}' not found after extraction",
+                model.archive_subdir
             ));
         }
 
@@ -719,7 +948,7 @@ impl ModelManager {
         // upstream tarball ships no LICENSE/NOTICE, so we provide it ourselves
         // per §3(a)(1) (license must travel with Shared material).
         let license_path = extracted_subdir.join(STT_LICENSE_FILE_NAME);
-        if let Err(e) = tokio::fs::write(&license_path, STT_LICENSE_TEXT).await {
+        if let Err(e) = tokio::fs::write(&license_path, model.license_text).await {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             let _ = tokio::fs::remove_file(&archive_path).await;
             return Err(format!("write model license sidecar: {e}"));
@@ -883,6 +1112,15 @@ pub fn stt_model_dir() -> Option<PathBuf> {
     global_model_manager()?.stt_model_dir()
 }
 
+/// sherpa-onnx model family of the selected STT model (English default when the
+/// manager is unavailable). The huddle STT pipeline uses this to configure the
+/// offline recognizer for the right model family.
+pub fn stt_model_family() -> SttFamily {
+    global_model_manager()
+        .map(|m| m.stt_family())
+        .unwrap_or(SttFamily::NemoCtc)
+}
+
 /// `true` if all expected STT model files are present on disk.
 pub fn is_stt_ready() -> bool {
     global_model_manager()
@@ -937,7 +1175,11 @@ mod tests {
     #[test]
     fn tts_readiness_requires_license_sidecar() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let slot = ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION);
+        let slot = ModelSlot::new(
+            TTS_MODEL_DIR_NAME,
+            TTS_EXPECTED_FILES.to_vec(),
+            TTS_MODEL_VERSION,
+        );
         let model_dir = temp.path().join(TTS_MODEL_DIR_NAME);
         std::fs::create_dir_all(&model_dir).expect("create model dir");
 
@@ -950,5 +1192,123 @@ mod tests {
 
         std::fs::remove_file(model_dir.join(TTS_LICENSE_FILE_NAME)).expect("remove sidecar");
         assert!(!slot.is_ready(temp.path()));
+    }
+
+    // ── STT model selection (issue #2478) ─────────────────────────────────────
+
+    #[test]
+    fn defaults_to_english_without_override_or_locale() {
+        assert_eq!(select_stt_model(None, None).id, "parakeet-en");
+        assert_eq!(select_stt_model(None, Some("en-US")).id, "parakeet-en");
+        assert_eq!(select_stt_model(None, Some("en")).id, "parakeet-en");
+        // Neutral C/POSIX locales are dropped by detect_locale, but pass the raw
+        // primary subtag here to prove "en" specifically stays on English.
+        assert!(!select_stt_model(None, None).multilingual);
+    }
+
+    #[test]
+    fn non_english_locale_selects_multilingual_model() {
+        for locale in ["de-DE", "uk_UA", "fr", "es-ES", "pl_PL.UTF-8"] {
+            let model = select_stt_model(None, Some(locale));
+            assert!(model.multilingual, "locale {locale} should be multilingual");
+            assert_eq!(model.id, "parakeet-v3", "locale {locale}");
+        }
+    }
+
+    #[test]
+    fn explicit_override_wins_over_locale() {
+        // Force multilingual even on an English locale.
+        assert_eq!(
+            select_stt_model(Some("parakeet-v3"), Some("en-US")).id,
+            "parakeet-v3"
+        );
+        // Force English even on a non-English locale.
+        assert_eq!(
+            select_stt_model(Some("parakeet-en"), Some("de-DE")).id,
+            "parakeet-en"
+        );
+        // Override id is case-insensitive.
+        assert_eq!(
+            select_stt_model(Some("PARAKEET-V3"), None).id,
+            "parakeet-v3"
+        );
+    }
+
+    #[test]
+    fn unknown_or_empty_override_falls_back() {
+        // Unknown override id → fall through to locale, then default.
+        assert_eq!(
+            select_stt_model(Some("does-not-exist"), Some("en-US")).id,
+            "parakeet-en"
+        );
+        assert_eq!(
+            select_stt_model(Some("does-not-exist"), Some("fr-FR")).id,
+            "parakeet-v3"
+        );
+        // Empty / whitespace override is ignored.
+        assert_eq!(select_stt_model(Some("   "), None).id, "parakeet-en");
+    }
+
+    #[test]
+    fn registry_invariants_hold() {
+        assert!(!STT_MODELS.is_empty());
+        assert_eq!(default_stt_model().id, "parakeet-en");
+        // The English default must always be integrity-pinned.
+        assert!(
+            default_stt_model().archive_sha256.is_some(),
+            "English default must ship a pinned SHA-256"
+        );
+        // At least one multilingual model exists (covers #2478).
+        assert!(STT_MODELS.iter().any(|m| m.multilingual));
+        // Ids are unique (case-insensitive); every model declares files + a cap.
+        for (i, model) in STT_MODELS.iter().enumerate() {
+            assert!(!model.model_files.is_empty(), "{} has no files", model.id);
+            assert!(model.max_download_bytes > 0, "{} has no size cap", model.id);
+            for other in &STT_MODELS[i + 1..] {
+                assert!(
+                    !model.id.eq_ignore_ascii_case(other.id),
+                    "duplicate model id {}",
+                    model.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expected_files_always_include_license_sidecar() {
+        for model in STT_MODELS {
+            let files = stt_expected_files(model);
+            assert!(
+                files.contains(&STT_LICENSE_FILE_NAME),
+                "{} missing license sidecar in expected files",
+                model.id
+            );
+            for f in model.model_files {
+                assert!(files.contains(f), "{} missing {f}", model.id);
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_uses_per_model_expected_files() {
+        // A transducer model needs encoder/decoder/joiner — the single-file
+        // check must not pass until all three plus tokens + license exist.
+        let v3 = stt_model_by_id("parakeet-v3").expect("v3 registered");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slot = ModelSlot::new(v3.dir_name, stt_expected_files(v3), v3.version);
+        let dir = temp.path().join(v3.dir_name);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::write(dir.join(MANIFEST_FILENAME), v3.version).expect("manifest");
+
+        // Only some files present → not ready.
+        std::fs::write(dir.join("encoder.int8.onnx"), b"x").expect("write");
+        std::fs::write(dir.join("tokens.txt"), b"x").expect("write");
+        assert!(!slot.is_ready(temp.path()));
+
+        // All expected files present → ready.
+        for f in stt_expected_files(v3) {
+            std::fs::write(dir.join(f), b"x").expect("write");
+        }
+        assert!(slot.is_ready(temp.path()));
     }
 }
