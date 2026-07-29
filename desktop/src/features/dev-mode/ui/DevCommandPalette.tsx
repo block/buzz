@@ -8,6 +8,7 @@ import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
   invalidateChannelState,
   useAddChannelMembersMutation,
+  useArchiveChannelMutation,
   useChannelMembersQuery,
   useLeaveChannelMutation,
 } from "@/features/channels/hooks";
@@ -97,10 +98,22 @@ export function DevCommandPalette({
   const activeChannelId = activeChannel?.id ?? null;
   const addMembersMutation = useAddChannelMembersMutation(activeChannelId);
   const leaveMutation = useLeaveChannelMutation(activeChannelId);
-  const membersQuery = useChannelMembersQuery(
-    activeChannelId,
-    mode === "add-member",
-  );
+  const archiveMutation = useArchiveChannelMutation(activeChannelId);
+  const membersQuery = useChannelMembersQuery(activeChannelId);
+
+  // The relay refuses to remove a channel's last owner, so when no other
+  // human would remain, "leave" archives the channel instead.
+  const isLastHumanMember = React.useMemo(() => {
+    const members = membersQuery.data;
+    if (!members || !myPubkey) return false;
+    const self = normalizePubkey(myPubkey);
+    return !members.some(
+      (member) =>
+        normalizePubkey(member.pubkey) !== self &&
+        !member.isAgent &&
+        member.role !== "bot",
+    );
+  }, [membersQuery.data, myPubkey]);
   const managedAgentsQuery = useManagedAgentsQuery({
     enabled: mode === "add-member",
   });
@@ -164,7 +177,11 @@ export function DevCommandPalette({
   const leaveChannel = React.useCallback(async () => {
     setActionError(null);
     try {
-      await leaveMutation.mutateAsync();
+      if (isLastHumanMember) {
+        await archiveMutation.mutateAsync();
+      } else {
+        await leaveMutation.mutateAsync();
+      }
       onClose();
       onChannelLeft();
     } catch (error) {
@@ -172,7 +189,13 @@ export function DevCommandPalette({
         error instanceof Error ? error.message : "Failed to leave channel.",
       );
     }
-  }, [leaveMutation, onChannelLeft, onClose]);
+  }, [
+    archiveMutation,
+    isLastHumanMember,
+    leaveMutation,
+    onChannelLeft,
+    onClose,
+  ]);
 
   const entries = React.useMemo<PaletteEntry[]>(() => {
     const needle = query.trim().toLowerCase();
@@ -254,7 +277,9 @@ export function DevCommandPalette({
           {
             id: "leave-channel",
             label: `leave # ${activeChannel.name}`,
-            detail: "remove yourself",
+            detail: isLastHumanMember
+              ? "archives — you're the last member"
+              : "remove yourself",
             run: () => void leaveChannel(),
           },
         ]
@@ -319,6 +344,7 @@ export function DevCommandPalette({
     activeChannel,
     addUserToChannel,
     channels,
+    isLastHumanMember,
     leaveChannel,
     membersQuery.data,
     mode,
