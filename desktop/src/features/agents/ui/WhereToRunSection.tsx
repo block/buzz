@@ -5,7 +5,11 @@ import { useBackendProvidersQuery } from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
-import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
+import {
+  applyProbeResult,
+  emptyWhereToRunDraft,
+  type WhereToRunDraft,
+} from "./whereToRunIntent";
 
 /** Optional remote-backend selector. Buzz shared compute is an LLM provider, not a run destination. */
 export function WhereToRunSection({
@@ -26,32 +30,28 @@ export function WhereToRunSection({
     [backendProviders, draft.runOn],
   );
 
+  // Read live draft + callback through refs so the probe effect can key on the
+  // *provider identity* alone. Depending on `draft` here re-fired the effect on
+  // every keystroke, and each async probe resolution then reset the config —
+  // wiping whatever the user was typing.
+  const draftRef = React.useRef(draft);
+  draftRef.current = draft;
+  const onDraftChangeRef = React.useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+
+  const selectedBinaryPath = selectedBackendProvider?.binaryPath;
+
   React.useEffect(() => {
-    if (!isProviderMode || !selectedBackendProvider) {
+    if (!isProviderMode || !selectedBinaryPath) {
       setProbeError(null);
       return;
     }
     let cancelled = false;
     setProbeError(null);
-    void probeBackendProvider(selectedBackendProvider.binaryPath)
+    void probeBackendProvider(selectedBinaryPath)
       .then((result) => {
         if (cancelled) return;
-        const defaults: Record<string, string> = {};
-        const properties =
-          (result.config_schema as Record<string, unknown> | undefined)
-            ?.properties ?? {};
-        for (const [key, property] of Object.entries(properties) as [
-          string,
-          Record<string, unknown>,
-        ][]) {
-          if (property.default != null)
-            defaults[key] = String(property.default);
-        }
-        onDraftChange({
-          ...draft,
-          probedProvider: result,
-          providerConfig: defaults,
-        });
+        onDraftChangeRef.current(applyProbeResult(draftRef.current, result));
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -61,7 +61,7 @@ export function WhereToRunSection({
     return () => {
       cancelled = true;
     };
-  }, [draft, isProviderMode, onDraftChange, selectedBackendProvider]);
+  }, [isProviderMode, selectedBinaryPath]);
 
   if (backendProviders.length === 0) return null;
 
