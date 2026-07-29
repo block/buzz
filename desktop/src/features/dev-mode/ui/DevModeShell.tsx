@@ -19,6 +19,7 @@ import {
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
 import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActions";
+import { DevChannelMembers } from "@/features/dev-mode/ui/DevChannelMembers";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
 import { DevCommandPalette } from "@/features/dev-mode/ui/DevCommandPalette";
 import { DevPromptComposer } from "@/features/dev-mode/ui/DevPromptComposer";
@@ -689,9 +690,15 @@ export function DevModeShell({
           >
             buzz · developer mode
             {topBarChannel ? (
-              <span className="truncate text-foreground">
+              <span
+                className="truncate text-foreground"
+                data-testid="dev-mode-topbar-channel"
+              >
                 # {topBarChannel.name}
               </span>
+            ) : null}
+            {topBarChannel ? (
+              <DevChannelMembers channelId={topBarChannel.id} />
             ) : null}
           </span>
           <div
