@@ -3371,6 +3371,7 @@ fn handle_prompt_result(
                     | acp::AcpError::WriteTimeout(_)
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
+                    | acp::AcpError::PublicationFence(_)
             );
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
@@ -3783,7 +3784,7 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
-        let spawn_result = AcpClient::spawn(
+        let spawn_result = AcpClient::spawn_managed(
             &startup.command,
             &startup.args,
             &startup.extra_env,
@@ -3891,7 +3892,7 @@ async fn spawn_and_init(
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
+    let mut acp = AcpClient::spawn_managed(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);

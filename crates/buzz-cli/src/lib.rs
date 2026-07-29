@@ -173,6 +173,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Internal harness capability probe.
+    #[command(name = "__publication-fence-capability", hide = true)]
+    PublicationFenceCapability,
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -1769,6 +1772,14 @@ pub enum ModerationCmd {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
+    if matches!(&cli.command, Cmd::PublicationFenceCapability) {
+        println!(
+            "{}",
+            buzz_publication_fence::PUBLICATION_FENCE_CAPABILITY_RESPONSE
+        );
+        return Ok(());
+    }
+
     let relay_url = client::normalize_relay_url(&cli.relay);
 
     // Pack commands are local-only — no relay connection needed.
@@ -1826,7 +1837,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::PublicationFenceCapability => unreachable!("handled above"),
     }
 }
 
@@ -1834,6 +1845,18 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[tokio::test]
+    async fn publication_fence_capability_needs_no_identity_or_relay() {
+        assert_eq!(
+            run_from_args([
+                "buzz",
+                buzz_publication_fence::PUBLICATION_FENCE_CAPABILITY_ARG,
+            ])
+            .await,
+            0
+        );
+    }
 
     /// Smoke test: CLI definition is valid and parseable.
     #[test]
@@ -1894,6 +1917,7 @@ mod tests {
         let cmd = Cli::command();
         let mut actual: Vec<String> = cmd
             .get_subcommands()
+            .filter(|s| !s.is_hide_set())
             .map(|s| s.get_name().to_string())
             .filter(|n| n != "help")
             .collect();

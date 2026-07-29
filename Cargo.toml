@@ -2,6 +2,7 @@
 members = [
     "crates/buzz-relay",
     "crates/buzz-core",
+    "crates/buzz-publication-fence",
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",
     "crates/buzz-db",
@@ -88,6 +89,7 @@ anyhow    = "1"
 # Utilities
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
+fs2     = "0.4"
 
 # HTTP client (webhook delivery)
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
@@ -123,6 +125,7 @@ schemars = { version = "1", default-features = false }
 
 # Internal crates
 buzz-core = { path = "crates/buzz-core" }
+buzz-publication-fence = { path = "crates/buzz-publication-fence" }
 buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-auth = { path = "crates/buzz-auth" }
