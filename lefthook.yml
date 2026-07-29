@@ -61,6 +61,11 @@ pre-push:
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
       run: just desktop-test
+    desktop-tauri-clippy:
+      # Keep local lint parity with Desktop Core CI for every path that can
+      # affect the Tauri crate or its path dependencies.
+      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
+      run: just desktop-tauri-clippy
     desktop-tauri-test:
       # ci.yml:113 — Desktop Core triggers on `rust` OR `desktop-rust`;
       # desktop/src-tauri path-depends on crates/buzz-core, buzz-persona,
