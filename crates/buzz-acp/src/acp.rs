@@ -3276,7 +3276,10 @@ mod tests {
             .await
             .unwrap_or_else(|| panic!("child produced no output for {var}"))
             .expect("child stdout was not readable");
-        client.shutdown().await;
+        client
+            .shutdown()
+            .await
+            .expect("env probe shutdown must be verified");
         std::fs::remove_dir_all(&dir).expect("remove env probe dir");
         observed
     }
