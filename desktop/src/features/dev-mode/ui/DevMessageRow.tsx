@@ -1,5 +1,8 @@
 import type { AuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
-import { renderHighlightedContent } from "@/features/dev-mode/lib/highlightContent";
+import {
+  renderHighlightedContent,
+  type MentionStyle,
+} from "@/features/dev-mode/lib/highlightContent";
 import type { NameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
@@ -50,6 +53,16 @@ export function DevMessageRow({
     return null;
   }
 
+  // The pubkeys this message explicitly mentions (its p tags) let known
+  // `@Name` tokens render as pills in the mentioned author's color.
+  const mentionStyles: MentionStyle[] = [];
+  for (const tag of event.tags) {
+    if (tag[0] !== "p" || !tag[1]) continue;
+    const name = resolveName(tag[1]);
+    if (mentionStyles.some((mention) => mention.name === name)) continue;
+    mentionStyles.push({ name, color: resolveColor(tag[1]) });
+  }
+
   return (
     <div className="flex min-w-0 gap-2 py-0.5 text-sm leading-6">
       <span className="shrink-0 select-none text-muted-foreground/50">
@@ -70,7 +83,7 @@ export function DevMessageRow({
           event.pending && "text-muted-foreground",
         )}
       >
-        {renderHighlightedContent(event.content)}
+        {renderHighlightedContent(event.content, mentionStyles)}
       </span>
       {reactions && reactions.length > 0 ? (
         <ReactionChips reactions={reactions} />
