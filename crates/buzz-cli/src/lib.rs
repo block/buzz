@@ -348,7 +348,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  buzz messages send --channel <FORUM_UUID> --kind 45001 --content \"new forum thread\"\n  buzz messages send --channel <FORUM_UUID> --kind 45003 --reply-to <event-id> --content \"forum reply\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')

@@ -3636,15 +3636,6 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("--allow-non-member-mentions"));
         assert!(prompt.contains("never changes membership automatically"));
     }
-
-    #[test]
-    fn shared_base_prompt_distinguishes_forum_kinds_from_stream_messages() {
-        let prompt = include_str!("base_prompt.md");
-        assert!(prompt.contains("Forum channels are not stream channels."));
-        assert!(prompt.contains("kind `45001`"));
-        assert!(prompt.contains("kind `45003`"));
-        assert!(prompt.contains("stream default kind `9`"));
-    }
 }
 
 fn default_heartbeat_prompt() -> String {

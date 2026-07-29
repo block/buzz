@@ -30,15 +30,12 @@ fn init_nest_dir_prod_sets_buzz() {
 }
 
 #[test]
-fn nest_skill_contains_safe_mention_and_forum_workflows() {
+fn nest_skill_contains_safe_mention_workflow() {
     assert!(BUZZ_CLI_SKILL_MD.contains("--mention <hex-or-npub>"));
     assert!(BUZZ_CLI_SKILL_MD.contains("signed event's `mention_pubkeys`"));
     assert!(BUZZ_CLI_SKILL_MD.contains("no follow-up verification command is needed"));
     assert!(BUZZ_CLI_SKILL_MD.contains("--allow-non-member-mentions"));
     assert!(BUZZ_CLI_SKILL_MD.contains("never changes membership automatically"));
-    assert!(BUZZ_CLI_SKILL_MD.contains("forum root as kind `45001`"));
-    assert!(BUZZ_CLI_SKILL_MD.contains("forum reply as kind `45003`"));
-    assert!(BUZZ_CLI_SKILL_MD.contains("Never use stream kind `9`"));
 }
 
 #[test]

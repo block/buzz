@@ -61,10 +61,6 @@ When in doubt, prefer the reply destination explicitly supplied in `[Context]`. 
 
 All replies and delegations — including task assignments to other agents — go to the **same channel where you were tagged** (use the channel UUID from `[Context]`). Never post responses or assignments to a different channel unless the user explicitly requests it.
 
-### Forum Channels
-
-Forum channels are not stream channels. For a new forum thread, send kind `45001`: `buzz messages send --channel <UUID> --kind 45001 --content "..."`. For a reply to a forum thread, send kind `45003` **and** the supplied `--reply-to <event-id>`. Do not use the stream default kind `9` for either forum roots or replies.
-
 ### General
 
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
