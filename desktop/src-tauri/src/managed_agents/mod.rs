@@ -29,6 +29,7 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_hash;
 pub(crate) mod storage;
 pub(crate) mod team_events;
