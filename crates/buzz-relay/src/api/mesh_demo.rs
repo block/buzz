@@ -428,8 +428,13 @@ mod tests {
     #[tokio::test]
     #[ignore = "live-transport evidence smoke — run explicitly; default-suite coverage is the in-memory variant"]
     async fn demo_join_forwarded_arm_round_trips_echo_live_mesh() {
+        // Explicitly opt-in (`-- --ignored`), so a missing Redis must fail
+        // loudly: a silent no-op here reads as a green run and proves nothing.
         let Some(directory) = redis_directory_if_available().await else {
-            return;
+            panic!(
+                "live-mesh variant requires reachable Redis \
+                 (REDIS_URL, default redis://127.0.0.1:6379) — refusing to no-op"
+            );
         };
         let community_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
