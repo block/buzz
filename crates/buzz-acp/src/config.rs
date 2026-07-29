@@ -693,6 +693,11 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "grok" => Some(vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1538,6 +1543,18 @@ mod tests {
     fn normalizes_goose_args_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    }
+
+    #[test]
+    fn normalizes_grok_args_to_agent_always_approve_stdio() {
+        assert_eq!(
+            normalize_agent_args("grok", Vec::new()),
+            vec!["agent", "--always-approve", "stdio"]
+        );
+        assert_eq!(
+            normalize_agent_args("grok", vec!["".into()]),
+            vec!["agent", "--always-approve", "stdio"]
+        );
     }
 
     #[test]
