@@ -119,6 +119,33 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
+### Managed identity and team instructions
+
+Two trusted values are normally supplied by Buzz Desktop after it resolves the
+managed agent's owner and team. They are deliberately separate from the
+user-editable environment variables on an agent:
+
+| Variable | Supplied by | Description |
+|----------|-------------|-------------|
+| `BUZZ_AUTH_TAG` | Buzz Desktop or a trusted backend provider | JSON-encoded NIP-OA owner attestation. The harness uses it to resolve the owner and forwards it to the `buzz` CLI. It is delegated authority, not general deploy, database, or infrastructure access. |
+| `BUZZ_ACP_TEAM_INSTRUCTIONS` | Buzz Desktop or the service operator | Inline team-owned instruction text, layered after the system prompt and before agent memory. The value is the instruction text itself, not a filename. |
+
+Buzz Desktop strips user-supplied values for reserved identity keys such as
+`BUZZ_PRIVATE_KEY` and `BUZZ_AUTH_TAG`, then injects the values it owns when it
+starts the harness. Adding either key in the agent environment-variable editor
+does not override that boundary.
+
+For a remote or manually supervised harness, deliver `BUZZ_AUTH_TAG` only
+through the trusted provisioning channel. Do not mint it on the agent host from
+the owner's private key, put it on a process command line, commit it, or print it
+to logs. Store it with the same protections as the agent private key and replace
+the old value when rotating the authorization.
+
+`BUZZ_ACP_TEAM_INSTRUCTIONS` is not secret-bearing storage. Operators using a
+file as their source of truth must read that file and pass its contents to the
+harness; setting the variable to `/path/to/instructions.md` would inject that
+literal path into the prompt.
+
 ### Parallel Agents & Heartbeat
 
 | Flag | Env Var | Default | Description |
