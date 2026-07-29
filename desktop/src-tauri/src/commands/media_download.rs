@@ -49,9 +49,13 @@ fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
         return Err("download URL must match the relay origin".to_string());
     }
 
-    // Path must be /media/{filename}.
+    // Path must contain a /media/{filename} segment. The segment may be preceded
+    // by a base path when the relay is served under one (BUZZ_BASE_PATH), e.g.
+    // /relay/media/<hash>.png. Requiring the full segment still rejects
+    // near-misses such as /media-evil/<hash>, and the origin check above already
+    // pins the request to the relay.
     let path = parsed.path();
-    if !path.starts_with("/media/") {
+    if !path.contains("/media/") {
         return Err("download URL must be a /media/ path".to_string());
     }
 
@@ -786,6 +790,34 @@ mod tests {
             validate_download_url("https://relay.example.com/media/abc123.png", RELAY_BASE,)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn test_validate_download_url_accepts_base_path_prefixed_media() {
+        // A relay served under BUZZ_BASE_PATH hosts media at <prefix>/media/<hash>.
+        assert!(validate_download_url(
+            "https://relay.example.com/relay/media/abc123.png",
+            RELAY_BASE,
+        )
+        .is_ok());
+        assert!(validate_download_url(
+            "https://relay.example.com/buzz/relay/media/abc123.png",
+            RELAY_BASE,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_validate_download_url_rejects_media_lookalike_segment() {
+        // The full /media/ segment is still required, prefix or not.
+        let result =
+            validate_download_url("https://relay.example.com/media-evil/abc123.png", RELAY_BASE);
+        assert!(result.is_err());
+        let prefixed = validate_download_url(
+            "https://relay.example.com/relay/media-evil/abc123.png",
+            RELAY_BASE,
+        );
+        assert!(prefixed.is_err());
     }
 
     #[test]

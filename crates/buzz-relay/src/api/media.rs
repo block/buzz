@@ -402,6 +402,7 @@ pub async fn upload_blob(
     rewrite_descriptor_urls_for_tenant(
         &mut descriptor,
         &state.config.relay_url,
+        &state.config.base_path,
         auth.tenant.host(),
     );
 
@@ -444,7 +445,17 @@ pub async fn upload_blob(
     Ok(Json(descriptor))
 }
 
-pub(crate) fn media_base_url_for_tenant(config_relay_url: &str, tenant_host: &str) -> String {
+/// Build the tenant-scoped media base URL that upload descriptors advertise.
+///
+/// `base_path` is the deployment's `BUZZ_BASE_PATH` prefix (empty when the relay
+/// serves at the root). The prefix must be present: this URL is what clients and
+/// agents fetch, and it is embedded in published events, so a missing prefix
+/// bakes an unreachable URL into message history rather than failing loudly.
+pub(crate) fn media_base_url_for_tenant(
+    config_relay_url: &str,
+    base_path: &str,
+    tenant_host: &str,
+) -> String {
     let scheme = if config_relay_url.trim_start().starts_with("wss://")
         || config_relay_url.trim_start().starts_with("https://")
     {
@@ -452,15 +463,16 @@ pub(crate) fn media_base_url_for_tenant(config_relay_url: &str, tenant_host: &st
     } else {
         "http"
     };
-    format!("{scheme}://{tenant_host}/media")
+    format!("{scheme}://{tenant_host}{base_path}/media")
 }
 
 fn rewrite_descriptor_urls_for_tenant(
     descriptor: &mut BlobDescriptor,
     config_relay_url: &str,
+    base_path: &str,
     tenant_host: &str,
 ) {
-    let base = media_base_url_for_tenant(config_relay_url, tenant_host);
+    let base = media_base_url_for_tenant(config_relay_url, base_path, tenant_host);
     let ext = descriptor
         .url
         .rsplit_once('.')
@@ -1271,12 +1283,66 @@ mod tests {
     #[test]
     fn media_base_url_for_tenant_uses_tenant_host_and_http_scheme() {
         assert_eq!(
-            media_base_url_for_tenant("wss://config.example", "tenant-b.example"),
+            media_base_url_for_tenant("wss://config.example", "", "tenant-b.example"),
             "https://tenant-b.example/media"
         );
         assert_eq!(
-            media_base_url_for_tenant("ws://config.example", "localhost:3100"),
+            media_base_url_for_tenant("ws://config.example", "", "localhost:3100"),
             "http://localhost:3100/media"
+        );
+    }
+
+    /// A relay served under BUZZ_BASE_PATH must advertise media under the prefix.
+    /// This URL is embedded in published events and fetched by clients and agents,
+    /// so dropping the prefix bakes an unreachable URL into message history — and
+    /// behind a path-routing gateway it resolves to the gateway, not the relay.
+    #[test]
+    fn media_base_url_for_tenant_includes_the_base_path_prefix() {
+        assert_eq!(
+            media_base_url_for_tenant("wss://config.example", "/relay", "tenant-b.example"),
+            "https://tenant-b.example/relay/media"
+        );
+        assert_eq!(
+            media_base_url_for_tenant("wss://config.example", "/buzz/relay", "tenant-b.example"),
+            "https://tenant-b.example/buzz/relay/media"
+        );
+        assert_eq!(
+            media_base_url_for_tenant("ws://config.example", "/relay", "localhost:3100"),
+            "http://localhost:3100/relay/media"
+        );
+    }
+
+    #[test]
+    fn rewrite_descriptor_urls_for_tenant_applies_the_base_path_prefix() {
+        let hash = "b".repeat(64);
+        let mut descriptor = BlobDescriptor {
+            url: format!("https://primary.example/media/{hash}.png"),
+            sha256: hash.clone(),
+            size: 7,
+            mime_type: "image/png".to_string(),
+            uploaded: 1700000000,
+            dim: None,
+            blurhash: None,
+            thumb: Some(format!("https://primary.example/media/{hash}.thumb.jpg")),
+            duration: None,
+        };
+
+        rewrite_descriptor_urls_for_tenant(
+            &mut descriptor,
+            "wss://primary.example",
+            "/relay",
+            "tenant-b.example",
+        );
+
+        assert_eq!(
+            descriptor.url,
+            format!("https://tenant-b.example/relay/media/{hash}.png")
+        );
+        assert_eq!(
+            descriptor.thumb,
+            Some(format!(
+                "https://tenant-b.example/relay/media/{hash}.thumb.jpg"
+            ))
         );
     }
 
@@ -1298,6 +1364,7 @@ mod tests {
         rewrite_descriptor_urls_for_tenant(
             &mut descriptor,
             "wss://primary.example",
+            "",
             "tenant-b.example",
         );
 
