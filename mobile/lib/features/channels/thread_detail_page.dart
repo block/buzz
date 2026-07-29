@@ -486,6 +486,10 @@ class _ThreadMessage extends ConsumerWidget {
         currentPubkey?.toLowerCase() == pk ||
         (profile?.ownerPubkey != null &&
             profile?.ownerPubkey == currentPubkey?.toLowerCase());
+    final hasImageGallery = hasTrailingImageGallery(
+      message.content,
+      message.tags,
+    );
 
     final userCache = ref.watch(userCacheProvider);
     final knownAgentPubkeys = ref.watch(mentionAgentPubkeysProvider(channelId));
@@ -515,10 +519,10 @@ class _ThreadMessage extends ConsumerWidget {
         child: Material(
           color: Colors.transparent,
           borderRadius: BorderRadius.circular(Radii.md),
-          // The media carousel intentionally continues through the list's
-          // trailing gutter. InkWell still clips its ink to [borderRadius],
-          // while leaving overflowing message content visible.
-          clipBehavior: Clip.none,
+          // Only galleries paint through the trailing gutter. Keep normal rows
+          // clipped so recycled list children cannot leave stale text over the
+          // following message or thread summary.
+          clipBehavior: hasImageGallery ? Clip.none : Clip.antiAlias,
           child: InkWell(
             key: ValueKey('thread-message-row-${message.id}'),
             borderRadius: BorderRadius.circular(Radii.md),

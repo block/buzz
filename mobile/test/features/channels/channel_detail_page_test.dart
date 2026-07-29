@@ -696,6 +696,16 @@ void main() {
       expect(find.text('Alice'), findsOneWidget);
       expect(find.text('alice@example.com'), findsOneWidget);
       expect(find.text('Bob'), findsOneWidget);
+      final textMessageMaterial = find
+          .ancestor(
+            of: find.byKey(const ValueKey('message-row-msg1')),
+            matching: find.byType(Material),
+          )
+          .first;
+      expect(
+        tester.widget<Material>(textMessageMaterial).clipBehavior,
+        Clip.antiAlias,
+      );
       final messageAvatars = find.byType(CircleAvatar);
       expect(messageAvatars, findsNWidgets(2));
       for (final avatar in messageAvatars.evaluate()) {
