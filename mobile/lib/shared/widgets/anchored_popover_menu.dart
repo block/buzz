@@ -10,7 +10,13 @@ const _popoverExitDuration = Duration(milliseconds: 110);
 const _popoverStartScale = 0.96;
 
 /// The horizontal edge a popover aligns to on its triggering control.
-enum AnchoredPopoverAlignment { start, end }
+enum AnchoredPopoverAlignment {
+  /// Aligns the popover's leading edge with the trigger's leading edge.
+  start,
+
+  /// Aligns the popover's trailing edge with the trigger's trailing edge.
+  end,
+}
 
 /// Shows an anchored, cross-platform popup menu with the Activity controls'
 /// sizing, motion, and safe-area placement.

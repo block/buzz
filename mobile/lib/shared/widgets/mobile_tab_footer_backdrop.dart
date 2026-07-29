@@ -27,6 +27,9 @@ class MobileTabFooterBackdrop extends StatelessWidget {
   /// Surface-color alpha values paired with [stops].
   final List<double> opacities;
 
+  /// Creates a footer backdrop with the required [height].
+  ///
+  /// Override [stops] and [opacities] together to customize the gradient.
   const MobileTabFooterBackdrop({
     super.key,
     required this.height,
