@@ -1338,9 +1338,9 @@ impl EventQueue {
         let Some(pos) = q.iter().position(|qe| qe.id == occurrence_id.0) else {
             return false;
         };
-        let qe = q
-            .remove(pos)
-            .expect("position came from iter so remove must succeed");
+        let Some(qe) = q.remove(pos) else {
+            return false;
+        };
         if q.is_empty() {
             self.queues.remove(&channel_id);
         }
@@ -5436,6 +5436,20 @@ mod tests {
         );
         assert_eq!(pending_count(&q), 0);
         assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn native_steer_withhold_missing_occurrence_is_a_lossless_no_op() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let queued = q.push(make_queued(ch, "hello")).expect("queued occurrence");
+
+        assert!(!q.mark_native_steer_pending(ch, EnqueueOccurrenceId(Uuid::new_v4())));
+
+        let batch = q.flush_next().expect("original occurrence remains queued");
+        assert_eq!(batch.occurrence_ids.events, vec![queued.0]);
+        assert_eq!(batch.events[0].event.content, "hello");
+        assert!(!q.withheld_native_steer.contains_key(&ch));
     }
 
     #[test]

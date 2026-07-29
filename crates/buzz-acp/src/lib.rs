@@ -1644,6 +1644,14 @@ impl SpawnInitFailure {
 
 type SpawnInitResult = std::result::Result<(AcpClient, u32, String), SpawnInitFailure>;
 
+fn missing_replacement_ownership(
+    guard: &mut RespawnGuard,
+    phase: &'static str,
+) -> SpawnInitFailure {
+    guard.phase = RespawnPhase::OldOwnerUnverified;
+    SpawnInitFailure::CleanupUnverified(anyhow::anyhow!("replacement ownership missing {phase}"))
+}
+
 struct RespawnResult {
     index: usize,
     /// `Some`: initialized replacement; `None`: old adapter was fully shut
@@ -2071,6 +2079,23 @@ mod respawn_guard_tests {
     }
 
     #[test]
+    fn missing_replacement_ownership_is_typed_cleanup_uncertainty() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut guard = RespawnGuard::new(1, tx, None, false, false);
+        guard.mark_owner_cleanup_verified();
+
+        let failure = missing_replacement_ownership(&mut guard, "before adapter initialization");
+
+        assert!(matches!(guard.phase, RespawnPhase::OldOwnerUnverified));
+        assert!(matches!(
+            failure,
+            SpawnInitFailure::CleanupUnverified(error)
+                if error.to_string()
+                    == "replacement ownership missing before adapter initialization"
+        ));
+    }
+
+    #[test]
     fn failed_idle_switch_recycle_emits_channel_scoped_terminal_failure() {
         let (tx, mut rx) = mpsc::channel(1);
         let observer = observer::ObserverHandle::in_process();
@@ -2193,6 +2218,20 @@ mod pool_startup_tests {
             matches!(startup, InitialPoolStartup::CleanupQuarantine(_)),
             "eager cleanup uncertainty must keep the harness alive without a ready pool"
         );
+    }
+
+    #[test]
+    fn missing_eager_startup_result_returns_typed_invariant_failure() {
+        let error = match resolve_initial_pool_startup(false, None) {
+            Ok(_) => panic!("missing eager startup evidence must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            PoolStartupFailure::Invariant(message)
+                if message == "eager pool startup did not provide an initialization result"
+        ));
     }
 }
 
@@ -3955,6 +3994,10 @@ async fn tokio_main() -> Result<()> {
                 shutdown_verification.record(ShutdownOwner::Wake, verified);
             }
             Err(PoolStartupFailure::CleanupUnverified(_)) => {
+                shutdown_verification.record(ShutdownOwner::Wake, false);
+            }
+            Err(PoolStartupFailure::Invariant(error)) => {
+                tracing::error!(error, "wake pool startup invariant failed");
                 shutdown_verification.record(ShutdownOwner::Wake, false);
             }
             Err(PoolStartupFailure::Retryable(_)) => {}
@@ -6093,6 +6136,8 @@ enum PoolStartupFailure {
     Retryable(String),
     #[error("{0}")]
     CleanupUnverified(String),
+    #[error("{0}")]
+    Invariant(String),
 }
 
 enum InitialPoolStartup {
@@ -6110,7 +6155,12 @@ fn resolve_initial_pool_startup(
         return Ok(InitialPoolStartup::Dormant);
     }
 
-    match eager_result.expect("eager startup must provide an initialization result") {
+    let eager_result = eager_result.ok_or_else(|| {
+        PoolStartupFailure::Invariant(
+            "eager pool startup did not provide an initialization result".to_string(),
+        )
+    })?;
+    match eager_result {
         Ok(pool) => Ok(InitialPoolStartup::Ready(pool)),
         Err(PoolStartupFailure::CleanupUnverified(error)) => {
             Ok(InitialPoolStartup::CleanupQuarantine(error))
@@ -6319,18 +6369,27 @@ async fn spawn_and_init(
     guard.mark_replacement_initializing(Arc::clone(&initializing));
     let mut slot = initializing.lock().await;
 
-    let initialize_result = slot
-        .as_mut()
-        .expect("tracked replacement must own its client")
-        .initialize()
-        .await;
+    let initialize_result = match slot.as_mut() {
+        Some(acp) => acp.initialize().await,
+        None => {
+            drop(slot);
+            return Err(missing_replacement_ownership(
+                guard,
+                "before adapter initialization",
+            ));
+        }
+    };
     match initialize_result {
         Ok(init_result) => {
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-            let acp = slot
-                .take()
-                .expect("initialized replacement must remain tracked");
+            let Some(acp) = slot.take() else {
+                drop(slot);
+                return Err(missing_replacement_ownership(
+                    guard,
+                    "after successful adapter initialization",
+                ));
+            };
             drop(slot);
             guard.mark_owner_cleanup_verified();
             acp.observe(
@@ -6347,11 +6406,16 @@ async fn spawn_and_init(
             // Explicitly shut down the spawned child to prevent zombie/leak.
             // Drop is best-effort; replacement must know whether bounded
             // shutdown was actually verified.
-            let cleanup = slot
-                .as_mut()
-                .expect("failed replacement must remain tracked")
-                .shutdown()
-                .await;
+            let cleanup = match slot.as_mut() {
+                Some(acp) => acp.shutdown().await,
+                None => {
+                    drop(slot);
+                    return Err(missing_replacement_ownership(
+                        guard,
+                        "after failed adapter initialization",
+                    ));
+                }
+            };
             let _ = slot.take();
             drop(slot);
             match cleanup {

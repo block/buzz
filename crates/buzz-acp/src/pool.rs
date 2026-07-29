@@ -829,12 +829,14 @@ impl AgentPool {
         self.agents
             .iter_mut()
             .filter_map(|slot| {
-                slot.as_ref()
+                if slot
+                    .as_ref()
                     .is_some_and(|agent| agent.state.sessions.contains_key(&channel_id))
-                    .then(|| {
-                        slot.take()
-                            .expect("matching idle slot must contain an agent")
-                    })
+                {
+                    slot.take()
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -867,9 +869,9 @@ impl AgentPool {
 
         // Pre-cancel guard against the cached catalog. None = catalog not yet
         // populated (no session ever created); defer validation to apply time.
-        let agent = self.agents[position]
-            .as_ref()
-            .expect("matching idle slot must contain an agent");
+        let Some(agent) = self.agents.get(position).and_then(Option::as_ref) else {
+            return IdleSwitchResult::NoIdleAgent;
+        };
         if let Some(caps) = agent.model_capabilities.as_ref() {
             if !model_in_catalog(
                 &caps.config_options_raw,
@@ -880,9 +882,9 @@ impl AgentPool {
             }
         }
 
-        let mut agent = self.agents[position]
-            .take()
-            .expect("matching idle slot must contain an agent");
+        let Some(mut agent) = self.agents.get_mut(position).and_then(Option::take) else {
+            return IdleSwitchResult::NoIdleAgent;
+        };
         begin_model_switch(&mut agent, &ModelSwitchRequest::new(model_id, request_id));
         IdleSwitchResult::Recycle(Box::new(agent))
     }
@@ -5155,8 +5157,8 @@ mod tests {
     #[tokio::test]
     async fn taking_idle_channel_owner_preserves_session_until_process_recycle() {
         let channel_id = Uuid::new_v4();
-        let agent = inert_owned_agent_with_session(0, channel_id).await;
-        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let agent = inert_owned_agent_with_session(1, channel_id).await;
+        let mut pool = AgentPool::from_slots(vec![None, Some(agent), None]);
 
         let mut owners = pool.take_idle_agents_with_session(channel_id);
 
@@ -5168,7 +5170,7 @@ mod tests {
                 .sessions
                 .get(&channel_id)
                 .map(String::as_str),
-            Some("session-0"),
+            Some("session-1"),
             "claiming for recycle must not locally forget remote ownership"
         );
         owners[0]
@@ -5181,8 +5183,8 @@ mod tests {
     #[tokio::test]
     async fn idle_model_switch_claim_preserves_session_and_model_intent_for_recycle() {
         let channel_id = Uuid::new_v4();
-        let agent = inert_owned_agent_with_session(0, channel_id).await;
-        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        let agent = inert_owned_agent_with_session(1, channel_id).await;
+        let mut pool = AgentPool::from_slots(vec![None, Some(agent), None]);
 
         let mut claimed = match pool.switch_idle_agent_model(
             channel_id,
@@ -5197,7 +5199,7 @@ mod tests {
         assert_eq!(pool.live_count(), 0);
         assert_eq!(
             claimed.state.sessions.get(&channel_id).map(String::as_str),
-            Some("session-0")
+            Some("session-1")
         );
         assert_eq!(claimed.desired_model.as_deref(), Some("runtime-model"));
         assert!(claimed.model_overridden);
@@ -5210,6 +5212,21 @@ mod tests {
             .shutdown()
             .await
             .expect("claimed agent must shut down cleanly");
+    }
+
+    #[test]
+    fn idle_model_switch_without_an_owned_slot_is_a_typed_no_op() {
+        let mut pool = AgentPool::from_slots(vec![None]);
+
+        assert!(matches!(
+            pool.switch_idle_agent_model(
+                Uuid::new_v4(),
+                "runtime-model",
+                TEST_MODEL_SWITCH_REQUEST_ID,
+            ),
+            IdleSwitchResult::NoIdleAgent
+        ));
+        assert_eq!(pool.live_count(), 0);
     }
 
     // ── requeue_cancelled_batch ────────────────────────────────────────────
