@@ -5,6 +5,7 @@ import {
   CircleDot,
   FileText,
   Hash,
+  LoaderCircle,
   Lock,
   X,
 } from "lucide-react";
@@ -17,7 +18,6 @@ import {
 
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
 import {
@@ -27,7 +27,6 @@ import {
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { useNow } from "@/shared/lib/useNow";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -120,7 +119,7 @@ export function formatWorkingTooltip(
   return `${leadName} and ${formatAgentCount(remainingAgentCount)} working`;
 }
 
-function ChannelWorkingBadge({
+export function ChannelWorkingIndicator({
   channelName,
   isActive,
   summary,
@@ -129,24 +128,25 @@ function ChannelWorkingBadge({
   isActive: boolean;
   summary: ActiveChannelTurnSummary;
 }) {
-  const now = useNow(1000);
-  const elapsed = formatElapsed(now - summary.anchorAt);
-  const label =
-    summary.agentCount > 1 ? `${elapsed} (${summary.agentCount})` : elapsed;
   const title = formatWorkingTooltip(summary);
 
   return (
     <span
+      aria-label={title}
       className={cn(
-        "hidden max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden sm:inline-flex",
+        "hidden size-5 shrink-0 items-center justify-center group-data-[collapsible=icon]:hidden sm:inline-flex",
         isActive
-          ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
-          : "bg-primary/10 text-primary",
+          ? "text-sidebar-active-foreground/65"
+          : "text-sidebar-foreground/45",
       )}
       data-testid={`channel-working-${channelName}`}
+      role="status"
       title={title}
     >
-      {label}
+      <LoaderCircle
+        aria-hidden="true"
+        className="size-3.5 motion-safe:animate-spin"
+      />
     </span>
   );
 }
@@ -305,7 +305,7 @@ export function ChannelMenuButton({
         />
       ) : null}
       {activeWorking ? (
-        <ChannelWorkingBadge
+        <ChannelWorkingIndicator
           channelName={channel.name}
           isActive={isActive}
           summary={activeWorking}
