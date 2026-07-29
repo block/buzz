@@ -60,10 +60,13 @@ test("Battle Rhythm persists a manual weekly routine and honours an exclusion", 
 
   const dialog = page.getByRole("dialog", { name: "New manual event" });
   await dialog.getByLabel("Event").fill("Commanders Update Brief");
-  await dialog.getByLabel("Start", { exact: true }).fill("2026-07-29T08:00");
-  await dialog.getByLabel("End", { exact: true }).fill("2026-07-29T09:00");
+  await dialog.getByLabel("Start date").fill("2026-07-29");
+  await dialog.getByLabel("Start time (24 hour)").fill("08:00");
+  await dialog.getByLabel("End date").fill("2026-07-29");
+  await dialog.getByLabel("End time (24 hour)").fill("09:00");
   await dialog.getByLabel("Recurrence").selectOption("weekly");
-  await dialog.getByLabel("Until").fill("2026-08-12T08:00");
+  await dialog.getByLabel("Until date").fill("2026-08-12");
+  await dialog.getByLabel("Until time (24 hour)").fill("08:00");
   await dialog
     .getByLabel("Excluded occurrence starts")
     .fill("2026-08-05T08:00:00+10:00");
@@ -111,6 +114,66 @@ test("Battle Rhythm explains a rejected manual-event save and keeps the draft op
   await expect(
     dialog.getByText("mock project event rejection", { exact: true }),
   ).toBeVisible();
+});
+
+test("manual events use ship-time controls and span every selected calendar day", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-battle-rhythm-view").click();
+  const screen = page.getByTestId("battle-rhythm-screen");
+  await screen.getByRole("button", { name: "New Event" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "New manual event" });
+  const title = dialog.getByLabel("Event");
+  const remarks = dialog.getByLabel("Remarks");
+  await expect(title).toHaveAttribute("spellcheck", "true");
+  await expect(remarks).toHaveAttribute("spellcheck", "true");
+  await expect(dialog.getByLabel("Start time (24 hour)")).toHaveAttribute(
+    "placeholder",
+    "HH:mm",
+  );
+  await expect(dialog.getByLabel("End time (24 hour)")).toHaveAttribute(
+    "placeholder",
+    "HH:mm",
+  );
+
+  await title.fill("SMP");
+  await dialog.getByLabel("Start date").fill("2026-07-27");
+  const startTime = dialog.getByLabel("Start time (24 hour)");
+  await startTime.clear();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText("Something went wrong!")).toHaveCount(0);
+  await startTime.pressSequentially("08:00");
+  await startTime.blur();
+  await expect(dialog.getByLabel("End date")).toHaveValue("2026-07-27");
+  await expect(dialog.getByLabel("End time (24 hour)")).toHaveValue("09:00");
+  await dialog.getByLabel("End date").fill("2026-08-02");
+  await dialog.getByLabel("All day").check();
+
+  await dialog.getByLabel("Recurrence").selectOption("weekly");
+  const untilDate = dialog.getByLabel("Until date");
+  await expect(untilDate).toBeVisible();
+  const [dialogBox, untilBox] = await Promise.all([
+    dialog.boundingBox(),
+    untilDate.boundingBox(),
+  ]);
+  expect(dialogBox).not.toBeNull();
+  expect(untilBox).not.toBeNull();
+  expect((untilBox?.x ?? 0) + (untilBox?.width ?? 0)).toBeLessThanOrEqual(
+    (dialogBox?.x ?? 0) + (dialogBox?.width ?? 0) - 16,
+  );
+  await dialog.getByLabel("Recurrence").selectOption("none");
+  await dialog.getByRole("button", { name: "Save event" }).click();
+
+  await expect(screen.getByRole("button", { name: "All day SMP" })).toHaveCount(
+    7,
+  );
+  await screen.getByLabel("Calendar view").selectOption("Month");
+  await expect(screen.getByText("SMP", { exact: true })).toHaveCount(7);
+  await screen.getByLabel("Calendar view").selectOption("Day");
+  await expect(screen.getByText("SMP", { exact: true })).toBeVisible();
 });
 
 test("Battle Rhythm opens read-only plan milestones without duplicating them", async ({
@@ -168,8 +231,10 @@ test("Planning Review proposes but does not auto-create a missing prerequisite",
   await screen.getByRole("button", { name: "New Event" }).click();
   let editor = page.getByRole("dialog", { name: "New manual event" });
   await editor.getByLabel("Event").fill("Sail Manila");
-  await editor.getByLabel("Start", { exact: true }).fill("2026-08-03T08:00");
-  await editor.getByLabel("End", { exact: true }).fill("2026-08-03T10:00");
+  await editor.getByLabel("Start date").fill("2026-08-03");
+  await editor.getByLabel("Start time (24 hour)").fill("08:00");
+  await editor.getByLabel("End date").fill("2026-08-03");
+  await editor.getByLabel("End time (24 hour)").fill("10:00");
   await editor.getByRole("button", { name: "Save event" }).click();
 
   await screen.getByRole("button", { name: "Planning Review" }).click();
@@ -184,9 +249,8 @@ test("Planning Review proposes but does not auto-create a missing prerequisite",
   await expect(editor.getByLabel("Event")).toHaveValue(
     "Securing for sea rounds",
   );
-  await expect(editor.getByLabel("Start", { exact: true })).toHaveValue(
-    "2026-07-31T00:00",
-  );
+  await expect(editor.getByLabel("Start date")).toHaveValue("2026-07-31");
+  await expect(editor.getByLabel("Start time (24 hour)")).toHaveValue("00:00");
   await editor.getByRole("button", { name: "Save event" }).click();
 
   await screen.getByRole("button", { name: "Planning Review" }).click();
@@ -251,8 +315,10 @@ test("Battle Rhythm adjusts an imported event without rewriting its source revis
     dialog.getByText("The imported source remains unchanged"),
   ).toBeVisible();
   await dialog.getByLabel("Event").fill("Navigation brief – delayed");
-  await dialog.getByLabel("Start", { exact: true }).fill("2026-07-29T09:00");
-  await dialog.getByLabel("End", { exact: true }).fill("2026-07-29T09:30");
+  await dialog.getByLabel("Start date").fill("2026-07-29");
+  await dialog.getByLabel("Start time (24 hour)").fill("09:00");
+  await dialog.getByLabel("End date").fill("2026-07-29");
+  await dialog.getByLabel("End time (24 hour)").fill("09:30");
   await dialog.getByRole("button", { name: "Save event" }).click();
 
   await expect(screen.getByText("Navigation brief – delayed")).toBeVisible();
@@ -295,8 +361,10 @@ test("Battle Rhythm revises and rolls back one source without touching manual ev
   await screen.getByRole("button", { name: "New Event" }).click();
   let dialog = page.getByRole("dialog", { name: "New manual event" });
   await dialog.getByLabel("Event").fill("CO personal planning");
-  await dialog.getByLabel("Start", { exact: true }).fill("2026-07-29T07:00");
-  await dialog.getByLabel("End", { exact: true }).fill("2026-07-29T07:30");
+  await dialog.getByLabel("Start date").fill("2026-07-29");
+  await dialog.getByLabel("Start time (24 hour)").fill("07:00");
+  await dialog.getByLabel("End date").fill("2026-07-29");
+  await dialog.getByLabel("End time (24 hour)").fill("07:30");
   await dialog.getByRole("button", { name: "Save event" }).click();
 
   await screen.getByRole("button", { name: "Import Document" }).click();

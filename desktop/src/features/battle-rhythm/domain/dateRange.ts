@@ -40,7 +40,7 @@ function localMidnight(day: string, timeZone: string): string {
   return `${day}T00:00:00${offsetFor(guessed, timeZone)}`;
 }
 
-function addDays(day: string, amount: number): string {
+export function addDays(day: string, amount: number): string {
   const [year, month, date] = day.split("-").map(Number);
   const next = new Date(Date.UTC(year, month - 1, date + amount));
   return next.toISOString().slice(0, 10);
@@ -57,6 +57,13 @@ export function getWeekRange(day: string, timeZone: string): DateRange {
   return {
     start: localMidnight(startDay, timeZone),
     end: localMidnight(endDay, timeZone),
+  };
+}
+
+export function getDayRange(day: string, timeZone: string): DateRange {
+  return {
+    start: localMidnight(day, timeZone),
+    end: localMidnight(addDays(day, 1), timeZone),
   };
 }
 
@@ -104,4 +111,13 @@ export function overlapsRange(
     Date.parse(start) < Date.parse(range.end) &&
     Date.parse(end) > Date.parse(range.start)
   );
+}
+
+export function overlapsCalendarDay(
+  start: string,
+  end: string,
+  day: string,
+  timeZone: string,
+): boolean {
+  return overlapsRange(start, end, getDayRange(day, timeZone));
 }

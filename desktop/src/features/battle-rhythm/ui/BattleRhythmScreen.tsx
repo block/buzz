@@ -16,7 +16,11 @@ import {
   calendarHeading,
   type CalendarView,
 } from "../domain/calendarPresentation";
-import { dayInTimeZone, getYearRange } from "../domain/dateRange";
+import {
+  dayInTimeZone,
+  getYearRange,
+  overlapsCalendarDay,
+} from "../domain/dateRange";
 import {
   evaluatePlanningChecks,
   type PlanningFinding,
@@ -113,7 +117,9 @@ export function BattleRhythmScreen() {
     (milestone) => milestone.date === day,
   );
   const visibleEvents = events.filter(
-    (event) => event.start.slice(0, 10) === day || view !== "Day",
+    (event) =>
+      view !== "Day" ||
+      overlapsCalendarDay(event.start, event.end, day, effectiveTimeZone),
   );
   const publishToApple = React.useCallback(async () => {
     setAppleBusy(true);

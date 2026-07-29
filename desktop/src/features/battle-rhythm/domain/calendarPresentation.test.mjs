@@ -18,6 +18,10 @@ test("formats all four calendar horizons and 24-hour Ship Time", () => {
     "27 July – 2 August 2026",
   );
   assert.equal(
+    calendarHeading("Week", "2027-02-28", "Australia/Sydney"),
+    "22–28 February 2027",
+  );
+  assert.equal(
     calendarHeading("Month", "2026-07-29", "Australia/Sydney"),
     "July 2026",
   );

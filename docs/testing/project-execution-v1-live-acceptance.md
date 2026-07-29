@@ -71,9 +71,9 @@ Command Adviser now provides:
   readiness endpoint returned `{"status":"ready"}` and relay `/health`
   returned `ok`.
 
-The installed app has intentionally not been opened after the upgrade. This
-leaves macOS Keychain and Apple data permissions at the expected first-launch
-gate for the user rather than dismissing or pre-empting them.
+At the initial project-execution checkpoint, the installed app was
+intentionally left unopened so the user could pass the expected macOS
+permission gates. The correction below records the subsequent live exercise.
 
 ## Accepted V1 refinements
 
@@ -88,7 +88,48 @@ The following items are not required for the first usable version:
 The scheduling rules, stable execution claims, visibility/wake catch-up,
 artefact storage decision, and native execution paths are covered by unit,
 native, and end-to-end tests. These refinements should only be built after
-user testing shows a practical need.
+live use demonstrates that they are needed.
+
+## First user-test correction — 29 July 2026
+
+The first live user test identified and corrected the following Battle Rhythm
+issues:
+
+- event date and time controls now use Ship Time with explicit `HH:mm`
+  24-hour fields;
+- a new event defaults to one hour in the future, and changing its start keeps
+  the same duration while ensuring the end remains later;
+- clearing or partially typing a time no longer reaches the React error
+  boundary;
+- title, location, owner, and remarks fields enable Australian English
+  spellchecking and autocorrection;
+- recurrence controls only appear when recurrence is enabled, and the Until
+  date and time fit within the editor;
+- multi-day events use overlap semantics in Day, Week, Month, and Year views;
+- an all-day range selected in the editor includes every selected calendar day;
+  and
+- range headings include the complete day, month, and year.
+
+The installed application was exercised against the user's real persisted SMP
+event. It appeared on all seven days of both 15–21 and 22–28 February 2027.
+The final installed editor opened at the current Australia/Sydney time with an
+end one hour later; changing `21:57` to `08:00` automatically changed the end
+to `09:00` without an error. The previously hidden project-execution functions
+are now advertised on the empty Plans landing page as Board and Gantt
+scheduling, Operational playbooks, and HOD Sync Packs and AI outputs.
+
+Verification after the correction:
+
+- focused Battle Rhythm, screenshot, and Plans Playwright suites: 16 passed;
+- full repository gate (`just ci`): passed;
+- signed application executable SHA-256:
+  `aefcab1f1bf1dbdc3c11069d3460fe09dceadd9a46dcf0d95d268bc7a28e8a6d`;
+- DMG SHA-256:
+  `69066078a8701d41ce984bcc45488b9f4dbaad875d3169597dcf8e1f413ed0e5`;
+- recoverable pre-correction application:
+  `/Applications/Command Adviser.before-partial-time-fix-20260729-2153.app`;
+- installed signature, entitlements, bundle identity, executable hash, live
+  launch, and relay health: passed.
 
 ## First-launch user test
 

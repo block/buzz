@@ -115,6 +115,22 @@ async function addTask(
   await expect(screen.getByText(input.title, { exact: true })).toBeVisible();
 }
 
+test("Plans makes the new execution tools visible before the first plan exists", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-plans-view").click();
+
+  const list = page.getByTestId("plans-screen");
+  await expect(list.getByText("Board and Gantt scheduling")).toBeVisible();
+  await expect(list.getByText("Operational playbooks")).toBeVisible();
+  await expect(list.getByText("HOD Sync Packs and AI outputs")).toBeVisible();
+  await expect(
+    list.getByRole("button", { name: "Create first plan" }),
+  ).toBeVisible();
+});
+
 test("Plans persists a deployment network, critical path, and mission constraint", async ({
   page,
 }) => {

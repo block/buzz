@@ -1,6 +1,6 @@
 import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calendarProjection";
 import type { BattleRhythmEvent } from "../domain/contracts";
-import { getMonthCells } from "../domain/dateRange";
+import { getMonthCells, overlapsCalendarDay } from "../domain/dateRange";
 export function MonthCalendar({
   day,
   events,
@@ -63,7 +63,9 @@ export function MonthCalendar({
                   </button>
                 ))}
               {events
-                .filter((event) => event.start.slice(0, 10) === cell)
+                .filter((event) =>
+                  overlapsCalendarDay(event.start, event.end, cell, timeZone),
+                )
                 .map((event) => (
                   <button
                     className="block w-full truncate rounded bg-primary/10 px-1 text-left text-2xs text-primary"

@@ -1,7 +1,11 @@
 import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calendarProjection";
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { formatShipTime, weekDayHeading } from "../domain/calendarPresentation";
-import { getWeekRange, overlapsRange } from "../domain/dateRange";
+import {
+  getWeekRange,
+  overlapsCalendarDay,
+  overlapsRange,
+} from "../domain/dateRange";
 
 function addDays(day: string, amount: number): string {
   const date = new Date(`${day}T12:00:00Z`);
@@ -62,9 +66,13 @@ export function WeekCalendar({
                     </button>
                   ))}
                 {shown
-                  .filter(
-                    (event) =>
-                      new Date(event.start).getDay() === (offset + 1) % 7,
+                  .filter((event) =>
+                    overlapsCalendarDay(
+                      event.start,
+                      event.end,
+                      dateKey,
+                      timeZone,
+                    ),
                   )
                   .map((event) => (
                     <button

@@ -1,5 +1,12 @@
 import * as React from "react";
-import { CalendarCheck, ChartGantt, Plus } from "lucide-react";
+import {
+  BookOpenText,
+  CalendarCheck,
+  ChartGantt,
+  FileOutput,
+  LayoutDashboard,
+  Plus,
+} from "lucide-react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
@@ -117,12 +124,53 @@ export function PlansScreen() {
             })}
           </div>
         ) : (
-          <section className="mt-8 rounded-lg border border-dashed p-10 text-center">
-            <ChartGantt className="mx-auto h-8 w-8 text-muted-foreground" />
-            <h2 className="mt-3 text-base font-medium">No active plans</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Create a deployment or readiness plan to start its work breakdown.
-            </p>
+          <section className="mt-8 rounded-xl border border-dashed p-6">
+            <div className="text-center">
+              <ChartGantt className="mx-auto h-8 w-8 text-primary" />
+              <h2 className="mt-3 text-base font-medium">No active plans</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Create a deployment or readiness plan to use the complete
+                execution workspace.
+              </p>
+            </div>
+            <div className="mt-6 grid gap-3 md:grid-cols-3">
+              {[
+                {
+                  icon: LayoutDashboard,
+                  title: "Board and Gantt scheduling",
+                  body: "Move work through a Kanban board, adjust dates, and see the critical path.",
+                },
+                {
+                  icon: BookOpenText,
+                  title: "Operational playbooks",
+                  body: "Apply reusable pre-departure and mission preparation task sets.",
+                },
+                {
+                  icon: FileOutput,
+                  title: "HOD Sync Packs and AI outputs",
+                  body: "Assign by department or adviser, then export checklists and generated products.",
+                },
+              ].map(({ body, icon: Icon, title: capability }) => (
+                <article
+                  className="rounded-lg border bg-card p-4 text-left"
+                  key={capability}
+                >
+                  <Icon className="h-5 w-5 text-primary" />
+                  <h3 className="mt-3 text-sm font-medium">{capability}</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">{body}</p>
+                </article>
+              ))}
+            </div>
+            <div className="mt-6 text-center">
+              <button
+                className="rounded bg-primary px-3 py-2 text-sm text-primary-foreground"
+                onClick={() => setOpen(true)}
+                type="button"
+              >
+                <Plus className="mr-1 inline h-4 w-4" />
+                Create first plan
+              </button>
+            </div>
           </section>
         )}
       </div>

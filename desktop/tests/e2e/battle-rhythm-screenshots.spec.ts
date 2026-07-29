@@ -20,8 +20,10 @@ test("Battle Rhythm calendar views and import review are visually distinct", asy
   await screen.getByRole("button", { name: "New Event" }).click();
   const editor = page.getByRole("dialog", { name: "New manual event" });
   await editor.getByLabel("Event").fill("Commanders Update Brief");
-  await editor.getByLabel("Start", { exact: true }).fill("2026-07-29T08:00");
-  await editor.getByLabel("End", { exact: true }).fill("2026-07-29T09:00");
+  await editor.getByLabel("Start date").fill("2026-07-29");
+  await editor.getByLabel("Start time (24 hour)").fill("08:00");
+  await editor.getByLabel("End date").fill("2026-07-29");
+  await editor.getByLabel("End time (24 hour)").fill("09:00");
   await editor.getByRole("button", { name: "Save event" }).click();
   await expect(screen.getByText("Commanders Update Brief")).toBeVisible();
 

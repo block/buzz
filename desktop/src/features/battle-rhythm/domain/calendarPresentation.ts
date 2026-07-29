@@ -57,18 +57,18 @@ export function calendarHeading(
   const endYear = end.slice(0, 4);
   const startMonth = start.slice(5, 7);
   const endMonth = end.slice(5, 7);
+  const startDay = Number(start.slice(8, 10));
+  const endDay = Number(end.slice(8, 10));
+  const startMonthName = formatDay(start, timeZone, { month: "long" });
+  const endMonthName = formatDay(end, timeZone, { month: "long" });
 
-  const startText = formatDay(start, timeZone, {
-    day: "numeric",
-    month: "long",
-    ...(startYear !== endYear ? { year: "numeric" } : {}),
-  });
-  const endText = formatDay(end, timeZone, {
-    day: "numeric",
-    ...(startMonth !== endMonth ? { month: "long" } : {}),
-    year: "numeric",
-  });
-  return `${startText} – ${endText}`;
+  if (startYear === endYear && startMonth === endMonth) {
+    return `${startDay}–${endDay} ${endMonthName} ${endYear}`;
+  }
+  if (startYear === endYear) {
+    return `${startDay} ${startMonthName} – ${endDay} ${endMonthName} ${endYear}`;
+  }
+  return `${startDay} ${startMonthName} ${startYear} – ${endDay} ${endMonthName} ${endYear}`;
 }
 
 export function weekDayHeading(day: string, timeZone: string): string {

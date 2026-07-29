@@ -1,5 +1,6 @@
 import type { BattleRhythmEvent } from "../domain/contracts";
 import { monthGrid } from "../domain/calendarPresentation";
+import { overlapsCalendarDay } from "../domain/dateRange";
 
 export function YearTimeline({
   day,
@@ -31,8 +32,8 @@ export function YearTimeline({
           </div>
           <div className="grid grid-cols-7 gap-y-1 text-center text-xs">
             {month.cells.map((cell) => {
-              const hasEvents = events.some(
-                (event) => event.start.slice(0, 10) === cell,
+              const hasEvents = events.some((event) =>
+                overlapsCalendarDay(event.start, event.end, cell, timeZone),
               );
               return (
                 <span
@@ -45,7 +46,14 @@ export function YearTimeline({
                   title={
                     hasEvents
                       ? events
-                          .filter((event) => event.start.slice(0, 10) === cell)
+                          .filter((event) =>
+                            overlapsCalendarDay(
+                              event.start,
+                              event.end,
+                              cell,
+                              timeZone,
+                            ),
+                          )
                           .map((event) => event.title)
                           .join(", ")
                       : undefined
