@@ -1,6 +1,14 @@
 import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calendarProjection";
 import type { BattleRhythmEvent } from "../domain/contracts";
+import { formatShipTime, weekDayHeading } from "../domain/calendarPresentation";
 import { getWeekRange, overlapsRange } from "../domain/dateRange";
+
+function addDays(day: string, amount: number): string {
+  const date = new Date(`${day}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + amount);
+  return date.toISOString().slice(0, 10);
+}
+
 export function WeekCalendar({
   day,
   events,
@@ -26,13 +34,17 @@ export function WeekCalendar({
         All-day activities
       </div>
       <div className="grid grid-cols-7 gap-2">
-        {["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map(
-          (weekday, offset) => {
-            const date = new Date(`${range.start.slice(0, 10)}T12:00:00Z`);
-            date.setUTCDate(date.getUTCDate() + offset);
-            const dateKey = date.toISOString().slice(0, 10);
-            return (
-              <div className="min-h-80 rounded border p-2" key={weekday}>
+        {Array.from({ length: 7 }, (_, offset) => {
+          const dateKey = addDays(range.start.slice(0, 10), offset);
+          return (
+            <div
+              className="min-h-80 overflow-hidden rounded border bg-card/30"
+              key={dateKey}
+            >
+              <div className="border-b bg-muted/40 px-2 py-2 text-center text-xs font-semibold tracking-wide">
+                {weekDayHeading(dateKey, timeZone)}
+              </div>
+              <div className="p-2">
                 {planMilestones
                   .filter((milestone) => milestone.date === dateKey)
                   .map((milestone) => (
@@ -64,19 +76,15 @@ export function WeekCalendar({
                       <span className="block text-2xs text-muted-foreground">
                         {event.allDay
                           ? "All day"
-                          : new Intl.DateTimeFormat("en-AU", {
-                              hour: "numeric",
-                              minute: "2-digit",
-                              timeZone,
-                            }).format(new Date(event.start))}
+                          : formatShipTime(event.start, timeZone)}
                       </span>
                       {event.title}
                     </button>
                   ))}
               </div>
-            );
-          },
-        )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -33,13 +33,28 @@ test("Battle Rhythm persists a manual weekly routine and honours an exclusion", 
   await expect(page).toHaveURL(/#\/battle-rhythm$/);
   const screen = page.getByTestId("battle-rhythm-screen");
   await expect(screen).toBeVisible();
+  await expect(screen.getByTestId("calendar-heading")).toHaveText(
+    "27 July – 2 August 2026",
+  );
+  await expect(screen.getByTestId("ship-time-zone")).toHaveText(
+    "Ship Time: Australia/Sydney",
+  );
+  await expect(screen.getByText("MON 27 JUL", { exact: true })).toBeVisible();
   await expect(
     screen.getByRole("button", { name: "Published to Apple" }),
   ).toBeVisible();
 
-  for (const view of ["Year", "Month", "Week", "Day"]) {
-    await screen.getByLabel("Calendar view").selectOption(view);
-  }
+  await screen.getByLabel("Calendar view").selectOption("Day");
+  await expect(screen.getByTestId("calendar-heading")).toHaveText(
+    "Wednesday, 29 July 2026",
+  );
+  await screen.getByLabel("Calendar view").selectOption("Month");
+  await expect(screen.getByTestId("calendar-heading")).toHaveText("July 2026");
+  await expect(screen.getByText("Monday", { exact: true })).toBeVisible();
+  await screen.getByLabel("Calendar view").selectOption("Year");
+  await expect(screen.getByTestId("calendar-heading")).toHaveText("2026");
+  await expect(screen.getByText("January", { exact: true })).toBeVisible();
+  await expect(screen.getByText("December", { exact: true })).toBeVisible();
   await screen.getByLabel("Calendar view").selectOption("Week");
   await screen.getByRole("button", { name: "New Event" }).click();
 

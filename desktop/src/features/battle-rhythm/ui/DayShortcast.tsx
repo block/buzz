@@ -1,5 +1,7 @@
 import type { PlanTaskCalendarProjection } from "@/features/plans/domain/calendarProjection";
 import type { BattleRhythmEvent } from "../domain/contracts";
+import { formatShipTime } from "../domain/calendarPresentation";
+
 export function DayShortcast({
   events,
   planMilestones,
@@ -55,11 +57,7 @@ export function DayShortcast({
                 <td className="py-2">
                   {event.allDay
                     ? "All day"
-                    : new Intl.DateTimeFormat("en-AU", {
-                        hour: "numeric",
-                        minute: "2-digit",
-                        timeZone,
-                      }).format(new Date(event.start))}
+                    : formatShipTime(event.start, timeZone)}
                 </td>
                 <td>
                   <button onClick={() => onEdit?.(event)} type="button">

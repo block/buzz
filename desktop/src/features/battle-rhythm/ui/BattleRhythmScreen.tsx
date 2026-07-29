@@ -12,6 +12,10 @@ import {
   publishBattleRhythmToApple,
   type ApplePublicationStatus,
 } from "../data/applePublication";
+import {
+  calendarHeading,
+  type CalendarView,
+} from "../domain/calendarPresentation";
 import { dayInTimeZone, getYearRange } from "../domain/dateRange";
 import {
   evaluatePlanningChecks,
@@ -30,7 +34,6 @@ import { SourceHistoryDialog } from "./SourceHistoryDialog";
 import { WeekCalendar } from "./WeekCalendar";
 import { YearTimeline } from "./YearTimeline";
 
-type CalendarView = "Year" | "Month" | "Week" | "Day";
 const TIME_ZONE = "Australia/Sydney";
 function shiftDay(day: string, amount: number) {
   const next = new Date(`${day}T12:00:00Z`);
@@ -159,7 +162,8 @@ export function BattleRhythmScreen() {
           ? "Changes pending"
           : "Retry Apple publication";
   const renderView = () => {
-    if (view === "Year") return <YearTimeline events={events} />;
+    if (view === "Year")
+      return <YearTimeline day={day} events={events} timeZone={TIME_ZONE} />;
     if (view === "Month")
       return (
         <MonthCalendar
@@ -338,6 +342,25 @@ export function BattleRhythmScreen() {
             New Event
           </button>
         </div>
+      </div>
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-3 border-b pb-4">
+        <div>
+          <h2
+            className="text-2xl font-semibold tracking-tight"
+            data-testid="calendar-heading"
+          >
+            {calendarHeading(view, day, TIME_ZONE)}
+          </h2>
+          <p
+            className="mt-1 text-xs text-muted-foreground"
+            data-testid="ship-time-zone"
+          >
+            Ship Time: {TIME_ZONE}
+          </p>
+        </div>
+        <p className="rounded-full border bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
+          Routine: Alongside · 0800–1600
+        </p>
       </div>
       {rhythm.isLoading ? (
         <p className="text-sm text-muted-foreground">Loading calendar…</p>
