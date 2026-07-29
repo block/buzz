@@ -696,6 +696,9 @@ pub(crate) fn push_hook_outputs_as_tool_results(
                 provider_id: provider_id.clone(),
                 name: tool_name,
                 arguments: serde_json::json!({}),
+                // Synthesised locally, so there is no provider wire form to
+                // preserve.
+                provider_extra: Default::default(),
             }],
         });
         history.push(HistoryItem::ToolResult(ToolResult {
