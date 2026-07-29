@@ -138,7 +138,7 @@ type AppSidebarProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => void;
+  onRemoveCommunity: (id: string) => Promise<void>;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
   onSelectProjects: () => void;

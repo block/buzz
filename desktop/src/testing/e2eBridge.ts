@@ -9690,6 +9690,11 @@ function sendToMockSocket(args: {
   if (type === "EVENT") {
     const event = rest[0] as RelayEvent;
 
+    if (event.kind === 28936) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     if ([9030, 9031, 9032].includes(event.kind)) {
       const accepted = updateMockRelayMembershipFromAdminEvent(event);
       sendWsText(socket.handler, [

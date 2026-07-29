@@ -57,7 +57,7 @@ type CommunitySwitcherProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => void;
+  onRemoveCommunity: (id: string) => Promise<void>;
 };
 
 export function CommunityEmojiIcon({
@@ -391,7 +391,7 @@ export function CommunitySwitcher({
       )}
 
       <EditCommunityDialog
-        canRemove={communities.length > 1}
+        canRemove
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}

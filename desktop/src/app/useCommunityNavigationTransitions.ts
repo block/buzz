@@ -13,6 +13,7 @@ import {
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
+import { leaveCommunity } from "@/features/communities/leaveCommunity";
 
 type Communities = ReturnType<typeof useCommunities>;
 type ShellRoute = ReturnType<typeof deriveShellRoute>;
@@ -71,6 +72,19 @@ export function useCommunityNavigationTransitions({
 
   const removeCommunity = React.useCallback(
     async (id: string) => {
+      const target = communities.communities.find(
+        (community) => community.id === id,
+      );
+      if (!target) return;
+
+      // Do not touch local state until this relay has explicitly accepted the
+      // signed NIP-43 leave request. Rejections and timeouts bubble back to the
+      // dialog so the person can retry without losing their community config.
+      await leaveCommunity(
+        target.relayUrl,
+        communities.activeCommunity?.relayUrl,
+      );
+
       if (id !== communities.activeCommunity?.id) {
         communities.removeCommunity(id);
         return;
@@ -78,7 +92,12 @@ export function useCommunityNavigationTransitions({
       const fallback = communities.communities.find(
         (community) => community.id !== id,
       );
-      if (!fallback) return;
+
+      if (!fallback) {
+        await goHome({ replace: true });
+        communities.removeCommunity(id);
+        return;
+      }
 
       await runCommunityViewTransition(async () => {
         saveActiveDestination();

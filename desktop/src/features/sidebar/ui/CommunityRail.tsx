@@ -48,7 +48,7 @@ type CommunityRailProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => void;
+  onRemoveCommunity: (id: string) => Promise<void>;
   onReorderCommunities: (orderedIds: string[]) => void;
 };
 
@@ -423,7 +423,7 @@ export function CommunityRail({
         <TooltipContent side="right">Add community</TooltipContent>
       </Tooltip>
       <EditCommunityDialog
-        canRemove={communities.length > 1}
+        canRemove
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}

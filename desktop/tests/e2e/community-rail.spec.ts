@@ -721,7 +721,7 @@ test.describe("community rail", () => {
       .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
       .click({ button: "right" });
     await page.getByRole("menuitem", { name: "Community settings" }).click();
-    await page.getByRole("button", { name: "Remove Community" }).click();
+    await page.getByRole("button", { name: "Leave Community" }).click();
 
     await expect(page).toHaveURL(randomUrl);
     await expect
@@ -759,6 +759,39 @@ test.describe("community rail", () => {
 
     // The app settles into the new community once apply completes.
     await expect(buttonB).toHaveAttribute("aria-current", "true");
+  });
+
+  test("leaving the final community returns to setup without resetting identity", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const identityBefore = await page.evaluate(async () =>
+      window.__TAURI_INTERNALS__.invoke("get_identity"),
+    );
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Community settings" })
+      .click();
+    await page.getByRole("button", { name: "Leave Community" }).click();
+
+    await expect(page.getByText("Join or create a community")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.localStorage.getItem("buzz-communities")),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        page.evaluate(async () =>
+          window.__TAURI_INTERNALS__.invoke("get_identity"),
+        ),
+      )
+      .toEqual(identityBefore);
   });
 
   test("hides the rail with a single community", async ({ page }) => {
