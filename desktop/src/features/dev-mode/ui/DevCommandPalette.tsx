@@ -73,7 +73,6 @@ const SETTINGS_ENTRIES: { section: SettingsSection; label: string }[] = [
   { section: "appearance", label: "appearance settings" },
   { section: "profile", label: "profile settings" },
   { section: "notifications", label: "notification settings" },
-  { section: "shortcuts", label: "keyboard shortcuts" },
   { section: "experimental", label: "experimental features" },
   { section: "channel-templates", label: "channel templates" },
   { section: "compute", label: "compute settings" },
@@ -96,6 +95,7 @@ export function DevCommandPalette({
   onNewSession,
   onNewSubChannel,
   onChannelLeft,
+  onShowShortcuts,
   onClose,
 }: {
   /** All session channels, newest first. */
@@ -114,6 +114,8 @@ export function DevCommandPalette({
   /** Starts a sub-channel draft in the open channel; null when unavailable. */
   onNewSubChannel: (() => void) | null;
   onChannelLeft: (channelId: string) => void;
+  /** Opens the dev-mode keyboard-shortcuts pane. */
+  onShowShortcuts: () => void;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
@@ -560,6 +562,14 @@ export function DevCommandPalette({
           setSelectedIndex(0);
         },
       },
+      {
+        id: "shortcuts",
+        label: "keyboard shortcuts",
+        run: () => {
+          onClose();
+          onShowShortcuts();
+        },
+      },
       ...SETTINGS_ENTRIES.map(
         (entry): PaletteEntry => ({
           id: `settings-${entry.section}`,
@@ -632,6 +642,7 @@ export function DevCommandPalette({
     onNewSession,
     onNewSubChannel,
     onOpenChannel,
+    onShowShortcuts,
     openSettings,
     parentOfActive,
     pinnedIds,

@@ -19,8 +19,6 @@ type DevPromptComposerProps = {
   value: string;
   mode: DevComposerMode;
   placeholder: string;
-  /** Keybinding help line, contextual to the shell state. */
-  hint: string;
   busy: boolean;
   /** Whether this composer owns the keyboard (side chat may own it instead). */
   active: boolean;
@@ -49,6 +47,8 @@ type DevPromptComposerProps = {
   onSwitchPane: (pane: "main" | "thread") => void;
   /** `/` on an empty input. */
   onOpenPalette: () => void;
+  /** `?` on an empty input. */
+  onOpenShortcuts: () => void;
   onEscape: () => void;
   /** Click on the box while inactive — the user wants to type again. */
   onReactivate?: () => void;
@@ -58,7 +58,6 @@ export function DevPromptComposer({
   value,
   mode,
   placeholder,
-  hint,
   busy,
   active,
   draftLabel = null,
@@ -72,6 +71,7 @@ export function DevPromptComposer({
   onStepChannel,
   onSwitchPane,
   onOpenPalette,
+  onOpenShortcuts,
   onEscape,
   onReactivate,
 }: DevPromptComposerProps) {
@@ -158,6 +158,12 @@ export function DevPromptComposer({
       return;
     }
 
+    if (event.key === "?" && !value) {
+      event.preventDefault();
+      onOpenShortcuts();
+      return;
+    }
+
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       // ⌥↑/⌥↓ steps through the channel list, draft or not, without the
       // caret ever leaving the box.
@@ -226,7 +232,7 @@ export function DevPromptComposer({
         pendingImeta={pendingImeta}
         uploadingPreviews={uploadingPreviews}
       />
-      <div className="relative flex items-start gap-2 px-4 pt-1">
+      <div className="relative flex items-start gap-2 px-4 pt-1 pb-3">
         {active && autocomplete.open ? (
           <DevChannelSuggestions
             onAccept={autocomplete.accept}
@@ -277,9 +283,6 @@ export function DevPromptComposer({
           spellCheck={false}
           value={value}
         />
-      </div>
-      <div className="mt-2 flex items-center justify-end pr-4 pb-3 pl-10 text-xs text-muted-foreground">
-        <span className="select-none">{hint}</span>
       </div>
     </div>
   );

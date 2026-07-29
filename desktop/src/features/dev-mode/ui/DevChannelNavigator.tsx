@@ -4,7 +4,7 @@ import {
   type ChannelGroup,
   toggleChannelPinned,
 } from "@/features/dev-mode/lib/pinnedChannels";
-import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
+import type { NavigatorWidthControls } from "@/features/dev-mode/lib/useNavigatorWidth";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -25,14 +25,12 @@ function ChannelRow({
   isHighlighted,
   isPinned,
   isUnread,
-  onHighlight,
   onOpen,
 }: {
   channel: Channel;
   isHighlighted: boolean;
   isPinned: boolean;
   isUnread: boolean;
-  onHighlight: (channelId: string) => void;
   onOpen: (channelId: string) => void;
 }) {
   const scrollHighlightedIntoView = React.useCallback(
@@ -56,10 +54,7 @@ function ChannelRow({
     >
       <button
         className="flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 rounded-none px-2 py-0.5 text-left text-sm"
-        onClick={() =>
-          isHighlighted ? onOpen(channel.id) : onHighlight(channel.id)
-        }
-        onDoubleClick={() => onOpen(channel.id)}
+        onClick={() => onOpen(channel.id)}
         type="button"
       >
         <span aria-hidden className="w-3 shrink-0 select-none">
@@ -106,16 +101,18 @@ function ChannelRow({
 
 /**
  * Always-visible left channel list. The shell owns which channel is
- * highlighted (↑/↓) and what Enter/Escape do; this renders a pinned section
- * on top and all other chats beneath — both ordered by last activity, most
- * recent first — with unread indicators and per-row pin toggles.
+ * highlighted (↑/↓), what Enter/Escape do, and the draggable width (shared
+ * with the top bar so the header columns stay aligned); this renders a
+ * pinned section on top and all other chats beneath — both ordered by last
+ * activity, most recent first — with unread indicators and per-row pin
+ * toggles. Clicking a row opens the channel immediately.
  */
 export function DevChannelNavigator({
   groups,
   unreadChannelIds,
   highlightedId,
   dimmed,
-  onHighlight,
+  widthControls,
   onOpen,
 }: {
   /** Render-ordered groups; within each, most recent activity renders first. */
@@ -124,11 +121,12 @@ export function DevChannelNavigator({
   highlightedId: string | null;
   /** True while a channel is focused — the list stays visible but recedes. */
   dimmed: boolean;
-  onHighlight: (channelId: string) => void;
+  /** Lifted to the shell so the top bar can mirror the navigator width. */
+  widthControls: NavigatorWidthControls;
   onOpen: (channelId: string) => void;
 }) {
   const isEmpty = groups.every((group) => group.channels.length === 0);
-  const { width, dragging, dividerProps } = useNavigatorWidth();
+  const { width, dragging, dividerProps } = widthControls;
 
   return (
     <div className="flex shrink-0" style={{ width }}>
@@ -161,15 +159,11 @@ export function DevChannelNavigator({
                   isHighlighted={channel.id === highlightedId}
                   isPinned={group.pinned}
                   isUnread={unreadChannelIds.has(channel.id)}
-                  onHighlight={onHighlight}
                   onOpen={onOpen}
                 />
               ))}
             </div>
           ))}
-        </div>
-        <div className="shrink-0 truncate border-t border-border/60 px-3 py-1.5 text-xs text-muted-foreground/60">
-          ↑↓: preview · enter: open · esc: back
         </div>
       </div>
       {/* biome-ignore lint/a11y/useSemanticElements: <hr> cannot host the drag/keyboard resize handlers of a movable separator */}

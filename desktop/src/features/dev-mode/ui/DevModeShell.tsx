@@ -28,11 +28,13 @@ import {
 } from "@/features/dev-mode/lib/useDevComposerModes";
 import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActions";
 import { useDevModeShortcuts } from "@/features/dev-mode/lib/useDevModeShortcuts";
+import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
 import { DevChannelMembers } from "@/features/dev-mode/ui/DevChannelMembers";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
 import { DevChannelTabs } from "@/features/dev-mode/ui/DevChannelTabs";
 import { DevCommandPalette } from "@/features/dev-mode/ui/DevCommandPalette";
 import { DevPromptComposer } from "@/features/dev-mode/ui/DevPromptComposer";
+import { DevShortcutsOverlay } from "@/features/dev-mode/ui/DevShortcutsOverlay";
 import { DevSplitPane } from "@/features/dev-mode/ui/DevSplitPane";
 import { DevThreadPanel } from "@/features/dev-mode/ui/DevThreadPanel";
 import { DevTranscript } from "@/features/dev-mode/ui/DevTranscript";
@@ -108,6 +110,7 @@ export function DevModeShell({
   const [paletteInitialMode, setPaletteInitialMode] = React.useState<
     "root" | "members"
   >("root");
+  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   const [focusSignal, setFocusSignal] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -283,6 +286,10 @@ export function DevModeShell({
   const { handleFocusCapture, handleShellMouseDown, handleShellMouseUp } =
     useShellFocusGuards({ cardSelectionActive, focusComposer });
 
+  // Lifted here (not inside the navigator) so the top bar's columns track
+  // the navigator width live while the divider is dragged.
+  const navigatorWidthControls = useNavigatorWidth();
+
   const closePalette = React.useCallback(() => {
     setPaletteOpen(false);
     focusComposer();
@@ -292,6 +299,11 @@ export function DevModeShell({
     setPaletteInitialMode(mode);
     setPaletteOpen(true);
   }, []);
+
+  const closeShortcuts = React.useCallback(() => {
+    setShortcutsOpen(false);
+    focusComposer();
+  }, [focusComposer]);
 
   const openChannel = React.useCallback(
     (channelId: string) => {
@@ -495,22 +507,6 @@ export function DevModeShell({
     [navigateChannels, navigateCards, orderedChannels, view],
   );
 
-  /**
-   * Mouse highlight from the always-visible list: in the fresh state it also
-   * enters the navigator; with a channel already open it switches directly.
-   */
-  const handleHighlight = React.useCallback(
-    (channelId: string) => {
-      if (view === "channel") {
-        openChannelAtUnread(channelId);
-        return;
-      }
-      setNavigatorId(channelId);
-      if (view === "fresh") setView("navigator");
-    },
-    [openChannelAtUnread, view],
-  );
-
   const handleEscape = React.useCallback(() => {
     if (view === "channel") {
       if (subDraftActive) {
@@ -681,26 +677,14 @@ export function DevModeShell({
         ? `Prompt ${devComposerModeLabel(mode)} — spawns a new channel where it works…`
         : "Start a discussion — spawns a new channel for humans…";
 
-  const hint =
-    view === "navigator"
-      ? "↑↓: preview channels · enter: open · esc: back · ⌘K: palette"
-      : view === "channel"
-        ? subDraftActive
-          ? "tab: target · enter: spawn new tab · esc: cancel"
-          : threadOpen
-            ? "←→: switch pane · tab: target · esc: close side chat"
-            : selectedRootId
-              ? "↑↓: prompts · enter: side chat · esc: back"
-              : "tab: target · enter: send · ↑↓: prompts · ⌥↑↓: channels · esc: channels"
-        : "tab: target · enter: send · ↑: channels · /: palette";
-
   const composerActive =
     !paletteOpen &&
+    !shortcutsOpen &&
     !(threadOpen && activePane === "thread") &&
     !cardSelectionActive;
 
   React.useEffect(() => {
-    if (!cardSelectionActive || paletteOpen) return;
+    if (!cardSelectionActive || paletteOpen || shortcutsOpen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       // A focused input owns its own keys (e.g. a click landed in one).
@@ -730,6 +714,7 @@ export function DevModeShell({
     navigateCards,
     paletteOpen,
     selectedRootId,
+    shortcutsOpen,
   ]);
 
   const transcriptFor = (
@@ -758,13 +743,13 @@ export function DevModeShell({
         subDraftActive ? `new tab in # ${activeMainChannel?.name ?? ""}` : null
       }
       focusSignal={focusSignal}
-      hint={hint}
       mode={mode}
       onChange={setInput}
       onCycleMode={handleCycleMode}
       onEscape={handleEscape}
       onNavigate={handleNavigate}
       onOpenPalette={() => openPalette()}
+      onOpenShortcuts={() => setShortcutsOpen(true)}
       onStepChannel={stepChannel}
       onReactivate={() => {
         if (cardSelectionActive) setSelectedRootId(null);
@@ -785,10 +770,14 @@ export function DevModeShell({
 
   // Fixed px clearance: the native macOS traffic lights overlay this strip
   // and ignore the app's text zoom, so rem-based padding would slide the
-  // title under them. With the community rail present the lights sit over
-  // the rail instead, so the title keeps its normal padding (but stays
-  // vertically aligned with the lights).
+  // title under them. The 56px community rail absorbs most of the lights'
+  // ~88px footprint, leaving ~32px protruding into the shell.
   const macChrome = isMacPlatform() && !isFullscreen;
+  const titleClearance = macChrome
+    ? hasCommunityRail
+      ? "pl-[32px]"
+      : "pl-[88px]"
+    : "pl-4";
 
   return (
     <DevChannelRefsProvider channels={channelRefs} openChannel={openChannel}>
@@ -800,55 +789,73 @@ export function DevModeShell({
         onMouseDown={handleShellMouseDown}
         onMouseUp={handleShellMouseUp}
       >
+        {/* Two columns sharing the navigator's live width so "buzz ·
+            developer mode" sits over the channel list and the channel
+            name/members sit over the transcript, even mid-drag. */}
         <div
-          className={cn(
-            "flex h-[40px] shrink-0 cursor-default select-none items-center justify-between border-b border-border/60 pr-4 font-mono text-xs text-muted-foreground",
-            macChrome && !hasCommunityRail ? "pl-[88px]" : "pl-4",
-          )}
+          className="flex h-[40px] shrink-0 cursor-default select-none items-center border-b border-border/60 font-mono text-xs text-muted-foreground"
           data-tauri-drag-region
         >
-          <span
-            className={cn(
-              "pointer-events-none flex min-w-0 items-baseline gap-2 whitespace-nowrap",
-              macChrome && "translate-y-[3px]",
-            )}
-          >
-            buzz · developer mode
-            {topBarChannel ? (
-              <span
-                className="truncate text-foreground"
-                data-testid="dev-mode-topbar-channel"
-              >
-                # {topBarChannel.name}
-              </span>
-            ) : null}
-            {topBarChannel ? (
-              <DevChannelMembers
-                channel={topBarChannel}
-                onShowMembers={() => openPalette("members")}
-              />
-            ) : null}
-          </span>
           <div
-            className={cn(
-              "flex shrink-0 items-center gap-3",
-              macChrome && "translate-y-[3px]",
-            )}
+            className={cn("flex h-full shrink-0 items-center", titleClearance)}
+            data-tauri-drag-region
+            style={{ width: navigatorWidthControls.width }}
           >
-            <button
-              className="cursor-pointer hover:text-foreground"
-              onClick={() => openPalette()}
-              type="button"
+            <span
+              className={cn(
+                "pointer-events-none truncate",
+                macChrome && "translate-y-[3px]",
+              )}
             >
-              palette ⌘K
-            </button>
-            <button
-              className="cursor-pointer hover:text-foreground"
-              onClick={() => setDisplayStyle("standard")}
-              type="button"
+              buzz · developer mode
+            </span>
+          </div>
+          <div
+            className="flex h-full min-w-0 flex-1 items-center justify-between gap-3 pr-4 pl-4"
+            data-tauri-drag-region
+          >
+            <span
+              className={cn(
+                "pointer-events-none flex min-w-0 items-baseline gap-2 whitespace-nowrap",
+                macChrome && "translate-y-[3px]",
+              )}
             >
-              standard ui ⌘⇧D
-            </button>
+              {topBarChannel ? (
+                <span
+                  className="truncate text-foreground"
+                  data-testid="dev-mode-topbar-channel"
+                >
+                  # {topBarChannel.name}
+                </span>
+              ) : null}
+              {topBarChannel ? (
+                <DevChannelMembers
+                  channel={topBarChannel}
+                  onShowMembers={() => openPalette("members")}
+                />
+              ) : null}
+            </span>
+            <div
+              className={cn(
+                "flex shrink-0 items-center gap-3",
+                macChrome && "translate-y-[3px]",
+              )}
+            >
+              <button
+                className="cursor-pointer hover:text-foreground"
+                onClick={() => openPalette()}
+                type="button"
+              >
+                palette
+              </button>
+              <button
+                className="cursor-pointer hover:text-foreground"
+                onClick={() => setDisplayStyle("standard")}
+                type="button"
+              >
+                standard ui
+              </button>
+            </div>
           </div>
         </div>
 
@@ -857,9 +864,9 @@ export function DevModeShell({
             dimmed={view === "channel"}
             groups={channelGroups}
             highlightedId={view === "fresh" ? null : navigatorId}
-            onHighlight={handleHighlight}
             onOpen={openChannelAtUnread}
             unreadChannelIds={navigatorUnreadIds}
+            widthControls={navigatorWidthControls}
           />
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -876,7 +883,7 @@ export function DevModeShell({
             {view === "navigator" && previewChannel ? (
               <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col opacity-70">
                 <div className="shrink-0 border-b border-border/60 px-4 py-1 font-mono text-xs text-muted-foreground/60">
-                  preview — enter to open
+                  preview
                 </div>
                 {transcriptFor(previewChannel)}
               </div>
@@ -920,10 +927,8 @@ export function DevModeShell({
                 <div className="max-w-lg space-y-2">
                   <div className="text-foreground">new session</div>
                   <div>
-                    Type a prompt and hit enter — it spawns a channel and puts
-                    the selected target to work. Tab cycles between chat and{" "}
-                    {modes.length - 1} agent{modes.length === 2 ? "" : "s"}.
-                    Press ⌘K for the command palette.
+                    Type a prompt — it spawns a channel and puts the selected
+                    target to work. Type ? for keyboard shortcuts.
                   </div>
                 </div>
               </div>
@@ -958,6 +963,7 @@ export function DevModeShell({
             onChannelLeft={handleChannelLeft}
             onClose={closePalette}
             onNewSession={goToFresh}
+            onShowShortcuts={() => setShortcutsOpen(true)}
             onNewSubChannel={
               view === "channel" && activeMainChannel
                 ? startSubChannelDraft
@@ -972,6 +978,10 @@ export function DevModeShell({
                 : null
             }
           />
+        ) : null}
+
+        {shortcutsOpen ? (
+          <DevShortcutsOverlay onClose={closeShortcuts} />
         ) : null}
       </div>
     </DevChannelRefsProvider>

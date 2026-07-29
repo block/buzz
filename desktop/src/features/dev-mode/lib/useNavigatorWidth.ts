@@ -30,6 +30,8 @@ function persistWidth(width: number) {
   }
 }
 
+export type NavigatorWidthControls = ReturnType<typeof useNavigatorWidth>;
+
 /**
  * Persisted, pointer-draggable width for the channel navigator (clamped
  * 200–480px). Spread `dividerProps` on a vertical separator at the
