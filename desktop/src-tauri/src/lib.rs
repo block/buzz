@@ -4,9 +4,11 @@ mod archive;
 mod builderlab;
 mod commands;
 mod deep_link;
+mod egress_guard;
 mod event_sync;
 mod events;
 mod huddle;
+mod key_backup;
 mod linux_media;
 mod managed_agents;
 mod media_proxy;
@@ -669,6 +671,10 @@ pub fn run() {
             title_bar_double_click,
             get_identity,
             get_nsec,
+            generate_backup_passphrase,
+            create_ncryptsec_backup,
+            verify_ncryptsec_backup,
+            save_ncryptsec_copy,
             import_identity,
             persist_current_identity,
             get_profile,

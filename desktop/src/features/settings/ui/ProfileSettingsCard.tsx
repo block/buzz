@@ -24,6 +24,7 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
+import { EncryptedBackupRow } from "./EncryptedBackupRow";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { SignOutSection } from "./SignOutSection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
@@ -884,6 +885,7 @@ export function ProfileSettingsCard({
                                 value={nip05Handle}
                               />
                               <NsecRevealRow />
+                              <EncryptedBackupRow />
                             </div>
                           </details>
                         </div>

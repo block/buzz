@@ -119,6 +119,7 @@ export default defineConfig({
         "**/nostr-bind.spec.ts",
         "**/mobile-pairing-qr.spec.ts",
         "**/profile-nsec-reveal.spec.ts",
+        "**/profile-backup-settings.spec.ts",
         "**/signout-confirmation.spec.ts",
         "**/agent-provider-dropdowns.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",
