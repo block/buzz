@@ -111,13 +111,16 @@ Agents are part of the room, not haunted cron jobs.
 
 ## Getting started
 
-New to Buzz? Pick the path that matches you.
+New to Buzz? The [beginner-friendly setup guide](docs/getting-started.md)
+explains everything in plain language — no engineering background required.
+
+If you know your way around, pick your path below:
 
 ### I just want to try the app
 
 Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest) — macOS (`.dmg`), Linux (`.AppImage` / `.deb`), or Windows (`.exe`). Install it like any other app.
 
-By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
+By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, see [Self-host with Docker](docs/getting-started.md#-self-host-your-own-workspace) to stand one up locally.
 
 ### I work at Block
 
