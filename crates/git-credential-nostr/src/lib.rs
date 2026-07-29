@@ -1,4 +1,5 @@
 //! git-credential-nostr — NIP-98 git credential helper for Buzz.
+#![warn(missing_docs)]
 //!
 //! Git calls this via the credential helper protocol (stdin/stdout).
 //! We read the request, sign a kind:27235 event, and return the base64-encoded

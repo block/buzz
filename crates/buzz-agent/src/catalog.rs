@@ -3,7 +3,7 @@
 //! Exposes [`discover_databricks_models`] — an async helper that lists
 //! available models for the `databricks` and `databricks_v2` providers
 //! without triggering a browser OAuth flow. Auth is acquired in-process via
-//! [`build_token_source`](crate::llm::build_token_source):
+//! `build_token_source`:
 //!
 //! - Static bearer (`DATABRICKS_TOKEN`): returned immediately.
 //! - PKCE cache hit: returned from disk without a network round-trip.
@@ -22,7 +22,9 @@ use crate::{
 /// label (same as `id` for Databricks — the API has no separate display name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
+    /// Model identifier used as the picker value.
     pub id: String,
+    /// Human-readable display label.
     pub name: String,
 }
 

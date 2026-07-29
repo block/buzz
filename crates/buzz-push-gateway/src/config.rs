@@ -6,39 +6,61 @@ use std::{
 };
 use thiserror::Error;
 
+/// A named 256-bit key entry in a keyring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyConfig {
+    /// Stable identifier for the key (used for KID selection).
     pub id: String,
+    /// Raw 32-byte key material.
     pub key: Vec<u8>,
 }
 
+/// Resolved gateway configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Address the delivery HTTP server binds to.
     pub bind_addr: SocketAddr,
+    /// Address the health/metrics server binds to.
     pub health_addr: SocketAddr,
+    /// Public https URL relays address deliveries to.
     pub public_delivery_url: url::Url,
+    /// Maximum lifetime (seconds) of a delivery grant.
     pub max_grant_lifetime_seconds: i64,
+    /// Maximum lifetime (seconds) of an installation.
     pub max_installation_lifetime_seconds: i64,
+    /// Per-endpoint quota window length (seconds).
     pub endpoint_quota_window_seconds: i64,
+    /// Maximum deliveries per endpoint per quota window.
     pub endpoint_quota_max_deliveries: i64,
+    /// App profiles the gateway will accept.
     pub enabled_profiles: HashSet<crate::model::AppProfile>,
+    /// Postgres connection string.
     pub database_url: String,
+    /// App Attest app id (TeamID.bundleID).
     pub app_attest_app_id: String,
+    /// Path to the pinned Apple App Attest root certificate.
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
     pub grant_keys: Vec<KeyConfig>,
     /// Independent token-custody keyring. These keys MUST NOT be reused for
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
+    /// Path to the APNs provider signing key (.p8).
     pub apns_key_path: PathBuf,
+    /// APNs provider key id.
     pub apns_key_id: String,
+    /// APNs team id.
     pub apns_team_id: String,
+    /// APNs topic (bundle id).
     pub apns_topic: String,
 }
+/// Errors raised while resolving configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// A required environment variable was missing.
     #[error("missing required environment variable {0}")]
     Missing(&'static str),
+    /// An environment variable had an invalid value.
     #[error("invalid environment variable {0}")]
     Invalid(&'static str),
 }
@@ -76,9 +98,11 @@ fn parse_keyring(
     Ok(keys)
 }
 impl Config {
+    /// Resolve configuration from the process environment.
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_map(&std::env::vars().collect())
     }
+    /// Resolve configuration from an explicit key/value map (tests).
     pub fn from_map(e: &HashMap<String, String>) -> Result<Self, ConfigError> {
         fn req<'a>(
             e: &'a HashMap<String, String>,

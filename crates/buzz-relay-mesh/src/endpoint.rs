@@ -44,14 +44,17 @@ impl MeshEndpoint {
         })
     }
 
+    /// This endpoint's mesh identity (its public key).
     pub fn runtime_id(&self) -> RuntimeId {
         self.runtime_id
     }
 
+    /// Clone of the underlying iroh endpoint handle.
     pub fn endpoint(&self) -> Endpoint {
         self.endpoint.clone()
     }
 
+    /// The endpoint's dialable address (public key + transport addrs).
     pub fn addr(&self) -> EndpointAddr {
         self.endpoint.addr()
     }
@@ -70,6 +73,7 @@ impl MeshEndpoint {
             .collect()
     }
 
+    /// Accept one inbound mesh connection, or `Ok(None)` if the endpoint is closed.
     pub async fn accept(&self) -> Result<Option<crate::peer::MeshPeer>, MeshError> {
         let Some(incoming) = self.endpoint.accept().await else {
             return Ok(None);
@@ -80,6 +84,7 @@ impl MeshEndpoint {
         crate::peer::MeshPeer::from_connection(self.endpoint.clone(), conn).map(Some)
     }
 
+    /// Dial a peer by its [`EndpointAddr`] and complete the mesh handshake.
     pub async fn connect(
         &self,
         peer_addr: EndpointAddr,
@@ -93,14 +98,17 @@ impl MeshEndpoint {
     }
 }
 
+/// Derive a [`RuntimeId`] from an iroh public key.
 pub fn runtime_id_from_public_key(public_key: PublicKey) -> RuntimeId {
     RuntimeId(*public_key.as_bytes())
 }
 
+/// Recover the iroh public key from a [`RuntimeId`].
 pub fn public_key_from_runtime_id(runtime_id: RuntimeId) -> Result<PublicKey, MeshError> {
     PublicKey::from_bytes(&runtime_id.0).map_err(|err| MeshError::Transport(err.to_string()))
 }
 
+/// Build a single-IP [`EndpointAddr`] for a peer (no relay/DNS paths).
 pub fn direct_addr(runtime_id: RuntimeId, addr: SocketAddr) -> Result<EndpointAddr, MeshError> {
     Ok(EndpointAddr::from_parts(
         public_key_from_runtime_id(runtime_id)?,

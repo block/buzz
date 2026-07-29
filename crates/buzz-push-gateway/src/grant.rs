@@ -13,29 +13,36 @@ use thiserror::Error;
 const AAD_PREFIX: &[u8] = b"buzz-stateful-delivery-capability-v1:";
 const MAX_KEY_ID_BYTES: usize = 32;
 
+/// A single named AES-256-GCM key used to seal/open endpoint grants.
 #[derive(Clone)]
 pub struct GrantKey {
     id: String,
     cipher: Aes256Gcm,
 }
 
+/// Ordered keyring: one current seal/open key plus decrypt-only predecessors.
 #[derive(Clone)]
 pub struct GrantKeyring {
     current: GrantKey,
     predecessors: HashMap<String, GrantKey>,
 }
 
+/// Errors raised while minting or opening endpoint grants.
 #[derive(Debug, Error)]
 pub enum GrantError {
+    /// The grant or key material was malformed.
     #[error("invalid endpoint grant")]
     Invalid,
+    /// The keyring contained two keys with the same id.
     #[error("duplicate grant key id")]
     DuplicateKeyId,
+    /// The keyring contained no keys.
     #[error("grant keyring is empty")]
     EmptyKeyring,
 }
 
 impl GrantKey {
+    /// Construct a grant key from its id and 32-byte raw material.
     pub fn new(id: impl Into<String>, key: &[u8]) -> Result<Self, GrantError> {
         let id = id.into();
         if id.is_empty()

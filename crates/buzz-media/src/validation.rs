@@ -233,7 +233,7 @@ pub struct VideoMeta {
 /// Validate uploaded bytes for the **image** upload path.
 ///
 /// Checks magic bytes, MIME allowlist (images only), size, and pixel dimensions.
-/// Rejects `video/mp4` — video uploads must use [`process_video_upload`] which
+/// Rejects `video/mp4` — video uploads must use [`crate::process_video_upload`] which
 /// has its own magic-byte check and full MP4 validation pipeline.
 pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, MediaError> {
     // 1. Magic bytes — never trust Content-Type header

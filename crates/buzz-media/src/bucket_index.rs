@@ -33,15 +33,31 @@ use crate::error::MediaError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyClass {
     /// `{sha256}.thumb.jpg` — attributed to the blob's sha.
-    Thumb { sha256: String },
+    Thumb {
+        /// The 64-char lowercase-hex SHA-256 digest from the key stem.
+        sha256: String,
+    },
     /// `{sha256}.{ext}` — physical bytes, logical join key.
-    Blob { sha256: String, ext: String },
+    Blob {
+        /// The 64-char lowercase-hex SHA-256 digest from the key stem.
+        sha256: String,
+        /// The blob's file extension (1-8 mixed-case alphanumeric chars).
+        ext: String,
+    },
     /// `_meta/{community}/{sha256}.json` — the (community, sha) binding.
-    Sidecar { community: Uuid, sha256: String },
+    Sidecar {
+        /// The canonical lowercase community UUID parsed from the key path.
+        community: Uuid,
+        /// The 64-char lowercase-hex SHA-256 digest bound to this community.
+        sha256: String,
+    },
     /// `_uploads/{community}/{sha256}/{event_id}.json` — fleet physical only.
     Auxiliary {
+        /// The canonical lowercase community UUID parsed from the key path.
         community: Uuid,
+        /// The 64-char lowercase-hex SHA-256 digest of the uploaded blob.
         sha256: String,
+        /// The Crockford-base32 ULID event id from the key's last segment.
         event_id: String,
     },
     /// Anything that doesn't match one of the four strict shapes above.
@@ -195,7 +211,9 @@ fn parse_auxiliary_key(key: &str) -> Option<(Uuid, String, String)> {
 /// Per-community logical storage: bytes and object count of bound shas.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommunityStorage {
+    /// Total logical bytes attributed to this community.
     pub bytes: u64,
+    /// Number of logical objects attributed to this community.
     pub objects: u64,
 }
 
@@ -204,16 +222,20 @@ pub struct CommunityStorage {
 /// data — no I/O, cheap to clone into a cached snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BucketSnapshot {
-    /// Every listed object, every class (kind=physical).
+    /// Total bytes of every listed object, every class (kind=physical).
     pub physical_bytes: u64,
+    /// Total count of every listed object, every class (kind=physical).
     pub physical_objects: u64,
-    /// Sum of per-community logical bytes/objects (kind=logical). Bills a
+    /// Sum of per-community logical bytes (kind=logical). Bills a
     /// blob bound to N communities N times — intentional (D-EXT/D-COUNT).
     pub logical_bytes: u64,
+    /// Sum of per-community logical object counts (kind=logical).
     pub logical_objects: u64,
+    /// Per-community logical breakdown keyed by community UUID.
     pub per_community: HashMap<Uuid, CommunityStorage>,
-    /// Blob shas with zero sidecar binding in any community.
+    /// Total bytes of blob shas with zero sidecar binding in any community.
     pub orphan_blob_bytes: u64,
+    /// Count of blob shas with zero sidecar binding in any community.
     pub orphan_blob_count: u64,
     /// Sidecar bindings whose sha has no blob bytes at all.
     pub orphan_sidecar_count: u64,
@@ -221,7 +243,9 @@ pub struct BucketSnapshot {
     pub multi_variant_shas: u64,
     /// Total bytes of ALL blob variants belonging to anomalous shas.
     pub multi_variant_bytes: u64,
+    /// Total bytes of keys that did not match any known class.
     pub unknown_key_bytes: u64,
+    /// Count of keys that did not match any known class.
     pub unknown_key_objects: u64,
 }
 
@@ -341,7 +365,12 @@ impl BucketAggregate {
 pub enum SweepError {
     /// Cumulative listed-object count exceeded `cap` mid-listing.
     #[error("object cap exceeded: {seen} listed objects > cap {cap}")]
-    CapExceeded { seen: u64, cap: u64 },
+    CapExceeded {
+        /// Number of objects listed when the cap was breached.
+        seen: u64,
+        /// The configured maximum object count for a single sweep.
+        cap: u64,
+    },
     /// The page source (S3, or a test double) failed.
     #[error("storage error during listing: {0}")]
     Storage(#[from] MediaError),
@@ -362,8 +391,11 @@ pub enum SweepError {
 /// fold below can be driven by a synthetic closure in tests.
 #[derive(Debug, Clone, Default)]
 pub struct Page {
+    /// The `(key, size)` pairs returned by this listing page.
     pub objects: Vec<(String, u64)>,
+    /// S3 continuation token for the next page, if the listing is truncated.
     pub next_continuation_token: Option<String>,
+    /// Whether more pages remain to be fetched.
     pub is_truncated: bool,
 }
 

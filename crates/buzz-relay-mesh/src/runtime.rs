@@ -99,6 +99,7 @@ impl MeshRuntime {
         )
     }
 
+    /// Like [`Self::start`] but with explicit gossip/reconcile intervals (tests).
     pub fn start_with_intervals(
         endpoint: MeshEndpoint,
         membership: MeshMembership,
@@ -126,10 +127,12 @@ impl MeshRuntime {
         }
     }
 
+    /// The membership table backing this mesh.
     pub fn membership(&self) -> &MeshMembership {
         &self.inner.membership
     }
 
+    /// This runtime's mesh identity.
     pub fn local_runtime_id(&self) -> RuntimeId {
         self.inner.endpoint.runtime_id()
     }

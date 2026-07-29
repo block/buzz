@@ -6,60 +6,93 @@ use axum::response::{IntoResponse, Response};
 /// Errors from media operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
+    /// The uploaded bytes did not match any known magic-number signature.
     #[error("unknown content type")]
     UnknownContentType,
+    /// The detected content type is not on the allowlist.
     #[error("disallowed content type: {0}")]
     DisallowedContentType(String),
+    /// The uploaded file exceeds the configured maximum size.
     #[error("file too large: {size} bytes (max {max})")]
-    FileTooLarge { size: u64, max: u64 },
+    FileTooLarge {
+        /// Actual size of the uploaded file in bytes.
+        size: u64,
+        /// Maximum allowed size in bytes.
+        max: u64,
+    },
+    /// The decoded image exceeds the configured pixel-dimension cap.
     #[error("image dimensions too large")]
     ImageTooLarge,
+    /// The image bytes could not be decoded.
     #[error("invalid image data")]
     InvalidImage,
+    /// The media embeds forbidden metadata or a non-canonical metadata channel.
     #[error("media contains metadata or a non-canonical metadata channel")]
     MetadataForbidden,
+    /// The provided signature failed verification.
     #[error("invalid signature")]
     InvalidSignature,
+    /// The auth event has the wrong Nostr kind.
     #[error("invalid auth event kind")]
     InvalidAuthKind,
+    /// The auth event carries an unsupported Blossom verb.
     #[error("invalid auth verb")]
     InvalidAuthVerb,
+    /// A required Nostr tag is absent from the auth event.
     #[error("missing required tag: {0}")]
     MissingTag(&'static str),
+    /// The computed SHA-256 does not match the claimed hash.
     #[error("hash mismatch")]
     HashMismatch,
+    /// The auth event references a different server URL.
     #[error("server mismatch")]
     ServerMismatch,
+    /// The auth event's expiration timestamp has passed.
     #[error("token expired")]
     TokenExpired,
+    /// The auth event's `created_at` falls outside the acceptance window.
     #[error("timestamp out of window")]
     TimestampOutOfWindow,
+    /// An underlying storage backend (S3) operation failed.
     #[error("storage error: {0}")]
     StorageError(String),
+    /// A generic internal error not covered by a more specific variant.
     #[error("internal error")]
     Internal,
+    /// The requested blob does not exist in storage.
     #[error("not found")]
     NotFound,
+    /// The request carried no authorization header.
     #[error("missing authorization header")]
     MissingAuth,
+    /// The authorization scheme is not supported.
     #[error("invalid authorization scheme")]
     InvalidAuthScheme,
+    /// The authorization header contained invalid base64.
     #[error("invalid base64 encoding")]
     InvalidBase64,
+    /// The decoded authorization event is malformed.
     #[error("invalid auth event")]
     InvalidAuthEvent,
+    /// The authenticated principal is not permitted to perform this action.
     #[error("unauthorized")]
     Unauthorized,
+    /// The auth event lacks the required Blossom scope for this operation.
     #[error("insufficient scope")]
     InsufficientScope,
+    /// The pubkey is not a member of the required relay.
     #[error("relay membership required")]
     RelayMembershipRequired,
+    /// The auth token has been revoked.
     #[error("token revoked")]
     TokenRevoked,
+    /// The auth event's pubkey does not match the requested resource's owner.
     #[error("pubkey mismatch")]
     PubkeyMismatch,
+    /// The uploader has exceeded the per-window upload rate limit.
     #[error("upload rate limit exceeded")]
     UploadRateLimitExceeded,
+    /// The uploader has reached the concurrent-upload limit.
     #[error("upload concurrency limit reached")]
     UploadConcurrencyLimitReached,
     /// A video/audio track does not use the canonical H.264/AAC codecs.

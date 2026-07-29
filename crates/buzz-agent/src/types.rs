@@ -14,9 +14,17 @@ use serde_json::Value;
 const IMAGE_CONTEXT_TOKEN_EQUIV: usize = 16 * 1024;
 
 #[derive(Debug, Clone)]
+/// A single content part returned by a tool call.
 pub enum ToolResultContent {
+    /// Plain-text content.
     Text(String),
-    Image { data: String, mime_type: String },
+    /// Base64-encoded image data plus its MIME type.
+    Image {
+        /// Base64-encoded image payload.
+        data: String,
+        /// MIME type of the image (e.g. `image/png`).
+        mime_type: String,
+    },
 }
 
 impl ToolResultContent {
@@ -35,10 +43,10 @@ impl ToolResultContent {
 
     /// Token-equivalent context-window pressure, in bytes (the handoff gate
     /// maps bytes→tokens at 1:1). Identical to [`Self::estimated_bytes`] for
-    /// text, but an image is charged a flat [`IMAGE_CONTEXT_TOKEN_EQUIV`]
-    /// budget rather than its base64 length — providers bill it as visual
-    /// tiles (~2K tokens), so counting `data.len()` over-counts by ~1500× and
-    /// forces a handoff on a single image.
+    /// text, but an image is charged a flat per-image token budget
+    /// (`IMAGE_CONTEXT_TOKEN_EQUIV`) rather than its base64 length — providers
+    /// bill it as visual tiles (~2K tokens), so counting `data.len()` over-
+    /// counts by ~1500× and forces a handoff on a single image.
     pub fn context_pressure_bytes(&self) -> usize {
         match self {
             Self::Text(s) => s.len(),
@@ -46,6 +54,8 @@ impl ToolResultContent {
         }
     }
 
+    /// Return the content as plain text. Image content is rendered as a
+    /// size summary placeholder since it has no textual form.
     pub fn as_text_lossy(&self) -> String {
         match self {
             Self::Text(s) => s.clone(),
@@ -57,16 +67,23 @@ impl ToolResultContent {
 }
 
 #[derive(Debug, Clone)]
+/// One item in a session's conversation history.
 pub enum HistoryItem {
+    /// A user turn.
     User(String),
+    /// An assistant turn with its text and any tool calls it made.
     Assistant {
+        /// Assistant text output for this turn.
         text: String,
+        /// Tool calls requested by the assistant in this turn.
         tool_calls: Vec<ToolCall>,
     },
+    /// A completed tool call result fed back to the model.
     ToolResult(ToolResult),
 }
 
 impl HistoryItem {
+    /// Estimated serialized byte size of this item.
     pub fn estimated_bytes(&self) -> usize {
         self.size_with(ToolResultContent::estimated_bytes)
     }
@@ -104,20 +121,29 @@ impl HistoryItem {
 }
 
 #[derive(Debug, Clone)]
+/// A tool call requested by the model.
 pub struct ToolCall {
+    /// Provider-assigned call id used to correlate results with this call.
     pub provider_id: String,
+    /// Name of the tool to invoke.
     pub name: String,
+    /// JSON arguments to pass to the tool.
     pub arguments: Value,
 }
 
 #[derive(Debug, Clone)]
+/// The outcome of executing a tool call.
 pub struct ToolResult {
+    /// Provider-assigned call id this result corresponds to.
     pub provider_id: String,
+    /// Content blocks returned by the tool.
     pub content: Vec<ToolResultContent>,
+    /// Whether the tool execution reported an error.
     pub is_error: bool,
 }
 
 impl ToolResult {
+    /// Join all content blocks into a single text representation.
     pub fn text(&self) -> String {
         self.content
             .iter()
@@ -128,9 +154,13 @@ impl ToolResult {
 }
 
 #[derive(Debug, Clone)]
+/// The parsed response from an LLM completion request.
 pub struct LlmResponse {
+    /// Assistant text output.
     pub text: String,
+    /// Tool calls the model requested, if any.
     pub tool_calls: Vec<ToolCall>,
+    /// Why the model stopped generating.
     pub stop: ProviderStop,
     /// Total input tokens the provider reported for this request, or `None`
     /// if the response carried no usage. For Anthropic/Databricks this is the
@@ -155,31 +185,48 @@ pub struct LlmResponse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Stop reason reported by the upstream provider.
 pub enum ProviderStop {
+    /// The model finished its turn naturally.
     EndTurn,
+    /// The model stopped to emit tool calls.
     ToolUse,
+    /// The `max_tokens` limit was reached.
     MaxTokens,
+    /// The model refused the request.
     Refusal,
+    /// Any other provider-reported stop reason.
     Other,
 }
 
 #[derive(Debug, Clone)]
+/// Definition of a tool exposed to the model.
 pub struct ToolDef {
+    /// Tool name as seen by the model.
     pub name: String,
+    /// Human-readable description of what the tool does.
     pub description: String,
+    /// JSON schema describing the tool's arguments.
     pub input_schema: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Why an agent prompt turn ended, as surfaced to the client.
 pub enum StopReason {
+    /// The model finished its turn naturally.
     EndTurn,
+    /// The turn was cancelled by the client.
     Cancelled,
+    /// The `max_tokens` limit was reached.
     MaxTokens,
+    /// The configured maximum number of turn requests was reached.
     MaxTurnRequests,
+    /// The model refused the request.
     Refusal,
 }
 
 impl StopReason {
+    /// Return the ACP wire string for this stop reason.
     pub fn as_wire(self) -> &'static str {
         match self {
             Self::EndTurn => "end_turn",
@@ -192,41 +239,62 @@ impl StopReason {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// Specification of an stdio MCP server to spawn.
 pub struct McpServerStdio {
+    /// Logical name of the MCP server.
     pub name: String,
+    /// Executable command to run.
     pub command: String,
+    /// Command-line arguments to pass to the command.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables to set on the child process.
     #[serde(default)]
     pub env: Vec<EnvVar>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+/// A name/value pair for a child process environment variable.
 pub struct EnvVar {
+    /// Environment variable name.
     pub name: String,
+    /// Environment variable value.
     pub value: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
+/// A content block from a user prompt.
 pub enum ContentBlock {
+    /// A text block.
     Text {
+        /// The text content.
         text: String,
     },
+    /// A reference to an external resource.
     ResourceLink {
+        /// URI of the referenced resource.
         uri: String,
     },
+    /// A content block type this agent does not handle.
     #[serde(other)]
     Unsupported,
 }
 
 #[derive(Debug)]
+/// Errors that can occur while driving an agent prompt turn.
 pub enum AgentError {
+    /// The client sent malformed or invalid request parameters.
     InvalidParams(String),
+    /// A generic LLM transport or parsing error.
     Llm(String),
+    /// An LLM authentication or authorization failure.
     LlmAuth(String),
+    /// The requested model was not found or not available.
     LlmModelNotFound(String),
+    /// An MCP server transport or protocol error.
     Mcp(String),
+    /// The turn was cancelled.
     Cancelled,
 }
 
@@ -246,6 +314,7 @@ impl std::fmt::Display for AgentError {
 impl std::error::Error for AgentError {}
 
 impl AgentError {
+    /// Return the JSON-RPC error code this error maps to.
     pub fn json_rpc_code(&self) -> i32 {
         match self {
             Self::InvalidParams(_) => -32602,
@@ -256,6 +325,8 @@ impl AgentError {
     }
 }
 
+/// Truncate `s` to at most `max` bytes on a UTF-8 char boundary, appending a
+/// `[truncated]` marker when truncation occurs.
 pub fn clamp(mut s: String, max: usize) -> String {
     if s.len() <= max {
         return s;

@@ -1,4 +1,5 @@
 //! git-sign-nostr — NIP-GS git object signing with Nostr keys.
+#![warn(missing_docs)]
 //!
 //! A pluggable git signing program (`gpg.x509.program`) that signs commits
 //! and tags with BIP-340 Schnorr signatures using the signer's Nostr keypair.

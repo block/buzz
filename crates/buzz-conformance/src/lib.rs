@@ -1,4 +1,5 @@
 //! Runtime trace schema + independent replay checker for
+#![warn(missing_docs)]
 //! `docs/spec/MultiTenantRelay.tla`.
 //!
 //! North star (from the runtime-formal-compliance skill): don't ask "did the

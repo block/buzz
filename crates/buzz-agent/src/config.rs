@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+/// ACP protocol version advertised to clients during `initialize`.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Reasoning/thinking effort level for providers that support it.
@@ -17,12 +18,19 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// - **Databricks**: routed by model family (Claude → Anthropic mapping, GPT-5 → Responses, MLflow → Chat).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ThinkingEffort {
+    /// Disable thinking entirely.
     None,
+    /// Minimal thinking effort.
     Minimal,
+    /// Low thinking effort.
     Low,
+    /// Medium thinking effort.
     Medium,
+    /// High thinking effort.
     High,
+    /// Extra-high thinking effort (above `High`).
     XHigh,
+    /// Maximum thinking effort supported by the provider.
     Max,
 }
 
@@ -99,7 +107,7 @@ fn strip_catalog_prefix(model: &str) -> &str {
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
 ///
 /// API shape selection (per Anthropic extended-thinking support table,
-/// https://platform.claude.com/docs/en/build-with-claude/extended-thinking, July 2025):
+/// <https://platform.claude.com/docs/en/build-with-claude/extended-thinking>, July 2025):
 ///
 /// **Adaptive families** — `thinking: {type:"adaptive"}` + `output_config: {effort}`.
 /// These models use adaptive thinking; `thinking:{type:"adaptive"}` is required to enable
@@ -637,7 +645,9 @@ pub fn parse_thinking_effort(raw: Option<&str>) -> Result<Option<ThinkingEffort>
     }
 }
 
+/// Maximum size, in bytes, of a single `session/prompt` user prompt.
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+/// Maximum combined size, in bytes, of the system prompt sent at `session/new`.
 pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
 /// Total per-result byte ceiling (text + images). Sized for image-bearing
 /// results — view_image can legitimately return multi-MiB base64 payloads.
@@ -649,20 +659,27 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 /// shell-output caps in sprout-dev-mcp, goose, and pi; codex defaults to
 /// 10 KB. Tunable via `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
 pub const DEFAULT_TOOL_RESULT_TEXT_BYTES: usize = 50 * 1024;
+/// Maximum number of tool calls allowed in a single prompt turn.
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 
+/// Maximum output tokens requested from the summarizing model during a context handoff.
 pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
 
+/// Maximum byte size of the preserved original-task text carried across a handoff.
 pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
 
+/// Maximum number of tool names retained in the post-handoff tool summary.
 pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// LLM provider to route requests to.
 pub enum Provider {
+    /// Anthropic (Claude) via the Messages API.
     Anthropic,
+    /// OpenAI or an OpenAI-compatible endpoint (Chat Completions or Responses).
     OpenAi,
     /// Databricks model serving. Routes to `{base_url}/serving-endpoints/{model}/invocations`
     /// with a dynamically-acquired bearer (OAuth 2.0 PKCE, or static `DATABRICKS_TOKEN`).
@@ -680,25 +697,42 @@ pub enum Provider {
 /// provider error.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OpenAiApi {
+    /// Use the Chat Completions API (`/v1/chat/completions`).
     Chat,
+    /// Use the Responses API (`/v1/responses`).
     Responses,
+    /// Pick the API based on the host (Responses for `*.openai.com`, Chat otherwise).
     Auto,
 }
 
 #[derive(Debug, Clone)]
+/// Process-wide agent configuration, loaded from environment variables.
 pub struct Config {
+    /// LLM provider requests are routed to.
     pub provider: Provider,
+    /// System prompt prepended to every prompt turn (before hints).
     pub system_prompt: String,
+    /// Maximum number of model round-trips per prompt turn (0 = unlimited).
     pub max_rounds: u32,
+    /// Maximum output tokens requested from the model per request.
     pub max_output_tokens: u32,
+    /// Timeout for a single LLM completion request.
     pub llm_timeout: Duration,
+    /// Timeout for a single tool (MCP) call.
     pub tool_timeout: Duration,
+    /// Timeout for an MCP server's initialization handshake.
     pub mcp_init_timeout: Duration,
+    /// Maximum number of restart attempts when an MCP server exits unexpectedly.
     pub mcp_max_restart_attempts: u32,
+    /// Base delay, in milliseconds, for the exponential MCP restart backoff.
     pub mcp_restart_base_ms: u64,
+    /// Upper cap, in milliseconds, for the exponential MCP restart backoff.
     pub mcp_restart_max_ms: u64,
+    /// Maximum number of concurrent sessions the agent will accept.
     pub max_sessions: usize,
+    /// Maximum size, in bytes, of a single stdio line read from the client.
     pub max_line_bytes: usize,
+    /// Maximum total byte size of conversation history retained per session.
     pub max_history_bytes: usize,
     /// Per-tool-result cap on text content. Oversized text is middle-elided
     /// (head + tail kept) before entering history. Images are exempt — they
@@ -712,8 +746,11 @@ pub struct Config {
     /// operators lower/raise it for other models. Set via
     /// `BUZZ_AGENT_MAX_CONTEXT_TOKENS`.
     pub max_context_tokens: u64,
+    /// Maximum number of context-summarizing handoffs allowed per prompt turn.
     pub max_handoffs: usize,
+    /// Maximum number of tool calls dispatched in parallel within a round.
     pub max_parallel_tools: usize,
+    /// Timeout for a single hook server invocation.
     pub hook_timeout: Duration,
     /// Maximum `_Stop` rejections per prompt. Default 3. Set to 0 to
     /// disable `_Stop` hooks entirely (agent always honors end_turn).
@@ -722,9 +759,13 @@ pub struct Config {
     /// Default (env unset/empty) is `None` — hooks are off unless the
     /// operator explicitly opts in.
     pub hook_servers: HookServers,
+    /// API key or static bearer token used to authenticate with the provider.
     pub api_key: String,
+    /// Configured model identifier.
     pub model: String,
+    /// Base URL the provider API is served from.
     pub base_url: String,
+    /// `anthropic-version` header value sent on Anthropic requests.
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
@@ -734,6 +775,7 @@ pub struct Config {
     /// `BUZZ_AGENT_PREFER_MESH_FOR_AUTO=1`; other providers keep their
     /// existing `auto` semantics.
     pub prefer_mesh_for_auto: bool,
+    /// Whether to inject discovered skill/hint docs into the system prompt.
     pub hints_enabled: bool,
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
@@ -741,6 +783,7 @@ pub struct Config {
 }
 
 impl Config {
+    /// Build a [`Config`] by reading the process environment.
     pub fn from_env() -> Result<Self, String> {
         let databricks_host = env("DATABRICKS_HOST");
         let databricks_model = env("DATABRICKS_MODEL");
@@ -840,7 +883,7 @@ impl Config {
 
     /// Construct a minimal `Config` for model-catalog discovery.
     ///
-    /// Only the fields used by [`build_token_source`](crate::llm::build_token_source)
+    /// Only the fields used by `build_token_source` and the catalog HTTP
     /// and the catalog HTTP helpers are meaningful; all others are set to
     /// inert defaults. Never call `from_env` for discovery — it requires
     /// `DATABRICKS_MODEL` and other fields that are irrelevant here.
@@ -1063,8 +1106,11 @@ where
 ///   - `a,b,c`                          → `Only(["a","b","c"])`
 #[derive(Debug, Clone)]
 pub enum HookServers {
+    /// No hook servers are eligible (hooks disabled).
     None,
+    /// Every server is eligible to receive hook calls.
     All,
+    /// Only the listed servers may receive hook calls.
     Only(Vec<String>),
 }
 

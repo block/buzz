@@ -6,11 +6,16 @@ use crate::{
     StreamRecvHalf, StreamSendHalf, ALPN,
 };
 
+/// Snapshot of counters for a single peer connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PeerCounters {
+    /// Reliable streams this side opened to the peer.
     pub streams_opened: u64,
+    /// Reliable streams accepted from the peer.
     pub streams_accepted: u64,
+    /// Datagrams sent to the peer.
     pub datagrams_sent: u64,
+    /// Datagrams received from the peer.
     pub datagrams_received: u64,
 }
 
@@ -62,18 +67,22 @@ impl MeshPeer {
         })
     }
 
+    /// The peer's mesh identity.
     pub fn runtime_id(&self) -> RuntimeId {
         self.runtime_id
     }
 
+    /// Max datagram size the connection accepts, if datagrams are enabled.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.conn.max_datagram_size()
     }
 
+    /// Snapshot this peer's per-connection counters.
     pub fn counters(&self) -> PeerCounters {
         self.counters.snapshot()
     }
 
+    /// Open a bidirectional framed stream to the peer.
     pub async fn open_bi(&self) -> Result<MeshStream, MeshError> {
         let (send, recv) = self
             .conn
@@ -87,6 +96,7 @@ impl MeshPeer {
         ))
     }
 
+    /// Accept the next bidirectional framed stream from the peer.
     pub async fn accept_bi(&self) -> Result<MeshStream, MeshError> {
         let (send, recv) = self
             .conn
@@ -102,6 +112,7 @@ impl MeshPeer {
         ))
     }
 
+    /// Send a realtime datagram, enforcing the connection's size limit.
     pub fn send_datagram(&self, dgram: &MeshDatagram) -> Result<(), MeshError> {
         let max = self
             .conn
@@ -115,6 +126,7 @@ impl MeshPeer {
         Ok(())
     }
 
+    /// Receive the next realtime datagram from the peer.
     pub async fn recv_datagram(&self) -> Result<MeshDatagram, MeshError> {
         let bytes = self
             .conn

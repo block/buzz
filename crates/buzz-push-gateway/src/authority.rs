@@ -11,72 +11,120 @@ use std::sync::Mutex;
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Single-use enrollment challenge issued to a client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Challenge {
+    /// Unique challenge id.
     pub id: Uuid,
+    /// 32-byte random challenge value.
     pub value: [u8; 32],
+    /// Unix timestamp at which the challenge expires.
     pub expires_at: i64,
 }
 
+/// Installation record at creation time, before it has been persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewInstallation {
+    /// Unique installation id.
     pub id: Uuid,
+    /// App Attest key id (raw 32 bytes).
     pub app_attest_key_id: Vec<u8>,
+    /// App Attest P-256 public key (raw bytes).
     pub app_attest_public_key: Vec<u8>,
+    /// Current assertion counter.
     pub assertion_counter: u32,
+    /// App profile bound to this installation.
     pub profile: AppProfile,
+    /// Encrypted APNs token ciphertext.
     pub token_ciphertext: Vec<u8>,
+    /// SHA-256 fingerprint of the plaintext token.
     pub token_fingerprint: [u8; 32],
+    /// Endpoint epoch for this token generation.
     pub endpoint_epoch: i64,
+    /// Unix timestamp at which the installation expires.
     pub expires_at: i64,
 }
 
+/// Durable installation authority record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installation {
+    /// Unique installation id.
     pub id: Uuid,
+    /// App Attest key id (raw 32 bytes).
     pub app_attest_key_id: Vec<u8>,
+    /// App Attest P-256 public key (raw bytes).
     pub app_attest_public_key: Vec<u8>,
+    /// Current assertion counter.
     pub assertion_counter: u32,
+    /// App profile bound to this installation.
     pub profile: AppProfile,
+    /// Encrypted APNs token ciphertext.
     pub token_ciphertext: Vec<u8>,
+    /// SHA-256 fingerprint of the plaintext token.
     pub token_fingerprint: [u8; 32],
+    /// Endpoint epoch for this token generation.
     pub endpoint_epoch: i64,
+    /// Unix timestamp at which the installation expires.
     pub expires_at: i64,
+    /// Whether the installation has been revoked.
     pub revoked: bool,
 }
 
+/// Relay delegation granting a relay the right to deliver for an installation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delegation {
+    /// Unique delegation id.
     pub id: Uuid,
+    /// The installation being delegated.
     pub installation_id: Uuid,
+    /// Nostr relay public key (hex) receiving the delegation.
     pub relay_pubkey: String,
+    /// Endpoint epoch the delegation is bound to.
     pub endpoint_epoch: i64,
+    /// Monotonic delegation generation (revocation bumps it).
     pub generation: i64,
+    /// Unix timestamp from which the delegation is valid.
     pub not_before: i64,
+    /// Unix timestamp at which the delegation expires.
     pub expires_at: i64,
+    /// Whether the delegation has been revoked.
     pub revoked: bool,
 }
 
+/// Locked authority required to perform one delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryAuthority {
+    /// The delegation authorizing delivery.
     pub delegation_id: Uuid,
+    /// The installation the delivery targets.
     pub installation_id: Uuid,
+    /// Nostr relay public key (hex) performing delivery.
     pub relay_pubkey: String,
+    /// App profile of the installation.
     pub profile: AppProfile,
+    /// Encrypted APNs token ciphertext.
     pub token_ciphertext: Vec<u8>,
+    /// Endpoint epoch of the token.
     pub endpoint_epoch: i64,
+    /// Delegation generation at authorization time.
     pub generation: i64,
+    /// Unix timestamp at which the authority expires.
     pub expires_at: i64,
 }
 
+/// One-use authority to perform a delivery, returned by `authorize_delivery`.
 #[derive(Debug)]
 pub struct DeliveryPermit {
+    /// The locked delivery authority.
     pub authority: DeliveryAuthority,
+    /// Nostr relay public key (hex) performing the delivery.
     pub relay_pubkey: String,
+    /// Unique id of the delivery request.
     pub request_id: Uuid,
 }
 
 impl DeliveryPermit {
+    /// Assemble a permit from its authority, relay, and request id.
     pub fn new(authority: DeliveryAuthority, relay_pubkey: String, request_id: Uuid) -> Self {
         Self {
             authority,
@@ -86,16 +134,22 @@ impl DeliveryPermit {
     }
 }
 
+/// Outcome of a delivery as reported to `finish_delivery`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryDisposition {
+    /// The delivery is complete; no retry.
     Terminal,
+    /// The delivery may be retried.
     Retryable,
 }
 
+/// Errors raised by the authority store.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityError {
+    /// The authority state rejected the request.
     #[error("authority state rejected the request")]
     Rejected,
+    /// The authority store was unavailable.
     #[error("authority store unavailable")]
     Unavailable,
 }
@@ -106,25 +160,32 @@ pub enum AuthorityError {
 pub trait AuthorityStore: Send + Sync {
     /// Readiness must fail closed when durable authority cannot participate.
     async fn ready(&self) -> Result<(), AuthorityError>;
+    /// Persist a freshly issued challenge.
     async fn put_challenge(&self, challenge: Challenge) -> Result<(), AuthorityError>;
+    /// Consume a challenge by id+value if it has not expired.
     async fn consume_challenge(
         &self,
         id: Uuid,
         value: [u8; 32],
         now: i64,
     ) -> Result<(), AuthorityError>;
+    /// Persist a new installation.
     async fn create_installation(
         &self,
         installation: NewInstallation,
     ) -> Result<(), AuthorityError>;
+    /// Load an installation by id (fails if expired).
     async fn installation(&self, id: Uuid, now: i64) -> Result<Installation, AuthorityError>;
+    /// Advance an installation's assertion counter from `previous` to `next`.
     async fn advance_assertion_counter(
         &self,
         installation_id: Uuid,
         previous: u32,
         next: u32,
     ) -> Result<(), AuthorityError>;
+    /// Insert or update a delegation (bumping generation on change).
     async fn upsert_delegation(&self, delegation: Delegation) -> Result<(), AuthorityError>;
+    /// Rotate an installation's endpoint/token, expecting `expected_epoch`.
     async fn rotate_endpoint(
         &self,
         installation_id: Uuid,
@@ -133,12 +194,14 @@ pub trait AuthorityStore: Send + Sync {
         token_ciphertext: Vec<u8>,
         token_fingerprint: [u8; 32],
     ) -> Result<(), AuthorityError>;
+    /// Revoke a relay's delegation, bumping it to `new_generation`.
     async fn revoke_delegation(
         &self,
         installation_id: Uuid,
         relay_pubkey: &str,
         new_generation: i64,
     ) -> Result<(), AuthorityError>;
+    /// Revoke an installation, expecting `expected_epoch` and rotating to `new_epoch`.
     async fn revoke_installation(
         &self,
         installation_id: Uuid,

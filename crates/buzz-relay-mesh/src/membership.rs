@@ -14,6 +14,7 @@ use crate::registry::ReadyRecord;
 use crate::status::{ConnectionState, MeshCounters, MeshPeerCounters, MeshPeerStatus, MeshStatus};
 use crate::{PeerInfo, RelayMeshMembership, RuntimeId};
 
+/// Default phi value at which a peer is considered suspect (excluded from routing).
 pub const DEFAULT_PHI_SUSPECT_THRESHOLD: f64 = 8.0;
 
 #[derive(Clone, Debug)]
@@ -43,6 +44,7 @@ pub struct MeshMembership {
 }
 
 impl MeshMembership {
+    /// Create a membership view seeded with the local runtime's record.
     pub fn new(local_record: GossipRecord) -> Self {
         Self {
             local_runtime_id: local_record.runtime_id,
@@ -63,11 +65,13 @@ impl MeshMembership {
         self
     }
 
+    /// Set the phi value above which a peer is treated as suspect.
     pub fn with_phi_suspect_threshold(mut self, threshold: f64) -> Self {
         self.phi_suspect_threshold = threshold;
         self
     }
 
+    /// Clone of this runtime's own gossip record.
     pub fn local_record(&self) -> GossipRecord {
         self.local_record
             .read()
@@ -152,6 +156,7 @@ impl MeshMembership {
         }
     }
 
+    /// Override a peer's connection state (no-op if the peer is unknown).
     pub fn mark_connection_state(&self, runtime_id: RuntimeId, state: ConnectionState) {
         if let Some(peer) = self
             .peers
@@ -163,6 +168,7 @@ impl MeshMembership {
         }
     }
 
+    /// Mutate the local record under `update`, bumping its version/heartbeat.
     pub fn update_local<F>(&self, update: F) -> GossipRecord
     where
         F: FnOnce(&mut GossipRecord),
@@ -177,6 +183,7 @@ impl MeshMembership {
         local.clone()
     }
 
+    /// Whether this runtime is draining.
     pub fn is_draining(&self) -> bool {
         self.draining.load(Ordering::Relaxed)
     }
@@ -246,42 +253,49 @@ impl MeshMembership {
         }
     }
 
+    /// Increment a peer's `streams_opened` counter.
     pub fn record_stream_opened(&self, runtime_id: RuntimeId) {
         self.update_peer_counters(runtime_id, |c| {
             c.streams_opened = c.streams_opened.saturating_add(1)
         });
     }
 
+    /// Increment a peer's `streams_received` counter.
     pub fn record_stream_received(&self, runtime_id: RuntimeId) {
         self.update_peer_counters(runtime_id, |c| {
             c.streams_received = c.streams_received.saturating_add(1)
         });
     }
 
+    /// Increment a peer's `datagrams_sent` counter.
     pub fn record_datagram_sent(&self, runtime_id: RuntimeId) {
         self.update_peer_counters(runtime_id, |c| {
             c.datagrams_sent = c.datagrams_sent.saturating_add(1)
         });
     }
 
+    /// Increment a peer's `datagrams_received` counter.
     pub fn record_datagram_received(&self, runtime_id: RuntimeId) {
         self.update_peer_counters(runtime_id, |c| {
             c.datagrams_received = c.datagrams_received.saturating_add(1)
         });
     }
 
+    /// Increment a peer's `gossip_frames_sent` counter.
     pub fn record_gossip_frame_sent(&self, runtime_id: RuntimeId) {
         self.update_peer_counters(runtime_id, |c| {
             c.gossip_frames_sent = c.gossip_frames_sent.saturating_add(1)
         });
     }
 
+    /// Increment a peer's `gossip_frames_received` counter.
     pub fn record_gossip_frame_received(&self, runtime_id: RuntimeId) {
         self.update_peer_counters(runtime_id, |c| {
             c.gossip_frames_received = c.gossip_frames_received.saturating_add(1)
         });
     }
 
+    /// Record a stale-generation fence rejection, optionally against a peer.
     pub fn record_stale_generation_rejection(&self, runtime_id: Option<RuntimeId>) {
         self.stale_generation_rejections
             .fetch_add(1, Ordering::Relaxed);
@@ -292,6 +306,7 @@ impl MeshMembership {
         }
     }
 
+    /// Snapshot the full `/_mesh` status for operators.
     pub fn status(&self) -> MeshStatus {
         let now = SystemTime::now();
         let local = self.local_record();

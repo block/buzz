@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! Ephemeral sidecar relay for NIP-AB device pairing handshakes.
 //!
 //! Accepts WebSocket connections, matches incoming kind:24134 events against
@@ -101,6 +103,7 @@ struct Sub {
     writer_tx: mpsc::Sender<OutMsg>,
 }
 
+/// Core relay state: live subscriptions, connection counter, and bounded dedup/delivery maps.
 pub struct Relay {
     subs: Mutex<Vec<Sub>>,
     conn_count: AtomicU32,
@@ -118,6 +121,7 @@ impl Default for Relay {
 }
 
 impl Relay {
+    /// Create a new empty relay with no subscriptions or tracked state.
     pub fn new() -> Self {
         Self {
             subs: Mutex::new(Vec::new()),

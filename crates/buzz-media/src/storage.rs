@@ -69,7 +69,7 @@ impl MediaStorage {
     /// Store an object from a byte slice.
     ///
     /// Used for images, sidecars, and thumbnails. For large video files use
-    /// [`put_file`] to avoid loading the entire blob into RAM.
+    /// [`MediaStorage::put_file`] to avoid loading the entire blob into RAM.
     pub async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError> {
         self.bucket
             .put_object_with_content_type(key, bytes, content_type)
@@ -377,6 +377,7 @@ mod tests {
 
 /// Metadata returned by HEAD — just enough for BUD-01 response headers.
 pub struct BlobHeadMeta {
+    /// Object size in bytes.
     pub size: u64,
 }
 

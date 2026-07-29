@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! Media storage, validation, and thumbnail generation for Buzz.
 //!
 //! Library crate — no Axum dependency for handlers. Axum handlers live in `buzz-relay`.

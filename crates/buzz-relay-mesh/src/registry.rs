@@ -16,9 +16,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{MeshError, RuntimeId};
 
+/// Redis key prefix for ready records.
 pub const READY_KEY_PREFIX: &str = "mesh:ready:";
+/// Default refresh interval for the ready-registry heartbeat.
 pub const DEFAULT_REGISTRY_REFRESH: Duration = Duration::from_secs(15);
+/// TTL multiplier applied to the refresh interval to get record expiry.
 pub const REGISTRY_EXPIRY_MULTIPLIER: u64 = 3;
+/// Versioned domain-separation string for ready-record attestations.
 pub const ATTESTATION_CONTEXT: &str = "buzz-relay-mesh-ready-v1";
 
 /// Relay-key-signed binding for a boot-unique runtime endpoint pubkey.
@@ -35,6 +39,7 @@ pub struct RuntimeAttestation {
 }
 
 impl RuntimeAttestation {
+    /// Create and sign an attestation binding `runtime_id` to the relay key.
     pub fn new(relay_keys: &nostr::Keys, runtime_id: RuntimeId) -> Self {
         let relay_pubkey = relay_keys.public_key().to_hex();
         let message = attestation_message(runtime_id, &relay_pubkey);
@@ -45,6 +50,7 @@ impl RuntimeAttestation {
         }
     }
 
+    /// Verify the attestation against the given `runtime_id`.
     pub fn verify(&self, runtime_id: RuntimeId) -> Result<(), MeshError> {
         verify_attestation(runtime_id, &self.relay_pubkey, &self.relay_sig)
     }
@@ -97,6 +103,7 @@ fn attestation_message(runtime_id: RuntimeId, relay_pubkey: &str) -> Message {
 /// Value stored at `mesh:ready:{runtime_id}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadyRecord {
+    /// The boot-unique mesh identity being attested.
     pub runtime_id: RuntimeId,
     /// Explicit duplicate of `runtime_id` for the contract record shape: this
     /// is the boot-unique ed25519/iroh endpoint pubkey being attested.
@@ -108,11 +115,14 @@ pub struct ReadyRecord {
     /// Dialable iroh endpoint addresses, serialized as strings so this layer
     /// does not depend on transport internals.
     pub endpoint_addrs: Vec<String>,
+    /// Protocol version the runtime speaks.
     pub proto_version: u16,
+    /// Capability strings advertised by the runtime.
     pub capabilities: Vec<String>,
 }
 
 impl ReadyRecord {
+    /// Create a signed record for `runtime_id` using the relay key.
     pub fn new(
         runtime_id: RuntimeId,
         relay_keys: &nostr::Keys,
@@ -132,10 +142,12 @@ impl ReadyRecord {
         }
     }
 
+    /// The Redis key this record is stored under.
     pub fn key(&self) -> String {
         ready_key(self.runtime_id)
     }
 
+    /// Verify `runtime_pubkey`/`relay_sig` against the record's `runtime_id`.
     pub fn verify_attestation(&self) -> Result<(), MeshError> {
         if self.runtime_pubkey != self.runtime_id.to_hex() {
             return Err(MeshError::Transport(format!(
@@ -147,10 +159,12 @@ impl ReadyRecord {
     }
 }
 
+/// Build the Redis key for a runtime's ready record.
 pub fn ready_key(runtime_id: RuntimeId) -> String {
     format!("{READY_KEY_PREFIX}{runtime_id}")
 }
 
+/// TTL to set for a record given the configured refresh interval.
 pub fn expiry_for(refresh: Duration) -> Duration {
     refresh.saturating_mul(REGISTRY_EXPIRY_MULTIPLIER as u32)
 }
@@ -163,14 +177,17 @@ pub struct ReadyRegistry {
 }
 
 impl ReadyRegistry {
+    /// Create a registry over `pool` with the given heartbeat `refresh`.
     pub fn new(pool: deadpool_redis::Pool, refresh: Duration) -> Self {
         Self { pool, refresh }
     }
 
+    /// The configured heartbeat refresh interval.
     pub fn refresh_interval(&self) -> Duration {
         self.refresh
     }
 
+    /// The TTL applied to published records.
     pub fn expiry(&self) -> Duration {
         expiry_for(self.refresh)
     }
@@ -257,6 +274,7 @@ impl ReadyRegistry {
         Ok(out)
     }
 
+    /// Build a readiness-gated heartbeat driver for `record`.
     pub fn heartbeat(&self, record: ReadyRecord) -> ReadyHeartbeat {
         ReadyHeartbeat {
             registry: self.clone(),
@@ -284,14 +302,17 @@ pub struct ReadyHeartbeat {
 }
 
 impl ReadyHeartbeat {
+    /// The record being heartbeated.
     pub fn record(&self) -> &ReadyRecord {
         &self.record
     }
 
+    /// Whether the record is currently published.
     pub fn published(&self) -> bool {
         self.published
     }
 
+    /// Advance one tick: publish while `ready`, clear on the ready→not-ready edge.
     pub async fn tick(&mut self, ready: bool) -> Result<(), MeshError> {
         if ready {
             self.registry.publish_ready(&self.record).await?;
@@ -303,6 +324,7 @@ impl ReadyHeartbeat {
         Ok(())
     }
 
+    /// Clear the published record on clean shutdown (no-op if not published).
     pub async fn shutdown(&mut self) -> Result<(), MeshError> {
         if self.published {
             self.registry.clear_ready(self.record.runtime_id).await?;

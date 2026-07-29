@@ -7,15 +7,18 @@ use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use uuid::Uuid;
 
+/// Postgres-backed implementation of [`AuthorityStore`].
 #[derive(Clone)]
 pub struct PostgresAuthorityStore {
     pool: PgPool,
 }
 impl PostgresAuthorityStore {
+    /// Wrap a connection pool as an authority store.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
+    /// Run SQLx migrations and grant runtime role permissions on the pool.
     pub async fn apply_migrations_and_grants(
         pool: &PgPool,
         runtime_role: &str,

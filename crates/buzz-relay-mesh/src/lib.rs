@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! buzz-relay-mesh — the inter-relay QUIC mesh.
 //!
 //! One iroh endpoint per relay runtime (identity = a boot-unique mesh
@@ -18,13 +19,21 @@
 //! **The law:** mesh membership is a hint; the Redis fenced generation is the
 //! arbiter. Nothing in this crate grants ownership — see [`wire::FencedHeader`].
 
+/// QUIC endpoint wrapper and connection lifecycle.
 pub mod endpoint;
+/// Scuttlebutt membership gossip state machine and digest exchange.
 pub mod gossip;
+/// Phi-accrual membership tracker and live peer view.
 pub mod membership;
+/// Per-peer connection state and framed transport halves.
 pub mod peer;
+/// Ready registry: Redis-backed attestation/heartbeat directory of runtimes.
 pub mod registry;
+/// [`MeshRuntime`] — the trait iroh-backed runtimes implement.
 pub mod runtime;
+/// `/_mesh` status snapshot types surfaced to operators.
 pub mod status;
+/// The fenced wire contract: framing, version, and headers.
 pub mod wire;
 
 // Lane modules — one owner per file (see the mesh thread for lane map):
@@ -62,28 +71,51 @@ pub struct MeshConfig {
     pub registry_refresh: std::time::Duration,
 }
 
+/// Errors raised by the mesh transport and wire codec.
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
+    /// Failed to encode a wire frame.
     #[error("frame encode: {0}")]
     Encode(#[source] postcard::Error),
+    /// Failed to decode a wire frame.
     #[error("frame decode: {0}")]
     Decode(#[source] postcard::Error),
+    /// Encountered an unrecognized wire protocol version.
     #[error("unknown wire version {0}")]
     UnknownWireVersion(u8),
+    /// Received an empty (zero-length) frame.
     #[error("empty frame")]
     EmptyFrame,
+    /// A frame exceeded the configured maximum size.
     #[error("frame exceeds max size ({size} > {max})")]
-    FrameTooLarge { size: usize, max: usize },
+    FrameTooLarge {
+        /// Actual frame size in bytes.
+        size: usize,
+        /// Configured maximum frame size in bytes.
+        max: usize,
+    },
+    /// A datagram exceeded the connection's `max_datagram_size`.
     #[error("datagram exceeds connection max_datagram_size ({size} > {max})")]
-    DatagramTooLarge { size: usize, max: usize },
+    DatagramTooLarge {
+        /// Actual datagram size in bytes.
+        size: usize,
+        /// Connection maximum datagram size in bytes.
+        max: usize,
+    },
+    /// The target peer has no live mesh connection.
     #[error("peer {0} not connected")]
     PeerNotConnected(RuntimeId),
+    /// The target peer is draining and refuses new traffic.
     #[error("peer {0} is draining")]
     PeerDraining(RuntimeId),
+    /// The frame's generation is older than the known generation for the session.
     #[error("stale generation for session {session_id}: frame {frame_generation} < known {known_generation}")]
     StaleGeneration {
+        /// The session the stale frame targeted.
         session_id: uuid::Uuid,
+        /// Generation claimed by the rejected frame.
         frame_generation: u64,
+        /// Highest generation known for the session.
         known_generation: u64,
     },
     // The three variants below complete the fence-rejection taxonomy alongside
@@ -94,32 +126,48 @@ pub enum MeshError {
     // `stale_generation` | `no_active_lease` | `owner_mismatch` |
     // `future_generation`. None of these are serialized — the wire-level fence
     // signal remains `GoodbyeReason::StaleGeneration`.
+    /// A frame arrived for a session with no live lease on this runtime.
     #[error("no active lease for session {session_id}: frame generation {frame_generation}, known generation {known_generation}, claimed owner {frame_owner_runtime_id}")]
     NoActiveLease {
+        /// The session the frame targeted.
         session_id: uuid::Uuid,
+        /// Generation claimed by the frame.
         frame_generation: u64,
+        /// Highest generation known for the session.
         known_generation: u64,
         /// The owner the *frame* claimed — there is no current owner by
         /// definition when no live lease exists.
         frame_owner_runtime_id: RuntimeId,
     },
+    /// The frame's claimed owner does not match the session's current owner.
     #[error("owner mismatch for session {session_id} generation {generation}: frame owner {frame_owner_runtime_id} != current owner {current_owner_runtime_id}")]
     OwnerMismatch {
+        /// The session whose owner was contested.
         session_id: uuid::Uuid,
+        /// Generation at which the mismatch was detected.
         generation: u64,
+        /// Owner claimed by the frame.
         frame_owner_runtime_id: RuntimeId,
+        /// The runtime that actually owns the session.
         current_owner_runtime_id: RuntimeId,
     },
+    /// The frame carried a generation ahead of any known lease (replay/forge signal).
     #[error("future generation for session {session_id}: frame {frame_generation} > known {known_generation}")]
     FutureGeneration {
+        /// The session the frame targeted.
         session_id: uuid::Uuid,
+        /// Generation claimed by the frame.
         frame_generation: u64,
+        /// Highest generation known for the session.
         known_generation: u64,
     },
+    /// The mesh is disabled via `BUZZ_MESH=off`.
     #[error("mesh is disabled (BUZZ_MESH=off)")]
     Disabled,
+    /// Lower-level transport failure not covered by a more specific variant.
     #[error("transport: {0}")]
     Transport(String),
+    /// A Redis operation failed.
     #[error("redis: {0}")]
     Redis(#[from] redis::RedisError),
 }
@@ -127,7 +175,9 @@ pub enum MeshError {
 /// A peer as membership sees it. Everything here is a routing HINT.
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
+    /// The peer's mesh identity.
     pub runtime_id: RuntimeId,
+    /// Whether the peer has begun draining and should shed load.
     pub draining: bool,
     /// Phi-accrual suspicion; `None` until enough heartbeats observed.
     pub phi: Option<f64>,
@@ -175,7 +225,9 @@ pub trait RelayPeerTransport: Send + Sync + 'static {
 
 /// Inbound mesh traffic, delivered after wire decode + Hello validation.
 pub trait InboundHandler: Send + Sync + 'static {
+    /// Called for each inbound realtime datagram after wire decode.
     fn on_datagram(&self, from: RuntimeId, dgram: MeshDatagram);
+    /// Called for each inbound session stream after `Hello` validation.
     fn on_session_stream(&self, from: RuntimeId, hello: StreamHello, stream: MeshStream);
 }
 
@@ -188,22 +240,30 @@ pub struct MeshStream {
     pub(crate) recv: Box<dyn StreamRecvHalf>,
 }
 
+/// Write half of a framed mesh stream.
 pub trait StreamSendHalf: Send + 'static {
+    /// Send a single length-delimited frame.
     fn send_frame(&mut self, frame: MeshStreamFrame) -> BoxFuture<'_, Result<(), MeshError>>;
+    /// Finish the send half, signalling clean EOF to the peer.
     fn finish(&mut self) -> Result<(), MeshError>;
 }
 
+/// Read half of a framed mesh stream.
 pub trait StreamRecvHalf: Send + 'static {
+    /// Receive the next frame, or `Ok(None)` at clean EOF.
     fn recv_frame(&mut self) -> BoxFuture<'_, Result<Option<MeshStreamFrame>, MeshError>>;
 }
 
 impl MeshStream {
+    /// Send a single length-delimited frame on the underlying stream.
     pub fn send_frame(&mut self, frame: MeshStreamFrame) -> BoxFuture<'_, Result<(), MeshError>> {
         self.send.send_frame(frame)
     }
+    /// Receive the next frame, or `Ok(None)` at clean EOF.
     pub fn recv_frame(&mut self) -> BoxFuture<'_, Result<Option<MeshStreamFrame>, MeshError>> {
         self.recv.recv_frame()
     }
+    /// Finish the send half, signalling clean EOF to the peer.
     pub fn finish(&mut self) -> Result<(), MeshError> {
         self.send.finish()
     }

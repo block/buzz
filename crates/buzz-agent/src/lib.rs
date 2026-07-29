@@ -1,20 +1,30 @@
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
+//! Minimal ACP-compliant agent.
+//!
+//! `buzz-agent` is a non-streaming, tool-calls-as-output agent that speaks the
+//! Agent Client Protocol (ACP) over stdio. It wires an LLM provider to MCP tool
+//! servers and exposes session management, model switching, mid-turn steering,
+//! and context-summarizing handoffs.
 mod agent;
+/// Provider-agnostic OAuth/PKCE and static token sources.
 pub mod auth;
 mod builtin;
+/// Databricks model-catalog discovery.
 pub mod catalog;
+/// Process-wide configuration loaded from environment variables.
 pub mod config;
 mod handoff;
 mod hints;
 mod llm;
 mod mcp;
+/// Wire protocol, error, and message types shared across modules.
 pub mod types;
 mod wire;
 
 pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
 pub use config::Provider;
 pub use types::AgentError;
-
 /// Environment keys the Windows Git Bash resolver may inspect. `spawn_one()`
 /// forwards every key in this list into its otherwise-cleared MCP child; Doctor
 /// uses the same contract so a ready agent can always start its shell tool.
@@ -107,6 +117,10 @@ fn die(msg: String) -> ! {
     std::process::exit(2);
 }
 
+/// Entry point for the `buzz-agent` binary.
+///
+/// Dispatches the `auth` subcommand (interactive provider login) when invoked
+/// as `buzz-agent auth <provider>`; otherwise runs the ACP stdio server.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if matches!(args.get(1).map(String::as_str), Some("auth")) {

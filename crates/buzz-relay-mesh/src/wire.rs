@@ -62,6 +62,7 @@ pub const MAX_STREAM_FRAME: u32 = 16 * 1024 * 1024;
 pub struct RuntimeId(pub [u8; 32]);
 
 impl RuntimeId {
+    /// Lowercase hex encoding of the runtime id.
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
@@ -83,6 +84,7 @@ impl std::fmt::Display for RuntimeId {
 /// every hop against the Redis lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FencedHeader {
+    /// The session this frame belongs to.
     pub session_id: Uuid,
     /// Monotonic lease generation from the Redis CAS. A receiver that has
     /// observed generation G for a session rejects any frame with < G.
@@ -109,6 +111,7 @@ pub enum Profile {
 /// One QUIC datagram: realtime media only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeshDatagram {
+    /// The fence header for the session this datagram carries.
     pub fenced: FencedHeader,
     /// Sender-scoped monotonic sequence for loss/reorder observability.
     /// Receivers tolerate gaps and reordering; they never wait.
@@ -128,19 +131,26 @@ pub enum MeshStreamFrame {
     Hello(StreamHello),
     /// Opaque tunnel bytes for a reliable-stream session.
     Data {
+        /// The fence header for the session this data carries.
         fenced: FencedHeader,
+        /// Opaque reliable-stream payload.
         payload: Vec<u8>,
     },
     /// Clean close: the sender will send no more `Data` for this session.
     /// Distinct from a QUIC reset — receivers treat reset as abnormal.
     Goodbye {
+        /// The fence header for the session being closed.
         fenced: FencedHeader,
+        /// Why the stream is closing.
         reason: GoodbyeReason,
     },
     /// Membership gossip on the control stream (one per peer connection).
     /// Payload is the gossip lane's postcard-encoded digest/delta exchange —
     /// opaque at this layer so gossip can evolve without a wire bump here.
-    Gossip { payload: Vec<u8> },
+    Gossip {
+        /// Gossip-lane postcard payload (opaque here).
+        payload: Vec<u8>,
+    },
 }
 
 /// Stream role, declared in the Hello.
@@ -151,17 +161,23 @@ pub enum StreamRole {
     Control,
     /// A reliable-stream tunnel session.
     Session {
+        /// The fence header establishing the session's ownership.
         fenced: FencedHeader,
+        /// The tunnel profile fixed for this session.
         profile: Profile,
     },
 }
 
+/// The first frame on every mesh stream, declaring sender and role.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamHello {
+    /// The runtime id of the sender.
     pub sender: RuntimeId,
+    /// The role this stream plays (control or session).
     pub role: StreamRole,
 }
 
+/// Why a stream is being closed cleanly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GoodbyeReason {
     /// Client closed / session ended normally.

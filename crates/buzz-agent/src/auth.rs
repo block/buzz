@@ -1,9 +1,9 @@
 //! Token sources for the LLM transport layer.
 //!
-//! [`TokenSource`] decouples request auth from `Config::api_key`: providers
-//! can supply a static string ([`StaticTokenSource`]) or a refreshable OAuth
-//! 2.0 PKCE engine ([`PkceOAuthTokenSource`]). Engines own their own cache
-//! and refresh logic; the [`Llm`] just asks for a bearer per request.
+//! `TokenSource` decouples request auth from `Config::api_key`: providers
+//! can supply a static string (`StaticTokenSource`) or a refreshable OAuth
+//! 2.0 PKCE engine (`PkceOAuthTokenSource`). Engines own their own cache
+//! and refresh logic; the LLM layer just asks for a bearer per request.
 //!
 //! The PKCE engine implements RFC 6749 + RFC 7636 with on-disk token
 //! caching keyed by `sha256(discovery_url|client_id|scopes)`. It's the
@@ -38,10 +38,11 @@ const TOKEN_REFRESH_LEEWAY: Duration = Duration::from_secs(60);
 /// We match: any longer and the user has gone to lunch.
 const BROWSER_AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Asynchronous source of a bearer token. The [`Llm`] calls this per
+/// Asynchronous source of a bearer token. The LLM layer calls this per
 /// request, so impls are expected to be cheap on the cache-hit path.
 #[async_trait]
 pub trait TokenSource: Send + Sync {
+    /// Return a bearer token, refreshing or launching an interactive flow if needed.
     async fn bearer(&self) -> Result<String, AgentError>;
 
     /// Return a bearer token from cache or refresh, **never** opening a browser.
@@ -76,6 +77,7 @@ pub trait TokenSource: Send + Sync {
 pub struct StaticTokenSource(String);
 
 impl StaticTokenSource {
+    /// Create a static token source that always returns the given token.
     pub fn new(token: impl Into<String>) -> Self {
         Self(token.into())
     }
@@ -96,9 +98,13 @@ impl TokenSource for StaticTokenSource {
 /// the token JSON lives in — separates providers' caches cleanly.
 #[derive(Debug, Clone)]
 pub struct PkceOAuthConfig {
+    /// RFC 8414 well-known discovery URL for the OAuth authorization server.
     pub discovery_url: String,
+    /// OAuth client id used in authorization and token requests.
     pub client_id: String,
+    /// OAuth scopes to request for the token.
     pub scopes: Vec<String>,
+    /// Cache sub-directory under `~/.config/buzz-agent/oauth/` for this provider's tokens.
     pub cache_namespace: String,
     /// When `Some`, the engine writes tokens here instead of
     /// `~/.config/buzz-agent/oauth/<cache_namespace>/`. Production code
@@ -141,6 +147,7 @@ pub struct PkceOAuthTokenSource {
 }
 
 impl PkceOAuthTokenSource {
+    /// Construct a new PKCE token source, loading any cached token from disk.
     pub fn new(cfg: PkceOAuthConfig) -> Result<Arc<Self>, AgentError> {
         let cache_path = cache_path_for(&cfg)?;
         if let Some(parent) = cache_path.parent() {

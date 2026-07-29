@@ -5,7 +5,9 @@ use crate::error::MediaError;
 /// Blossom kind:24242 verbs Buzz currently accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlossomVerb {
+    /// Upload (write) a blob to the server.
     Upload,
+    /// Get (read) a blob from the server.
     Get,
 }
 

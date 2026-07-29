@@ -33,20 +33,34 @@ use std::{
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
+/// Shared application state threaded through every handler.
 #[derive(Clone)]
 pub struct AppState {
+    /// Keyring used to mint/open endpoint grants.
     pub grant_keyring: Arc<GrantKeyring>,
+    /// App Attest verifier bound to the configured app id.
     pub app_attest: Arc<AppAttestVerifier>,
+    /// Durable authority store.
     pub authority: Arc<dyn AuthorityStore>,
+    /// Keyring used to seal/open APNs tokens.
     pub token_keyring: Arc<TokenKeyring>,
+    /// APNs transport used to send deliveries.
     pub transport: Arc<dyn PushTransport>,
+    /// Public https delivery URL relays address.
     pub delivery_url: url::Url,
+    /// Maximum lifetime (seconds) of a delivery grant.
     pub max_grant_lifetime_seconds: i64,
+    /// Maximum lifetime (seconds) of an installation.
     pub max_installation_lifetime_seconds: i64,
+    /// Per-endpoint quota window length (seconds).
     pub endpoint_quota_window_seconds: i64,
+    /// Maximum deliveries per endpoint per quota window.
     pub endpoint_quota_max_deliveries: i64,
+    /// App profiles the gateway accepts.
     pub enabled_profiles: HashSet<AppProfile>,
+    /// Wall-clock source (injectable for tests).
     pub now: fn() -> i64,
+    /// Gate flipped to false during shutdown to refuse new work.
     pub accepting: Arc<AtomicBool>,
 }
 fn error(status: StatusCode, code: &'static str) -> Response {
@@ -724,6 +738,7 @@ async fn ready(State(s): State<AppState>) -> Response {
     }
     Json(serde_json::json!({"status":"ready"})).into_response()
 }
+/// Build the public and private routers without a metrics endpoint.
 pub fn router(state: AppState) -> (Router, Router) {
     router_with_metrics(state, None)
 }

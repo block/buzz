@@ -12,26 +12,32 @@ const AAD_PREFIX: &[u8] = b"buzz-apns-token-v1:";
 const MAX_KEY_ID_BYTES: usize = 32;
 const MAX_CIPHERTEXT_BYTES: usize = 2048;
 
+/// A single named AES-256-GCM key used to seal/open APNs tokens.
 #[derive(Clone)]
 pub struct TokenKey {
     id: String,
     cipher: Aes256Gcm,
 }
+/// Ordered keyring: one current seal/open key plus decrypt-only predecessors.
 #[derive(Clone)]
 pub struct TokenKeyring {
     current: TokenKey,
     predecessors: HashMap<String, TokenKey>,
 }
 
+/// Errors raised while sealing or opening APNs token ciphertext.
 #[derive(Debug, Error)]
 pub enum TokenError {
+    /// The ciphertext, token, or key material was malformed.
     #[error("invalid token ciphertext")]
     Invalid,
+    /// The keyring was empty or contained duplicate ids.
     #[error("token keyring is empty or contains duplicate ids")]
     InvalidKeyring,
 }
 
 impl TokenKey {
+    /// Construct a token key from its id and 32-byte raw material.
     pub fn new(id: impl Into<String>, key: &[u8]) -> Result<Self, TokenError> {
         let id = id.into();
         if id.is_empty()
@@ -53,6 +59,7 @@ impl TokenKey {
 }
 
 impl TokenKeyring {
+    /// Build a keyring ordered current key first, then decrypt-only predecessors.
     pub fn new(keys: Vec<TokenKey>) -> Result<Self, TokenError> {
         let mut keys = keys.into_iter();
         let current = keys.next().ok_or(TokenError::InvalidKeyring)?;
@@ -66,6 +73,7 @@ impl TokenKeyring {
             predecessors: rest.into_iter().map(|k| (k.id.clone(), k)).collect(),
         })
     }
+    /// Seal a raw APNs token under the current key, producing a self-describing ciphertext.
     pub fn seal(&self, token: &[u8]) -> Result<Vec<u8>, TokenError> {
         if token.is_empty() || token.len() > crate::model::MAX_ENDPOINT_HEX_BYTES {
             return Err(TokenError::Invalid);
@@ -92,6 +100,7 @@ impl TokenKeyring {
         }
         Ok(encoded)
     }
+    /// Open a sealed token, selecting the key by its authenticated id prefix.
     pub fn open(&self, encoded: &[u8]) -> Result<Vec<u8>, TokenError> {
         if encoded.len() > MAX_CIPHERTEXT_BYTES {
             return Err(TokenError::Invalid);

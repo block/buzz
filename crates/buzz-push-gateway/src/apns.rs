@@ -77,7 +77,9 @@ pub fn classify(code: u16, reason: Option<&str>, timestamp: Option<i64>) -> Deli
 /// content; the concrete transport always uses `APNS_RECONNECT_PAYLOAD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeliveryAttempt {
+    /// Unique id of the delivery request.
     pub request_id: uuid::Uuid,
+    /// Unix timestamp at which the request expires.
     pub expires_at: i64,
 }
 

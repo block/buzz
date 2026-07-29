@@ -13,27 +13,36 @@ const APPLE_APP_ATTEST_ROOT_PEM_SHA256: [u8; 32] = [
     0x6a, 0xed, 0x4a, 0xd4, 0x49, 0x0e, 0x1e, 0x92, 0xc0, 0x5c, 0xb3, 0x55, 0x21, 0x2a, 0x50, 0x13,
 ];
 
+/// Result of a successful attestation verification: the attested key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAttestation {
+    /// The attested key id (raw 32 bytes).
     pub key_id: Vec<u8>,
+    /// The attested P-256 public key (raw X9.62 bytes).
     pub public_key: Vec<u8>,
 }
+/// Result of a successful assertion verification: the monotonic counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedAssertion {
+    /// The assertion's monotonic counter (must strictly exceed the previous).
     pub counter: u32,
 }
+/// Errors raised by App Attest verification.
 #[derive(Debug, Error)]
 pub enum AppAttestError {
+    /// The attestation/assertion was malformed, unverifiable, or replayed.
     #[error("invalid app attestation or assertion")]
     Invalid,
 }
 
+/// Apple App Attest verifier bound to an app id and pinned root certificate.
 #[derive(Clone)]
 pub struct AppAttestVerifier {
     app_id: String,
     apple_root_cert_pem: Vec<u8>,
 }
 impl AppAttestVerifier {
+    /// Create a verifier for `app_id`, pinning the Apple App Attest root cert.
     pub fn new(app_id: String, apple_root_cert_pem: Vec<u8>) -> Result<Self, AppAttestError> {
         if app_id.is_empty()
             || Sha256::digest(&apple_root_cert_pem).as_slice() != APPLE_APP_ATTEST_ROOT_PEM_SHA256
@@ -81,6 +90,7 @@ impl AppAttestVerifier {
             public_key: public_key.to_vec(),
         })
     }
+    /// Verify an App Attest assertion, enforcing counter advancement and challenge match.
     pub fn verify_assertion(
         &self,
         assertion_b64: &str,
