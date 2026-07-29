@@ -128,6 +128,49 @@ Verification after the correction:
   `69066078a8701d41ce984bcc45488b9f4dbaad875d3169597dcf8e1f413ed0e5`;
 - recoverable pre-correction application:
   `/Applications/Command Adviser.before-partial-time-fix-20260729-2153.app`;
+
+## Ship program colours and Week all-day lane — 29 July 2026
+
+The ship's broad program is now classified at presentation time without
+rewriting its signed events:
+
+- an all-day location containing `Sea` as a word is blue;
+- any other non-empty all-day location, including FBE and FBW, is yellow; and
+- timed events and blank-location all-day events remain neutral.
+
+Week view now renders each all-day event once in a dedicated seven-column
+lane, clipped to the visible week and spanning its overlapping days. The
+daily columns retain timed events and plan milestones but no longer repeat
+all-day events.
+
+Automated verification:
+
+- Battle Rhythm domain tests: 47 passed;
+- Battle Rhythm Playwright journeys: 8 passed;
+- desktop format, lint, file-size, text-size, and pubkey checks: passed;
+- complete desktop JavaScript test suite: passed; and
+- native desktop tests: 1,936 passed, 14 ignored, plus 3 diagnostics passed.
+
+Installed-app verification used the real persisted 2028 program and did not
+create or edit an event:
+
+- `Post Maintience Availability · FBE` appeared once as a yellow full-week bar
+  for 30 October–5 November 2028; and
+- `Unit Readiness Evaluation · SEA` appeared once as a blue full-week bar for
+  24–30 April 2028.
+
+Build and recovery evidence:
+
+- application: `/Applications/Command Adviser.app`;
+- recoverable prior application:
+  `/Applications/Command Adviser.before-program-colours-20260729-2323.app`;
+- signed application executable SHA-256:
+  `5007a64e38e6522b07de4a5b8ef7f1e662399b474e07417496030e6f9894874b`;
+- DMG SHA-256:
+  `8c1474ba705c16f2039b2f7e3e38386b57ca82fc68d8e532d9767dca3fc22baf`;
+  and
+- deep signature and macOS entitlement verification: passed on both the built
+  and installed application.
 - installed signature, entitlements, bundle identity, executable hash, live
   launch, and relay health: passed.
 
