@@ -2,11 +2,13 @@ import * as React from "react";
 
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { cn } from "@/shared/lib/cn";
+import { useChannelRefAutocomplete } from "@/features/dev-mode/lib/useChannelRefAutocomplete";
 import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
 import {
   devComposerModeLabel,
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
+import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 
 type DevPromptComposerProps = {
@@ -56,6 +58,11 @@ export function DevPromptComposer({
     value,
     "buzz.devMode.composerHeight",
   );
+  const autocomplete = useChannelRefAutocomplete({
+    value,
+    onChange,
+    textareaRef,
+  });
   const resolveColor = useAuthorColorResolver();
   // The pill (and caret) wear the same color the agent's name has in chat.
   const agentColor =
@@ -73,6 +80,11 @@ export function DevPromptComposer({
   }, [active, focusSignal]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Open `#channel` suggestions own Tab/Enter/arrows/Escape.
+    if (autocomplete.handleKeyDown(event)) {
+      return;
+    }
+
     if (event.key === "Tab") {
       event.preventDefault();
       onCycleMode(event.shiftKey ? -1 : 1);
@@ -124,7 +136,14 @@ export function DevPromptComposer({
         testId="dev-mode-composer-resize"
         {...resizeHandleProps}
       />
-      <div className="flex items-start gap-2 px-4 pt-2">
+      <div className="relative flex items-start gap-2 px-4 pt-2">
+        {active && autocomplete.open ? (
+          <DevChannelSuggestions
+            onAccept={autocomplete.accept}
+            selectedIndex={autocomplete.selectedIndex}
+            suggestions={autocomplete.suggestions}
+          />
+        ) : null}
         <span
           aria-hidden
           className={cn(
@@ -139,12 +158,16 @@ export function DevPromptComposer({
           ref={textareaRef}
           className="min-h-6 w-full resize-none bg-transparent text-sm leading-6 outline-none placeholder:text-muted-foreground/60"
           data-testid="dev-mode-composer"
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => {
+            onChange(event.target.value);
+            autocomplete.syncCursor(event.target);
+          }}
           onFocus={() => onSwitchPane("main")}
           onKeyDown={handleKeyDown}
           onMouseDown={() => {
             if (!active) onReactivate?.();
           }}
+          onSelect={(event) => autocomplete.syncCursor(event.currentTarget)}
           placeholder={placeholder}
           readOnly={!active}
           rows={1}

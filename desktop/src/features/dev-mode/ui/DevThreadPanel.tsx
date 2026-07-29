@@ -10,9 +10,11 @@ import {
   devComposerModeLabel,
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
+import { useChannelRefAutocomplete } from "@/features/dev-mode/lib/useChannelRefAutocomplete";
 import { useComposerAutoGrow } from "@/features/dev-mode/lib/useComposerAutoGrow";
 import { useMemberNameResolver } from "@/features/dev-mode/lib/useMemberNameResolver";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
+import { DevChannelSuggestions } from "@/features/dev-mode/ui/DevChannelSuggestions";
 import { DevComposerResizeHandle } from "@/features/dev-mode/ui/DevComposerResizeHandle";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
@@ -63,6 +65,11 @@ export function DevThreadPanel({
     input,
     "buzz.devMode.threadComposerHeight",
   );
+  const autocomplete = useChannelRefAutocomplete({
+    value: input,
+    onChange: setInput,
+    textareaRef,
+  });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: textareaRef is a stable ref from useComposerAutoGrow
   React.useEffect(() => {
@@ -108,6 +115,11 @@ export function DevThreadPanel({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Open `#channel` suggestions own Tab/Enter/arrows/Escape.
+    if (autocomplete.handleKeyDown(event)) {
+      return;
+    }
+
     if (event.key === "Tab") {
       event.preventDefault();
       onCycleMode(event.shiftKey ? -1 : 1);
@@ -210,7 +222,14 @@ export function DevThreadPanel({
           testId="dev-mode-thread-composer-resize"
           {...resizeHandleProps}
         />
-        <div className="flex items-start gap-2 px-3 pt-1">
+        <div className="relative flex items-start gap-2 px-3 pt-1">
+          {active && autocomplete.open ? (
+            <DevChannelSuggestions
+              onAccept={autocomplete.accept}
+              selectedIndex={autocomplete.selectedIndex}
+              suggestions={autocomplete.suggestions}
+            />
+          ) : null}
           <span
             aria-hidden
             className={cn(
@@ -225,9 +244,13 @@ export function DevThreadPanel({
             ref={textareaRef}
             className="min-h-6 w-full resize-none bg-transparent text-sm leading-6 outline-none placeholder:text-muted-foreground/60"
             data-testid="dev-mode-thread-composer"
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => {
+              setInput(event.target.value);
+              autocomplete.syncCursor(event.target);
+            }}
             onFocus={() => onSwitchPane("thread")}
             onKeyDown={handleKeyDown}
+            onSelect={(event) => autocomplete.syncCursor(event.currentTarget)}
             placeholder={
               root
                 ? mode.kind === "agent"

@@ -1,4 +1,5 @@
 import type { AuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
+import { useChannelRefs } from "@/features/dev-mode/lib/channelRefs";
 import {
   renderHighlightedContent,
   type MentionStyle,
@@ -49,6 +50,8 @@ export function DevMessageRow({
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
 }) {
+  const { channels, openChannel } = useChannelRefs();
+
   if (event.kind === KIND_SYSTEM_MESSAGE) {
     return null;
   }
@@ -88,7 +91,10 @@ export function DevMessageRow({
           event.pending && "text-muted-foreground",
         )}
       >
-        {renderHighlightedContent(event.content, mentionStyles)}
+        {renderHighlightedContent(event.content, mentionStyles, {
+          channels,
+          onOpen: openChannel,
+        })}
       </div>
     </div>
   );

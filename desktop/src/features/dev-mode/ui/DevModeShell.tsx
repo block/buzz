@@ -2,6 +2,10 @@ import * as React from "react";
 
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
+  type ChannelRef,
+  DevChannelRefsProvider,
+} from "@/features/dev-mode/lib/channelRefs";
+import {
   groupSessionChannels,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
@@ -104,6 +108,13 @@ export function DevModeShell({
           channel.archivedAt === null,
       ),
     [channelsQuery.data],
+  );
+
+  // `#channel` references: composers autocomplete these names and message
+  // rows render matching tokens as clickable links to the channel.
+  const channelRefs = React.useMemo<ChannelRef[]>(
+    () => sessions.map((channel) => ({ id: channel.id, name: channel.name })),
+    [sessions],
   );
 
   const pinnedIds = usePinnedChannels();
@@ -604,150 +615,152 @@ export function DevModeShell({
   const macChrome = isMacPlatform() && !isFullscreen;
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: handlers only guard focus (track last input, keep dead-space clicks from blurring it) — the div is not interactive
-    <div
-      className="relative flex min-h-0 flex-1 flex-col bg-background"
-      data-testid="dev-mode-shell"
-      onFocusCapture={handleFocusCapture}
-      onMouseDown={handleShellMouseDown}
-      onMouseUp={handleShellMouseUp}
-    >
+    <DevChannelRefsProvider channels={channelRefs} openChannel={openChannel}>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: handlers only guard focus (track last input, keep dead-space clicks from blurring it) — the div is not interactive */}
       <div
-        className={cn(
-          "flex h-[40px] shrink-0 cursor-default select-none items-center justify-between border-b border-border/60 pr-4 font-mono text-xs text-muted-foreground",
-          macChrome ? "pl-[88px]" : "pl-4",
-        )}
-        data-tauri-drag-region
+        className="relative flex min-h-0 flex-1 flex-col bg-background"
+        data-testid="dev-mode-shell"
+        onFocusCapture={handleFocusCapture}
+        onMouseDown={handleShellMouseDown}
+        onMouseUp={handleShellMouseUp}
       >
-        <span
-          className={cn(
-            "pointer-events-none flex min-w-0 items-baseline gap-2 whitespace-nowrap",
-            macChrome && "translate-y-[3px]",
-          )}
-        >
-          buzz · developer mode
-          {topBarChannel ? (
-            <span className="truncate text-foreground">
-              # {topBarChannel.name}
-            </span>
-          ) : null}
-        </span>
         <div
           className={cn(
-            "flex shrink-0 items-center gap-3",
-            macChrome && "translate-y-[3px]",
+            "flex h-[40px] shrink-0 cursor-default select-none items-center justify-between border-b border-border/60 pr-4 font-mono text-xs text-muted-foreground",
+            macChrome ? "pl-[88px]" : "pl-4",
           )}
+          data-tauri-drag-region
         >
-          <button
-            className="cursor-pointer hover:text-foreground"
-            onClick={() => setPaletteOpen(true)}
-            type="button"
+          <span
+            className={cn(
+              "pointer-events-none flex min-w-0 items-baseline gap-2 whitespace-nowrap",
+              macChrome && "translate-y-[3px]",
+            )}
           >
-            palette ⌃O
-          </button>
-          <button
-            className="cursor-pointer hover:text-foreground"
-            onClick={() => setDisplayStyle("standard")}
-            type="button"
+            buzz · developer mode
+            {topBarChannel ? (
+              <span className="truncate text-foreground">
+                # {topBarChannel.name}
+              </span>
+            ) : null}
+          </span>
+          <div
+            className={cn(
+              "flex shrink-0 items-center gap-3",
+              macChrome && "translate-y-[3px]",
+            )}
           >
-            standard ui ⌘⇧D
-          </button>
+            <button
+              className="cursor-pointer hover:text-foreground"
+              onClick={() => setPaletteOpen(true)}
+              type="button"
+            >
+              palette ⌃O
+            </button>
+            <button
+              className="cursor-pointer hover:text-foreground"
+              onClick={() => setDisplayStyle("standard")}
+              type="button"
+            >
+              standard ui ⌘⇧D
+            </button>
+          </div>
         </div>
-      </div>
 
-      <div className="flex min-h-0 flex-1">
-        <DevChannelNavigator
-          dimmed={view === "channel"}
-          groups={channelGroups}
-          highlightedId={view === "fresh" ? null : navigatorId}
-          onHighlight={handleHighlight}
-          onOpen={openChannel}
-          unreadChannelIds={unreadChannelIds}
-        />
+        <div className="flex min-h-0 flex-1">
+          <DevChannelNavigator
+            dimmed={view === "channel"}
+            groups={channelGroups}
+            highlightedId={view === "fresh" ? null : navigatorId}
+            onHighlight={handleHighlight}
+            onOpen={openChannel}
+            unreadChannelIds={unreadChannelIds}
+          />
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {view === "navigator" && previewChannel ? (
-            <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col opacity-70">
-              <div className="shrink-0 border-b border-border/60 px-4 py-1 font-mono text-xs text-muted-foreground/60">
-                preview — enter to open
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {view === "navigator" && previewChannel ? (
+              <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col opacity-70">
+                <div className="shrink-0 border-b border-border/60 px-4 py-1 font-mono text-xs text-muted-foreground/60">
+                  preview — enter to open
+                </div>
+                {transcriptFor(previewChannel)}
               </div>
-              {transcriptFor(previewChannel)}
-            </div>
-          ) : view === "channel" && activeChannel ? (
-            threadOpen && mode ? (
-              <DevSplitPane
-                activePane={activePane}
-                main={
-                  <>
-                    {transcriptFor(activeChannel)}
-                    {composer}
-                  </>
-                }
-                side={
-                  <DevThreadPanel
-                    active={activePane === "thread"}
-                    channel={activeChannel}
-                    currentPubkey={identityQuery.data?.pubkey ?? null}
-                    mode={mode}
-                    onClose={() => {
-                      setThreadOpen(false);
-                      setActivePane("main");
-                      focusComposer();
-                    }}
-                    onCycleMode={handleCycleMode}
-                    onSend={handleThreadSend}
-                    onSwitchPane={handleSwitchPane}
-                    root={selectedRoot}
-                  />
-                }
-              />
+            ) : view === "channel" && activeChannel ? (
+              threadOpen && mode ? (
+                <DevSplitPane
+                  activePane={activePane}
+                  main={
+                    <>
+                      {transcriptFor(activeChannel)}
+                      {composer}
+                    </>
+                  }
+                  side={
+                    <DevThreadPanel
+                      active={activePane === "thread"}
+                      channel={activeChannel}
+                      currentPubkey={identityQuery.data?.pubkey ?? null}
+                      mode={mode}
+                      onClose={() => {
+                        setThreadOpen(false);
+                        setActivePane("main");
+                        focusComposer();
+                      }}
+                      onCycleMode={handleCycleMode}
+                      onSend={handleThreadSend}
+                      onSwitchPane={handleSwitchPane}
+                      root={selectedRoot}
+                    />
+                  }
+                />
+              ) : (
+                transcriptFor(activeChannel)
+              )
             ) : (
-              transcriptFor(activeChannel)
-            )
-          ) : (
-            <div className="flex min-h-0 flex-1 items-center justify-center px-8 font-mono text-sm text-muted-foreground">
-              <div className="max-w-lg space-y-2">
-                <div className="text-foreground">new session</div>
-                <div>
-                  Type a prompt and hit enter — it spawns a channel and puts the
-                  selected target to work. Tab cycles between chat and{" "}
-                  {modes.length - 1} agent{modes.length === 2 ? "" : "s"}. Press
-                  ⌃O for the command palette.
+              <div className="flex min-h-0 flex-1 items-center justify-center px-8 font-mono text-sm text-muted-foreground">
+                <div className="max-w-lg space-y-2">
+                  <div className="text-foreground">new session</div>
+                  <div>
+                    Type a prompt and hit enter — it spawns a channel and puts
+                    the selected target to work. Tab cycles between chat and{" "}
+                    {modes.length - 1} agent{modes.length === 2 ? "" : "s"}.
+                    Press ⌃O for the command palette.
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Inside a channel the composer covers only this pane; the fresh
+            {/* Inside a channel the composer covers only this pane; the fresh
               and navigator states' composer below spans the full shell. */}
-          {view === "channel" && !sideChatOpen ? (
-            <>
-              {errorBar}
-              {composer}
-            </>
-          ) : null}
-          {sideChatOpen ? errorBar : null}
+            {view === "channel" && !sideChatOpen ? (
+              <>
+                {errorBar}
+                {composer}
+              </>
+            ) : null}
+            {sideChatOpen ? errorBar : null}
+          </div>
         </div>
+
+        {view !== "channel" ? (
+          <>
+            {errorBar}
+            {composer}
+          </>
+        ) : null}
+
+        {paletteOpen ? (
+          <DevCommandPalette
+            activeChannel={topBarChannel}
+            channels={[...sessions].reverse()}
+            myPubkey={identityQuery.data?.pubkey ?? null}
+            onChannelLeft={goToFresh}
+            onClose={closePalette}
+            onNewSession={goToFresh}
+            onOpenChannel={openChannel}
+          />
+        ) : null}
       </div>
-
-      {view !== "channel" ? (
-        <>
-          {errorBar}
-          {composer}
-        </>
-      ) : null}
-
-      {paletteOpen ? (
-        <DevCommandPalette
-          activeChannel={topBarChannel}
-          channels={[...sessions].reverse()}
-          myPubkey={identityQuery.data?.pubkey ?? null}
-          onChannelLeft={goToFresh}
-          onClose={closePalette}
-          onNewSession={goToFresh}
-          onOpenChannel={openChannel}
-        />
-      ) : null}
-    </div>
+    </DevChannelRefsProvider>
   );
 }
