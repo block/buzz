@@ -57,7 +57,9 @@ pub struct MentionProfile<'a> {
 ///
 /// Returns lowercased names found after `@` tokens. An `@name` only matches
 /// when the `@` is at start-of-string or preceded by an ASCII whitespace
-/// character — this excludes things like email addresses (`user@host`).
+/// character or a mention delimiter (`*`, `_`, `(`, `|` — markdown emphasis,
+/// spoiler bars, or an opening paren; see `is_mention_lead`). This admits
+/// `**@name**`/`_@name_` while still excluding email addresses (`user@host`).
 ///
 /// Allowed name characters: ASCII alphanumerics, `.`, `-`, `_`.
 /// Duplicates are removed; first-seen order is preserved.
@@ -72,7 +74,7 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
     let mut i = 0;
     while i < len {
         if chars[i] == '@' {
-            let preceded_by_ws = i == 0 || chars[i - 1].is_ascii_whitespace();
+            let preceded_by_ws = i == 0 || is_mention_lead(chars[i - 1]);
             if preceded_by_ws && i + 1 < len {
                 let start = i + 1;
                 let mut end = start;
@@ -100,7 +102,8 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
 
 /// Extract `@mention` names from message content using known member names.
 ///
-/// At each `@` preceded by whitespace or start-of-string, tries known names
+/// At each `@` at start-of-string or preceded by whitespace or a mention
+/// delimiter (`*`, `_`, `(`, `|`; see `is_mention_lead`), tries known names
 /// longest-first (case-insensitive, word-boundary-checked), then falls back
 /// to single-word tokenization. Returns lowercased names in first-seen order,
 /// deduplicated. Empty/whitespace-only entries in `known_names` are ignored.
@@ -120,7 +123,11 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
     let mut seen = HashSet::new();
 
     for (i, _) in content.match_indices('@') {
-        let preceded = i == 0 || content.as_bytes()[i - 1].is_ascii_whitespace();
+        let preceded = i == 0
+            || content[..i]
+                .chars()
+                .next_back()
+                .is_some_and(is_mention_lead);
         if !preceded {
             continue;
         }
@@ -151,9 +158,29 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
     names
 }
 
+/// Characters that may immediately precede an `@` and still begin a mention.
+///
+/// Covers markdown emphasis (`*`, `_`), NIP-style spoiler bars (`|`), and an
+/// opening paren — matching Desktop's `hasMention.ts`. Start-of-string and
+/// whitespace are the base cases; this widens the set so `**@name**`,
+/// `_@name_`, `(@name)` and `||@name||` resolve like a bare `@name`. An email
+/// local part (`user@host`) is still excluded: `r` is none of these.
+fn is_mention_lead(prev: char) -> bool {
+    prev.is_ascii_whitespace() || matches!(prev, '*' | '_' | '(' | '|')
+}
+
+/// Trailing delimiters that terminate a known-name match.
+///
+/// Widened past plain punctuation to admit markdown emphasis (`*`, `_`) and
+/// spoiler bars (`|`) so a name wrapped as `@Will Pfleger**` still matches the
+/// full known name instead of falling through to the single-word tokenizer.
 fn is_word_boundary(s: &str) -> bool {
     s.chars().next().is_none_or(|c| {
-        c.is_ascii_whitespace() || matches!(c, ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}')
+        c.is_ascii_whitespace()
+            || matches!(
+                c,
+                ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}' | '*' | '_' | '|'
+            )
     })
 }
 
@@ -540,6 +567,71 @@ mod tests {
         // Reverse case: multi-byte known name against ASCII content.
         let result = extract_at_mentions_with_known("@alice hello", &["日本語"]);
         assert_eq!(result, vec!["alice"]);
+    }
+
+    // --- #2526: markdown emphasis / spoiler / paren delimiters around @mentions ---
+    // Parity with Desktop's hasMention.ts, which admits *, _, (, || as delimiters.
+
+    #[test]
+    fn extract_at_names_bold_and_italic_wrapped() {
+        // The core repro: **@Atlas** was silently dropped (preceding byte '*').
+        assert_eq!(extract_at_names("**@atlas** your fix"), vec!["atlas"]);
+        assert_eq!(extract_at_names("*@bob* hi"), vec!["bob"]);
+    }
+
+    #[test]
+    fn extract_at_names_paren_and_spoiler_lead() {
+        assert_eq!(extract_at_names("(@alice)"), vec!["alice"]);
+        assert_eq!(extract_at_names("||@bob|| spoiler"), vec!["bob"]);
+    }
+
+    #[test]
+    fn extract_at_names_still_rejects_email() {
+        // Widening the lead delimiter must NOT start matching email locals.
+        assert!(extract_at_names("user@example.com").is_empty());
+    }
+
+    #[test]
+    fn known_name_bold_wrapped_matches() {
+        // The exact production failure from the issue.
+        assert_eq!(
+            extract_at_mentions_with_known("**@Atlas** your fix is aimed", &["Atlas"]),
+            vec!["atlas"]
+        );
+    }
+
+    #[test]
+    fn known_name_italic_spoiler_paren_wrapped_match() {
+        assert_eq!(
+            extract_at_mentions_with_known("_@Atlas_", &["Atlas"]),
+            vec!["atlas"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("||@Atlas||", &["Atlas"]),
+            vec!["atlas"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("(@Atlas)", &["Atlas"]),
+            vec!["atlas"]
+        );
+    }
+
+    #[test]
+    fn trailing_emphasis_multiword_name_matches() {
+        // @Will Pfleger** must resolve the full name, not tokenize to "will".
+        assert_eq!(
+            extract_at_mentions_with_known("**@Will Pfleger** ping", &["Will Pfleger"]),
+            vec!["will pfleger"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("cc @Will Pfleger_", &["Will Pfleger"]),
+            vec!["will pfleger"]
+        );
+    }
+
+    #[test]
+    fn known_name_email_still_rejected() {
+        assert!(extract_at_mentions_with_known("user@example.com", &["example.com"]).is_empty());
     }
 
     fn profile<'a>(pk: &'a str, json: &'a str) -> MentionProfile<'a> {
