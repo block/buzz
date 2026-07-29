@@ -34,7 +34,9 @@ export function DevChannelTabs({
 
   const tab = (channel: Channel, label: string) => {
     const isActive = channel.id === activeId;
-    const isUnread = !isActive && unreadChannelIds.has(channel.id);
+    // An active tab keeps its dot while an unread thread remains inside it —
+    // viewing the tab clears top-level posts, not collapsed thread replies.
+    const isUnread = unreadChannelIds.has(channel.id);
     return (
       <button
         key={channel.id}

@@ -830,8 +830,9 @@ export function useUnreadChannels(
         if (unreadCount === 0) continue;
 
         unread.add(channel.id);
-        // Dev mode's list dot: only unread channel-level posts count, so a
-        // channel whose only unreads are thread replies stays visually read.
+        // Channels whose unread includes a channel-level post — surfaces
+        // that clear by opening the channel (vs thread replies, which clear
+        // through thread read markers) distinguish the two via this set.
         if (
           countUnreadTopLevelObservedEvents(
             observedEvents,

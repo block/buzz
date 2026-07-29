@@ -777,7 +777,8 @@ export function AppShell() {
                       <div className="flex min-h-0 flex-1 overflow-hidden">
                         <React.Suspense fallback={null}>
                           <LazyDevModeShell
-                            unreadChannelIds={topLevelUnreadChannelIds}
+                            topLevelUnreadChannelIds={topLevelUnreadChannelIds}
+                            unreadChannelIds={unreadChannelIds}
                           />
                         </React.Suspense>
                       </div>

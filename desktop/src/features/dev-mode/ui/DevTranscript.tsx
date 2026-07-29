@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useAppShell } from "@/app/AppShellContext";
 import {
   useAuthorColorResolver,
   type AuthorColorResolver,
@@ -22,6 +23,7 @@ import {
   useMemberAgentResolver,
   useMemberNameResolver,
 } from "@/features/dev-mode/lib/useMemberNameResolver";
+import { selectUnreadThreadRoots } from "@/features/dev-mode/lib/unreadThreads";
 import { usePinnedScroll } from "@/features/dev-mode/lib/usePinnedScroll";
 import { DevMessageRow } from "@/features/dev-mode/ui/DevMessageRow";
 import {
@@ -29,6 +31,10 @@ import {
   useChannelSubscription,
   useChannelWindowQuery,
 } from "@/features/messages/hooks";
+import {
+  channelWindowThreadSummaries,
+  type ChannelWindowThreadSummary,
+} from "@/features/messages/lib/channelWindowStore";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -42,6 +48,8 @@ function ThreadFirstReply({
   channel,
   rootId,
   replyCount,
+  unread,
+  markRead,
   currentPubkey,
   resolveName,
   resolveColor,
@@ -51,6 +59,9 @@ function ThreadFirstReply({
   channel: Channel;
   rootId: string;
   replyCount: number;
+  unread: boolean;
+  /** Whether rendering the inline reply advances the thread read frontier. */
+  markRead: boolean;
   currentPubkey: string | null;
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
@@ -75,6 +86,27 @@ function ThreadFirstReply({
   // The summary count can outrun the fetched subtree (live recounts) —
   // trust whichever knows about more replies.
   const moreCount = Math.max(replyCount, replies.length) - (first ? 1 : 0);
+
+  // The inline first reply is on screen, so seeing the channel counts as
+  // reading it: advance the thread frontier to exactly that reply. Later
+  // (collapsed) replies stay unread until the side chat is opened.
+  const { getThreadReadAt, markThreadRead } = useAppShell();
+  const firstReplyAt = first?.created_at ?? null;
+  const channelId = channel.id;
+  React.useEffect(() => {
+    if (!markRead || firstReplyAt === null) return;
+    const readAt = getThreadReadAt(rootId, channelId);
+    if (readAt === null || readAt < firstReplyAt) {
+      markThreadRead(rootId, firstReplyAt);
+    }
+  }, [
+    channelId,
+    firstReplyAt,
+    getThreadReadAt,
+    markRead,
+    markThreadRead,
+    rootId,
+  ]);
 
   // The reply sits on the same indent as the prompt that produced it.
   return (
@@ -104,8 +136,14 @@ function ThreadFirstReply({
         </button>
       ) : moreCount > 0 ? (
         <button
-          className="mt-1 cursor-pointer py-0.5 text-sm text-muted-foreground hover:text-foreground"
+          className={cn(
+            "mt-1 cursor-pointer py-0.5 text-sm",
+            unread
+              ? "text-primary hover:text-primary/80"
+              : "text-muted-foreground hover:text-foreground",
+          )}
           data-testid="dev-mode-more-replies"
+          data-unread={unread || undefined}
           onClick={(event) => {
             event.stopPropagation();
             onOpenThread();
@@ -113,6 +151,7 @@ function ThreadFirstReply({
           type="button"
         >
           … {moreCount} more {moreCount === 1 ? "reply" : "replies"}
+          {unread ? " ●" : ""}
         </button>
       ) : null}
     </div>
@@ -160,6 +199,8 @@ function PromptCard({
   root,
   rootReactions,
   replyCount,
+  unread,
+  markRead,
   selected,
   currentPubkey,
   resolveName,
@@ -171,6 +212,8 @@ function PromptCard({
   root: RelayEvent;
   rootReactions: string[] | undefined;
   replyCount: number;
+  unread: boolean;
+  markRead: boolean;
   selected: boolean;
   currentPubkey: string | null;
   resolveName: NameResolver;
@@ -202,9 +245,19 @@ function PromptCard({
     >
       {/* Absolute so selecting a card never changes its height (no layout
           shift while ↑/↓ walk the prompts). */}
-      {selected ? (
-        <div className="pointer-events-none absolute right-1 top-1 select-none bg-background/90 px-1 text-xs text-primary/80">
-          ⏎ side chat
+      {selected || unread ? (
+        <div className="pointer-events-none absolute right-1 top-1 flex select-none items-center gap-1.5 bg-background/90 px-1 text-xs text-primary/80">
+          {selected ? <span>⏎ side chat</span> : null}
+          {unread ? (
+            <span
+              aria-label="unread thread"
+              className="text-3xs leading-none text-primary"
+              data-testid="dev-mode-card-unread-dot"
+              role="img"
+            >
+              ●
+            </span>
+          ) : null}
         </div>
       ) : null}
       <DevMessageRow
@@ -219,12 +272,14 @@ function PromptCard({
         <ThreadFirstReply
           channel={channel}
           currentPubkey={currentPubkey}
+          markRead={markRead}
           onOpenThread={onOpenThread}
           replyCount={replyCount}
           resolveColor={resolveColor}
           resolveIsAgent={resolveIsAgent}
           resolveName={resolveName}
           rootId={root.id}
+          unread={unread}
         />
       ) : null}
     </div>
@@ -235,16 +290,20 @@ export function DevTranscript({
   channel,
   currentPubkey,
   selectedRootId,
+  markRead,
   onOpenThread,
 }: {
   channel: Channel;
   currentPubkey: string | null;
   selectedRootId: string | null;
+  /** False for previews — looking at a preview must not advance read state. */
+  markRead: boolean;
   onOpenThread: (rootId: string) => void;
 }) {
   const messagesQuery = useChannelMessagesQuery(channel);
   const windowQuery = useChannelWindowQuery(channel);
   useChannelSubscription(channel);
+  const { getThreadReadAt, readStateVersion } = useAppShell();
 
   const { scrollRef, contentRef, handleScroll } = usePinnedScroll(channel.id);
 
@@ -297,20 +356,32 @@ export function DevTranscript({
     );
   }, [memberships, roots]);
 
+  const threadSummaries = React.useMemo(
+    () =>
+      windowQuery.data
+        ? channelWindowThreadSummaries(windowQuery.data)
+        : new Map<string, ChannelWindowThreadSummary>(),
+    [windowQuery.data],
+  );
+
   const replyCounts = React.useMemo(() => {
     const counts = new Map<string, number>();
-    const store = windowQuery.data;
-    if (!store) return counts;
-    for (const page of store.pages) {
-      for (const row of page.rows) {
-        if (row.thread) counts.set(row.event.id, row.thread.replyCount);
-      }
-    }
-    for (const [rootId, live] of Object.entries(store.liveSummaries)) {
-      counts.set(rootId, live.summary.replyCount);
+    for (const [rootId, summary] of threadSummaries) {
+      counts.set(rootId, summary.replyCount);
     }
     return counts;
-  }, [windowQuery.data]);
+  }, [threadSummaries]);
+
+  // Threads with replies past the read frontier — carries the per-card
+  // unread dot. readStateVersion invalidates when any read marker moves.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion is an intentional invalidation signal
+  const unreadRootIds = React.useMemo(
+    () =>
+      selectUnreadThreadRoots(threadSummaries, (rootId) =>
+        getThreadReadAt(rootId, channel.id),
+      ),
+    [channel.id, getThreadReadAt, threadSummaries, readStateVersion],
+  );
 
   // Kind-7 reactions ride along as window aux events (pages + live); agents
   // react while working, so these double as a per-prompt activity signal.
@@ -345,8 +416,10 @@ export function DevTranscript({
               key={item.root.localKey ?? item.root.id}
               channel={channel}
               currentPubkey={currentPubkey}
+              markRead={markRead}
               onOpenThread={() => onOpenThread(item.root.id)}
               replyCount={replyCounts.get(item.root.id) ?? 0}
+              unread={unreadRootIds.has(item.root.id)}
               resolveColor={resolveColor}
               resolveIsAgent={resolveIsAgent}
               resolveName={resolveName}

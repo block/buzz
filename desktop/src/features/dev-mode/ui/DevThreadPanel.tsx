@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useAppShell } from "@/app/AppShellContext";
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { matchLeadingMention } from "@/features/dev-mode/lib/highlightContent";
 import { collectReactions } from "@/features/dev-mode/lib/messageReactions";
@@ -118,6 +119,27 @@ export function DevThreadPanel({
   );
   const agentColor =
     mode.kind === "agent" ? resolveColor(mode.target.pubkey) : null;
+
+  // The open side chat shows the whole thread, so advance the shared read
+  // frontier to the newest loaded reply — this is what clears the thread's
+  // contextual unread dots (card, tab, navigator) as replies stream in.
+  const { getThreadReadAt, markThreadRead } = useAppShell();
+  const rootId = root?.id ?? null;
+  const latestVisibleAt = React.useMemo(() => {
+    let latest = root?.created_at ?? 0;
+    for (const reply of replies) {
+      if (reply.created_at > latest) latest = reply.created_at;
+    }
+    return latest > 0 ? latest : null;
+  }, [replies, root]);
+  const channelId = channel.id;
+  React.useEffect(() => {
+    if (rootId === null || latestVisibleAt === null) return;
+    const readAt = getThreadReadAt(rootId, channelId);
+    if (readAt === null || readAt < latestVisibleAt) {
+      markThreadRead(rootId, latestVisibleAt);
+    }
+  }, [channelId, getThreadReadAt, latestVisibleAt, markThreadRead, rootId]);
 
   const handleSubmit = () => {
     const prompt = input.trim();

@@ -19,6 +19,8 @@ import {
   indexSubChannels,
 } from "@/features/dev-mode/lib/subChannels";
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
+import { useShellFocusGuards } from "@/features/dev-mode/lib/useShellFocusGuards";
+import { useUnreadRouting } from "@/features/dev-mode/lib/useUnreadRouting";
 import {
   devComposerModeLabel,
   useDevComposerModes,
@@ -67,8 +69,12 @@ type ShellView = "fresh" | "navigator" | "channel";
 
 export function DevModeShell({
   unreadChannelIds,
+  topLevelUnreadChannelIds,
 }: {
+  /** Channels with anything unread, including relevant thread replies. */
   unreadChannelIds: ReadonlySet<string>;
+  /** Channels with unread channel-level posts only. */
+  topLevelUnreadChannelIds: ReadonlySet<string>;
 }) {
   const identityQuery = useIdentityQuery();
   const channelsQuery = useChannelsQuery();
@@ -226,8 +232,8 @@ export function DevModeShell({
 
   // Viewing an open channel marks its channel-level posts read (same passive
   // NIP-RS path the standard channel screen uses). topLevelOnly keeps thread
-  // replies out of the marker — dev mode's unread dot only tracks top-level
-  // posts, so opening the channel is all it takes to clear it.
+  // replies out of the marker — thread unread clears through what is actually
+  // seen: the inline first reply (transcript) and the side chat (panel).
   const { markChannelRead } = useAppShell();
   const latestRootAt =
     roots.length > 0 ? roots[roots.length - 1].created_at : null;
@@ -254,84 +260,10 @@ export function DevModeShell({
     setSubDraftParentId(null);
   }, [effectiveSessionId]);
 
-  // Refocusing the window restores whichever text input last had the
-  // keyboard (main composer, side-chat composer, palette search), falling
-  // back to the composer if it unmounted meanwhile.
-  const lastFocusedRef = React.useRef<HTMLElement | null>(null);
-
-  const handleFocusCapture = React.useCallback(
-    (event: React.FocusEvent<HTMLDivElement>) => {
-      const target = event.target;
-      if (
-        target instanceof HTMLElement &&
-        target.matches("textarea, input, [contenteditable='true']")
-      ) {
-        lastFocusedRef.current = target;
-      }
-    },
-    [],
-  );
-
-  React.useEffect(() => {
-    const handleWindowFocus = () => {
-      // Card selection owns the keyboard — don't put the caret back in a box.
-      if (cardSelectionActive) return;
-      const last = lastFocusedRef.current;
-      if (last?.isConnected) {
-        last.focus();
-      } else {
-        focusComposer();
-      }
-    };
-    window.addEventListener("focus", handleWindowFocus);
-    return () => window.removeEventListener("focus", handleWindowFocus);
-  }, [cardSelectionActive, focusComposer]);
-
-  // Clicks on non-interactive chrome must not blur the active input — this
-  // also covers the click that refocuses the window landing on dead space.
-  // Transcript areas opt out (data-allow-text-selection) so message text
-  // stays drag-selectable; handleShellMouseUp restores focus afterwards.
-  const handleShellMouseDown = React.useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
-      const target = event.target;
-      if (
-        target instanceof HTMLElement &&
-        !target.closest(
-          "button, a, input, textarea, select, [role='button'], [role='separator'], [contenteditable='true'], [data-allow-text-selection]",
-        )
-      ) {
-        event.preventDefault();
-      }
-    },
-    [],
-  );
-
-  // A click in a transcript that ends without selecting text returns focus
-  // to the last-focused composer, so clicking a message never strands focus.
-  const handleShellMouseUp = React.useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
-      const target = event.target;
-      if (
-        !(target instanceof HTMLElement) ||
-        !target.closest("[data-allow-text-selection]") ||
-        target.closest("button, a, input, textarea, [contenteditable='true']")
-      ) {
-        return;
-      }
-      if (cardSelectionActive) return;
-      requestAnimationFrame(() => {
-        const selection = window.getSelection();
-        if (selection && !selection.isCollapsed) return;
-        const last = lastFocusedRef.current;
-        if (last?.isConnected) {
-          last.focus();
-        } else {
-          focusComposer();
-        }
-      });
-    },
-    [cardSelectionActive, focusComposer],
-  );
+  // Window refocus restores the last text input; dead-space clicks never
+  // blur it (see useShellFocusGuards).
+  const { handleFocusCapture, handleShellMouseDown, handleShellMouseUp } =
+    useShellFocusGuards({ cardSelectionActive, focusComposer });
 
   const closePalette = React.useCallback(() => {
     setPaletteOpen(false);
@@ -354,6 +286,22 @@ export function DevModeShell({
     },
     [focusComposer, subIndex],
   );
+
+  const handleOpenThread = React.useCallback((rootId: string) => {
+    setSelectedRootId(rootId);
+    setThreadOpen(true);
+    setActivePane("thread");
+  }, []);
+
+  const openChannelAtUnread = useUnreadRouting({
+    subIndex,
+    unreadChannelIds,
+    topLevelUnreadChannelIds,
+    activeChannelId: effectiveSessionId,
+    roots,
+    openChannel,
+    openThread: handleOpenThread,
+  });
 
   // "+ tab" (tab strip, palette, or ⌘⇧T): the composer's next Enter spawns
   // a new tab (sub-channel) of the open main instead of posting to the
@@ -536,13 +484,13 @@ export function DevModeShell({
   const handleHighlight = React.useCallback(
     (channelId: string) => {
       if (view === "channel") {
-        openChannel(channelId);
+        openChannelAtUnread(channelId);
         return;
       }
       setNavigatorId(channelId);
       if (view === "fresh") setView("navigator");
     },
-    [openChannel, view],
+    [openChannelAtUnread, view],
   );
 
   const handleEscape = React.useCallback(() => {
@@ -593,18 +541,12 @@ export function DevModeShell({
     [focusComposer, threadOpen],
   );
 
-  const handleOpenThread = React.useCallback((rootId: string) => {
-    setSelectedRootId(rootId);
-    setThreadOpen(true);
-    setActivePane("thread");
-  }, []);
-
   const handleSubmit = React.useCallback(
     (mentions: MentionRecord[] = []) => {
       const prompt = input.trim();
       if (!prompt) {
         if (view === "navigator" && navigatorId) {
-          openChannel(navigatorId);
+          openChannelAtUnread(navigatorId);
           return;
         }
         // Empty-input Enter opens the selected card's side chat.
@@ -659,7 +601,7 @@ export function DevModeShell({
       input,
       mode,
       navigatorId,
-      openChannel,
+      openChannelAtUnread,
       selectedRootId,
       sendToSession,
       subDraftActive,
@@ -758,10 +700,14 @@ export function DevModeShell({
     selectedRootId,
   ]);
 
-  const transcriptFor = (channel: NonNullable<typeof activeChannel>) => (
+  const transcriptFor = (
+    channel: NonNullable<typeof activeChannel>,
+    { markRead = false } = {},
+  ) => (
     <DevTranscript
       channel={channel}
       currentPubkey={identityQuery.data?.pubkey ?? null}
+      markRead={markRead}
       onOpenThread={handleOpenThread}
       selectedRootId={view === "channel" ? selectedRootId : null}
     />
@@ -878,7 +824,7 @@ export function DevModeShell({
             groups={channelGroups}
             highlightedId={view === "fresh" ? null : navigatorId}
             onHighlight={handleHighlight}
-            onOpen={openChannel}
+            onOpen={openChannelAtUnread}
             unreadChannelIds={navigatorUnreadIds}
           />
 
@@ -906,7 +852,9 @@ export function DevModeShell({
                   activePane={activePane}
                   main={
                     <>
-                      {transcriptFor(activeChannel)}
+                      {transcriptFor(activeChannel, {
+                        markRead: activeChannel.isMember,
+                      })}
                       {composer}
                     </>
                   }
@@ -929,7 +877,9 @@ export function DevModeShell({
                   }
                 />
               ) : (
-                transcriptFor(activeChannel)
+                transcriptFor(activeChannel, {
+                  markRead: activeChannel.isMember,
+                })
               )
             ) : (
               <div className="flex min-h-0 flex-1 items-center justify-center px-8 font-mono text-sm text-muted-foreground">
