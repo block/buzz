@@ -52,17 +52,22 @@ and the deployment just has to route traffic to it. Three cases:
 
 - **TLS (`compose.caddy.yml`) — works out of the box.** Caddy routes
   `/pair` on your main domain to the sidecar, so the desktop's legacy fallback
-  (`wss://<domain>/pair`) Just Works with no extra DNS and nothing to set.
+  (`wss://<domain>/pair`) Just Works with no extra DNS and nothing to set. The
+  overlay unpublishes the sidecar's host port; Caddy is the only way in.
 - **Split domain or your own reverse proxy.** Expose the sidecar at its own
   host name and advertise it so the desktop uses it directly:
   set `BUZZ_PAIRING_RELAY_URL=wss://pair.<domain>` in `.env` and point that
-  name at the `pair` service (port 5000) in your proxy. The relay then
-  advertises it in NIP-11 and the desktop skips the `/pair` fallback.
-- **Non-TLS / direct (no Caddy).** The base stack keeps the sidecar on the
-  internal network only. Publish its port (add a `5000:5000` mapping to the
-  `pair` service) and set `BUZZ_PAIRING_RELAY_URL=ws://<host>:5000`, or run TLS
-  mode. Without one of these, the desktop QR points at a `/pair` endpoint the
-  relay 404s and pairing fails.
+  name at the sidecar in your proxy — the base stack publishes it on
+  `BUZZ_PAIR_RELAY_PORT` (default 5000). If your proxy runs *outside* this
+  compose project and you would rather not publish the port, attach the proxy
+  to the project's `buzz-net` network and target `pair:5000` directly. The
+  relay then advertises the URL in NIP-11 and the desktop skips the `/pair`
+  fallback.
+- **Non-TLS / direct (no Caddy).** The base stack publishes the sidecar on
+  `BUZZ_PAIR_RELAY_PORT` (default 5000); set
+  `BUZZ_PAIRING_RELAY_URL=ws://<host>:5000` so the QR points at it. Without
+  that, the desktop QR points at a `/pair` endpoint the relay 404s and pairing
+  fails.
 
 `BUZZ_PAIRING_RELAY_URL` must be a `ws://` or `wss://` URL; the relay rejects
 anything else at startup.
