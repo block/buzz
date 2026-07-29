@@ -1,3 +1,12 @@
+//! Agent-first CLI for the Buzz relay.
+//!
+//! `buzz` is the command-line interface for interacting with a Buzz relay:
+//! sending and reading messages, managing channels and users, working with
+//! git-backed patches/issues/PRs (NIP-34), and driving agent draft requests.
+//! Auth is keypair-based — `BUZZ_PRIVATE_KEY` is the identity — with an
+//! optional NIP-OA `BUZZ_AUTH_TAG` attestation injected by the ACP harness.
+#![warn(missing_docs)]
+
 pub mod agent_management;
 mod client;
 mod commands;
@@ -97,10 +106,13 @@ struct Cli {
     command: Cmd,
 }
 
+/// Channel topology: linear stream or threaded forum.
 #[derive(Clone, clap::ValueEnum)]
 pub enum ChannelType {
+    /// Linear, chat-style channel.
     #[value(name = "stream")]
     Stream,
+    /// Threaded, post-style forum channel.
     #[value(name = "forum")]
     Forum,
 }
@@ -114,10 +126,13 @@ impl std::fmt::Display for ChannelType {
     }
 }
 
+/// Channel membership visibility.
 #[derive(Clone, clap::ValueEnum)]
 pub enum ChannelVisibility {
+    /// Anyone can discover and join the channel.
     #[value(name = "open")]
     Open,
+    /// Membership is invite-only.
     #[value(name = "private")]
     Private,
 }
@@ -131,20 +146,27 @@ impl std::fmt::Display for ChannelVisibility {
     }
 }
 
+/// User presence status reported via NIP-38.
 #[derive(Clone, clap::ValueEnum)]
 pub enum PresenceStatus {
+    /// Actively available.
     #[value(name = "online")]
     Online,
+    /// Available but idle.
     #[value(name = "away")]
     Away,
+    /// Not available.
     #[value(name = "offline")]
     Offline,
 }
 
+/// Which custom-emoji set to operate on.
 #[derive(Clone, clap::ValueEnum)]
 pub enum EmojiScope {
+    /// Only the current identity's own emoji set.
     #[value(name = "own")]
     Own,
+    /// The full workspace palette (union of all members' sets).
     #[value(name = "workspace")]
     Workspace,
 }
@@ -238,10 +260,13 @@ enum Cmd {
     Moderation(ModerationCmd),
 }
 
+/// Who a personal agent may respond to.
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum RespondToArg {
+    /// Only the owner may invoke the agent.
     #[value(name = "owner-only")]
     OwnerOnly,
+    /// Any channel member may invoke the agent.
     #[value(name = "anyone")]
     Anyone,
 }
@@ -256,6 +281,7 @@ impl RespondToArg {
     }
 }
 
+/// `buzz agents` subcommands.
 #[derive(Subcommand)]
 pub enum AgentsCmd {
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
@@ -278,17 +304,22 @@ pub enum AgentsCmd {
         /// Current name of the personal agent to update
         #[arg(long)]
         agent_name: String,
+        /// Proposed display name
         #[arg(long)]
         display_name: Option<String>,
         /// Replacement instructions; use '-' to read from stdin
         #[arg(long)]
         system_prompt: Option<String>,
+        /// Agent runtime identifier
         #[arg(long)]
         runtime: Option<String>,
+        /// Model provider identifier
         #[arg(long)]
         provider: Option<String>,
+        /// Model identifier
         #[arg(long)]
         model: Option<String>,
+        /// Who the agent may respond to
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
     },
@@ -344,6 +375,7 @@ buzz agents archived"
     Archived,
 }
 
+/// `buzz messages` subcommands.
 #[derive(Subcommand)]
 pub enum MessagesCmd {
     /// Send a message to a channel
@@ -498,6 +530,7 @@ pub enum MessagesCmd {
     },
 }
 
+/// `buzz channels` subcommands.
 #[derive(Subcommand)]
 pub enum ChannelsCmd {
     /// List channels visible to the current identity
@@ -675,6 +708,7 @@ pub enum ChannelsCmd {
     },
 }
 
+/// `buzz canvas` subcommands.
 #[derive(Subcommand)]
 pub enum CanvasCmd {
     /// Get the canvas document for a channel
@@ -694,6 +728,7 @@ pub enum CanvasCmd {
     },
 }
 
+/// `buzz reactions` subcommands.
 #[derive(Subcommand)]
 pub enum ReactionsCmd {
     /// Add an emoji reaction to a message
@@ -725,6 +760,7 @@ pub enum ReactionsCmd {
     },
 }
 
+/// `buzz emoji` subcommands.
 #[derive(Subcommand)]
 pub enum EmojiCmd {
     /// List the workspace custom emoji palette (union of every member's set)
@@ -767,6 +803,7 @@ pub enum EmojiCmd {
     },
 }
 
+/// `buzz dms` subcommands.
 #[derive(Subcommand)]
 pub enum DmsCmd {
     /// List direct message conversations
@@ -798,6 +835,7 @@ pub enum DmsCmd {
     },
 }
 
+/// `buzz users` subcommands.
 #[derive(Subcommand)]
 pub enum UsersCmd {
     /// Look up user profiles by pubkey or name
@@ -853,6 +891,7 @@ pub enum UsersCmd {
     },
 }
 
+/// `buzz workflows` subcommands.
 #[derive(Subcommand)]
 pub enum WorkflowsCmd {
     /// List workflows in a channel
@@ -932,6 +971,7 @@ pub enum WorkflowsCmd {
     },
 }
 
+/// `buzz feed` subcommands.
 #[derive(Subcommand)]
 pub enum FeedCmd {
     /// Get recent activity feed entries
@@ -948,6 +988,7 @@ pub enum FeedCmd {
     },
 }
 
+/// `buzz social` subcommands.
 #[derive(Subcommand)]
 pub enum SocialCmd {
     /// Publish a text note (NIP-01 kind:1)
@@ -1025,6 +1066,7 @@ pub enum SocialCmd {
     },
 }
 
+/// `buzz notes` subcommands.
 #[derive(Subcommand)]
 pub enum NotesCmd {
     /// Create or update a note. Idempotent upsert keyed by `(me, --name)`.
@@ -1104,6 +1146,7 @@ pub enum NotesCmd {
     },
 }
 
+/// `buzz repos` subcommands.
 #[derive(Subcommand)]
 pub enum ReposCmd {
     /// Announce a git repository (NIP-34)
@@ -1202,6 +1245,7 @@ pub enum RepoPushRole {
     Member,
 }
 
+/// `buzz patches` subcommands.
 #[derive(Subcommand)]
 pub enum PatchesCmd {
     /// Send a git patch (NIP-34 kind:1617)
@@ -1308,6 +1352,7 @@ pub enum PatchesCmd {
     },
 }
 
+/// `buzz pr` subcommands.
 #[derive(Subcommand)]
 pub enum PrCmd {
     /// Open a git pull request (NIP-34 kind:1618)
@@ -1452,6 +1497,7 @@ pub enum PrCmd {
     },
 }
 
+/// `buzz issues` subcommands.
 #[derive(Subcommand)]
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
@@ -1527,6 +1573,7 @@ pub enum IssuesCmd {
     },
 }
 
+/// `buzz upload` subcommands.
 #[derive(Subcommand)]
 pub enum UploadCmd {
     /// Upload a file to the relay's Blossom store
@@ -1537,6 +1584,7 @@ pub enum UploadCmd {
     },
 }
 
+/// `buzz media` subcommands.
 #[derive(Subcommand)]
 pub enum MediaCmd {
     /// Download relay media with Blossom get auth
@@ -1566,7 +1614,9 @@ pub enum MemCmd {
     },
     /// Print the value of a slug to stdout (no trailing newline)
     Get {
+        /// Slug of the memory entry to read.
         slug: String,
+        /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
         #[arg(long)]
         owner: Option<String>,
         /// Agent pubkey (hex) to read as this key's owner.
@@ -1575,7 +1625,9 @@ pub enum MemCmd {
     },
     /// Print sha256(value) in hex (use as `--base-hash` for `mem patch`).
     Hash {
+        /// Slug whose value to hash.
         slug: String,
+        /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
         #[arg(long)]
         owner: Option<String>,
         /// Agent pubkey (hex) to read as this key's owner.
@@ -1584,8 +1636,11 @@ pub enum MemCmd {
     },
     /// Set a slug's value. Pass `-` to read the value from stdin.
     Set {
+        /// Slug of the memory entry to write.
         slug: String,
+        /// New value, or `-` to read from stdin.
         value: String,
+        /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
         #[arg(long)]
         owner: Option<String>,
         /// Allow committing an empty value. Without this, a zero-byte stdin
@@ -1600,6 +1655,7 @@ pub enum MemCmd {
     /// slug has changed since `--base-hash` was captured, and refuses
     /// hunks whose context doesn't match the current value verbatim.
     Patch {
+        /// Slug of the memory entry to patch.
         slug: String,
         /// Read the patch from a file instead of stdin.
         #[arg(long)]
@@ -1621,12 +1677,15 @@ pub enum MemCmd {
         /// Allow committing an empty result.
         #[arg(long, default_value_t = false)]
         allow_empty: bool,
+        /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
         #[arg(long)]
         owner: Option<String>,
     },
     /// Publish a tombstone for a slug (cannot be used on `core`).
     Rm {
+        /// Slug of the memory entry to tombstone.
         slug: String,
+        /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
         #[arg(long)]
         owner: Option<String>,
     },

@@ -10,29 +10,44 @@ const REQUEST_KIND: &str = "agent_management_request";
 const MAX_NAME_CHARS: usize = 120;
 const MAX_PROMPT_CHARS: usize = 20_000;
 
+/// Owner-reviewed request to create a new personal agent.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateAgentDraft {
+    /// UUID of the channel the agent will be added to.
     pub channel_id: String,
+    /// Proposed display name for the agent.
     pub display_name: String,
+    /// Proposed system prompt / instructions for the agent.
     pub system_prompt: String,
 }
 
+/// Owner-reviewed request to update an existing personal agent.
+///
+/// At least one optional field must be set; an all-`None` request is rejected.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAgentDraft {
+    /// UUID of the channel the agent belongs to.
     pub channel_id: String,
+    /// Current name of the personal agent to update.
     pub agent_name: String,
+    /// New display name, if changing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Replacement system prompt, if changing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// New runtime identifier, if changing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// New model provider identifier, if changing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// New model identifier, if changing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Who the agent may respond to (`owner-only` or `anyone`), if changing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
 }
@@ -60,10 +75,15 @@ struct ObserverEvent<T> {
     payload: ManagementRequest<T>,
 }
 
+/// A signed agent-management observer frame ready to publish, plus the
+/// identifiers needed to correlate the relay response with the request.
 #[derive(Debug)]
 pub struct BuiltDraftRequest {
+    /// The signed Nostr observer frame event carrying the encrypted request.
     pub event: Event,
+    /// UUID of this draft request, for correlating the owner's response.
     pub request_id: String,
+    /// The request action: `create` or `update`.
     pub action: &'static str,
 }
 
@@ -125,6 +145,10 @@ fn build<T: Serialize>(
     })
 }
 
+/// Build and sign an owner-reviewed agent-creation draft request.
+///
+/// Validates the channel UUID, display name, and system prompt length, then
+/// encrypts the request to the owner and wraps it in a signed observer frame.
 pub fn build_create(
     keys: &Keys,
     owner: &PublicKey,
@@ -141,6 +165,11 @@ pub fn build_create(
     build(keys, owner, channel_id, "create", request)
 }
 
+/// Build and sign an owner-reviewed agent-update draft request.
+///
+/// Validates the channel UUID and each supplied field, requires at least one
+/// field to change, then encrypts the request to the owner and wraps it in a
+/// signed observer frame.
 pub fn build_update(
     keys: &Keys,
     owner: &PublicKey,

@@ -1,5 +1,13 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 #![cfg_attr(windows, deny(unsafe_code))]
+#![warn(missing_docs)]
+//! Developer MCP (Model Context Protocol) server providing shell, file-edit,
+//! and search tools for `buzz-agent`.
+//!
+//! Exposes tools over stdio for agent-driven development workflows: shell
+//! command execution, file reading/editing, ripgrep search, directory trees,
+//! todo management, and image viewing. Supports multicall dispatch so a single
+//! binary can serve as `rg`, `tree`, or other tool personalities.
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ServerCapabilities, ServerInfo},
@@ -135,6 +143,12 @@ impl ServerHandler for DevMcp {
     }
 }
 
+/// Entry point for the dev-mcp binary.
+///
+/// Dispatches to the appropriate tool personality based on the binary name
+/// (argv[0]): `rg` for ripgrep, `tree` for directory listing, or the full MCP
+/// server for the default `buzz-dev-mcp` name. Multicall personalities exit
+/// synchronously before any async runtime is started.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let argv0 = std::env::args().next().unwrap_or_default();
     let cmd = Path::new(&argv0)

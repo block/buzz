@@ -1,4 +1,13 @@
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
+//! ACP (Agent Communication Protocol) harness that bridges Buzz relay events
+//! to AI agent subprocesses.
+//!
+//! The harness subscribes to a Buzz relay, routes incoming messages (mentions,
+//! reminders, workflow approvals) to managed agent processes via ACP, and
+//! publishes their responses back to the relay. It manages the full agent
+//! lifecycle: process pooling, turn queuing per channel, rate limiting,
+//! observer telemetry, and usage tracking.
 
 mod acp;
 mod config;
@@ -1228,6 +1237,12 @@ impl Drop for RespawnGuard {
 // sync entry point — `std::env::set_var` is only safe before tokio spawns
 // worker threads (Rust 2024 edition safety requirement).
 
+/// Entry point for the ACP harness binary.
+///
+/// Propagates legacy environment variables synchronously (before the tokio
+/// runtime starts), then hands off to the async main loop which connects to
+/// the relay, subscribes to agent-relevant events, and manages agent
+/// subprocesses.
 pub fn run() -> Result<()> {
     config::propagate_legacy_env_vars();
     tokio_main()
