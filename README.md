@@ -157,6 +157,8 @@ This mode implements the core Nostr event/query surface for CLI and agent
 experiments. It intentionally omits hosted authorization policy, media,
 full-text search, workflows, and multi-node fan-out. See the
 [local relay guide](crates/buzz-local-relay/README.md) and
+[managed context CLI guide](crates/buzz-cli/CONTEXT.md) for profile-driven
+state, identity roles, migration, and replication, plus the
 [project telos](specs/TELOS.md).
 
 **Once:**

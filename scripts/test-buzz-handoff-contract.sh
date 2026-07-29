@@ -146,7 +146,7 @@ chmod +x "$TMP/path/curl"
 
 cat > "$TMP/fake-buzz-ctx" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+printf '%s\n' "$*" >> "${TEST_MANAGED_CLI_LOG:?}"
 EOF
 chmod +x "$TMP/fake-buzz-ctx"
 
@@ -161,83 +161,37 @@ export BUZZ_CTX_LOCAL="http://local.example"
 export BUZZ_CTX_CLOUD="https://cloud.example"
 export BUZZ_CTX_AGENT="fixture"
 export PATH="$TMP/path:$PATH"
+export TEST_MANAGED_CLI_LOG="$TMP/managed-cli.log"
 
 bash -n "$ROOT/scripts/buzz-ctx" "$ROOT/scripts/buzz-runner" "$ROOT/scripts/buzz-steward"
 
-ARTIFACT_SHA="$(printf 'artifact-bytes' | shasum -a 256 | awk '{print $1}')"
-export TEST_ARTIFACT_SHA="$ARTIFACT_SHA"
-printf 'artifact-bytes' > "$TMP/artifact"
-export TEST_CAPTURE="$TMP/manifest-event.json"
-export TEST_UPLOAD_LOG="$TMP/uploads.log"
-export TEST_SYNC_MARK="$TMP/synced"
-"$ROOT/scripts/buzz-ctx" announce "$TMP/artifact" "contract artifact" \
-  > "$TMP/announce.out"
-[ "$(wc -l < "$TEST_UPLOAD_LOG" | tr -d ' ')" -eq 2 ] \
-  || fail "announce did not upload bytes to both sovereign and rendezvous stores"
-grep -q '^http://local.example$' "$TEST_UPLOAD_LOG" \
-  || fail "announce skipped sovereign artifact custody"
-grep -q '^https://cloud.example$' "$TEST_UPLOAD_LOG" \
-  || fail "announce skipped rendezvous artifact custody"
-[ -s "$TEST_SYNC_MARK" ] \
-  || fail "announce did not synchronize the manifest before custody verification"
-grep -q 'rendezvous custody: verified' "$TMP/announce.out" \
-  || fail "announce did not report verified rendezvous custody"
+BUZZ_CONTEXT_BIN="$TMP/fake-buzz-ctx" \
+  "$ROOT/scripts/buzz-ctx" artifact "$TMP/artifact"
+BUZZ_CONTEXT_BIN="$TMP/fake-buzz-ctx" \
+  "$ROOT/scripts/buzz-ctx" announce "$TMP/artifact" "contract artifact"
+BUZZ_CONTEXT_BIN="$TMP/fake-buzz-ctx" \
+  "$ROOT/scripts/buzz-ctx" fetch "$RETURN_ID" "$TMP/out"
+BUZZ_CONTEXT_BIN="$TMP/fake-buzz-ctx" \
+  "$ROOT/scripts/buzz-ctx" handoff verify-artifacts "$RETURN_ID"
+BUZZ_CONTEXT_BIN="$TMP/fake-buzz-ctx" \
+  "$ROOT/scripts/buzz-ctx" share -m "managed"
 
-RETURN_SPEC="$TMP/return.json"
-jq -n --arg sha "$ARTIFACT_SHA" \
-  '{status:"done",evidence:"contract proof",artifacts:[$sha]}' > "$RETURN_SPEC"
+grep -Fxq "context artifact put $TMP/artifact" "$TEST_MANAGED_CLI_LOG" \
+  || fail "legacy artifact spelling did not map to the managed CLI"
+grep -Fxq "context artifact announce $TMP/artifact contract artifact" \
+  "$TEST_MANAGED_CLI_LOG" \
+  || fail "legacy announce spelling did not map to the managed CLI"
+grep -Fxq "context artifact get $RETURN_ID $TMP/out" "$TEST_MANAGED_CLI_LOG" \
+  || fail "legacy fetch spelling did not map to the managed CLI"
+grep -Fxq "context handoff verify-artifacts $RETURN_ID" "$TEST_MANAGED_CLI_LOG" \
+  || fail "handoff lifecycle command did not pass through to the managed CLI"
+grep -Fxq "context share --message managed" "$TEST_MANAGED_CLI_LOG" \
+  || fail "legacy share message spelling did not map to the managed CLI"
 
-export TEST_CAPTURE="$TMP/return-event.json"
-"$ROOT/scripts/buzz-ctx" handoff return "$OPEN_ID" "$RETURN_SPEC" >/dev/null
-jq -e --arg open "$OPEN_ID" --arg claim "$CLAIM_ID" --arg sha "$ARTIFACT_SHA" '
-  (.tags | any(. == ["e",$open,"","root"]))
-  and (.tags | any(. == ["e",$claim,"","claim"]))
-  and (.tags | any(. == ["x",$sha]))
-  and ((.content | fromjson).claim_id == $claim)
-' "$TEST_CAPTURE" >/dev/null \
-  || fail "return did not bind root, claim, and rendezvous-custodied artifact"
-
-export TEST_VERIFY_RETURN=1
-export TEST_STATE=RETURNED
-"$ROOT/scripts/buzz-ctx" handoff verify-artifacts "$RETURN_ID" \
-  > "$TMP/verify-artifacts.out"
-grep -q "verified artifact: $ARTIFACT_SHA" "$TMP/verify-artifacts.out" \
-  || fail "independent return verification did not fetch and hash its artifact"
-unset TEST_VERIFY_RETURN TEST_STATE
-
-export TEST_MANIFEST_MISSING=1
-export TEST_CAPTURE="$TMP/missing-event.json"
-if "$ROOT/scripts/buzz-ctx" handoff return "$OPEN_ID" "$RETURN_SPEC" \
-    >"$TMP/missing.out" 2>&1; then
-  fail "return advertised an artifact with no rendezvous manifest"
+if rg -n 'BUZZ_CTX_HOME|node\\.key|sovereign-client|buzz-handoff-state|curl|jq' \
+    "$ROOT/scripts/buzz-ctx" >/dev/null; then
+  fail "thin compatibility launcher regained host paths, identity, network, or policy logic"
 fi
-[ ! -e "$TEST_CAPTURE" ] \
-  || fail "artifact-gate failure still posted a return event"
-unset TEST_MANIFEST_MISSING
-
-export TEST_STATE=RETURNED
-export TEST_CAPTURE="$TMP/close-event.json"
-if "$ROOT/scripts/buzz-ctx" handoff close "$OPEN_ID" "$RETURN_ID" \
-    >"$TMP/close.out" 2>&1; then
-  fail "a signer outside the opener owner identity closed the handoff"
-fi
-[ ! -e "$TEST_CAPTURE" ] \
-  || fail "unauthorized close reached event publication"
-
-export TEST_OPEN_OWNER="$CLAIMANT"
-export TEST_VERIFY_RETURN=1
-"$ROOT/scripts/buzz-ctx" handoff close "$OPEN_ID" "$RETURN_ID" \
-  > "$TMP/authorized-close.out"
-jq -e --arg open "$OPEN_ID" --arg returned "$RETURN_ID" '
-  (.tags | any(. == ["e",$open,"","root"]))
-  and (.tags | any(. == ["e",$returned,"","return"]))
-  and ((.content | fromjson).return_id == $returned)
-' "$TEST_CAPTURE" >/dev/null \
-  || fail "authorized close did not bind the independently verified return"
-grep -q 'return custody verified' "$TMP/authorized-close.out" \
-  || fail "close did not execute independent rendezvous custody verification"
-unset TEST_OPEN_OWNER TEST_VERIFY_RETURN
-unset TEST_STATE
 
 REPO="$TMP/repo"
 mkdir -p "$REPO"

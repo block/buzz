@@ -151,7 +151,7 @@ def node_id($type; $value):
        | {
            id: node_id("context"; $context),
            type: "context",
-           label: ($metadata | tag_value("name")) // $context,
+           label: (($metadata | tag_value("name")) // $context),
            context_id: $context,
            visibility: (($metadata | tag_value("visibility")) // "unspecified")
          }]

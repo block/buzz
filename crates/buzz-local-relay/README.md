@@ -33,6 +33,13 @@ just local-relay --ephemeral
 just local-relay --require-auth
 ```
 
+For durable multi-profile operation, do not treat `.buzz-local` as an
+installation convention. Use the XDG profile and data layout documented by
+[`buzz context`](../buzz-cli/CONTEXT.md). The profile distinguishes immutable
+configuration and runtime references from the mutable journal, artifacts, and
+cursor state, and provides a dry-run-first migration path for existing
+`~/.buzz-local` nodes.
+
 The listener is loopback-only by default. Binding another address exposes an
 unauthenticated relay unless `--require-auth` is set and should be an
 intentional local-network experiment, not an internet deployment.
