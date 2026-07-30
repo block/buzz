@@ -182,10 +182,17 @@ export function DevModeShell({
   );
 
   // `#channel` references: composers autocomplete these names and message
-  // rows render matching tokens as clickable links to the channel.
+  // rows render matching tokens as clickable links to the channel. Includes
+  // discoverable channels the user hasn't joined — a link to any channel the
+  // relay lets us see should be clickable. Joined channels come first so
+  // autocomplete ranks them above not-yet-joined ones.
   const channelRefs = React.useMemo<ChannelRef[]>(
-    () => sessions.map((channel) => ({ id: channel.id, name: channel.name })),
-    [sessions],
+    () =>
+      [...sessions, ...discoverableChannels].map((channel) => ({
+        id: channel.id,
+        name: channel.name,
+      })),
+    [sessions, discoverableChannels],
   );
 
   // `parent--sub` channels pair with their parents: only mains render in
