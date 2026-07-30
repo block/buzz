@@ -1,0 +1,1462 @@
+{
+  "$comment": "NIP-MP conformance fixtures \u2014 the shared ingest contract for the relay validator, the Rust event builder, and the TypeScript event builder. Each case carries an UNSIGNED template: consumers sign it with their own test key, because signing fixes the event id and signature and a stored literal would not survive re-serialization. `expect` is the ingest outcome. `reject_rules` lists the validation rules that may fire; an implementation must reject for one of them, so it cannot pass by rejecting for an unrelated reason. This file covers single-event accept/reject only; the client-side fold has its own oracle in NIP-MP.fold-fixtures.json. Spec: docs/nips/NIP-MP.md.",
+  "version": 1,
+  "kind": 30621,
+  "member_cap": 64,
+  "owners": {
+    "a": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "b": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "cases": [
+    {
+      "name": "valid_minimal",
+      "expect": "accept",
+      "note": "Only the identity tag. A project needs nothing but a `d` tag to be a valid addressable container.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_full",
+      "expect": "accept",
+      "note": "Every specified tag present, with two members owned by two different pubkeys \u2014 the cross-owner grouping that motivates the kind.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "name",
+            "Platform"
+          ],
+          [
+            "description",
+            "Relay, desktop, and mobile for the platform team."
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          [
+            "a",
+            "30617:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:buzz-infra"
+          ],
+          [
+            "buzz-channel",
+            "3580ca9b-47b4-4af9-b22a-1068778f26c6"
+          ],
+          [
+            "buzz-visibility",
+            "listed"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_zero_members",
+      "expect": "accept",
+      "note": "Zero-member project. Legal at the protocol layer: it is the natural state after removing a final member and carries only bounded metadata.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "name",
+            "Platform"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_unlisted",
+      "expect": "accept",
+      "note": "Explicitly unlisted container. Accepted at ingest; the fold excludes it from listing eligibility, so its member keeps its implicit card.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "skunkworks"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          [
+            "buzz-visibility",
+            "unlisted"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_member_cap_boundary",
+      "expect": "accept",
+      "note": "Exactly 64 distinct member `a` tags \u2014 the cap is inclusive. Paired with `invalid_member_cap_exceeded` to pin the boundary from both sides.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "wide"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-00"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-01"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-02"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-03"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-04"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-05"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-06"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-07"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-08"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-09"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-10"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-11"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-12"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-13"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-14"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-15"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-16"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-17"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-18"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-19"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-20"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-21"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-22"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-23"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-24"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-25"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-26"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-27"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-28"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-29"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-30"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-31"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-32"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-33"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-34"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-35"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-36"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-37"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-38"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-39"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-40"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-41"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-42"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-43"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-44"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-45"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-46"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-47"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-48"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-49"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-50"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-51"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-52"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-53"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-54"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-55"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-56"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-57"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-58"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-59"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-60"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-61"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-62"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-63"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_same_dtag_two_owners",
+      "expect": "accept",
+      "note": "Two members share a repo `d` segment under different owners (the NIP-34 fork case). Identity is the whole coordinate, so these are not duplicates.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "forks"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          [
+            "a",
+            "30617:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:buzz"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_member_dtag_contains_colon",
+      "expect": "accept",
+      "note": "Repo `d` segment contains a colon. The coordinate splits into at most three parts, so the third part is the repo `d` value verbatim \u2014 `buzz:infra` here. Splitting on every colon instead would make any repo with a colon in its `d` tag unaddressable by a project.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz:infra"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_uninterpreted_metadata_values",
+      "expect": "accept",
+      "note": "`buzz-channel` is not a UUID and `buzz-visibility` is an unrecognized token. Ingest bounds metadata cardinality and length but does not interpret these values \u2014 matching how kind:30617 carries the same two tags. Client-side fallbacks for both are normative in the spec's Metadata interpretation section: an unresolvable channel renders the project without one, and an unrecognized visibility is treated as `listed`.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "buzz-channel",
+            "not-a-uuid"
+          ],
+          [
+            "buzz-visibility",
+            "chartreuse"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_unknown_tag_ignored",
+      "expect": "accept",
+      "note": "An unrecognized tag is neither rejected nor interpreted \u2014 unknown tags are ignored, not fatal.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "future-metadata",
+            "preserve-me"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_member_relay_hint",
+      "expect": "accept",
+      "note": "Member `a` tag carries NIP-01's optional third element, a relay hint. Ingest validates the tag's arity and the coordinate in element 1, so the hint's content is neither parsed nor a rejection cause; a client MAY use it to resolve an otherwise unavailable member.",
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+            "wss://relay.example.com"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "valid_non_empty_content",
+      "expect": "accept",
+      "note": "`content` holds a value. Writers should emit the empty string, but readers and relays must ignore whatever is there \u2014 a non-empty `content` is not a rejection cause and carries no semantics.",
+      "template": {
+        "kind": 30621,
+        "content": "ignored by every consumer",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_d_missing",
+      "expect": "reject",
+      "note": "No `d` tag. Without one the event collapses into the `(pubkey, 30621, \"\")` slot and silently last-write-wins over an unrelated project.",
+      "reject_rules": [
+        "d-cardinality"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "name",
+            "Platform"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_d_multiple",
+      "expect": "reject",
+      "note": "Two `d` tags. Which one addresses the event is reader-dependent; reject rather than pick.",
+      "reject_rules": [
+        "d-cardinality"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "d",
+            "infra"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_d_empty",
+      "expect": "reject",
+      "note": "Present but empty `d`. Same slot-collapse hazard as a missing `d`.",
+      "reject_rules": [
+        "d-empty"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            ""
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_duplicate",
+      "expect": "reject",
+      "note": "The same canonical coordinate twice. A signed event cannot be normalized in place, so the relay refuses it rather than store a head every consumer must defensively dedupe.",
+      "reject_rules": [
+        "member-duplicate"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_duplicate_differing_relay_hints",
+      "expect": "reject",
+      "note": "The same coordinate twice under different relay hints. Duplicate detection compares the coordinate alone, so differing hints do not make these distinct members; a validator that compares whole tag arrays would wrongly accept this.",
+      "reject_rules": [
+        "member-duplicate"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+            "wss://relay-one.example.com"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+            "wss://relay-two.example.com"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_cap_exceeded",
+      "expect": "reject",
+      "note": "65 distinct member `a` tags \u2014 one past the inclusive cap of 64.",
+      "reject_rules": [
+        "member-cap"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "wide"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-00"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-01"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-02"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-03"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-04"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-05"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-06"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-07"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-08"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-09"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-10"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-11"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-12"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-13"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-14"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-15"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-16"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-17"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-18"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-19"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-20"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-21"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-22"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-23"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-24"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-25"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-26"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-27"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-28"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-29"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-30"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-31"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-32"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-33"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-34"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-35"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-36"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-37"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-38"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-39"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-40"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-41"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-42"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-43"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-44"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-45"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-46"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-47"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-48"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-49"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-50"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-51"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-52"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-53"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-54"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-55"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-56"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-57"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-58"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-59"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-60"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-61"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-62"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-63"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-64"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_cap_exceeded_by_duplicates",
+      "expect": "reject",
+      "note": "65 member `a` tags naming 33 distinct coordinates. The spec evaluates the cap before the duplicate set is built, so `member-cap` is the required rule even though the event also carries duplicates; a validator that reports `member-duplicate` here has built a set whose size is bounded only by the frame limit.",
+      "reject_rules": [
+        "member-cap"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "wide"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-00"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-00"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-01"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-01"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-02"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-02"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-03"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-03"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-04"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-04"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-05"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-05"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-06"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-06"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-07"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-07"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-08"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-08"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-09"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-09"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-10"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-10"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-11"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-11"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-12"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-12"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-13"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-13"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-14"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-14"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-15"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-15"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-16"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-16"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-17"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-17"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-18"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-18"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-19"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-19"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-20"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-20"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-21"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-21"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-22"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-22"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-23"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-23"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-24"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-24"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-25"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-25"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-26"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-26"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-27"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-27"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-28"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-28"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-29"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-29"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-30"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-30"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-31"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-31"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:repo-32"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_tag_arity_four_elements",
+      "expect": "reject",
+      "note": "Member `a` tag carries a fourth element past the relay hint. Its coordinate is valid, so this rejects on tag shape rather than on the coordinate: NIP-01's `a` grammar is two or three elements, and a validator that reads element 1 and ignores the rest would accept unbounded unvalidated data in a position no consumer reads.",
+      "reject_rules": [
+        "member-tag-arity"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+            "wss://relay.example.com",
+            "unexpected"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_kind_prefix",
+      "expect": "reject",
+      "note": "Coordinate names kind 30618 (repo state) rather than 30617 (repo announcement). A project groups repositories, not their ref state.",
+      "reject_rules": [
+        "member-coordinate-malformed"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30618:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_owner_not_hex",
+      "expect": "reject",
+      "note": "Owner segment is 64 characters but not hex.",
+      "reject_rules": [
+        "member-coordinate-malformed"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz:buzz"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_owner_uppercase",
+      "expect": "reject",
+      "note": "Owner segment is uppercase hex. `#a` tag matching is byte-exact, so an uppercase head is invisible to the lowercase-coordinate queries every reader issues.",
+      "reject_rules": [
+        "member-coordinate-malformed"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:buzz"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_owner_wrong_length",
+      "expect": "reject",
+      "note": "Owner segment is 63 hex characters.",
+      "reject_rules": [
+        "member-coordinate-malformed"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_dtag_empty",
+      "expect": "reject",
+      "note": "Coordinate has an empty repo `d` segment \u2014 it addresses no announceable repository.",
+      "reject_rules": [
+        "member-coordinate-malformed"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_member_missing_segment",
+      "expect": "reject",
+      "note": "Coordinate has two segments instead of three.",
+      "reject_rules": [
+        "member-coordinate-malformed"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "a",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_metadata_duplicate_name",
+      "expect": "reject",
+      "note": "Two `name` tags. Reader-dependent display name; reject rather than pick.",
+      "reject_rules": [
+        "metadata-cardinality"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "name",
+            "Platform"
+          ],
+          [
+            "name",
+            "Infra"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_metadata_duplicate_channel",
+      "expect": "reject",
+      "note": "Two `buzz-channel` tags. Which channel the project links to would be reader-dependent.",
+      "reject_rules": [
+        "metadata-cardinality"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "buzz-channel",
+            "3580ca9b-47b4-4af9-b22a-1068778f26c6"
+          ],
+          [
+            "buzz-channel",
+            "00000000-0000-0000-0000-000000000000"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_metadata_name_too_long",
+      "expect": "reject",
+      "note": "`name` value exceeds 256 bytes.",
+      "reject_rules": [
+        "metadata-length"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "name",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_metadata_description_too_long",
+      "expect": "reject",
+      "note": "`description` value exceeds 2048 bytes.",
+      "reject_rules": [
+        "metadata-length"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "description",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_metadata_channel_too_long",
+      "expect": "reject",
+      "note": "`buzz-channel` value exceeds 256 bytes. Paired with `invalid_metadata_visibility_too_long` so each bound is exercised by an event whose other metadata is valid \u2014 neither check can hide behind the other's rejection.",
+      "reject_rules": [
+        "metadata-length"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "buzz-channel",
+            "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid_metadata_visibility_too_long",
+      "expect": "reject",
+      "note": "`buzz-visibility` value exceeds 256 bytes. Ingest does not interpret the token, but it must still bound its length.",
+      "reject_rules": [
+        "metadata-length"
+      ],
+      "template": {
+        "kind": 30621,
+        "content": "",
+        "tags": [
+          [
+            "d",
+            "platform"
+          ],
+          [
+            "buzz-visibility",
+            "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+          ]
+        ]
+      }
+    }
+  ]
+}

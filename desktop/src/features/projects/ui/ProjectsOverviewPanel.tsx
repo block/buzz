@@ -50,7 +50,8 @@ function StatPill({
 }) {
   return (
     <button
-      className="flex flex-col rounded-lg border border-border/60 bg-card px-3.5 py-3 text-left transition-colors hover:bg-muted/30"
+      className="flex flex-col rounded-lg border border-border/60 bg-transparent px-3.5 py-3 text-left transition-colors hover:bg-muted/30"
+      data-testid="projects-overview-stat"
       onClick={onClick}
       type="button"
     >
@@ -78,7 +79,7 @@ export function ProjectsOverviewPanel({
   const stats = overviewStats(projects, summaries);
 
   return (
-    <section className="-mx-4 mb-4 bg-card">
+    <section className="-mx-4 mb-4" data-testid="projects-overview-panel">
       <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
         <div className="order-1 grid grid-cols-2 gap-2 p-4 pt-0 sm:gap-3 xl:order-none xl:col-start-1 xl:row-start-1 xl:grid-cols-4">
           <StatPill

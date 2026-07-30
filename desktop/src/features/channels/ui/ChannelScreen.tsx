@@ -699,6 +699,7 @@ export function ChannelScreen({
     contentWidthPx: channelContentWidthPx,
   });
   const displayedThreadHeadMessage = threadPanelData.threadHead;
+  const displayedThreadAllMessages = threadPanelData.messages;
   const displayedThreadMessages = threadPanelData.visibleReplies;
   const displayedThreadReplyTargetMessage = threadPanelData.replyTargetMessage;
   const displayedThreadFirstUnreadReplyId = displayedThreadHeadMessage
@@ -945,6 +946,7 @@ export function ChannelScreen({
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
+                  threadAllMessages={displayedThreadAllMessages}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
                   threadMessagesPending={threadRepliesQuery.isPending}

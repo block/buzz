@@ -685,7 +685,7 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
 
 /// POST a pre-built signed engram event to the relay, authenticating as the
 /// new agent.
-async fn submit_engram_event(
+pub(crate) async fn submit_engram_event(
     state: &AppState,
     agent_keys: &nostr::Keys,
     event_json: &[u8],
@@ -694,6 +694,8 @@ async fn submit_engram_event(
 ) -> Result<(), String> {
     use crate::relay::build_nip98_auth_header_for_keys;
     use reqwest::Method;
+
+    crate::egress_guard::assert_no_key_backup_bytes(event_json, "persona snapshot engram submit")?;
 
     // Wait before signing: the relay enforces NIP-98 freshness (±60s) and the
     // gate may hold for up to MAX_HINT_SECONDS (300s). Building auth before the
@@ -737,6 +739,35 @@ async fn submit_engram_event(
         return Err(format!("relay rejected engram: {message}"));
     }
     Ok(())
+}
+
+// ── NIP-49 egress guard: boundary 7 (persona snapshot engram submit) ─────────
+
+#[cfg(test)]
+mod egress_guard_tests {
+    use super::submit_engram_event;
+
+    const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
+    /// An engram body carrying an ncryptsec must be rejected by the guard
+    /// before any network I/O (the target port is a discard address; a guard
+    /// error — not a connection error — proves the abort ordering).
+    #[tokio::test]
+    async fn blocks_ncryptsec_before_network() {
+        let state = crate::app_state::build_app_state();
+        let keys = nostr::Keys::generate();
+        let body = format!("{{\"content\":\"{NCRYPTSEC}\"}}");
+        let err = submit_engram_event(
+            &state,
+            &keys,
+            body.as_bytes(),
+            "http://127.0.0.1:9/events",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("key-backup material"), "{err}");
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { emit } from "@tauri-apps/api/event";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import { decode } from "nostr-tools/nip19";
+import { decode, npubEncode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 import {
@@ -203,6 +204,8 @@ type E2eConfig = {
     acpRuntimesCatalogAfterConnect?: RawAcpRuntimeCatalogEntry[];
     activePersonaIds?: string[];
     installAcpRuntimeDelayMs?: number;
+    /** Live output lines the mocked install emits before it settles. */
+    installAcpRuntimeOutputLines?: string[];
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
      *  Call N returns results[N]; when exhausted the last entry repeats.
@@ -277,6 +280,8 @@ type E2eConfig = {
     channelWindowDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
+    /** Override whether get_profile reports a real kind:0 event. */
+    profileHasEvent?: boolean;
     profileUpdateError?: string;
     profileUpdateErrors?: string[];
     searchProfiles?: MockSearchProfileSeed[];
@@ -415,6 +420,14 @@ type E2eConfig = {
      *  autosave behaviour while a request is in flight. 0/undefined = instant.
      *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
     setGlobalAgentConfigDelayMs?: number;
+    /** Errors returned by successive backup verification attempts. Null succeeds. */
+    backupVerificationErrors?: (string | null)[];
+    /** Public identities returned by successive successful backup verifications. */
+    backupVerificationPubkeys?: string[];
+    /** Delay (ms) applied to backup encryption so specs can observe pending UI. */
+    backupEncryptionDelayMs?: number;
+    /** Native paths returned by successive backup saves. */
+    backupSavePaths?: Array<string | null>;
     /**
      * When set, `get_nsec` throws with this message instead of returning the
      * mock nsec string. Use `nsecErrors` for sequenced failure/success.
@@ -1018,6 +1031,8 @@ declare global {
       mentionPubkeys?: string[];
       extraTags?: string[][];
       createdAt?: number;
+      /** Marks this test-only message as locally pending. */
+      pending?: boolean;
       /** 64-hex id required for the event to be a valid reaction target. */
       id?: string;
     }) => RelayEvent;
@@ -1096,6 +1111,11 @@ declare global {
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
+    __BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__?: (
+      unavailable: boolean,
+    ) => void;
+    __BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => number[];
+    __BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -1240,6 +1260,8 @@ const REACTION_TARGET_CONTENT = "React to me with a custom emoji";
 // REACTION_TARGET_EVENT_ID.
 const SYSTEM_REACTION_TARGET_EVENT_ID = "e".repeat(64);
 const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
+/** Stands in for `tauri.conf.json`'s version, which no mock IPC call can read. */
+const MOCK_APP_VERSION = "0.0.0-e2e";
 const DEFAULT_MOCK_IDENTITY = {
   pubkey: "deadbeef".repeat(8),
   display_name: "npub1mock...",
@@ -2808,6 +2830,8 @@ const mockReminderEvents: RelayEvent[] = [];
 const mockPersonaEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
+let mockWebsocketUnavailable = false;
+const relayWebsocketConnectAttemptStarts: number[] = [];
 let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
@@ -2888,9 +2912,7 @@ const mockMeshState: {
   servingUsage: MockServingUsage;
 } = {
   admitted: true,
-  models: [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ],
+  models: [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }],
   denyReason: "not a relay member",
   nodeState: "off",
   nodeMode: null,
@@ -2899,9 +2921,7 @@ const mockMeshState: {
 
 function resetMockMesh() {
   mockMeshState.admitted = true;
-  mockMeshState.models = [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ];
+  mockMeshState.models = [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }];
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
@@ -4014,6 +4034,7 @@ function emitMockChannelMessage(
   mentionPubkeys?: string[],
   extraTags?: string[][],
   createdAt?: number,
+  pending?: boolean,
   id?: string,
 ) {
   const eventKind = kind ?? 9;
@@ -4032,6 +4053,7 @@ function emitMockChannelMessage(
       createdAt,
       id,
     );
+    if (pending) event.pending = true;
     recordMockMessage(channelId, event);
     emitMockLiveEvent(channelId, event);
     return event;
@@ -4064,6 +4086,7 @@ function emitMockChannelMessage(
     createdAt,
     id,
   );
+  if (pending) event.pending = true;
   recordMockMessage(channelId, event);
   emitMockLiveEvent(channelId, event);
   return event;
@@ -5377,6 +5400,13 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
 async function handleGetProfile(config: E2eConfig | undefined) {
   const identity = getIdentity(config);
+  const forcedHasProfileEvent = config?.mock?.profileHasEvent;
+  if (forcedHasProfileEvent !== undefined) {
+    return {
+      ...cloneProfile(ensureMockProfile(config)),
+      has_profile_event: forcedHasProfileEvent,
+    };
+  }
   if (!identity) {
     const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
     if (profileReadDelayMs > 0) {
@@ -7194,12 +7224,61 @@ let mockGlobalAgentConfig: {
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
+let backupVerificationCallCount = 0;
+let backupSaveCallCount = 0;
 
 // Per-page explicit catalog publication outcomes.
 let personaSharePublicationCallCount = 0;
 
 // Per-page confirm_team_snapshot_import call counter for sequenced error testing.
 let teamSnapshotConfirmCallCount = 0;
+
+// Live-output sequence for the install currently being replayed. The backend
+// counter is per run (`InstallReporter::for_run` starts a fresh one), so this
+// restarts too — a bridge that stayed monotonic across installs would hide a UI
+// that carried a stale sequence number into the next run and rejected all of it.
+let installOutputSeq = 0;
+
+/**
+ * Replay the live output the Rust reporter emits while an install runs: a clear
+ * signal, then one line per entry. `seq` is install-wide and monotonic, matching
+ * the backend contract the UI's ordering depends on.
+ *
+ * The clear and the first line emit synchronously with the install invocation,
+ * exactly as the backend does — the command is invoked from the click handler,
+ * so those events land before React has committed the pending install state.
+ * Delaying them would let a listener that mounts on that state still catch them,
+ * hiding the very race the UI has to survive.
+ *
+ * Later lines are spaced so each is observable rather than collapsing into one
+ * frame with the next.
+ */
+const INSTALL_OUTPUT_REPLAY_GAP_MS = 1000;
+
+async function replayInstallOutput(
+  runtimeId: string,
+  lines: string[],
+): Promise<void> {
+  installOutputSeq = 0;
+  // The leading null is the clear signal the backend sends when an attempt
+  // starts, so this replays a whole attempt rather than only its output.
+  const events: (string | null)[] = [null, ...lines];
+  for (const [index, line] of events.entries()) {
+    // Index 0 and 1 are the clear and the first line: no gap before either.
+    if (index > 1) {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, INSTALL_OUTPUT_REPLAY_GAP_MS),
+      );
+    }
+    // `emit` reaches listeners registered through the real `listen` API, which
+    // is what the UI hook uses; mockIPC's shouldMockEvents wires the two.
+    await emit("acp-install-output", {
+      runtime_id: runtimeId,
+      seq: installOutputSeq++,
+      line,
+    });
+  }
+}
 
 async function handleInstallAcpRuntime(
   args: {
@@ -7208,6 +7287,10 @@ async function handleInstallAcpRuntime(
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
   const runtimeId = args.runtimeId ?? "";
+  const outputLines = config?.mock?.installAcpRuntimeOutputLines;
+  if (outputLines && outputLines.length > 0) {
+    await replayInstallOutput(runtimeId, outputLines);
+  }
   const perRuntime = config?.mock?.installAcpRuntimeByRuntime?.[runtimeId];
 
   if (perRuntime) {
@@ -7264,6 +7347,7 @@ async function handleInstallAcpRuntime(
     ],
     restarted_count: 0,
     failed_restart_count: 0,
+    log_path: null,
   };
 }
 
@@ -8912,6 +8996,7 @@ async function resolveGetEvent(
 }
 
 async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
+  relayWebsocketConnectAttemptStarts.push(Date.now());
   const wsId = nextSocketId++;
   const ws = new WebSocket(args.url ?? DEFAULT_RELAY_WS_URL);
   const handler = resolveHandler(args.onMessage);
@@ -8940,6 +9025,10 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
 }
 
 async function connectMockSocket(args: { onMessage: unknown }) {
+  relayWebsocketConnectAttemptStarts.push(Date.now());
+  if (mockWebsocketUnavailable) {
+    throw new Error("mock relay unavailable");
+  }
   const connectError = getConfig()?.mock?.websocketConnectErrors?.shift();
   if (connectError) {
     throw new Error(connectError);
@@ -9385,6 +9474,8 @@ export function maybeInstallE2eTauriMocks() {
   }
 
   mockClosedChannelLiveSubscription = false;
+  mockWebsocketUnavailable = false;
+  relayWebsocketConnectAttemptStarts.length = 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -9416,6 +9507,7 @@ export function maybeInstallE2eTauriMocks() {
     mentionPubkeys,
     extraTags,
     createdAt,
+    pending,
     id,
   }) => {
     const channel = mockChannels.find(
@@ -9434,6 +9526,7 @@ export function maybeInstallE2eTauriMocks() {
       mentionPubkeys,
       extraTags,
       createdAt,
+      pending,
       id,
     );
   };
@@ -9606,6 +9699,16 @@ export function maybeInstallE2eTauriMocks() {
     }
     return sockets.length;
   };
+  window.__BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__ = (unavailable) => {
+    mockWebsocketUnavailable = unavailable;
+    if (unavailable) relayWebsocketConnectAttemptStarts.length = 0;
+  };
+  window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => [
+    ...relayWebsocketConnectAttemptStarts,
+  ];
+  window.__BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => {
+    relayWebsocketConnectAttemptStarts.length = 0;
+  };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.
   window.__BUZZ_E2E_SET_MESH__ = (mesh) => {
@@ -9737,6 +9840,25 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "mesh_model_catalog":
+        return {
+          gpuName: "Mock Apple GPU",
+          vramDisplay: "32 GB",
+          vramGb: 32,
+          recommended: "Gemma-4-E4B-it-Q4_K_M",
+          entries: [
+            {
+              name: "Gemma-4-E4B-it-Q4_K_M",
+              size: "3.5GB",
+              sizeGb: 3.5,
+              description: "Buzz-curated local agent model",
+              fit: "comfortable",
+              installed: true,
+              recommended: true,
+              curated: true,
+            },
+          ],
+        };
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_serving_usage":
@@ -9812,6 +9934,43 @@ export function maybeInstallE2eTauriMocks() {
         // harness there is nothing to wipe; resolving is enough — specs
         // assert invocation via __BUZZ_E2E_COMMANDS__ and the pending UI.
         return;
+      case "generate_backup_passphrase":
+        return "correct horse battery staple";
+      case "create_ncryptsec_backup": {
+        const delayMs = activeConfig?.mock?.backupEncryptionDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        return "ncryptsec1mockbackupmaterial";
+      }
+      case "save_ncryptsec_copy": {
+        const paths = activeConfig?.mock?.backupSavePaths ?? [
+          "/tmp/buzz-identity.ncryptsec",
+        ];
+        const index = Math.min(backupSaveCallCount, paths.length - 1);
+        backupSaveCallCount += 1;
+        return paths[index];
+      }
+      case "verify_ncryptsec_backup": {
+        const errors = activeConfig?.mock?.backupVerificationErrors ?? [null];
+        const index = Math.min(backupVerificationCallCount, errors.length - 1);
+        const error = errors[index];
+        if (error) {
+          backupVerificationCallCount += 1;
+          throw new Error(error);
+        }
+        const pubkeys = activeConfig?.mock?.backupVerificationPubkeys ?? [
+          identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
+        ];
+        const pubkey = pubkeys[Math.min(index, pubkeys.length - 1)];
+        backupVerificationCallCount += 1;
+        return {
+          pubkey,
+          npub: npubEncode(pubkey),
+          matchesCurrentIdentity:
+            pubkey === (identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey),
+        };
+      }
       case "get_nsec": {
         const nsecSequence = activeConfig?.mock?.nsecErrors;
         if (nsecSequence && nsecSequence.length > 0) {
@@ -9866,6 +10025,12 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
+      case "update_tray_agent_activity":
+      case "clear_tray_agent_activity":
+      case "requeue_tray_actions":
+        return null;
+      case "take_tray_actions":
+        return [];
       case "get_profile":
         return handleGetProfile(activeConfig);
       case "update_profile":
@@ -11521,6 +11686,11 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "plugin:window|is_fullscreen":
         return false;
+      // Settings reads the app version through the app plugin. Without this the
+      // bridge throws an unhandled page error on every Settings render, which
+      // shows up as noise in unrelated specs.
+      case "plugin:app|version":
+        return MOCK_APP_VERSION;
       case "merge_save_subscription_kinds": {
         // Mirrors `merge_owner_p_kinds`: union `kind` into the owner_p row's
         // kinds, creating the row if it doesn't exist yet.

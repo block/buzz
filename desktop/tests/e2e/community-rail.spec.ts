@@ -145,6 +145,7 @@ test.describe("community rail", () => {
     await expect(page.getByTestId("community-invite-email-field")).toHaveCount(
       0,
     );
+    await expect(page.getByTestId("member-pubkey-input")).toBeVisible();
     await expect(page.getByTestId("copy-invite-link")).toBeVisible();
   });
 
