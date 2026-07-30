@@ -1,8 +1,8 @@
 /**
  * E2E screenshots + regression tests for agent-lifecycle feedback (PR #1766):
  *
- * 1. Persona delete confirm dialog shows "Also deletes N agent instance(s)."
- *    when the persona has linked managed-agent instances.
+ * 1. Persona delete confirm dialog discloses that N linked agent instance(s)
+ *    are also deleted when the persona has linked managed-agent instances.
  * 2. Global-config save reports "Saved. Restarted N agents." when running agents
  *    were restarted.
  * 3. Global-config save reports plain "Saved." when no agents were restarted;
@@ -75,7 +75,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     });
   });
 
-  // Shot 01: persona delete confirm dialog — "Also deletes 2 agent instance(s)."
+  // Shot 01: persona delete confirm dialog — 2 linked agent instances.
   // Seeds a custom persona with two linked managed agents so instanceCount = 2.
   // Triggers the delete confirm from the persona's "..." actions menu.
   test("01-delete-cascade-copy", async ({ page }) => {
@@ -124,9 +124,9 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await expect(dialog).toBeVisible({ timeout: 5_000 });
 
     // Core assertion: the cascade copy shows the correct instance count
-    // (plural) and discloses the relay-side archival (PR #2135).
+    // (plural) and discloses the identity archival (PR #2135).
     await expect(dialog).toContainText(
-      "Also deletes 2 agent instances and archives their identities on the relay",
+      "Its 2 agent instances are also deleted and their identities archived in the community",
     );
 
     await waitForAnimations(page);
@@ -215,7 +215,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     });
   });
 
-  // Shot 04: persona delete confirm dialog — singular "Also deletes 1 agent instance."
+  // Shot 04: persona delete confirm dialog — singular 1 linked agent instance.
   // One linked instance → singular copy (no extra "s").
   test("04-delete-cascade-singular", async ({ page }) => {
     await installMockBridge(page, {
@@ -253,7 +253,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     // Singular copy ("instance", "its identity") plus the archival disclosure.
     await expect(dialog).toContainText(
-      "Also deletes 1 agent instance and archives its identity on the relay",
+      "Its 1 agent instance is also deleted and its identity archived in the community",
     );
 
     await waitForAnimations(page);
@@ -263,7 +263,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
   });
 
   // Shot 05: persona delete confirm dialog — zero linked instances.
-  // No managed agents linked to the persona → "Also deletes…" line absent.
+  // No managed agents linked to the persona → cascade line absent.
   test("05-delete-cascade-zero-instances", async ({ page }) => {
     await installMockBridge(page, {
       personas: [
@@ -292,7 +292,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await expect(dialog).toBeVisible({ timeout: 5_000 });
 
     // No linked instances → no cascade warning.
-    await expect(dialog).not.toContainText("Also deletes");
+    await expect(dialog).not.toContainText("agent instance");
   });
 
   // Shot 06: global config save — singular "Saved. Restarted 1 agent."

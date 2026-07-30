@@ -32,9 +32,7 @@ export function useProfileDmAction({
     } catch (error) {
       if (!isMountedRef.current) return;
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to open direct message.",
+        error instanceof Error ? error.message : "Couldn't open direct message",
       );
       setIsOpeningDm(false);
       return;

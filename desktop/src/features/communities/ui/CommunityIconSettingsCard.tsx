@@ -72,7 +72,7 @@ export function CommunityIconSettingsCard({
             toast.error(
               error instanceof Error
                 ? error.message
-                : "Couldn’t update the community icon.",
+                : "Couldn’t update the community icon",
             );
           }
         }

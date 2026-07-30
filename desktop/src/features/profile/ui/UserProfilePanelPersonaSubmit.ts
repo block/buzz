@@ -100,7 +100,7 @@ export async function submitProfilePersonaDialog({
           `${result.agent.name} was updated, but profile sync failed: ${result.profileSyncError}`,
         );
       }
-      toast.success(`Updated ${input.displayName}.`);
+      toast.success(`Updated ${input.displayName}`);
     } else {
       const persona = await createPersona(input);
       try {
@@ -110,7 +110,7 @@ export async function submitProfilePersonaDialog({
             `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
           );
         } else {
-          toast.success(`Created and started ${created.agent.name}.`);
+          toast.success(`Created and started ${created.agent.name}`);
         }
         if (created.profileSyncError) {
           toast.warning(
@@ -120,16 +120,14 @@ export async function submitProfilePersonaDialog({
       } catch (error) {
         toast.error(
           error instanceof Error
-            ? `${persona.displayName} was created, but the agent instance could not be created: ${error.message}`
-            : `${persona.displayName} was created, but the agent instance could not be created.`,
+            ? `${persona.displayName} was created, but the agent instance couldn't be created: ${error.message}`
+            : `${persona.displayName} was created, but the agent instance couldn't be created.`,
         );
       }
     }
 
     onDone();
   } catch (error) {
-    toast.error(
-      error instanceof Error ? error.message : "Failed to save agent.",
-    );
+    toast.error(error instanceof Error ? error.message : "Couldn't save agent");
   }
 }

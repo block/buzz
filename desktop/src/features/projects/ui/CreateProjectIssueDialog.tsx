@@ -39,7 +39,7 @@ export function CreateProjectIssueDialog({
   async function handleCreate(input: CreateProjectWorkItemDialogInput) {
     if (!project) throw new Error("Choose a repository.");
     const issueId = await createMutation.mutateAsync(input);
-    toast.success("Issue created.");
+    toast.success("Issue created");
     await onCreated(project, issueId);
   }
 

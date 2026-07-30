@@ -546,12 +546,12 @@ export function ProjectPullRequestDetail({
         });
         toast.success(
           decision === "request-changes"
-            ? "Changes requested."
-            : "Comment posted.",
+            ? "Changes requested"
+            : "Comment posted",
         );
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to post comment.",
+          error instanceof Error ? error.message : "Failed to post comment",
         );
         throw error;
       }

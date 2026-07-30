@@ -246,14 +246,12 @@ export function AgentSessionThreadPanel({
 
     try {
       await cancelManagedAgentTurn(agent.pubkey, channel.id);
-      toast.success(
-        `Stop signal sent to ${agent.name}. It may take a moment to respond.`,
-      );
+      toast.success(`Stopping ${agent.name}'s turn. This may take a moment.`);
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : `Failed to stop ${agent.name}'s current turn.`,
+          : `Couldn't stop ${agent.name}'s current turn`,
       );
     }
   }

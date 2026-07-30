@@ -190,10 +190,10 @@ export function ProjectIssueDetail({
           mediaTags,
           mentionPubkeys,
         });
-        toast.success("Comment posted.");
+        toast.success("Comment posted");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to post comment.",
+          error instanceof Error ? error.message : "Failed to post comment",
         );
         throw error;
       }

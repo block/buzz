@@ -397,7 +397,7 @@ export function ProjectsAgentPromptPage({
       richText.clearContent();
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to reach the agent",
+        error instanceof Error ? error.message : "Couldn't reach agent",
       );
     } finally {
       setIsSending(false);

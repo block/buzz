@@ -249,14 +249,14 @@ export function DeleteSectionAlertDialog({
     channelCount === 1 ? "1 channel" : `${channelCount} channels`;
   const description =
     channelCount === 0
-      ? `Delete section "${sectionName}"? It has no channels.`
-      : `Delete section "${sectionName}"? Its ${channelLabel} will move back to the default Channels group.`;
+      ? `"${sectionName}" has no channels.`
+      : `Its ${channelLabel} will move back to the default Channels group.`;
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete section</AlertDialogTitle>
+          <AlertDialogTitle>Delete section?</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -265,7 +265,7 @@ export function DeleteSectionAlertDialog({
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             onClick={onConfirm}
           >
-            Delete
+            Delete section
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -294,9 +294,9 @@ export function LeaveChannelAlertDialog({
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Leave channel</AlertDialogTitle>
+          <AlertDialogTitle>Leave channel?</AlertDialogTitle>
           <AlertDialogDescription>
-            {`Leave "${channelName}"? You'll stop receiving its messages and can rejoin later.`}
+            {`You'll stop receiving messages from "${channelName}" and can rejoin later.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

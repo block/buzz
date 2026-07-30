@@ -37,7 +37,7 @@ export function useAgentLifecycleActions({
         if (managedAgent.backend.type === "local") {
           clearActiveTurnsForAgentOnStop(managedAgent.pubkey);
         }
-        toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);
+        toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}`);
         return;
       }
 
@@ -47,12 +47,14 @@ export function useAgentLifecycleActions({
       });
       toast.success(
         managedAgent.backend.type === "provider"
-          ? `Deploying ${managedAgent.name}.`
-          : `Started ${managedAgent.name}.`,
+          ? `Deploying ${managedAgent.name}`
+          : `Started ${managedAgent.name}`,
       );
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Agent action failed.",
+        error instanceof Error
+          ? error.message
+          : "Couldn’t complete that action",
       );
     }
   }, [

@@ -414,7 +414,7 @@ function QueueTab() {
       );
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to resolve the report",
+        error instanceof Error ? error.message : "Couldn't resolve the report",
       );
     }
   }

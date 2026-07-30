@@ -91,7 +91,7 @@ export function MachineOnboardingFlow({
 
   const replaceLostIdentity = React.useCallback(async () => {
     const confirmed = window.confirm(
-      "This will create a new identity and abandon your previous key. This cannot be undone. Continue?",
+      "This will create a new identity and abandon your previous key. This can't be undone. Continue?",
     );
     if (!confirmed) return;
 

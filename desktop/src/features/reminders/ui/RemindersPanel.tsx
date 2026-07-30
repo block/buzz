@@ -132,7 +132,7 @@ function ReminderRow({
   const handleComplete = () => {
     complete.mutate(reminder, {
       onSuccess: () => toast.success("Reminder completed"),
-      onError: () => toast.error("Failed to complete reminder"),
+      onError: () => toast.error("Couldn't complete reminder"),
     });
   };
 
@@ -141,7 +141,7 @@ function ReminderRow({
       { reminder, notBefore },
       {
         onSuccess: () => toast.success("Reminder snoozed"),
-        onError: () => toast.error("Failed to snooze reminder"),
+        onError: () => toast.error("Couldn't snooze reminder"),
       },
     );
   };
@@ -149,7 +149,7 @@ function ReminderRow({
   const handleCancel = () => {
     cancel.mutate(reminder, {
       onSuccess: () => toast.success("Reminder cancelled"),
-      onError: () => toast.error("Failed to cancel reminder"),
+      onError: () => toast.error("Couldn't cancel reminder"),
     });
   };
 

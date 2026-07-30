@@ -32,16 +32,16 @@ export function personaDeleteDescription(
   instanceCount: number,
 ): string {
   if (!persona) {
-    return "Delete this agent.";
+    return "This agent will be removed.";
   }
   if (instanceCount === 0) {
-    return `Delete ${persona.displayName}.`;
+    return `${persona.displayName} will be removed.`;
   }
   const cascade =
     instanceCount === 1
-      ? "Also deletes 1 agent instance and archives its identity on the relay, so it no longer appears in member lists or mention suggestions."
-      : `Also deletes ${instanceCount} agent instances and archives their identities on the relay, so they no longer appear in member lists or mention suggestions.`;
-  return `Delete ${persona.displayName}. ${cascade}`;
+      ? "Its 1 agent instance is also deleted and its identity archived in the community, so it no longer appears in member lists or mention suggestions."
+      : `Its ${instanceCount} agent instances are also deleted and their identities archived in the community, so they no longer appear in member lists or mention suggestions.`;
+  return `${persona.displayName} will be removed. ${cascade}`;
 }
 
 export function PersonaDeleteDialog({
@@ -76,7 +76,7 @@ export function PersonaDeleteDialog({
               type="button"
               variant="destructive"
             >
-              Delete
+              Delete agent
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

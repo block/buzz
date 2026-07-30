@@ -49,7 +49,8 @@ export function FileCard({
       onClick={() => {
         invokeTauri("download_file", { url: href, filename }).catch(
           (err: unknown) => {
-            const msg = err instanceof Error ? err.message : "Download failed";
+            const msg =
+              err instanceof Error ? err.message : "Couldn't download";
             toast.error(msg);
           },
         );

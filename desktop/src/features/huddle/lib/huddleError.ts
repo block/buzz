@@ -32,6 +32,6 @@ export function formatHuddleActionError(
   }
 
   return action === "join"
-    ? "Couldn’t join the huddle."
-    : "Couldn’t start the huddle.";
+    ? "Couldn’t join the huddle"
+    : "Couldn’t start the huddle";
 }

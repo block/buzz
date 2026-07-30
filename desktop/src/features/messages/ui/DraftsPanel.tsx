@@ -312,9 +312,9 @@ export function SendConfirmDialog({
     >
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Send message</AlertDialogTitle>
+          <AlertDialogTitle>Send message?</AlertDialogTitle>
           <AlertDialogDescription>
-            Are you sure you want to send this message to {destination}?
+            This message will be sent to {destination}.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

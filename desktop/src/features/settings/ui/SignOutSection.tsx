@@ -123,7 +123,7 @@ export function SignOutSection() {
         setIsPending(false);
         setIsOpen(false);
         resetDialogState();
-        toast.error(err instanceof Error ? err.message : "Sign out failed.");
+        toast.error(err instanceof Error ? err.message : "Couldn’t sign out");
       });
   }
 
@@ -137,7 +137,7 @@ export function SignOutSection() {
           <h2 className="text-lg font-semibold tracking-tight">Sign out</h2>
           <p className="text-sm text-muted-foreground">
             Removes your identity key and all local app data from this device.
-            Back up your private key (nsec) first — this cannot be undone.
+            Back up your private key (nsec) first — this can't be undone.
           </p>
         </div>
         <Button
@@ -151,7 +151,7 @@ export function SignOutSection() {
           {isPending ? (
             <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
           ) : null}
-          {isPending ? "Signing out…" : "Sign Out"}
+          {isPending ? "Signing out…" : "Sign out"}
         </Button>
       </div>
       <AlertDialog
@@ -169,7 +169,7 @@ export function SignOutSection() {
             <AlertDialogDescription>
               This will delete your identity key, all agent settings, and cached
               data from this device, then relaunch Buzz into first-run setup.
-              This cannot be undone.
+              This can't be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -257,7 +257,7 @@ export function SignOutSection() {
                   className="h-4 w-4 border-2"
                 />
               ) : null}
-              {isPending ? "Signing out…" : "Delete My Data"}
+              {isPending ? "Signing out…" : "Delete my data"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

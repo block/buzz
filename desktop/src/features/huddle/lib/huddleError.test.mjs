@@ -37,10 +37,10 @@ test("preserves other string and Error messages", () => {
 test("uses action-specific fallback copy for unknown errors", () => {
   assert.equal(
     formatHuddleActionError({ reason: "unknown" }, "join"),
-    "Couldn’t join the huddle.",
+    "Couldn’t join the huddle",
   );
   assert.equal(
     formatHuddleActionError(null, "start"),
-    "Couldn’t start the huddle.",
+    "Couldn’t start the huddle",
   );
 });

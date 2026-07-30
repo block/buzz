@@ -302,10 +302,10 @@ function AddSubscriptionForm({ channels, onSaved, onCancel }: AddFormProps) {
         request.kinds,
       );
       onSaved();
-      toast.success("Archive subscription created.");
+      toast.success("Archive subscription created");
     } catch (err) {
       toast.error(
-        err instanceof Error ? err.message : "Failed to create subscription.",
+        err instanceof Error ? err.message : "Couldn't create the subscription",
       );
     } finally {
       setIsAdding(false);
@@ -441,10 +441,12 @@ export function LocalArchiveSettingsCard() {
       try {
         await deleteSaveSubscription(scopeType, scopeValue);
         await reload();
-        toast.success("Archive subscription removed.");
+        toast.success("Archive subscription removed");
       } catch (err) {
         toast.error(
-          err instanceof Error ? err.message : "Failed to remove subscription.",
+          err instanceof Error
+            ? err.message
+            : "Couldn't remove the subscription",
         );
       } finally {
         setDeletingKey(null);
@@ -475,15 +477,15 @@ export function LocalArchiveSettingsCard() {
         }
         toast.success(
           checked
-            ? "Observer feed archive enabled."
-            : "Observer feed archive disabled.",
+            ? "Observer feed archive enabled"
+            : "Observer feed archive disabled",
         );
         await reload();
       } catch (err) {
         toast.error(
           err instanceof Error
             ? err.message
-            : "Failed to update observer archive.",
+            : "Couldn't update the observer archive",
         );
       } finally {
         setObserverToggling(false);
@@ -505,15 +507,15 @@ export function LocalArchiveSettingsCard() {
         setExplicitAgentMetricArchiveChoice(pubkey, checked);
         toast.success(
           checked
-            ? "Agent turn metric archive enabled."
-            : "Agent turn metric archive disabled.",
+            ? "Agent turn metric archive enabled"
+            : "Agent turn metric archive disabled",
         );
         await reload();
       } catch (err) {
         toast.error(
           err instanceof Error
             ? err.message
-            : "Failed to update agent metric archive.",
+            : "Couldn't update the agent metric archive",
         );
       } finally {
         setMetricToggling(false);

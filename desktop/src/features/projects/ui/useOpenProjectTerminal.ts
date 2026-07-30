@@ -43,7 +43,7 @@ export function useOpenProjectTerminal(reposDir?: string | null) {
         }
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to open terminal",
+          error instanceof Error ? error.message : "Couldn't open the terminal",
           { id: toastId },
         );
       }

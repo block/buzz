@@ -142,7 +142,7 @@ function isProviderBackedAgent(agent: ManagedAgent) {
 }
 
 const DM_THREAD_AGENT_MENTION_ERROR =
-  "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
+  "You can only mention agents already in this DM. Start a new conversation to add them.";
 const DM_THREAD_MEMBERS_LOADING_ERROR =
   "Checking conversation members. Try again in a moment.";
 
@@ -490,8 +490,8 @@ export function useMentionSendFlow({
         if (agentReadiness.errors.length > 0) {
           const message =
             agentReadiness.errors.length === 1
-              ? `Could not start agent mention: ${agentReadiness.errors[0]}`
-              : `Could not start agent mentions: ${agentReadiness.errors.join(
+              ? `Couldn't start agent mention: ${agentReadiness.errors[0]}`
+              : `Couldn't start agent mentions: ${agentReadiness.errors.join(
                   "; ",
                 )}`;
           setNonMemberPromptError(message);
@@ -680,8 +680,8 @@ export function useMentionSendFlow({
         if (personaMentionResult.errors.length > 0) {
           const message =
             personaMentionResult.errors.length === 1
-              ? `Could not create agent mention: ${personaMentionResult.errors[0]}`
-              : `Could not create agent mentions: ${personaMentionResult.errors.join(
+              ? `Couldn't create agent mention: ${personaMentionResult.errors[0]}`
+              : `Couldn't create agent mentions: ${personaMentionResult.errors.join(
                   "; ",
                 )}`;
           setNonMemberPromptError(message);

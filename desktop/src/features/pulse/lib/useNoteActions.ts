@@ -98,7 +98,7 @@ export function usePulseNoteActions({
 
         queryClient.setQueryData(reactionQueryKey, previousReactions);
         toast.error(
-          error instanceof Error ? error.message : "Failed to update reaction",
+          error instanceof Error ? error.message : "Couldn't update reaction",
         );
       } finally {
         setPendingUpvoteNoteIds((current) =>
@@ -135,7 +135,7 @@ export function usePulseNoteActions({
         });
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to post reply",
+          error instanceof Error ? error.message : "Couldn't post reply",
         );
         throw error;
       }
@@ -148,7 +148,7 @@ export function usePulseNoteActions({
       await writeTextToClipboard(buildNoteShareUri(note));
       toast.success("Copied note link");
     } catch {
-      toast.error("Failed to copy note link");
+      toast.error("Couldn't copy note link");
     }
   }, []);
 
@@ -164,7 +164,7 @@ export function usePulseNoteActions({
         });
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to open DM",
+          error instanceof Error ? error.message : "Couldn't open DM",
         );
       }
     },

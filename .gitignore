@@ -36,6 +36,9 @@ blob-report/
 # Node modules (pnpm workspace hoists to root)
 node_modules/
 
+# pnpm content-addressable store (local cache, not portable)
+.pnpm-store/
+
 # Root npm lockfiles are accidental; desktop uses pnpm in /desktop.
 /package-lock.json
 

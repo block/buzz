@@ -1165,7 +1165,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
         toast.success("Copied to clipboard");
       })
       .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : "Copy failed";
+        const msg = err instanceof Error ? err.message : "Couldn't copy";
         toast.error(msg);
       });
   }, []);
@@ -1176,7 +1176,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
       if (!downloadSrc) return;
       invokeTauri("download_image", { url: downloadSrc }).catch(
         (err: unknown) => {
-          const msg = err instanceof Error ? err.message : "Download failed";
+          const msg = err instanceof Error ? err.message : "Couldn't download";
           toast.error(msg);
         },
       );
@@ -1332,7 +1332,7 @@ function ExternalLinkAnchor({
               onSelect: () => {
                 closeMenu();
                 void openUrl(href).catch(() => {
-                  toast.error("Failed to open link");
+                  toast.error("Couldn't open link");
                 });
               },
             },

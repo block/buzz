@@ -522,7 +522,7 @@ function describeSystemEvent(
         title: membershipTitle,
         action: (
           <>
-            was added by{" "}
+            added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
               {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
             </ProfileName>
@@ -566,7 +566,7 @@ function describeSystemEvent(
         title: membershipTitle,
         action: (
           <>
-            was added by{" "}
+            added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
               {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
             </ProfileName>
@@ -584,16 +584,28 @@ function describeSystemEvent(
         title: actorName,
         action: <>removed {targetName} from the channel</>,
       };
-    case "topic_changed":
+    case "topic_changed": {
+      const topic = payload.topic?.trim();
       return {
         title: actorName,
-        action: <>changed the topic to &ldquo;{payload.topic}&rdquo;</>,
+        action: topic ? (
+          <>changed the topic to &ldquo;{topic}&rdquo;</>
+        ) : (
+          "cleared the channel topic"
+        ),
       };
-    case "purpose_changed":
+    }
+    case "purpose_changed": {
+      const purpose = payload.purpose?.trim();
       return {
         title: actorName,
-        action: <>changed the purpose to &ldquo;{payload.purpose}&rdquo;</>,
+        action: purpose ? (
+          <>changed the purpose to &ldquo;{purpose}&rdquo;</>
+        ) : (
+          "cleared the channel purpose"
+        ),
       };
+    }
     case "channel_created":
       return {
         title: actorName,

@@ -363,7 +363,7 @@ function ProjectActionsMenu({
           <AlertDialogTitle>Delete project?</AlertDialogTitle>
           <AlertDialogDescription>
             Delete {project.name} from Projects for everyone. This can only be
-            done for projects you own and cannot be undone.
+            done for projects you own and can't be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

@@ -39,7 +39,7 @@ export function ArchiveConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>
-            Archiving hides {subject} from the space.
+            Archiving hides {subject} from the community.
           </AlertDialogDescription>
         </AlertDialogHeader>
         {/* The list + closing paragraph sit outside AlertDialogDescription on
@@ -51,8 +51,8 @@ export function ArchiveConfirmDialog({
           </li>
           <li>
             This only affects{" "}
-            <span className="font-medium text-foreground">this space</span> —
-            not their account anywhere else
+            <span className="font-medium text-foreground">this community</span>{" "}
+            — not their account anywhere else
           </li>
           <li>You can unarchive them at any time to restore them</li>
         </ul>

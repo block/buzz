@@ -105,9 +105,7 @@ export function MergePullRequestButton({
         setConfirmOpen(false);
       }
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to merge pull request.",
+        error instanceof Error ? error.message : "Failed to merge pull request",
       );
     }
   }, [mergeMutation, pullRequest]);
@@ -138,12 +136,12 @@ export function MergePullRequestButton({
         recoveryRef: result.recoveryRef,
         targetRef: result.targetRef,
       });
-      toast.success("Recovery commit fetched and terminal opened.");
+      toast.success("Recovery commit fetched and terminal opened");
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to prepare merge recovery.",
+          : "Failed to prepare merge recovery",
       );
     } finally {
       setIsPreparingRecovery(false);
@@ -164,12 +162,12 @@ export function MergePullRequestButton({
         statusEvent: unpublishedStatusEvent,
       });
       setUnpublishedStatusState(null);
-      toast.success("Published merged pull request status.");
+      toast.success("Published merged pull request status");
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to publish merged pull request status.",
+          : "Failed to publish merged pull request status",
       );
     }
   }, [publishMergedMutation, unpublishedStatusEvent]);

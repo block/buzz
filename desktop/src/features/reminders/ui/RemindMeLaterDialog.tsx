@@ -48,7 +48,7 @@ export function RemindMeLaterDialog({
           onOpenChange(false);
           setNote("");
         },
-        onError: () => toast.error("Failed to create reminder"),
+        onError: () => toast.error("Couldn't create reminder"),
       },
     );
   };

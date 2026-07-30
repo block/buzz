@@ -138,7 +138,7 @@ export function CreatePullRequestDialog({
       mergeBase: sourceSyncQuery.data?.mergeBase ?? null,
       reviewers: [],
     });
-    toast.success("Pull request created.");
+    toast.success("Pull request created");
     await onCreated(project, pullRequestId);
   }
 

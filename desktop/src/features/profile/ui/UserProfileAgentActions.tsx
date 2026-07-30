@@ -310,7 +310,7 @@ function AgentDeleteConfirmDialog({
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent data-testid="agent-delete-confirm-dialog">
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete this agent?</AlertDialogTitle>
+          <AlertDialogTitle>Delete agent?</AlertDialogTitle>
           <AlertDialogDescription>
             Deleting this agent stops and removes the agent from this community.
           </AlertDialogDescription>

@@ -681,7 +681,7 @@ export function useDeleteMessageMutation(channel: Channel | null) {
       );
     },
     onError: (error) => {
-      toast.error(`Failed to delete message: ${error.message}`);
+      toast.error(`Couldn't delete message: ${error.message}`);
     },
   });
 }

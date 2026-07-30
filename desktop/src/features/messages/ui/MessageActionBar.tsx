@@ -285,7 +285,7 @@ function MoreActionsMenu({
             <AlertDialogHeader>
               <AlertDialogTitle>Delete message?</AlertDialogTitle>
               <AlertDialogDescription>
-                This will permanently delete this message and cannot be undone.
+                This will permanently delete this message and can't be undone.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
@@ -300,7 +300,7 @@ function MoreActionsMenu({
                   type="button"
                   variant="destructive"
                 >
-                  Delete
+                  Delete message
                 </Button>
               </AlertDialogAction>
             </AlertDialogFooter>

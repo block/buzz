@@ -43,7 +43,7 @@ export function ConfirmRemoveDialog({
         <DialogHeader>
           <DialogTitle>Remove {label}?</DialogTitle>
           <DialogDescription>
-            This will immediately revoke their access to the relay.
+            This will immediately revoke their access to the community.
           </DialogDescription>
           {member ? (
             <PubKey
@@ -75,7 +75,7 @@ export function ConfirmRemoveDialog({
                   toast.error(
                     error instanceof Error
                       ? error.message
-                      : "Failed to remove member",
+                      : "Couldn't remove member",
                   );
                 },
               });

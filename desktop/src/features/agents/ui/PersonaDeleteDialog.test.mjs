@@ -13,22 +13,25 @@ const persona = { displayName: "Scout" };
 
 test("cascade delete discloses relay archival (plural)", () => {
   const copy = personaDeleteDescription(persona, 3);
-  assert.match(copy, /deletes 3 agent instances/);
-  assert.match(copy, /archives their identities on the relay/);
+  assert.match(copy, /3 agent instances are also deleted/);
+  assert.match(copy, /their identities archived in the community/);
 });
 
 test("cascade delete discloses relay archival (singular)", () => {
   const copy = personaDeleteDescription(persona, 1);
-  assert.match(copy, /deletes 1 agent instance /);
-  assert.match(copy, /archives its identity on the relay/);
+  assert.match(copy, /1 agent instance is also deleted/);
+  assert.match(copy, /its identity archived in the community/);
 });
 
 test("no instances → no archival claim (nothing is archived)", () => {
   const copy = personaDeleteDescription(persona, 0);
-  assert.equal(copy, "Delete Scout.");
+  assert.equal(copy, "Scout will be removed.");
   assert.doesNotMatch(copy, /archiv/i);
 });
 
 test("null persona keeps the generic fallback", () => {
-  assert.equal(personaDeleteDescription(null, 2), "Delete this agent.");
+  assert.equal(
+    personaDeleteDescription(null, 2),
+    "This agent will be removed.",
+  );
 });

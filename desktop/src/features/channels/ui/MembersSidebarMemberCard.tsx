@@ -67,7 +67,11 @@ type MembersSidebarMemberCardProps = {
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onOpenProfile?: (pubkey: string) => void;
   onRemoveMember: (member: ChannelMember) => void;
-  onTimeout: (member: ChannelMember, expiresAtSecs: number) => void;
+  onTimeout: (
+    member: ChannelMember,
+    expiresAtSecs: number,
+    durationLabel: string,
+  ) => void;
   onUnban: (member: ChannelMember) => void;
   onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
@@ -322,7 +326,11 @@ function MemberActionsMenu({
   onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onRemoveMember: (member: ChannelMember) => void;
-  onTimeout: (member: ChannelMember, expiresAtSecs: number) => void;
+  onTimeout: (
+    member: ChannelMember,
+    expiresAtSecs: number,
+    durationLabel: string,
+  ) => void;
   onUnban: (member: ChannelMember) => void;
   onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
@@ -459,6 +467,7 @@ function MemberActionsMenu({
                         onTimeout(
                           member,
                           Math.floor(Date.now() / 1000) + preset.seconds,
+                          preset.label,
                         )
                       }
                     >

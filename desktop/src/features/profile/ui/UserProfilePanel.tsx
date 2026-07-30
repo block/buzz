@@ -464,14 +464,14 @@ export function UserProfilePanel({
       if (created.spawnError) {
         toast.error(created.spawnError);
       } else {
-        toast.success(`Started ${created.agent.name}.`);
+        toast.success(`Started ${created.agent.name}`);
       }
       if (created.profileSyncError) {
         toast.warning(created.profileSyncError);
       }
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to start agent.",
+        error instanceof Error ? error.message : "Couldn’t start the agent",
       );
     }
   }, [createManagedAgentForPersona, resolvedPersona]);
@@ -486,14 +486,14 @@ export function UserProfilePanel({
       });
       toast.success(
         updated.startOnAppLaunch
-          ? `Will start ${updated.name} automatically.`
-          : `${updated.name} will stay manual-start only.`,
+          ? `Will start ${updated.name} automatically`
+          : `${updated.name} will stay manual-start only`,
       );
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
-          : "Failed to update startup preference.",
+          : "Couldn’t update the startup preference",
       );
     }
   }, [managedAgent, startOnLaunchMutation.mutateAsync]);
@@ -505,11 +505,11 @@ export function UserProfilePanel({
       const result = await deleteManagedAgentRecord(managedAgent);
       if (result.cancelled) return;
 
-      toast.success(`Deleted ${managedAgent.name}.`);
+      toast.success(`Deleted ${managedAgent.name}`);
       onClose();
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to delete agent.",
+        error instanceof Error ? error.message : "Couldn’t delete agent",
       );
     }
   }, [deleteManagedAgentRecord, managedAgent, onClose]);
@@ -572,18 +572,18 @@ export function UserProfilePanel({
           id: resolvedPersona.id,
           active: false,
         });
-        toast.success(`Removed ${resolvedPersona.displayName} from My Agents.`);
+        toast.success(`Removed ${resolvedPersona.displayName} from My Agents`);
         onClose();
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to delete agent.",
+          error instanceof Error ? error.message : "Couldn’t delete agent",
         );
       }
       return;
     }
 
     if (resolvedPersona.sourceTeam) {
-      toast.error("This agent is managed by a team.");
+      toast.error("This agent is managed by a team");
       return;
     }
 
@@ -598,19 +598,19 @@ export function UserProfilePanel({
   const handleConfirmDeletePersona = React.useCallback(
     async (personaToConfirm: AgentPersona) => {
       if (personaToConfirm.sourceTeam) {
-        toast.error("This agent is managed by a team.");
+        toast.error("This agent is managed by a team");
         setPersonaToDelete(null);
         return;
       }
 
       try {
         await deletePersonaMutation.mutateAsync(personaToConfirm.id);
-        toast.success(`Deleted ${personaToConfirm.displayName}.`);
+        toast.success(`Deleted ${personaToConfirm.displayName}`);
         setPersonaToDelete(null);
         onClose();
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to delete agent.",
+          error instanceof Error ? error.message : "Couldn’t delete agent",
         );
       }
     },
@@ -632,11 +632,11 @@ export function UserProfilePanel({
   const handleAddedToChannel = React.useCallback(
     (channel: Channel, result: AttachManagedAgentToChannelResult) => {
       if (result.started) {
-        toast.success(`Added ${result.agent.name} to ${channel.name}.`);
+        toast.success(`Added ${result.agent.name} to ${channel.name}`);
       } else if (result.membershipAdded) {
-        toast.success(`Added ${result.agent.name} to ${channel.name}.`);
+        toast.success(`Added ${result.agent.name} to ${channel.name}`);
       } else {
-        toast.success(`${result.agent.name} is already in ${channel.name}.`);
+        toast.success(`${result.agent.name} is already in ${channel.name}`);
       }
       void managedAgentsQuery.refetch();
       void relayAgentsQuery.refetch();

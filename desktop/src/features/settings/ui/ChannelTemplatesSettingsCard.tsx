@@ -78,7 +78,7 @@ export function ChannelTemplatesSettingsCard() {
       },
       onError: (error) => {
         toast.error(
-          error instanceof Error ? error.message : "Failed to duplicate",
+          error instanceof Error ? error.message : "Couldn't duplicate",
         );
       },
     });
@@ -92,9 +92,7 @@ export function ChannelTemplatesSettingsCard() {
         setDeleteTarget(null);
       },
       onError: (error) => {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to delete",
-        );
+        toast.error(error instanceof Error ? error.message : "Couldn't delete");
       },
     });
   }
@@ -168,10 +166,10 @@ export function ChannelTemplatesSettingsCard() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete template</AlertDialogTitle>
+            <AlertDialogTitle>Delete template?</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete &quot;{deleteTarget?.name}&quot;?
-              This action cannot be undone.
+              Delete &quot;{deleteTarget?.name}&quot;. This can&apos;t be
+              undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -180,7 +178,7 @@ export function ChannelTemplatesSettingsCard() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleDelete}
             >
-              Delete
+              Delete template
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -375,7 +373,7 @@ function TemplateFormDialog({
         },
         onError: (error) => {
           toast.error(
-            error instanceof Error ? error.message : "Failed to update",
+            error instanceof Error ? error.message : "Couldn't update",
           );
         },
       });
@@ -394,7 +392,7 @@ function TemplateFormDialog({
         },
         onError: (error) => {
           toast.error(
-            error instanceof Error ? error.message : "Failed to create",
+            error instanceof Error ? error.message : "Couldn't create",
           );
         },
       });

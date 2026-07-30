@@ -55,7 +55,9 @@ export function useVideoContextMenu(
             url: downloadUrl,
             filename: resolveVideoDownloadFilename(filename),
           }).catch((err: unknown) => {
-            toast.error(err instanceof Error ? err.message : "Download failed");
+            toast.error(
+              err instanceof Error ? err.message : "Couldn't download",
+            );
           });
         },
       });

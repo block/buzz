@@ -108,7 +108,7 @@ export function ChatHeader({
       await writeTextToClipboard(value);
       toast.success("Channel name copied");
     } catch {
-      toast.error("Failed to copy channel name");
+      toast.error("Couldn't copy channel name");
     }
   }
 

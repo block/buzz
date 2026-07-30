@@ -117,9 +117,7 @@ function RelayMemberRow({
       toast.success(success);
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "Couldn’t update this community member.",
+        error instanceof Error ? error.message : "Couldn’t update membership",
       );
     }
   }
@@ -187,7 +185,7 @@ function RelayMemberRow({
                         pubkey: member.pubkey,
                         role: "admin",
                       }),
-                    "Made community admin",
+                    `Promoted ${displayName} to admin`,
                   )
                 }
               >
@@ -203,7 +201,7 @@ function RelayMemberRow({
                         pubkey: member.pubkey,
                         role: "member",
                       }),
-                    "Made community member",
+                    `Demoted ${displayName} to member`,
                   )
                 }
               >
@@ -219,7 +217,7 @@ function RelayMemberRow({
                 onClick={() =>
                   void mutateWithToast(
                     () => removeMutation.mutateAsync(member.pubkey),
-                    "Removed community member",
+                    `Removed ${displayName} from the community`,
                   )
                 }
               >
