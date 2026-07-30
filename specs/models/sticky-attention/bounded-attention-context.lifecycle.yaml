@@ -1,0 +1,82 @@
+id: bounded-attention-context-lifecycle
+type: model
+entity: BoundedAttentionContext
+description: |
+  Derived freshness states for one bounded context on one node. Freshness is
+  a relation between things the relay already stores — head timestamps, the
+  newest residue, and the attention cursor — recomputed at projection time.
+  Nothing here is a stored status field, so no transition can be forgotten.
+
+sources:
+  stories:
+    - specs/stories/sticky-attention/accrete-attention-residue.md
+    - specs/stories/sticky-attention/distill-a-context-head.md
+  journeys:
+    - specs/journeys/re-enter-a-bounded-context.md
+
+initial_state: fresh
+
+states:
+  fresh:
+    description: The head distills all residue; nothing newer awaits synthesis.
+    terminal: false
+  accreting:
+    description: |
+      Residue is newer than the head — the healthy working state. The brief
+      leads with the live thread; the head still orients.
+    terminal: false
+  stale:
+    description: |
+      The head is far behind its residue, or many efforts have accreted
+      under one head. Surfaced at re-entry as a distillation prompt, or as a
+      hint that the boundary should split. Never hidden.
+    terminal: false
+  cold:
+    description: |
+      No builder-agent touch for a long interval. Listed low in warmth
+      ordering but fully re-enterable; re-entry reheats it and shows what
+      was true then and what changed since.
+    terminal: false
+
+transitions:
+  work:
+    from: [fresh, stale, cold]
+    to: accreting
+    trigger: builder_attested_agent
+    description: Any accepted residue record newer than the head.
+  distill:
+    from: [accreting, stale]
+    to: fresh
+    trigger: builder_accepts_agent_proposal
+    guards:
+      - head-synthesizes-residue-since-previous-head
+      - head-carries-same-h-boundary
+  neglect:
+    from: accreting
+    to: stale
+    trigger: time
+    description: Residue keeps accreting while the head falls far behind.
+  idle:
+    from: [fresh, accreting, stale]
+    to: cold
+    trigger: time
+    description: The attention cursor ages past the warmth horizon.
+  reheat:
+    from: cold
+    to: accreting
+    trigger: builder_attested_agent
+    description: Re-entry plus a first residue record warms the context.
+
+invalid:
+  - transition: foreign_touch_warms_context
+    reason: Steward and counterpart records never move the attention cursor; only the builder's own attested agents warm a context.
+  - transition: distill_without_residue
+    reason: A head replaced with no intervening residue is composition from scratch, not distillation.
+  - transition: stale_hidden_at_reentry
+    reason: Staleness is surfaced in the brief, never suppressed to make re-entry look cleaner.
+  - transition: head_replacement_prunes_history
+    reason: Distillation preserves residue; history remains replayable beneath every head.
+  - transition: unbounded_residue_counted
+    reason: Records without the context's h boundary belong to no context; they are reported for migration, not silently included.
+  - transition: cross_node_projection
+    reason: Single-node continuity only; relationships and cross-node context mapping are explicitly deferred.
