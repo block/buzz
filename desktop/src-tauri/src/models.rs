@@ -88,6 +88,21 @@ pub struct UserNoteInfo {
     pub tags: Vec<Vec<String>>,
 }
 
+/// A NIP-23 long-form note resolved from its exact addressable coordinate.
+#[derive(Serialize, Deserialize)]
+pub struct LongFormNoteInfo {
+    pub id: String,
+    pub pubkey: String,
+    pub identifier: String,
+    pub created_at: i64,
+    pub content: String,
+    pub tags: Vec<Vec<String>>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub published_at: Option<u64>,
+    pub topics: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct NoteReactionSummary {
     pub note_id: String,
