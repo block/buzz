@@ -175,7 +175,7 @@ export function resolveUserSecondaryLabel(input: {
 
 /**
  * Label for an agent's owner: "you" when the current user owns it, otherwise
- * the owner's display name, NIP-05 handle, or truncated pubkey.
+ * the owner's NIP-05 handle, display name, Nostr name, or truncated pubkey.
  */
 export function formatOwnerLabel(
   ownerPubkey: string | null | undefined,
@@ -196,9 +196,9 @@ export function formatOwnerLabel(
 
   const owner = ownerProfiles?.[normalizedOwnerPubkey];
   return (
+    owner?.nip05Handle?.trim() ||
     owner?.displayName?.trim() ||
     owner?.name?.trim() ||
-    owner?.nip05Handle?.trim() ||
     truncatePubkey(ownerPubkey)
   );
 }

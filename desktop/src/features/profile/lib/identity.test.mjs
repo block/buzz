@@ -24,9 +24,26 @@ const summary = (over = {}) => ({
 test("formatOwnerLabel resolves a known owner's display name", () => {
   assert.equal(
     formatOwnerLabel(OWNER_PUBKEY, null, {
-      [OWNER_PUBKEY]: summary({ displayName: "baxen" }),
+      [OWNER_PUBKEY]: summary({
+        displayName: "baxen",
+        nip05Handle: null,
+      }),
     }),
     "baxen",
+  );
+});
+
+test("formatOwnerLabel prefers NIP-05 when all owner identity fields coexist", () => {
+  assert.equal(
+    formatOwnerLabel(OWNER_PUBKEY, null, {
+      [OWNER_PUBKEY]: {
+        pubkey: OWNER_PUBKEY,
+        name: "legacy-name",
+        displayName: "Human Name",
+        nip05Handle: "owner@example.com",
+      },
+    }),
+    "owner@example.com",
   );
 });
 

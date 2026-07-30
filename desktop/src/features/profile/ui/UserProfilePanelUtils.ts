@@ -247,8 +247,8 @@ export function resolveOwnerHandle(
 
   return (
     profile?.nip05Handle?.trim() ||
-    profile?.name?.trim() ||
     profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
     truncatePubkey(currentPubkey)
   );
 }
