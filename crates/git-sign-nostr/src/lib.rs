@@ -1017,7 +1017,7 @@ fn do_sign(key_id: &str, status: &mut StatusWriter) -> Result<(), Error> {
     let oa = load_auth_tag()?;
     if let Some(ref oa_val) = oa {
         // Owner pubkey must be a valid BIP-340 key
-        if PublicKey::from_hex(&oa_val.0).is_err() {
+        if parse_bip340_pubkey(&oa_val.0).is_err() {
             return Err(Error::Fatal(
                 "auth tag owner (oa[0]) is not a valid BIP-340 public key".to_string(),
             ));
@@ -1188,7 +1188,7 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
     }
 
     // Validate pk is a valid BIP-340 x-only public key
-    let pk = PublicKey::from_hex(&envelope.pk).map_err(|e| {
+    let pk = parse_bip340_pubkey(&envelope.pk).map_err(|e| {
         write_errsig(status, Some(&envelope.pk));
         Error::VerifyFailed {
             pk: Some(envelope.pk.clone()),
@@ -1243,7 +1243,7 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
     let oa_result = if let Some(ref oa) = envelope.oa {
         // Validate oa[0] is a valid BIP-340 public key. Per NIP-GS spec,
         // an invalid owner pubkey is a structural error → ERRSIG.
-        if PublicKey::from_hex(&oa.0).is_err() {
+        if parse_bip340_pubkey(&oa.0).is_err() {
             write_errsig(status, Some(&envelope.pk));
             return Err(Error::VerifyFailed {
                 pk: Some(envelope.pk),
@@ -1342,6 +1342,15 @@ struct Envelope {
     oa: Option<(String, String, String)>,
 }
 
+/// Parse a 64-char hex string as a BIP-340 x-only public key, validating the
+/// point is on the curve. Under nostr 0.44 `PublicKey::from_hex` is hex-decode
+/// only — curve validation happens in `.xonly()`, so both steps are required.
+fn parse_bip340_pubkey(hex_pk: &str) -> Result<PublicKey, String> {
+    let pk = PublicKey::from_hex(hex_pk).map_err(|e| e.to_string())?;
+    pk.xonly().map_err(|e| e.to_string())?;
+    Ok(pk)
+}
+
 fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
     let val: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("invalid JSON: {e}"))?;
@@ -1420,7 +1429,7 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
         }
 
         // Validate oa[0] is a valid BIP-340 x-only public key (not just hex)
-        PublicKey::from_hex(owner)
+        parse_bip340_pubkey(owner)
             .map_err(|e| format!("oa[0] is not a valid BIP-340 public key: {e}"))?;
 
         // Self-attestation is meaningless — owner must differ from signer
@@ -1501,7 +1510,7 @@ fn verify_oa(agent_pk_hex: &str, oa: &(String, String, String)) -> bool {
     let (owner_pk_hex, conditions, owner_sig_hex) = oa;
 
     // Parse owner pubkey
-    let owner_pk = match PublicKey::from_hex(owner_pk_hex) {
+    let owner_pk = match parse_bip340_pubkey(owner_pk_hex) {
         Ok(p) => p,
         Err(_) => {
             eprintln!("warning: oa owner pubkey is not a valid BIP-340 key");
