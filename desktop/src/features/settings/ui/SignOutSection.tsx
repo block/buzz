@@ -151,7 +151,7 @@ export function SignOutSection() {
           {isPending ? (
             <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
           ) : null}
-          {isPending ? "Signing out…" : "Sign Out"}
+          {isPending ? "Signing out…" : "Delete my data"}
         </Button>
       </div>
       <AlertDialog
@@ -257,7 +257,7 @@ export function SignOutSection() {
                   className="h-4 w-4 border-2"
                 />
               ) : null}
-              {isPending ? "Signing out…" : "Delete My Data"}
+              {isPending ? "Signing out…" : "Delete my data"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
