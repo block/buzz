@@ -33,3 +33,17 @@ export function describeChannelTextFieldChange(
   }
   return `changed the ${field} to ${OPEN_QUOTE}${trimmed}${CLOSE_QUOTE}`;
 }
+
+/**
+ * Adjusts a resolved display name for use inside a sentence rather than in the
+ * name slot at the top of a row — "added by you", "removed you from the channel".
+ *
+ * `resolveUserLabel` returns "You" for the current user, which is right standing
+ * alone and wrong mid-phrase. Agent ownership already draws the same distinction
+ * from the other side: `formatOwnerLabel` returns lowercase "you" because it is
+ * only ever read as "managed by you". Every other name is a proper noun and is
+ * returned untouched.
+ */
+export function toInlineName(label: string): string {
+  return label === "You" ? "you" : label;
+}
