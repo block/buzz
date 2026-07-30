@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, is_unshared_persona_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    event_kind_u32, is_ephemeral, is_unshared_persona_event_for, AUTHOR_ONLY_KINDS,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_SPAWNER_ATTESTATION,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -166,8 +166,11 @@ pub async fn filter_fanout_by_access(
                 if pk == author {
                     return true;
                 }
-                // Foreign connection: allowed only if the event is shared.
-                !is_unshared_persona_event(&stored_event.event, &pk)
+                // Foreign connection: allowed if the event is shared, or if this
+                // connection is NIP-OA attested to the persona's author (an
+                // owner-run agent or spawner reading its owner's personas).
+                let owner = state.conn_manager.agent_owner_for_conn(*conn_id);
+                !is_unshared_persona_event_for(&stored_event.event, &pk, owner.as_deref())
             })
             .collect()
     } else {
@@ -691,6 +694,17 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    if kind_u32 == KIND_SPAWNER_ATTESTATION {
+        if let Err(message) = validate_spawner_attestation_envelope(&event) {
+            reject("invalid");
+            conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            return;
+        }
+        // Falls through to the generic ephemeral path: channel-less ephemeral
+        // events fan out on the global `#p`-kind index, which already routes
+        // each frame to the tagged counterparty and nobody else.
+    }
+
     // Scope enforcement for ephemeral kinds: require MessagesWrite.
     // Persistent events skip this gate and rely on
     // ingest_event()'s per-kind scope allowlist instead, so a token with
@@ -940,6 +954,55 @@ fn observer_frame_rate_limited(
 /// These frames bypass storage and are routed as global ephemeral events. The
 /// relay gates publication by the existing `agent_owner_pubkey` mapping and
 /// gates subscription in the REQ handler via the cleartext `p` tag.
+/// Validate the envelope of a NIP-AS spawner attestation frame (kind 24201).
+///
+/// These frames carry a NIP-OA auth tag between a spawner and an agent owner
+/// who have no recorded relationship yet — establishing that relationship is
+/// the entire point of the handshake — so this gate cannot reuse the agent/owner
+/// DB check that kind:24200 observer frames rely on. What it can enforce is that
+/// the frame is addressed to exactly one counterparty, is genuinely encrypted,
+/// and is fresh:
+///
+/// - Exactly one `p` tag, so the frame cannot be broadcast to many readers or
+///   published untargeted onto the global ephemeral index.
+/// - NIP-44 v2 ciphertext, so a client bug cannot put a signed auth tag on the
+///   wire in the clear.
+/// - Within a ±5 minute window, matching the observer-frame policy, so a
+///   captured frame cannot be replayed later.
+///
+/// Confidentiality rests on the encryption, not on this routing: a reader who
+/// subscribes with someone else's `p` value receives ciphertext they hold no key
+/// for. Binding a response to its request is the spawner's job, via the nonce.
+fn validate_spawner_attestation_envelope(event: &Event) -> Result<(), String> {
+    let mut p_tags = event.tags.iter().filter_map(|t| {
+        let parts = t.as_slice();
+        (parts.len() >= 2 && parts[0].as_str() == "p").then(|| parts[1].as_str())
+    });
+    let Some(recipient) = p_tags.next() else {
+        return Err("invalid: spawner attestation frame requires exactly one p tag".into());
+    };
+    if p_tags.next().is_some() {
+        return Err("invalid: spawner attestation frame requires exactly one p tag".into());
+    }
+    if recipient.len() != 64 || !recipient.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid: spawner attestation p tag must be a 64-character hex pubkey".into());
+    }
+
+    if !content_looks_like_nip44(event.content.as_ref()) {
+        return Err("invalid: spawner attestation content must be NIP-44 v2 ciphertext".into());
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let event_ts = event.created_at.as_secs() as i64;
+    if (event_ts - now).unsigned_abs() > 300 {
+        return Err(
+            "invalid: spawner attestation timestamp outside ±5 minute freshness window".into(),
+        );
+    }
+
+    Ok(())
+}
+
 async fn handle_agent_observer_event(
     event: Event,
     conn_id: uuid::Uuid,
@@ -1236,6 +1299,98 @@ mod tests {
             !super::super::ingest::requires_h_channel_scope(KIND_PRESENCE_UPDATE),
             "presence updates are global/ephemeral"
         );
+    }
+
+    /// Build a kind:24201 attestation frame with real NIP-44 ciphertext.
+    fn spawner_attestation_event(
+        sender: &Keys,
+        recipient: &nostr::PublicKey,
+        tags: Vec<Tag>,
+    ) -> nostr::Event {
+        let encrypted = encrypt_observer_payload(
+            sender,
+            recipient,
+            &serde_json::json!({"type": "request", "nonce": "ab"}),
+        )
+        .expect("encrypt attestation payload");
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_SPAWNER_ATTESTATION as u16),
+            encrypted,
+        )
+        .tags(tags)
+        .sign_with_keys(sender)
+        .expect("sign event")
+    }
+
+    #[test]
+    fn spawner_attestation_accepts_a_single_p_tagged_encrypted_frame() {
+        let spawner = Keys::generate();
+        let owner = Keys::generate();
+        let event = spawner_attestation_event(
+            &spawner,
+            &owner.public_key(),
+            vec![Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag")],
+        );
+        assert!(super::validate_spawner_attestation_envelope(&event).is_ok());
+    }
+
+    #[test]
+    fn spawner_attestation_rejects_missing_or_multiple_p_tags() {
+        let spawner = Keys::generate();
+        let owner = Keys::generate();
+        let other = Keys::generate();
+
+        let untargeted = spawner_attestation_event(&spawner, &owner.public_key(), vec![]);
+        assert!(super::validate_spawner_attestation_envelope(&untargeted).is_err());
+
+        // Fan-out to several readers would put one owner's handshake on another
+        // owner's subscription; exactly one counterparty is the whole contract.
+        let broadcast = spawner_attestation_event(
+            &spawner,
+            &owner.public_key(),
+            vec![
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+                Tag::parse(["p", &other.public_key().to_hex()]).expect("p tag"),
+            ],
+        );
+        assert!(super::validate_spawner_attestation_envelope(&broadcast).is_err());
+    }
+
+    #[test]
+    fn spawner_attestation_rejects_plaintext_content() {
+        let spawner = Keys::generate();
+        let owner = Keys::generate();
+        // A signed auth tag in the clear is exactly what this gate exists to stop.
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_SPAWNER_ATTESTATION as u16),
+            r#"{"type":"response","auth_tag":"[\"auth\",\"owner\",\"\",\"sig\"]"}"#,
+        )
+        .tags([Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag")])
+        .sign_with_keys(&spawner)
+        .expect("sign event");
+        assert!(super::validate_spawner_attestation_envelope(&event).is_err());
+    }
+
+    #[test]
+    fn spawner_attestation_rejects_stale_frames() {
+        let spawner = Keys::generate();
+        let owner = Keys::generate();
+        let encrypted = encrypt_observer_payload(
+            &spawner,
+            &owner.public_key(),
+            &serde_json::json!({"type": "request"}),
+        )
+        .expect("encrypt attestation payload");
+        let stale = nostr::Timestamp::from((chrono::Utc::now().timestamp() - 3600).unsigned_abs());
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_SPAWNER_ATTESTATION as u16),
+            encrypted,
+        )
+        .tags([Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag")])
+        .custom_created_at(stale)
+        .sign_with_keys(&spawner)
+        .expect("sign event");
+        assert!(super::validate_spawner_attestation_envelope(&event).is_err());
     }
 
     #[test]

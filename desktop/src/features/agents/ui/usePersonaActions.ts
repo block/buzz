@@ -63,6 +63,8 @@ import {
   buildInstanceInputForDefinition,
   type BackendIntent,
 } from "../lib/instanceInputForDefinition";
+import { LOCAL, type AgentLocation } from "../agentLocation";
+import { useDeployPersonaToSpawner } from "./useDeployPersonaToSpawner";
 
 type PersonaFeedbackSurface = "catalog" | "library";
 
@@ -125,6 +127,7 @@ export function usePersonaActions() {
   const [personaFeedbackSurface, setPersonaFeedbackSurface] =
     React.useState<PersonaFeedbackSurface>("library");
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
+  const deployToSpawner = useDeployPersonaToSpawner();
   const [isPersonaSubmitPending, setIsPersonaSubmitPending] =
     React.useState(false);
 
@@ -176,6 +179,7 @@ export function usePersonaActions() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent?: AgentCreateIntent,
     backendIntent?: BackendIntent | null,
+    location?: AgentLocation,
     targetChannel?: Pick<Channel, "id" | "name"> | null,
     options?: { publishCatalogUpdates?: boolean },
   ): Promise<boolean> {
@@ -237,6 +241,17 @@ export function usePersonaActions() {
           setPersonaDialogState(null);
           return true;
         }
+
+        // Server-hosted: the spawner owns the process, so no local instance is
+        // created and nothing is spawned here. The definition is still created
+        // — the spawner resolves the prompt from it.
+        const runLocation = location ?? LOCAL;
+        if (runLocation.kind === "spawner") {
+          await deployToSpawner(persona, runLocation.spawnerPubkey);
+          setPersonaDialogState(null);
+          return true;
+        }
+
         const agentInput = await buildInstanceInputForDefinition(
           persona,
           runtime,

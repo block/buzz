@@ -161,6 +161,59 @@ export function isSuccessfulEmptyDiscovery({
   );
 }
 
+/**
+ * Pure gate for running local model discovery. Server-managed (spawner-hosted)
+ * agents never discover locally: their model catalog comes from the spawner
+ * announcement and their credentials (e.g. OAuth) live on the server, so a
+ * local discovery attempt would only produce spurious "enter an API key"
+ * warnings.
+ */
+export function canRunLocalModelDiscovery({
+  open,
+  modelFieldVisible,
+  serverManaged,
+  runtimeAvailability,
+  runtimeCommand,
+  isCustomProviderEditing,
+  provider,
+}: {
+  open: boolean;
+  modelFieldVisible: boolean;
+  serverManaged: boolean;
+  runtimeAvailability: string | undefined;
+  runtimeCommand: string | null;
+  isCustomProviderEditing: boolean;
+  provider: string;
+}): boolean {
+  return (
+    !serverManaged &&
+    open &&
+    modelFieldVisible &&
+    runtimeAvailability === "available" &&
+    runtimeCommand !== null &&
+    (!isCustomProviderEditing || provider.trim().length > 0)
+  );
+}
+
+/**
+ * Whether the "Runtime not available" warning should be shown when discovery
+ * cannot run. Suppressed for server-managed agents — local runtime
+ * availability is meaningless for an agent hosted on a spawner.
+ */
+export function shouldSurfaceRuntimeUnavailableStatus({
+  serverManaged,
+  runtimeAvailability,
+}: {
+  serverManaged: boolean;
+  runtimeAvailability: string | null | undefined;
+}): boolean {
+  return (
+    !serverManaged &&
+    runtimeAvailability != null &&
+    runtimeAvailability !== "available"
+  );
+}
+
 export function usePersonaModelDiscovery({
   envVars,
   isCustomProviderEditing,
@@ -168,6 +221,7 @@ export function usePersonaModelDiscovery({
   open,
   provider,
   selectedRuntime,
+  serverManaged = false,
 }: {
   envVars: EnvVarsValue;
   isCustomProviderEditing: boolean;
@@ -175,6 +229,8 @@ export function usePersonaModelDiscovery({
   open: boolean;
   provider: string;
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
+  /** True when the agent is hosted on a spawner — disables local discovery. */
+  serverManaged?: boolean;
 }) {
   const [modelDiscoveryData, setModelDiscoveryData] =
     React.useState<AgentModelsResponse | null>(null);
@@ -206,12 +262,15 @@ export function usePersonaModelDiscovery({
   const selectedRuntimeLabel = selectedRuntime?.label;
   const selectedRuntimeDefaultArgs = selectedRuntime?.defaultArgs;
   const selectedRuntimeDefinitionEnv = selectedRuntime?.definitionEnv;
-  const canDiscoverModelOptions =
-    open &&
-    modelFieldVisible &&
-    selectedRuntime?.availability === "available" &&
-    discoveryAgentCommand !== null &&
-    (!isCustomProviderEditing || trimmedProvider.length > 0);
+  const canDiscoverModelOptions = canRunLocalModelDiscovery({
+    open,
+    modelFieldVisible,
+    serverManaged,
+    runtimeAvailability: selectedRuntime?.availability,
+    runtimeCommand: discoveryAgentCommand,
+    isCustomProviderEditing,
+    provider: trimmedProvider,
+  });
   const modelDiscoveryEnvKey = React.useMemo(
     () => stableModelDiscoveryEnvKey(envVars),
     [envVars],
@@ -246,8 +305,10 @@ export function usePersonaModelDiscovery({
       // When the runtime exists but is not available, surface a status message
       // so the model dropdown explains why no live models can be loaded.
       if (
-        selectedRuntimeAvailability != null &&
-        selectedRuntimeAvailability !== "available"
+        shouldSurfaceRuntimeUnavailableStatus({
+          serverManaged,
+          runtimeAvailability: selectedRuntimeAvailability,
+        })
       ) {
         setModelDiscoveryStatus(
           formatModelDiscoveryErrorStatus(
@@ -362,6 +423,7 @@ export function usePersonaModelDiscovery({
     selectedRuntimeDefaultArgs,
     selectedRuntimeDefinitionEnv,
     selectedRuntimeLabel,
+    serverManaged,
     shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);

@@ -1564,3 +1564,37 @@ test("blockSave_inheritTransition_buzzAgentPin_toClaudePersona_notBlocked", () =
     "claude must return empty required keys — no dialog-fixable credential",
   );
 });
+
+test("editAgent_serverManaged_ignoresMissingRequiredEnvKey", () => {
+  // A spawner-hosted agent authenticates on the server (e.g. OAuth) — a
+  // credential key missing on THIS machine must not block Save.
+  const base = {
+    name: "My Agent",
+    parallelism: "",
+    agentAcpCommand: "",
+    acpCommand: "",
+    respondTo: "all",
+    respondToAllowlistLength: 0,
+    selectedRuntimeId: "buzz-agent",
+    inheritHarness: false,
+    agentCommand: "buzz-agent",
+    requiredEnvKeyMissing: true,
+  };
+
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, serverManaged: true }),
+    true,
+    "server-managed agents must not be gated on local credential keys",
+  );
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, serverManaged: false }),
+    false,
+    "local agents must still be gated on missing credential keys",
+  );
+  // Other validity rules still apply to server-managed agents.
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, serverManaged: true, name: " " }),
+    false,
+    "blank name must still block Save for server-managed agents",
+  );
+});

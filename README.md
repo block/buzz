@@ -156,6 +156,8 @@ For a split-terminal workflow (relay logs separate from Vite output), use `just 
 
 Want a single-node / VPS relay instead of the local-dev stack? Use the production Compose bundle in [`deploy/compose/`](deploy/compose/README.md) (`docker compose` + Postgres, Redis, MinIO, optional Caddy/TLS). The root [`docker-compose.yml`](docker-compose.yml) is for day-to-day development only.
 
+For the full walkthrough of standing up your own backend — relay, the `buzz-spawner` for server-hosted agents, per-owner Claude credentials, and every gotcha we hit along the way — see [**Self-hosting a full Buzz backend**](docs/self-hosted-backend.md).
+
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
 ---
