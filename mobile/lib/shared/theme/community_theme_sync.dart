@@ -41,6 +41,8 @@ class CommunityThemeSyncManager {
   final SignedEventRelay signedEventRelay;
   final CommunityThemeCrypto crypto;
   final Duration debounce;
+  final Duration publishRetryBase;
+  final Duration publishRetryMax;
   final Duration subscriptionRetryBase;
   final void Function(RemoteCommunityTheme) onRemote;
   final void Function(CommunityThemePreference) onPublished;
@@ -54,6 +56,7 @@ class CommunityThemeSyncManager {
   String _lastEventId = '';
   int _subscriptionEpoch = 0;
   int _subscriptionRetryAttempt = 0;
+  int _publishRetryAttempt = 0;
   bool _disposed = false;
 
   CommunityThemeSyncManager({
@@ -64,6 +67,8 @@ class CommunityThemeSyncManager {
     required this.onRemote,
     this.onPublished = _ignorePublished,
     this.debounce = const Duration(seconds: 2),
+    this.publishRetryBase = const Duration(seconds: 1),
+    this.publishRetryMax = const Duration(seconds: 30),
     this.subscriptionRetryBase = const Duration(seconds: 1),
   });
 
@@ -174,8 +179,14 @@ class CommunityThemeSyncManager {
   void publish(CommunityThemePreference preference) {
     if (_disposed) return;
     _pending = preference;
+    _publishRetryAttempt = 0;
+    _schedulePublish(debounce);
+  }
+
+  void _schedulePublish(Duration delay) {
+    if (_disposed) return;
     _publishTimer?.cancel();
-    _publishTimer = Timer(debounce, () {
+    _publishTimer = Timer(delay, () {
       _publishTimer = null;
       unawaited(flush());
     });
@@ -197,6 +208,7 @@ class CommunityThemeSyncManager {
         DateTime.now().millisecondsSinceEpoch ~/ 1000,
         _lastCreatedAt + 1,
       );
+      NostrEvent? signed;
       await signedEventRelay.submit(
         kind: EventKind.readState,
         content: content,
@@ -205,14 +217,29 @@ class CommunityThemeSyncManager {
           ['t', communityThemeDTag],
         ],
         createdAt: createdAt,
+        onSigned: (event) => signed = event,
       );
       if (_disposed) return;
-      _lastCreatedAt = createdAt;
+      final published = signed;
+      if (published == null) {
+        throw StateError('Signed event coordinate unavailable');
+      }
+      _lastCreatedAt = published.createdAt;
+      _lastEventId = published.id;
       _lastPublished = preference;
+      _publishRetryAttempt = 0;
       if (_pending == preference) _pending = null;
       onPublished(preference);
     } catch (error) {
       debugPrint('[CommunityThemeSync] publish failed: $error');
+      if (_disposed || _pending != preference) return;
+      final multiplier = 1 << min(_publishRetryAttempt, 30);
+      _publishRetryAttempt++;
+      final retryMs = min(
+        publishRetryBase.inMilliseconds * multiplier,
+        publishRetryMax.inMilliseconds,
+      );
+      _schedulePublish(Duration(milliseconds: retryMs));
     }
   }
 

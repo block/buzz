@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/relay/relay.dart';
@@ -162,14 +163,57 @@ void main() {
     expect(session.subscribeCalls, 1);
   });
 
+  test('publish failure retries and acknowledges exact preference', () async {
+    final relay = _FakeSignedRelay(failuresRemaining: 1);
+    final acknowledgements = <CommunityThemePreference>[];
+    final manager = _manager(
+      _FakeSession(),
+      relay,
+      onPublished: acknowledgements.add,
+    );
+    manager.publish(local);
+    await manager.flush();
+    expect(manager.pending, local);
+
+    await _waitUntil(() => acknowledgements.length == 1);
+    expect(relay.attempts, 2);
+    expect(manager.pending, isNull);
+    expect(acknowledgements, [local]);
+  });
+
   test(
-    'publish failure keeps pending preference for reconnect retry',
+    'published coordinate rejects delayed same-second initialization result',
     () async {
-      final relay = _FakeSignedRelay(fail: true);
-      final manager = _manager(_FakeSession(), relay);
+      const stale = CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+      );
+      final history = Completer<List<NostrEvent>>();
+      final session = _FakeSession(historyFuture: history.future);
+      final relay = _FakeSignedRelay(eventId: 'published-z');
+      final applied = <CommunityThemePreference>[];
+      final manager = _manager(
+        session,
+        relay,
+        onRemote: (remote) => applied.add(remote.preference),
+      );
+
+      final initializing = manager.initialize();
       manager.publish(local);
       await manager.flush();
-      expect(manager.pending, local);
+      final createdAt = relay.submittedEvents.single.createdAt;
+      history.complete([
+        _event(
+          id: 'published-a',
+          createdAt: createdAt,
+          content: jsonEncode(stale.toJson()),
+        ),
+      ]);
+      await initializing;
+
+      expect(applied, isEmpty);
+      expect(manager.pending, isNull);
     },
   );
 }
@@ -178,14 +222,18 @@ CommunityThemeSyncManager _manager(
   _FakeSession session,
   _FakeSignedRelay relay, {
   void Function(RemoteCommunityTheme)? onRemote,
+  void Function(CommunityThemePreference)? onPublished,
 }) => CommunityThemeSyncManager(
   pubkey: 'pk',
   relaySession: session,
   signedEventRelay: relay,
   crypto: const CommunityThemeCrypto(encrypt: _identity, decrypt: _identity),
   debounce: const Duration(days: 1),
+  publishRetryBase: const Duration(milliseconds: 1),
+  publishRetryMax: const Duration(milliseconds: 4),
   subscriptionRetryBase: const Duration(milliseconds: 1),
   onRemote: onRemote ?? (_) {},
+  onPublished: onPublished ?? (_) {},
 );
 
 String _identity(String value) => value;
@@ -207,9 +255,13 @@ NostrEvent _event({
 );
 
 class _FakeSession extends RelaySessionNotifier {
-  _FakeSession({List<NostrEvent> history = const [], this.error})
-    : history = List.of(history);
+  _FakeSession({
+    List<NostrEvent> history = const [],
+    this.historyFuture,
+    this.error,
+  }) : history = List.of(history);
   List<NostrEvent> history;
+  final Future<List<NostrEvent>>? historyFuture;
   final Object? error;
   int subscribeCalls = 0;
   final List<void Function(NostrEvent)> _listeners = [];
@@ -225,6 +277,7 @@ class _FakeSession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (error != null) throw error!;
+    if (historyFuture != null) return historyFuture!;
     return history;
   }
 
@@ -279,9 +332,12 @@ class _Submission {
 }
 
 class _FakeSignedRelay implements SignedEventRelay {
-  _FakeSignedRelay({this.fail = false});
-  final bool fail;
+  _FakeSignedRelay({this.failuresRemaining = 0, this.eventId = 'event'});
+  int failuresRemaining;
+  final String eventId;
+  int attempts = 0;
   final submissions = <_Submission>[];
+  final submittedEvents = <NostrEvent>[];
   @override
   String? get pubkey => 'pk';
   @override
@@ -292,8 +348,19 @@ class _FakeSignedRelay implements SignedEventRelay {
     int? createdAt,
     void Function(NostrEvent)? onSigned,
   }) async {
-    if (fail) throw StateError('publish failed');
+    attempts++;
+    if (failuresRemaining > 0) {
+      failuresRemaining--;
+      throw StateError('publish failed');
+    }
     submissions.add(_Submission(kind, content, tags));
-    return _event(content: content, createdAt: createdAt ?? 0);
+    final event = _event(
+      id: eventId,
+      content: content,
+      createdAt: createdAt ?? 0,
+    );
+    onSigned?.call(event);
+    submittedEvents.add(event);
+    return event;
   }
 }
