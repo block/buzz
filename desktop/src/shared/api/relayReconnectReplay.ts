@@ -122,6 +122,7 @@ export async function replayLiveSubscriptions({
   subscriptions,
   sendRaw,
   requestHistory,
+  replaySubscriptionEvent,
   now = Math.floor(Date.now() / 1_000),
   pageReplayConcurrency = RECONNECT_REPLAY_PAGE_CONCURRENCY,
   visibleChannelId = null,
@@ -134,6 +135,7 @@ export async function replayLiveSubscriptions({
   subscriptions: Map<string, RelaySubscription>;
   sendRaw: (payload: unknown[]) => Promise<void>;
   requestHistory: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
+  replaySubscriptionEvent?: (subId: string, event: RelayEvent) => void;
   now?: number;
   pageReplayConcurrency?: number;
   /** Channel currently visible in the UI — its subscriptions go in the first batch. */
@@ -238,7 +240,16 @@ export async function replayLiveSubscriptions({
     pageReplayConcurrency,
     async ({ subId, subscription, replaySince }) => {
       await replayReconnectHistoryPages({
-        subscription,
+        subscription: {
+          ...subscription,
+          onEvent: (event) => {
+            if (replaySubscriptionEvent) {
+              replaySubscriptionEvent(subId, event);
+            } else {
+              subscription.onEvent(event);
+            }
+          },
+        },
         since: replaySince,
         until: now,
         isActive: () => subscriptions.get(subId) === subscription,

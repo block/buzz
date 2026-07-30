@@ -9,8 +9,6 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
-  CHANNEL_EVENT_KINDS,
-  KIND_CHANNEL_THREAD_SUMMARY,
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
@@ -23,6 +21,7 @@ import {
   buildChannelAuxDeletionFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
+  buildChannelLiveFilter,
   buildChannelMentionFilter,
   buildGlobalStreamFilter,
 } from "@/shared/api/relayChannelFilters";
@@ -79,6 +78,8 @@ export const BACKOFF_RESET_STABLE_MS = 60_000;
  */
 const STALL_CHECK_INTERVAL_MS = 10_000;
 const STALL_IDLE_TIMEOUT_MS = 60_000;
+
+type LiveCallbacks = Partial<Record<"onFlush", () => void>>;
 
 export class RelayClient {
   private wsId: number | null = null;
@@ -356,23 +357,13 @@ export class RelayClient {
     return this.subscribe(buildChannelFilter(channelId, 50), onEvent);
   }
 
-  /** Subscribe to channel rows and aux starting now, with no history replay. */
+  /** Subscribe to channel rows and aux, with one callback per buffered flush. */
   async subscribeToChannelLive(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
+    options?: LiveCallbacks,
   ) {
-    return this.subscribe(
-      {
-        // 39005 rides only this window-store subscription — not
-        // CHANNEL_EVENT_KINDS, whose other consumers (unread tracking,
-        // timeline-cache merges) must never see summary overlays.
-        kinds: [...CHANNEL_EVENT_KINDS, KIND_CHANNEL_THREAD_SUMMARY],
-        "#h": [channelId],
-        limit: 1000,
-        since: Math.floor(Date.now() / 1_000),
-      },
-      onEvent,
-    );
+    return this.subscribe(buildChannelLiveFilter(channelId), onEvent, options);
   }
 
   /**
@@ -600,6 +591,7 @@ export class RelayClient {
   private async subscribe(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
+    options?: LiveCallbacks,
   ) {
     await this.ensureConnected();
 
@@ -622,6 +614,7 @@ export class RelayClient {
       filter,
       onEvent,
       resolveReady,
+      ...options,
     });
 
     try {
@@ -829,6 +822,8 @@ export class RelayClient {
             ["REQ", subId, filter],
             "Failed to restore relay subscription after CLOSED.",
           ),
+        requestHistory: (filter) => this.requestHistory(filter),
+        replaySubscriptionEvent: this.handleEvent.bind(this),
       });
       return;
     }
@@ -884,14 +879,19 @@ export class RelayClient {
     this.flushTimeout = null;
     const buffer = this.eventBuffer;
     this.eventBuffer = [];
+    const flushCallbacks = new Set<() => void>();
 
     // Re-lookup: subscriptions removed during batch window are intentionally skipped.
     for (const { subId, event } of buffer) {
       const subscription = this.subscriptions.get(subId);
       if (subscription?.mode === "live") {
         subscription.onEvent(event);
+        const callback = (subscription as typeof subscription & LiveCallbacks)
+          .onFlush;
+        if (callback) flushCallbacks.add(callback);
       }
     }
+    for (const callback of flushCallbacks) callback();
   }
 
   private handleEose(subId: string) {
@@ -943,7 +943,6 @@ export class RelayClient {
 
     return false;
   }
-
   private async replayLiveSubscriptions() {
     const generation = this.connectionGeneration;
     try {
@@ -951,6 +950,7 @@ export class RelayClient {
         subscriptions: this.subscriptions,
         sendRaw: (payload) => this.sendRaw(payload),
         requestHistory: (filter) => this.requestHistory(filter),
+        replaySubscriptionEvent: this.handleEvent.bind(this),
         visibleChannelId: this.visibleChannelId,
         isActive: () => this.connectionGeneration === generation,
       });

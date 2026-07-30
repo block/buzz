@@ -33,9 +33,11 @@ import { installMockBridge } from "../helpers/bridge";
  * SCOPE LIMIT: this measures Chromium main-thread longtasks under throttle. It
  * does NOT measure the WKWebView compositor feel on the shipped Tauri shell —
  * that is a separate real-wheel pass.
+ * This harness observes main-thread longtasks only. It cannot observe network
+ * round trips and must never be cited as evidence that a round trip was removed.
  *
  * Run it:
- *   pnpm build && npx playwright test --config=playwright.perf.config.ts \
+ *   pnpm build:e2e && npx playwright test --config=playwright.perf.config.ts \
  *     cold-switch-longtask.perf.ts
  */
 
