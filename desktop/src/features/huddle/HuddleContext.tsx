@@ -5,6 +5,10 @@ import * as React from "react";
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { useAudioDevices } from "./lib/useAudioDevices";
 import { formatHuddleActionError } from "./lib/huddleError";
+import {
+  availableMediaDevices,
+  MICROPHONE_UNAVAILABLE_ERROR,
+} from "./lib/mediaDevices";
 import { useTtsSubscription } from "./lib/useTtsSubscription";
 
 /**
@@ -165,15 +169,14 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       .catch(() => {
         /* best-effort */
       });
-    navigator.mediaDevices.addEventListener(
-      "devicechange",
-      refreshOutputDevices,
-    );
+    // The device list itself comes from Rust and always loads; only the
+    // hot-plug listener needs `navigator.mediaDevices`, which is absent in a
+    // non-secure context.
+    const media = availableMediaDevices();
+    if (!media) return;
+    media.addEventListener("devicechange", refreshOutputDevices);
     return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        refreshOutputDevices,
-      );
+      media.removeEventListener("devicechange", refreshOutputDevices);
     };
   }, []);
 
@@ -371,7 +374,11 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       if (selectedDeviceId) {
         audioConstraints.deviceId = { exact: selectedDeviceId };
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const media = availableMediaDevices();
+      if (!media?.getUserMedia) {
+        throw new Error(MICROPHONE_UNAVAILABLE_ERROR);
+      }
+      const stream = await media.getUserMedia({
         audio: audioConstraints,
       });
       const audioTrack = stream.getAudioTracks()[0];
