@@ -97,6 +97,12 @@ enum PersistResult {
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
 /// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+#[tracing::instrument(
+    target = "buzz_datastore",
+    name = "persist_command_event",
+    skip_all,
+    fields(otel.kind = "client", db.system.name = "postgresql")
+)]
 async fn persist_command_event(
     state: &Arc<AppState>,
     tenant: &TenantContext,

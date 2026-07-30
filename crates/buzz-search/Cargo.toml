@@ -12,6 +12,7 @@ buzz-core   = { workspace = true }
 sqlx        = { workspace = true }
 uuid        = { workspace = true }
 thiserror   = { workspace = true }
+tracing     = { workspace = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }
