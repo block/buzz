@@ -12,10 +12,12 @@
  *
  *   s<D>pattern<D>replacement<D><flags>
  *
- * - `<D>` is the delimiter: the single character immediately following `s`. It
- *   may be any punctuation character, so `s/a/b/`, `s|a|b|`, and `s#a#b#` are
- *   all equivalent. Requiring a punctuation delimiter (not a letter/digit)
- *   keeps ordinary prose like "s3 bucket" from being mistaken for a command.
+ * - `<D>` is the delimiter, and it is always `/` — the canonical IRC/sed
+ *   shorthand (`s/old/new/`). sed itself allows any character as the delimiter,
+ *   but the only thing that buys you is avoiding escapes when the delimiter
+ *   appears in your pattern — which `\/` escaping already covers. Fixing it to
+ *   `/` keeps ordinary prose (`s3 bucket`, `s: notes`, `s|foo`) from ever
+ *   looking like a command, shrinking the accidental-trigger surface.
  * - The trailing delimiter is optional when there are no flags (`s/a/b` works).
  * - `\<D>` inside pattern/replacement is a literal delimiter; `\\` is a literal
  *   backslash. Every other backslash is kept verbatim.
@@ -37,14 +39,8 @@ export type SelfCorrectionCommand = {
   ignoreCase: boolean;
 };
 
-/**
- * A delimiter must be a single non-alphanumeric, non-whitespace, non-backslash
- * character. This is deliberately conservative: it lets `/ | # : , ~` etc. work
- * while ensuring a bare word starting with "s" can never look like a command.
- */
-function isValidDelimiter(char: string): boolean {
-  return /^[^\sA-Za-z0-9\\]$/.test(char);
-}
+/** The one supported delimiter — the canonical IRC/sed `s/old/new/` slash. */
+const DELIMITER = "/";
 
 /**
  * Scan a delimited section starting at `start`, honouring `\<delim>` and `\\`
@@ -86,14 +82,11 @@ function scanSection(
 export function parseSelfCorrection(
   input: string,
 ): SelfCorrectionCommand | null {
-  // `s` + a delimiter + at least a closing delimiter is the minimum shape.
-  if (input.length < 3 || input[0] !== "s") {
+  // `s/` + at least a closing delimiter is the minimum shape.
+  if (input.length < 3 || input[0] !== "s" || input[1] !== DELIMITER) {
     return null;
   }
-  const delimiter = input[1];
-  if (!isValidDelimiter(delimiter)) {
-    return null;
-  }
+  const delimiter = DELIMITER;
 
   const patternSection = scanSection(input, 2, delimiter);
   if (!patternSection || patternSection.value.length === 0) {

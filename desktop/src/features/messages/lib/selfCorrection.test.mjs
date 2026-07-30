@@ -32,13 +32,12 @@ test("empty replacement is a valid deletion", () => {
   });
 });
 
-test("accepts alternate punctuation delimiters", () => {
-  for (const cmd of ["s|a|b|", "s#a#b#", "s,a,b,", "s:a:b:"]) {
-    assert.deepEqual(
-      parseSelfCorrection(cmd),
-      { pattern: "a", replacement: "b", global: false, ignoreCase: false },
-      cmd,
-    );
+test("only the canonical slash delimiter is a command", () => {
+  // Alternate punctuation delimiters are intentionally NOT commands — they widen
+  // the accidental-trigger surface for no gain (`\/` escaping already covers a
+  // slash inside the pattern). Slash-only matches the IRC `s/old/new/` shorthand.
+  for (const cmd of ["s|a|b|", "s#a#b#", "s,a,b,", "s:a:b:", "s~a~b~"]) {
+    assert.equal(parseSelfCorrection(cmd), null, cmd);
   }
 });
 
@@ -95,11 +94,13 @@ test("returns null for non-commands so they send as literal text", () => {
     "s//",
     "s/a", // no closing delimiter for the pattern
     "s///", // empty pattern
-    "s3://bucket/key", // alphanumeric delimiter → not a command
+    "s3://bucket/key", // second char isn't the slash delimiter → not a command
     "she said s/x/y/", // does not start with the command
     "hello world",
-    "s a b", // whitespace delimiter → not a command
-    "s\\a\\b\\", // backslash delimiter → not a command
+    "s: notes for later", // non-slash char after `s` → ordinary prose, not a command
+    "s|a|b|", // alternate delimiters are no longer commands
+    "s a b", // whitespace after `s` → not a command
+    "s\\a\\b\\", // backslash after `s` → not a command
     "s/a/b/x", // unknown flag
     "s/a/b/gg", // repeated flag
   ]) {
@@ -166,6 +167,34 @@ test("deletion removes the matched text", () => {
   assert.equal(
     applySelfCorrection("hel lo", cmd({ pattern: " ", replacement: "" })),
     "hello",
+  );
+});
+
+test("pattern and replacement are literal text, never regex", () => {
+  // `s/*/x` replaces the first literal `*` with `x` — no regex metacharacters.
+  assert.equal(
+    applySelfCorrection("a*b*c", parseSelfCorrection("s/*/x")),
+    "axb*c",
+  );
+  // `.` is a literal dot, not a wildcard: absent from "abc" → nothing to correct.
+  assert.equal(applySelfCorrection("abc", parseSelfCorrection("s/./X/")), null);
+  assert.equal(
+    applySelfCorrection("a.c", parseSelfCorrection("s/./X/")),
+    "aXc",
+  );
+  // Other regex-special chars match themselves in both pattern and replacement.
+  assert.equal(
+    applySelfCorrection("1+1", parseSelfCorrection("s/+/ plus /")),
+    "1 plus 1",
+  );
+  assert.equal(
+    applySelfCorrection("(a)", parseSelfCorrection("s/(a)/[b]/")),
+    "[b]",
+  );
+  // Replacement is inserted verbatim — no `$1` backrefs or `\d` interpretation.
+  assert.equal(
+    applySelfCorrection("hi", parseSelfCorrection("s/hi/$1\\d/")),
+    "$1\\d",
   );
 });
 
