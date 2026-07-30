@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_persona_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, KIND_PERSONA, P_GATED_KINDS, RESULT_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
+    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -290,11 +290,11 @@ pub async fn handle_req(
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
             apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
-            // Persona visibility pushdown: set reader bytes so query_events appends
-            // the SQL visibility clause before ORDER/LIMIT, preventing newer private
-            // personas from starving older shared ones off the page.
-            if filter_can_match_persona_shared_kinds(filter) {
-                params.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown: set reader bytes so query_events
+            // appends the SQL visibility clause before ORDER/LIMIT, preventing
+            // newer private events from starving older shared ones off the page.
+            if filter_can_match_shared_gated_kinds(filter) {
+                params.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             (idx, per_filter_channel, params)
         })
@@ -1137,19 +1137,20 @@ pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
     })
 }
 
-/// Returns `true` if the filter CAN match kind 30175 (persona) — meaning it
-/// either has no `kinds` constraint (wildcard) or explicitly includes 30175.
+/// Returns `true` if the filter CAN match any kind in [`SHARED_GATED_KINDS`] —
+/// meaning it either has no `kinds` constraint (wildcard) or explicitly includes
+/// one of them.
 ///
 /// Used by the COUNT handler to force the per-event fallback path, which calls
-/// `is_unshared_persona_event` on each row. The fast SQL `count_events()` path
+/// `is_unshared_gated_event` on each row. The fast SQL `count_events()` path
 /// has no per-event access check, so it would over-count foreign unshared
-/// persona events — leaking the existence of persona activity even without
-/// returning content.
-pub(crate) fn filter_can_match_persona_shared_kinds(filter: &Filter) -> bool {
-    filter
-        .kinds
-        .as_ref()
-        .is_none_or(|ks| ks.iter().any(|k| k.as_u16() as u32 == KIND_PERSONA))
+/// events — leaking the existence of private persona/team-catalog activity even
+/// without returning content.
+pub(crate) fn filter_can_match_shared_gated_kinds(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_none_or(|ks| {
+        ks.iter()
+            .any(|k| SHARED_GATED_KINDS.contains(&(k.as_u16() as u32)))
+    })
 }
 
 /// Returns `true` if the filter CAN match result-gated kinds — meaning it
@@ -1208,8 +1209,9 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 ///
 /// 1. **Author-only kinds** (`AUTHOR_ONLY_KINDS`, e.g. kind 30300/30350): only
 ///    the author may read their own events.
-/// 2. **Persona shared-gate** (kind 30175 without `["shared","true"]`): the
-///    event is only visible to the author unless explicitly opted into sharing.
+/// 2. **Shared-gate** (`SHARED_GATED_KINDS`, e.g. kind 30175/30178 without
+///    `["shared","true"]`): the event is only visible to the author unless
+///    explicitly opted into sharing.
 /// 3. **Result-gated kinds** (kind 44200/30622 etc.): `reader_authorized_for_event`
 ///    carries the per-event ownership check.
 ///
@@ -1223,7 +1225,7 @@ pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_byt
     if is_author_only_event(event, requester_pubkey_bytes) {
         return false;
     }
-    if is_unshared_persona_event(event, requester_pubkey_bytes) {
+    if is_unshared_gated_event(event, requester_pubkey_bytes) {
         return false;
     }
     let requester_pubkey_hex = hex::encode(requester_pubkey_bytes);

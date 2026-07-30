@@ -1236,10 +1236,10 @@ async fn query_events_authed(
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
-        // Persona visibility pushdown: must mirror WS REQ so that a page of newer
-        // private personas does not starve older shared ones off the candidate page.
-        if crate::handlers::req::filter_can_match_persona_shared_kinds(filter) {
-            query.persona_reader = Some(pubkey_bytes.clone());
+        // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
+        // newer private events does not starve older shared ones off the page.
+        if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
+            query.shared_gated_reader = Some(pubkey_bytes.clone());
         }
 
         match extract_before_id(raw) {
@@ -1453,11 +1453,11 @@ async fn count_events_authed(
                     filter,
                     &authed_pubkey_hex,
                 );
-        // Force per-event fallback for filters that can match kind:30175 —
-        // the fast SQL count_events() path has no per-event gate and would
-        // over-count foreign unshared persona events (existence leak).
-        let needs_persona_filtering =
-            crate::handlers::req::filter_can_match_persona_shared_kinds(filter);
+        // Force per-event fallback for filters that can match a shared-gated
+        // kind — the fast SQL count_events() path has no per-event gate and
+        // would over-count foreign unshared events (existence leak).
+        let needs_shared_gate_filtering =
+            crate::handlers::req::filter_can_match_shared_gated_kinds(filter);
 
         // If filter targets a specific channel, verify access.
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1472,10 +1472,10 @@ async fn count_events_authed(
                 tenant.community(),
             )
             .await;
-            // Persona visibility pushdown: same as REQ and /query paths, so the
-            // fallback's query_events call doesn't over-fetch private persona rows.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown: same as REQ and /query paths, so
+            // the fallback's query_events call doesn't over-fetch private rows.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
@@ -1486,7 +1486,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
                 match state.db.count_events_routed("bridge_count", &query).await {
                     Ok(n) => total += n as u64,
@@ -1541,10 +1541,10 @@ async fn count_events_authed(
             )
             .await;
             query.channel_ids = Some(accessible_channels.to_vec());
-            // Persona visibility pushdown: pre-filter before ORDER/LIMIT on the
-            // fallback query_events path.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown: pre-filter before ORDER/LIMIT on
+            // the fallback query_events path.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
 
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
@@ -1556,7 +1556,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
                 query.limit = None;
                 match state.db.count_events_routed("bridge_count", &query).await {
