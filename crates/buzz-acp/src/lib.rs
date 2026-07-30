@@ -3028,6 +3028,53 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageLimitProvider {
+    Codex,
+    Claude,
+}
+
+impl UsageLimitProvider {
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+}
+
+/// Identify terminal account-usage limits from adapter-provided JSON-RPC data.
+///
+/// Codex ACP reports `codexErrorInfo: "usageLimitExceeded"` while Claude ACP
+/// reports `errorKind: "rate_limit"`. These structured discriminators are
+/// intentionally preferred over message matching: the JSON-RPC message is
+/// commonly only "Internal error", and broad text matching can misclassify
+/// transient provider or network rate limits.
+fn usage_limit_provider(error: &acp::AcpError) -> Option<UsageLimitProvider> {
+    let acp::AcpError::AgentError {
+        data: Some(data), ..
+    } = error
+    else {
+        return None;
+    };
+
+    if data.get("codexErrorInfo").and_then(|value| value.as_str()) == Some("usageLimitExceeded") {
+        return Some(UsageLimitProvider::Codex);
+    }
+    if data.get("errorKind").and_then(|value| value.as_str()) == Some("rate_limit") {
+        return Some(UsageLimitProvider::Claude);
+    }
+    None
+}
+
+fn usage_limit_failure_notice(provider: UsageLimitProvider) -> String {
+    format!(
+        "⚠️ {} reached its usage limit, so this turn stopped. Buzz did not receive \
+         a reset time; re-send the request after the limit resets if it's still needed.",
+        provider.display_name()
+    )
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3079,6 +3126,10 @@ fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    let terminal_usage_limit = match &result.outcome {
+        PromptOutcome::Error(error) => usage_limit_provider(error),
+        _ => None,
+    };
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -3163,6 +3214,18 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if let Some(provider) = terminal_usage_limit {
+                // Account usage limits cannot recover on the normal seconds-long
+                // retry schedule. Dead-letter immediately so the user sees the
+                // failure now and can decide whether the request is still safe to
+                // run after reset, rather than executing stale work automatically.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    provider = provider.display_name(),
+                    "dead-lettering batch immediately — account usage limit reached"
+                );
+                spawn_failure_notice(rest_client, &batch, usage_limit_failure_notice(provider));
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -6207,6 +6270,7 @@ mod error_outcome_emission_tests {
             code: -32000,
             message: "API Error: OAuth access token has expired. Re-authenticate to continue."
                 .to_string(),
+            data: None,
         };
         assert!(
             is_auth_error(&e),
@@ -6219,6 +6283,7 @@ mod error_outcome_emission_tests {
         let e = acp::AcpError::AgentError {
             code: -32000,
             message: "Internal error: API Error: 401 OAuth access token has expired.".to_string(),
+            data: None,
         };
         assert!(
             is_auth_error(&e),
@@ -6231,6 +6296,7 @@ mod error_outcome_emission_tests {
         let e = acp::AcpError::AgentError {
             code: -32601,
             message: "Usage credits required for 1M context — turn on usage credits".to_string(),
+            data: None,
         };
         assert!(
             !is_auth_error(&e),
@@ -6252,177 +6318,191 @@ mod error_outcome_emission_tests {
         );
     }
 
-    // ── auth error dead-letter behavior ────────────────────────────────────
+    // ── usage-limit classification ─────────────────────────────────────────
+
+    #[test]
+    fn usage_limit_provider_matches_codex_structured_error() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error".to_string(),
+            data: Some(Box::new(serde_json::json!({
+                "codexErrorInfo": "usageLimitExceeded",
+                "message": "usage limit reached"
+            }))),
+        };
+        assert_eq!(
+            usage_limit_provider(&error),
+            Some(UsageLimitProvider::Codex)
+        );
+    }
+
+    #[test]
+    fn usage_limit_provider_matches_claude_structured_error() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error".to_string(),
+            data: Some(Box::new(serde_json::json!({
+                "errorKind": "rate_limit"
+            }))),
+        };
+        assert_eq!(
+            usage_limit_provider(&error),
+            Some(UsageLimitProvider::Claude)
+        );
+    }
+
+    #[test]
+    fn usage_limit_provider_rejects_transient_and_unstructured_errors() {
+        for data in [
+            Some(Box::new(serde_json::json!({"errorKind": "overloaded"}))),
+            Some(Box::new(serde_json::json!({"errorKind": "server_error"}))),
+            None,
+        ] {
+            let error = acp::AcpError::AgentError {
+                code: -32603,
+                message: "usage limit reached".to_string(),
+                data,
+            };
+            assert_eq!(usage_limit_provider(&error), None);
+        }
+    }
+
+    #[test]
+    fn usage_limit_notice_names_provider_and_missing_reset_time() {
+        let codex = usage_limit_failure_notice(UsageLimitProvider::Codex);
+        assert!(codex.contains("Codex reached its usage limit"));
+        assert!(codex.contains("did not receive a reset time"));
+
+        let claude = usage_limit_failure_notice(UsageLimitProvider::Claude);
+        assert!(claude.contains("Claude reached its usage limit"));
+        assert!(claude.contains("did not receive a reset time"));
+    }
+
+    // ── terminal error batch behavior ──────────────────────────────────────
+
+    async fn queued_counts_after_agent_error(error: acp::AcpError) -> (usize, usize) {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(error),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        (
+            queue.pending_channels(),
+            queue.queued_event_count(&channel_id),
+        )
+    }
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
     /// (the batch is never requeued) so the user sees a re-auth hint at once
     /// rather than after 10 futile retries.
     #[tokio::test]
     async fn auth_error_dead_letters_immediately_without_requeueing() {
-        let keys = nostr::Keys::generate();
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let channel_id = uuid::Uuid::new_v4();
-        let batch = FlushBatch {
-            channel_id,
-            events: vec![BatchEvent {
-                event,
-                prompt_tag: "test".into(),
-                received_at: std::time::Instant::now(),
-            }],
-            cancelled_events: vec![],
-            cancel_reason: None,
-        };
-
-        let auth_error = acp::AcpError::AgentError {
+        let error = acp::AcpError::AgentError {
             code: -32000,
             message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
                 .to_string(),
+            data: None,
         };
-
-        let agent = dummy_agent(0).await;
-        let mut pool = AgentPool::from_slots(vec![None]);
-        let task_id = pool.join_set.spawn(async {}).id();
-        pool.task_map_mut().insert(
-            task_id,
-            crate::pool::TaskMeta {
-                agent_index: 0,
-                channel_id: None,
-                turn_id: "test-turn-id".to_string(),
-                recoverable_batch: None,
-                control_tx: None,
-                steer_tx: None,
-            },
-        );
-        let mut queue = EventQueue::new(config::DedupMode::Queue);
-        let config = test_config();
-        let mut heartbeat_in_flight = false;
-        let removed_channels = std::collections::HashSet::new();
-        let mut crash_history = vec![SlotCircuit {
-            crash_times: Vec::new(),
-            open_until: None,
-            respawn_in_flight: false,
-        }];
-        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
-        let mut respawn_tasks = tokio::task::JoinSet::new();
-        let result = PromptResult {
-            agent,
-            source: PromptSource::Channel(channel_id),
-            turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(auth_error),
-            batch: Some(batch),
-        };
-        handle_prompt_result(
-            &mut pool,
-            &mut queue,
-            &config,
-            result,
-            &mut heartbeat_in_flight,
-            &removed_channels,
-            &mut crash_history,
-            &respawn_tx,
-            &mut respawn_tasks,
-            None,
-            None,
-        );
-
-        // The batch must not be requeued: pending_channels returns 0.
-        assert_eq!(
-            queue.pending_channels(),
-            0,
-            "auth error must dead-letter immediately — batch must not be requeued"
-        );
-        assert_eq!(
-            queue.queued_event_count(&channel_id),
-            0,
-            "auth error must dead-letter immediately — no events should be pending"
-        );
+        assert_eq!(queued_counts_after_agent_error(error).await, (0, 0));
     }
 
-    /// A non-auth application error (e.g. usage credits) must still follow the
-    /// standard requeue path so today's behavior is unchanged.
     #[tokio::test]
-    async fn non_auth_application_error_is_requeued() {
-        let keys = nostr::Keys::generate();
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let channel_id = uuid::Uuid::new_v4();
-        let batch = FlushBatch {
-            channel_id,
-            events: vec![BatchEvent {
-                event,
-                prompt_tag: "test".into(),
-                received_at: std::time::Instant::now(),
-            }],
-            cancelled_events: vec![],
-            cancel_reason: None,
+    async fn codex_usage_limit_dead_letters_immediately_without_requeueing() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error".to_string(),
+            data: Some(Box::new(serde_json::json!({
+                "codexErrorInfo": "usageLimitExceeded"
+            }))),
         };
+        assert_eq!(queued_counts_after_agent_error(error).await, (0, 0));
+    }
 
-        // Usage-credits error — AgentError but NOT an auth error.
-        let usage_error = acp::AcpError::AgentError {
-            code: -32000,
-            message: "Usage credits required for 1M context".to_string(),
+    #[tokio::test]
+    async fn claude_usage_limit_dead_letters_immediately_without_requeueing() {
+        let error = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error".to_string(),
+            data: Some(Box::new(serde_json::json!({
+                "errorKind": "rate_limit"
+            }))),
         };
+        assert_eq!(queued_counts_after_agent_error(error).await, (0, 0));
+    }
 
-        let agent = dummy_agent(0).await;
-        let mut pool = AgentPool::from_slots(vec![None]);
-        let task_id = pool.join_set.spawn(async {}).id();
-        pool.task_map_mut().insert(
-            task_id,
-            crate::pool::TaskMeta {
-                agent_index: 0,
-                channel_id: None,
-                turn_id: "test-turn-id".to_string(),
-                recoverable_batch: None,
-                control_tx: None,
-                steer_tx: None,
-            },
-        );
-        let mut queue = EventQueue::new(config::DedupMode::Queue);
-        let config = test_config();
-        let mut heartbeat_in_flight = false;
-        let removed_channels = std::collections::HashSet::new();
-        let mut crash_history = vec![SlotCircuit {
-            crash_times: Vec::new(),
-            open_until: None,
-            respawn_in_flight: false,
-        }];
-        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
-        let mut respawn_tasks = tokio::task::JoinSet::new();
-        let result = PromptResult {
-            agent,
-            source: PromptSource::Channel(channel_id),
-            turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(usage_error),
-            batch: Some(batch),
-        };
-        handle_prompt_result(
-            &mut pool,
-            &mut queue,
-            &config,
-            result,
-            &mut heartbeat_in_flight,
-            &removed_channels,
-            &mut crash_history,
-            &respawn_tx,
-            &mut respawn_tasks,
+    /// Unknown or transient application errors must still follow the standard
+    /// requeue path so existing recovery behavior is unchanged.
+    #[tokio::test]
+    async fn transient_and_unstructured_application_errors_are_requeued() {
+        for data in [
+            Some(Box::new(serde_json::json!({"errorKind": "overloaded"}))),
+            Some(Box::new(serde_json::json!({"errorKind": "server_error"}))),
             None,
-            None,
-        );
-
-        // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
-        assert_eq!(
-            queue.pending_channels(),
-            1,
-            "non-auth application error must requeue the batch for retry"
-        );
-        assert_eq!(
-            queue.queued_event_count(&channel_id),
-            1,
-            "non-auth application error must preserve the event for retry"
-        );
+        ] {
+            let error = acp::AcpError::AgentError {
+                code: -32603,
+                message: "Usage credits required for 1M context".to_string(),
+                data,
+            };
+            assert_eq!(queued_counts_after_agent_error(error).await, (1, 1));
+        }
     }
 }
 

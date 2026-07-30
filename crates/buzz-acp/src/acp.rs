@@ -105,20 +105,29 @@ pub enum AcpError {
     Protocol(String),
 
     #[error("Agent reported error (code {code}): {message}")]
-    AgentError { code: i64, message: String },
+    AgentError {
+        code: i64,
+        message: String,
+        data: Option<Box<serde_json::Value>>,
+    },
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
-/// preserving the numeric code. When the `message` field is missing or
-/// non-string, fall back to the full JSON object so provider-specific
-/// detail (e.g. a `data` field) is not lost.
+/// preserving the numeric code and optional structured `data`. When the
+/// `message` field is missing or non-string, fall back to the full JSON object
+/// so provider-specific detail is still visible in logs and generic notices.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let message = match error.get("message").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
         None => error.to_string(),
     };
-    AcpError::AgentError { code, message }
+    let data = error.get("data").cloned().map(Box::new);
+    AcpError::AgentError {
+        code,
+        message,
+        data,
+    }
 }
 
 fn build_initialize_params() -> serde_json::Value {
@@ -4238,24 +4247,45 @@ mod tests {
         // not be silently truncated to "unknown error" — the full JSON is preserved.
         let error = serde_json::json!({"code": -32000, "data": "quota exceeded"});
         match super::agent_error_from_json(&error) {
-            AcpError::AgentError { code, message } => {
+            AcpError::AgentError {
+                code,
+                message,
+                data,
+            } => {
                 assert_eq!(code, -32000);
                 assert!(
                     message.contains("quota exceeded"),
                     "expected full JSON in message, got: {message}"
                 );
+                assert_eq!(data.as_deref(), Some(&serde_json::json!("quota exceeded")));
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
     }
 
     #[test]
-    fn agent_error_from_json_uses_message_field_when_present() {
-        let error = serde_json::json!({"code": -32001, "message": "auth denied"});
+    fn agent_error_from_json_preserves_data_when_message_is_present() {
+        let error = serde_json::json!({
+            "code": -32001,
+            "message": "Internal error",
+            "data": {
+                "codexErrorInfo": "usageLimitExceeded"
+            }
+        });
         match super::agent_error_from_json(&error) {
-            AcpError::AgentError { code, message } => {
+            AcpError::AgentError {
+                code,
+                message,
+                data,
+            } => {
                 assert_eq!(code, -32001);
-                assert_eq!(message, "auth denied");
+                assert_eq!(message, "Internal error");
+                assert_eq!(
+                    data.as_deref(),
+                    Some(&serde_json::json!({
+                        "codexErrorInfo": "usageLimitExceeded"
+                    }))
+                );
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
