@@ -12,9 +12,13 @@ import { usePageTitle } from "@/features/dev-mode/lib/usePageTitle";
 export function DevLink({ href, label }: { href: string; label?: string }) {
   const title = usePageTitle(label ? null : href);
 
+  // Plain inline display (not inline-flex): an atomic inline box would be
+  // skipped by native text selection (double-click-drag, triple-click), so
+  // the link must flow like ordinary text for selection and copy to include
+  // it. Long labels wrap with the rest of the message.
   return (
     <a
-      className="inline-flex max-w-full cursor-pointer items-baseline gap-1 align-baseline text-sky-500 hover:underline"
+      className="inline cursor-pointer break-words text-sky-500 hover:underline"
       data-dev-link=""
       href={href}
       onClick={(event) => {
@@ -24,10 +28,11 @@ export function DevLink({ href, label }: { href: string; label?: string }) {
       rel="noreferrer"
       title={href}
     >
-      <LinkIcon aria-hidden className="size-3.5 shrink-0 self-center" />
-      <span className="truncate">
-        {label ?? title ?? linkDisplayText(href)}
-      </span>
+      <LinkIcon
+        aria-hidden
+        className="mr-1 inline-block size-3.5 align-[-0.2em]"
+      />
+      {label ?? title ?? linkDisplayText(href)}
     </a>
   );
 }

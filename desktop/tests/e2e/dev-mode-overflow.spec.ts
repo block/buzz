@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
 // Developer-mode transcripts must keep chat content inside their pane: long
-// unbroken words wrap, links truncate, and nothing pushes the shell wider
+// unbroken words wrap, link labels wrap, and nothing pushes the shell wider
 // than the window (the shell is a flex item — without min-w-0 its intrinsic
 // min-content width lets nowrap content blow the layout out to the right).
 
