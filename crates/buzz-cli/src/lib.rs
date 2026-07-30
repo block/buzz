@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+pub mod native;
 mod validate;
 
 use clap::{Parser, Subcommand};

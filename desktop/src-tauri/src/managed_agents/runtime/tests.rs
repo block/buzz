@@ -104,10 +104,10 @@ fn codex_has_mcp_command() {
 }
 
 #[test]
-fn goose_has_no_mcp_hooks() {
+fn goose_has_native_buzz_mcp() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);
-    assert_eq!(p.mcp_command, None);
+    assert_eq!(p.mcp_command, Some("buzz-native-mcp"));
 }
 
 #[test]

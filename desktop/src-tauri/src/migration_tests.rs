@@ -627,7 +627,7 @@ fn rename_provider_to_runtime_preserves_existing_runtime_over_provider() {
 }
 
 #[test]
-fn reconcile_mcp_commands_clears_stale_buzz_mcp_server() {
+fn reconcile_mcp_commands_replaces_stale_server_with_native_buzz_mcp() {
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
@@ -639,7 +639,7 @@ fn reconcile_mcp_commands_clears_stale_buzz_mcp_server() {
     );
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
     let records = read_agents_json(dir.path());
-    assert_eq!(records[0]["mcp_command"], "");
+    assert_eq!(records[0]["mcp_command"], "buzz-native-mcp");
 }
 
 #[test]
@@ -720,8 +720,8 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
     );
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
     let records = read_agents_json(dir.path());
-    assert_eq!(records[0]["mcp_command"], "");
-    assert_eq!(records[1]["mcp_command"], "");
+    assert_eq!(records[0]["mcp_command"], "buzz-native-mcp");
+    assert_eq!(records[1]["mcp_command"], "buzz-native-mcp");
     assert_eq!(records[2]["mcp_command"], "my-custom-mcp");
     assert_eq!(records[3]["mcp_command"], "buzz-dev-mcp");
 }
@@ -729,8 +729,9 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
 #[test]
 fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
     // The frozen snapshot is buzz-agent (wants buzz-dev-mcp), but the linked
-    // persona's runtime is goose (wants no mcp). The reconcile must follow the
-    // EFFECTIVE harness (persona-wins) and clear the stale buzz-mcp-server.
+    // persona's runtime is goose (wants the native Buzz MCP). The reconcile
+    // must follow the EFFECTIVE harness (persona-wins) and replace the stale
+    // buzz-mcp-server.
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
@@ -747,7 +748,7 @@ fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
     );
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
     let records = read_agents_json(dir.path());
-    assert_eq!(records[0]["mcp_command"], "");
+    assert_eq!(records[0]["mcp_command"], "buzz-native-mcp");
 }
 
 #[test]
@@ -769,8 +770,8 @@ fn reconcile_mcp_commands_sees_team_dir_runtime_edit_same_launch() {
             "mcp_command": ""
         }]),
     );
-    // Pre-edit launch state: persona runtime is goose (no mcp_command). A
-    // reader running against this stale file derives the empty goose value.
+    // Pre-edit launch state: persona runtime is goose (native Buzz MCP). A
+    // reader running against this stale file derives that goose value.
     write_personas_json(
         dir.path(),
         &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
@@ -778,7 +779,7 @@ fn reconcile_mcp_commands_sees_team_dir_runtime_edit_same_launch() {
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
     assert_eq!(
         read_agents_json(dir.path())[0]["mcp_command"],
-        "",
+        "buzz-native-mcp",
         "reader-before-writer would see only the stale goose runtime"
     );
 

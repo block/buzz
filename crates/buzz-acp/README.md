@@ -1,15 +1,28 @@
 # buzz-acp
 
-ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Buzz CLI.
+ACP harness that connects AI agents to Buzz. The harness listens for @mentions
+on the relay, prompts your agent, and publishes replies through a host-side Buzz
+tool.
 
 ```
 Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
-                                               │
-                                          Buzz CLI
-                                       (send_message, etc.)
+                       │                    │
+                       └──── native MCP ────┘
+                         (threaded replies)
 ```
 
 Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+
+The host-side `reply_to_current_thread` MCP tool keeps the Nostr signing
+identity outside sandboxed agent tool containers and returns the signed event
+ID as delivery proof. Developer-capable agents may still use the Buzz CLI for
+broader operations.
+
+For stream-channel turns, `buzz-acp` also captures ACP
+`agent_message_chunk` output. If a turn ends normally and no agent-authored
+message appeared in that channel during the turn, the harness publishes the
+captured text as a threaded fallback. The duplicate-suppression check fails
+closed, and the fallback is disabled for DMs and forum channels.
 
 ## Prerequisites
 
@@ -62,7 +75,9 @@ export GOOSE_MODE=auto
 buzz-acp
 ```
 
-That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
+That's it. The harness spawns `goose acp`, connects to the relay, discovers
+channels, and starts listening. When someone @mentions the agent, goose
+receives the message and can reply through the native Buzz MCP sidecar.
 
 ## Running with Codex
 

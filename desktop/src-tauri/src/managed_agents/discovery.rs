@@ -76,7 +76,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["goose"],
         aliases: &[],
         avatar_url: GOOSE_AVATAR_URL,
-        mcp_command: None,
+        mcp_command: Some("buzz-native-mcp"),
         mcp_hooks: false,
         underlying_cli: Some("goose"),
         cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
@@ -110,7 +110,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["claude-agent-acp", "claude-code-acp"],
         aliases: &["claude-code", "claudecode"],
         avatar_url: CLAUDE_CODE_AVATAR_URL,
-        mcp_command: None,
+        mcp_command: Some("buzz-native-mcp"),
         mcp_hooks: false,
         underlying_cli: Some("claude"),
         cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
@@ -1514,7 +1514,7 @@ fn preset_catalog_entry(
         command,
         binary_path,
         default_args,
-        mcp_command: None,
+        mcp_command: Some("buzz-native-mcp".to_string()),
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
@@ -1781,9 +1781,9 @@ pub fn discover_acp_runtimes_from(
                 command,
                 binary_path,
                 default_args,
-                // Custom harnesses are plain ACP — no MCP sidecar, no env-var
-                // model switching, no thinking knobs.
-                mcp_command: None,
+                // Custom ACP harnesses receive only the least-privilege native
+                // Buzz reply sidecar; they get no developer shell tools.
+                mcp_command: Some("buzz-native-mcp".to_string()),
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,

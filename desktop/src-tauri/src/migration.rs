@@ -1008,9 +1008,8 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
         if current == expected {
             return false;
         }
-        // Only fix values that are clearly stale (empty or a removed binary).
-        // Leave user-customized values untouched.
-        if !current.is_empty() && current != "buzz-mcp-server" {
+        // Rewrite only empty/stale/Buzz-managed values; preserve custom MCPs.
+        if !["", "buzz-mcp-server", "buzz-native-mcp", "buzz-dev-mcp"].contains(&current) {
             return false;
         }
         eprintln!(

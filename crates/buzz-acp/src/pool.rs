@@ -1351,6 +1351,7 @@ pub async fn run_prompt_task(
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
+    let turn_started_secs = nostr::Timestamp::now().as_secs();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2061,6 +2062,14 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        let final_text = agent.acp.take_turn_message();
+                        publish_turn_fallback_if_needed(
+                            &ctx,
+                            batch.as_ref(),
+                            &final_text,
+                            turn_started_secs,
+                        )
+                        .await;
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2123,6 +2132,17 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            let final_text = agent.acp.take_turn_message();
+            if stop_reason == StopReason::EndTurn {
+                publish_turn_fallback_if_needed(
+                    &ctx,
+                    batch.as_ref(),
+                    &final_text,
+                    turn_started_secs,
+                )
+                .await;
+            }
 
             send_prompt_result(
                 &result_tx,
@@ -3063,6 +3083,182 @@ fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Opt
     match ctx.dedup_mode {
         DedupMode::Queue => batch,
         DedupMode::Drop => None,
+    }
+}
+
+/// Publish the ACP agent's streamed final text when the turn produced no Buzz
+/// message of its own.
+///
+/// This is the host-side delivery safety net for sandboxed runtimes: the agent
+/// never needs the Buzz binary or signing key in its tool container. A
+/// channel-scoped self-message query suppresses the fallback when the agent
+/// already used either the native Buzz MCP tool or the CLI during this turn.
+/// Only stream channels are eligible; DMs and forum channels require different
+/// message/encryption semantics and deliberately fail closed.
+async fn publish_turn_fallback_if_needed(
+    ctx: &PromptContext,
+    batch: Option<&FlushBatch>,
+    content: &str,
+    turn_started_secs: u64,
+) {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+    let Some(batch) = batch else {
+        return;
+    };
+    let Some(last_event) = batch.events.last() else {
+        return;
+    };
+
+    let Some(channel_info) = ctx.channel_info.resolve(batch.channel_id).await else {
+        tracing::warn!(
+            target: "pool::fallback_reply",
+            channel = %batch.channel_id,
+            "channel type unavailable — refusing to auto-publish ACP text"
+        );
+        return;
+    };
+    if channel_info.channel_type != "stream" {
+        tracing::debug!(
+            target: "pool::fallback_reply",
+            channel = %batch.channel_id,
+            channel_type = %channel_info.channel_type,
+            "auto-publish is limited to stream channels"
+        );
+        return;
+    }
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_STREAM_MESSAGE as u16,
+        ))
+        .author(ctx.agent_keys.public_key())
+        .custom_tags(h_tag, [batch.channel_id.to_string()])
+        .since(nostr::Timestamp::from(turn_started_secs))
+        .limit(1);
+
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        ctx.rest_client.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(value)) if value.as_array().is_some_and(|events| !events.is_empty()) => {
+            tracing::info!(
+                target: "pool::fallback_reply",
+                channel = %batch.channel_id,
+                "agent already published during this turn — suppressing fallback"
+            );
+            return;
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            // Duplicate prevention takes precedence over delivery. If Buzz
+            // cannot prove that the turn was silent, it must not guess.
+            tracing::warn!(
+                target: "pool::fallback_reply",
+                channel = %batch.channel_id,
+                "duplicate-suppression query failed: {error} — refusing fallback"
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "pool::fallback_reply",
+                channel = %batch.channel_id,
+                "duplicate-suppression query timed out — refusing fallback"
+            );
+            return;
+        }
+    }
+
+    let thread_tags = crate::queue::parse_thread_tags(&last_event.event);
+    let reply_anchor = thread_tags
+        .root_event_id
+        .unwrap_or_else(|| last_event.event.id.to_hex());
+    let Ok(reply_event_id) = nostr::EventId::from_hex(&reply_anchor) else {
+        tracing::warn!(
+            target: "pool::fallback_reply",
+            anchor = %reply_anchor,
+            "invalid reply anchor — refusing fallback"
+        );
+        return;
+    };
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id: reply_event_id,
+        parent_event_id: reply_event_id,
+    };
+    let builder = match buzz_sdk::build_message(
+        batch.channel_id,
+        content,
+        Some(&thread_ref),
+        &[],
+        false,
+        &[],
+    ) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::fallback_reply",
+                channel = %batch.channel_id,
+                "failed to build fallback message: {error}"
+            );
+            return;
+        }
+    };
+
+    let builder = match ctx.rest_client.auth_tag_json.as_deref() {
+        Some(raw) => match buzz_sdk::nip_oa::parse_auth_tag(raw) {
+            Ok(tag) => builder.tags([tag]),
+            Err(error) => {
+                tracing::warn!(
+                    target: "pool::fallback_reply",
+                    "invalid harness auth tag — refusing fallback: {error}"
+                );
+                return;
+            }
+        },
+        None => builder,
+    };
+    let event = match builder.sign_with_keys(&ctx.agent_keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::fallback_reply",
+                "failed to sign fallback message: {error}"
+            );
+            return;
+        }
+    };
+    let event_id = event.id.to_hex();
+
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        ctx.rest_client.submit_event(&event),
+    )
+    .await
+    {
+        Ok(Ok(_)) => tracing::info!(
+            target: "pool::fallback_reply",
+            channel = %batch.channel_id,
+            event_id = %event_id,
+            "published ACP final text through Buzz fallback"
+        ),
+        Ok(Err(error)) => tracing::error!(
+            target: "pool::fallback_reply",
+            channel = %batch.channel_id,
+            "fallback publish failed: {error}"
+        ),
+        Err(_) => tracing::error!(
+            target: "pool::fallback_reply",
+            channel = %batch.channel_id,
+            "fallback publish timed out"
+        ),
     }
 }
 

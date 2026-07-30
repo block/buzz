@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod native_reply;
 mod paths;
 mod read_file;
 mod rg;
@@ -25,6 +26,47 @@ struct DevMcp {
     state: Arc<shell::SharedState>,
     todos: Arc<todo::TodoState>,
     tool_router: ToolRouter<DevMcp>,
+}
+
+#[derive(Clone)]
+struct NativeBuzzMcp {
+    tool_router: ToolRouter<NativeBuzzMcp>,
+}
+
+#[tool_router]
+impl NativeBuzzMcp {
+    fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(
+        name = "reply_to_current_thread",
+        description = "Publish a Buzz reply through the host-side harness. Use the channel UUID and reply destination supplied in the current Buzz prompt. Returns the signed Nostr event ID as delivery proof. Buzz credentials stay outside the agent's tool container."
+    )]
+    async fn reply_to_current_thread(
+        &self,
+        Parameters(params): Parameters<native_reply::ReplyParams>,
+    ) -> Result<String, ErrorData> {
+        native_reply::run(params).await
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for NativeBuzzMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(rmcp::model::Implementation::new(
+                "buzz-native-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "Use reply_to_current_thread for the human-visible result of a Buzz-triggered \
+                 turn. Copy channel_id and reply_to exactly from the current prompt context. \
+                 A successful result contains the signed event ID and is delivery proof.",
+            )
+    }
 }
 
 #[tool_router]
@@ -69,6 +111,17 @@ impl DevMcp {
         Parameters(p): Parameters<view_image::ViewImageParams>,
     ) -> Result<CallToolResult, ErrorData> {
         view_image::run(&self.state, p).await
+    }
+
+    #[tool(
+        name = "reply_to_current_thread",
+        description = "Publish a Buzz reply through the host-side harness. Use the channel UUID and reply destination supplied in the current Buzz prompt. Returns the signed Nostr event ID as delivery proof."
+    )]
+    async fn reply_to_current_thread(
+        &self,
+        Parameters(params): Parameters<native_reply::ReplyParams>,
+    ) -> Result<String, ErrorData> {
+        native_reply::run(params).await
     }
 
     #[tool(
@@ -175,6 +228,12 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
+
+    if cmd == "buzz-native-mcp" {
+        let service = NativeBuzzMcp::new().serve(stdio()).await?;
+        service.waiting().await?;
+        return Ok(());
+    }
 
     let cwd = std::env::current_dir()?;
     let shim = shim::Shim::install()?;
