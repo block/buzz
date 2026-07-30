@@ -170,6 +170,10 @@ spec:
             - { name: BUZZ_S3_ENDPOINT, value: {{ $s3Endpoint | quote }} }
             {{- end }}
             - { name: BUZZ_S3_BUCKET, value: {{ .Values.s3.bucket | quote }} }
+            {{- if .Values.s3.region }}
+            - { name: BUZZ_S3_REGION, value: {{ .Values.s3.region | quote }} }
+            {{- end }}
+            - { name: BUZZ_S3_ADDRESSING_STYLE, value: {{ .Values.s3.addressingStyle | quote }} }
 
             # ── Secrets (from chart-managed or existing) ─────────────
             - name: BUZZ_RELAY_PRIVATE_KEY

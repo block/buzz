@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.2
+
+- feat(cli): mirror Desktop mention delivery ([#3330](https://github.com/block/buzz/pull/3330)) ([`7adc46268`](https://github.com/block/buzz/commit/7adc46268d5e93f0b1d4dc8e700af22815dcac1b))
+- fix(desktop): deduplicate relay outage notification ([#3579](https://github.com/block/buzz/pull/3579)) ([`66e705492`](https://github.com/block/buzz/commit/66e7054928cc29395f828467c3e8c81b7408dd29))
+- fix(desktop): reconcile thread arrivals at bottom ([#3585](https://github.com/block/buzz/pull/3585)) ([`b42a8d447`](https://github.com/block/buzz/commit/b42a8d447e3a2b85b2313dc4fdd123731fd8bba3))
+- Improve emoji autocomplete matching ([#3571](https://github.com/block/buzz/pull/3571)) ([`259de6afb`](https://github.com/block/buzz/commit/259de6afbe0cc0d106e57ebdb2323064990e4122))
+- Fix shared agent avatar import profiles ([#3578](https://github.com/block/buzz/pull/3578)) ([`324bd6b46`](https://github.com/block/buzz/commit/324bd6b464de5751e12abbd155376046ce3d2afc))
+- Fix inline raster avatars in agent catalog ([#3581](https://github.com/block/buzz/pull/3581)) ([`7e9b77f72`](https://github.com/block/buzz/commit/7e9b77f72d82e019a99f074f1c9829be30c57ae1))
+- feat(agent): make Gemini and MLflow-route models usable through databricks_v2 ([#3569](https://github.com/block/buzz/pull/3569)) ([`4a1ebf25c`](https://github.com/block/buzz/commit/4a1ebf25c782fc6a68f0a69e6f866f793a259a1f))
+
+
 ## v0.5.1
 
 - perf(desktop): move observer-feed archive and decrypt commands off main thread ([#3415](https://github.com/block/buzz/pull/3415)) ([`294c8c821`](https://github.com/block/buzz/commit/294c8c821de51442a8c384c0bdb66b1a10224ca0))

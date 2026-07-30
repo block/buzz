@@ -310,7 +310,7 @@ pub async fn handle_req(
         |(idx, per_filter_channel, params)| {
             let db = db.clone();
             async move {
-                let filter_events = db.query_events(&params).await;
+                let filter_events = db.query_events_routed("req_historical", &params).await;
                 (idx, per_filter_channel, filter_events)
             }
         },
@@ -629,7 +629,7 @@ async fn handle_search_req(
                 let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
                 let events = match state
                     .db
-                    .get_events_by_ids(tenant.community(), &id_refs)
+                    .get_events_by_ids_routed("req_search_hydrate", tenant.community(), &id_refs)
                     .await
                 {
                     Ok(evs) => evs,
