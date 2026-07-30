@@ -5,7 +5,7 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, HarnessSource,
 };
 
-use super::normalize_agent_args;
+use super::{normalize_agent_args, normalize_command_identity};
 
 /// Static data for a well-known tier-2 ACP harness.
 pub(super) struct PresetHarness {
@@ -204,6 +204,25 @@ pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
     static IDS: OnceLock<Vec<&'static str>> = OnceLock::new();
     IDS.get_or_init(|| PRESET_HARNESSES.iter().map(|preset| preset.id).collect())
         .as_slice()
+}
+
+/// Launch args for the [`PRESET_HARNESSES`] entry whose command matches the
+/// given command, when an agent has a command but no resolvable runtime preset
+/// (e.g. an explicit `agent_command_override` like `omp` with no `runtime` id).
+///
+/// Single source of truth: per-runtime launch args live only in
+/// `PRESET_HARNESSES`, mirroring [`preset_harness_ids`], so every preset — omp,
+/// grok, opencode, kimi, cursor, openclaw, … — is covered at the source instead
+/// of being hand-mirrored. Without this, an agent pinned to e.g. `omp` with no
+/// runtime id launches the bare command, which under headless Buzz (no
+/// controlling TTY) drops into the interactive TUI instead of `omp acp` and the
+/// ACP `initialize` handshake times out.
+pub(crate) fn preset_args_for_command(command: &str) -> Option<Vec<String>> {
+    let identity = normalize_command_identity(command);
+    PRESET_HARNESSES
+        .iter()
+        .find(|preset| normalize_command_identity(preset.command) == identity)
+        .map(|preset| preset.args.iter().map(|arg| arg.to_string()).collect())
 }
 
 /// Return the primary command for a preset harness by id, or `None` if the id
