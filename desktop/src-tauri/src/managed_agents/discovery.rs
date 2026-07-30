@@ -15,6 +15,12 @@ mod runtime_metadata;
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
+#[allow(dead_code)] // Wired into Goose discovery/install in the next implementation steps.
+pub(crate) const MIN_GOOSE_VERSION: (u64, u64, u64) = (1, 44, 0);
+#[allow(dead_code)] // Wired into Goose discovery/install in the next implementation steps.
+pub(crate) const MIN_GOOSE_RELEASE_TAG: &str = "v1.44.0";
+#[allow(dead_code)] // Wired into Goose discovery/install in the next implementation steps.
+pub(crate) const MIN_GOOSE_VERSION_DISPLAY: &str = "1.44.0";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
@@ -992,6 +998,17 @@ fn parse_semver_tag(s: &str) -> Option<(u64, u64, u64)> {
     let patch_str = parts.next()?;
     let patch = patch_str.split('-').next()?.parse::<u64>().ok()?;
     Some((major, minor, patch))
+}
+
+#[allow(dead_code)] // Wired into Goose discovery in the next implementation step.
+fn parse_goose_version_output(output: &str) -> Option<(u64, u64, u64)> {
+    let version = output.split_whitespace().last()?;
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let version = semver::Version::parse(version).ok()?;
+    if !version.pre.is_empty() || !version.build.is_empty() {
+        return None;
+    }
+    Some((version.major, version.minor, version.patch))
 }
 
 pub(crate) fn find_command(command: &str) -> Option<PathBuf> {

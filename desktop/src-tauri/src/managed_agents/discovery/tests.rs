@@ -6,9 +6,10 @@ use super::{
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, preset_catalog_entry, probe_codex_acp_version, record_agent_command,
-    refresh_login_shell_path, try_record_agent_command, PresetHarness, BUZZ_AGENT_AVATAR_URL,
-    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    parse_goose_version_output, parse_semver_tag, preset_catalog_entry, probe_codex_acp_version,
+    record_agent_command, refresh_login_shell_path, try_record_agent_command, PresetHarness,
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    MIN_GOOSE_RELEASE_TAG, MIN_GOOSE_VERSION, MIN_GOOSE_VERSION_DISPLAY,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -1037,6 +1038,33 @@ fn semver_ordering_chooses_highest() {
     ];
     tags.sort();
     assert_eq!(tags.last(), parse_semver_tag("v20.11.1").as_ref());
+}
+
+// ── parse_goose_version_output ───────────────────────────────────────────────
+
+#[test]
+fn goose_min_version_constants_are_consistent() {
+    assert_eq!(MIN_GOOSE_VERSION, (1, 44, 0));
+    assert_eq!(MIN_GOOSE_RELEASE_TAG, "v1.44.0");
+    assert_eq!(MIN_GOOSE_VERSION_DISPLAY, "1.44.0");
+}
+
+#[test]
+fn parse_goose_version_output_accepts_expected_shapes() {
+    assert_eq!(parse_goose_version_output("1.44.0"), Some((1, 44, 0)));
+    assert_eq!(parse_goose_version_output("v1.44.0"), Some((1, 44, 0)));
+    assert_eq!(parse_goose_version_output("goose 1.44.0"), Some((1, 44, 0)));
+    assert_eq!(
+        parse_goose_version_output("goose-cli 1.44.0"),
+        Some((1, 44, 0))
+    );
+}
+
+#[test]
+fn parse_goose_version_output_rejects_unusable_shapes() {
+    assert_eq!(parse_goose_version_output("goose 1.44"), None);
+    assert_eq!(parse_goose_version_output("goose 1.44.0-rc1"), None);
+    assert_eq!(parse_goose_version_output("goose version unknown"), None);
 }
 
 // ── find_nvm_default_bin ──────────────────────────────────────────────────────
