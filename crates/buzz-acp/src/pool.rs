@@ -19,6 +19,7 @@
 //!
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -799,6 +800,9 @@ pub enum IdleSwitchResult {
 /// Each call gets this budget; with one retry the total worst-case is
 /// 2 × CONTEXT_FETCH_TIMEOUT + CONTEXT_FETCH_RETRY_DELAY ≈ 6.5 s.
 const CONTEXT_FETCH_TIMEOUT: Duration = Duration::from_millis(3_000);
+
+/// Short, single-attempt timeout for best-effort exact truncated-thread counts.
+const CONTEXT_COUNT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Delay between the first failed context fetch and the single retry.
 const CONTEXT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -2600,7 +2604,14 @@ async fn fetch_conversation_context(
     let last_event = batch.events.last()?;
     let tags = crate::queue::parse_thread_tags(&last_event.event);
     if let Some(root_id) = tags.root_event_id {
-        return fetch_thread_context(batch.channel_id, &root_id, limit, &ctx.rest_client).await;
+        return fetch_thread_context(
+            batch.channel_id,
+            &root_id,
+            limit,
+            ctx.agent_keys.public_key(),
+            &ctx.rest_client,
+        )
+        .await;
     }
 
     // DM non-reply: fetch recent conversation history.
@@ -2762,12 +2773,48 @@ async fn fetch_prompt_profile_lookup(
 }
 
 /// Fetch thread context via Nostr query: root event by ID + replies by `#e` tag.
+///
+/// The reply query intentionally requests one more reply than the configured
+/// display window. That sentinel event lets the prompt say `N of M, truncated`
+/// when the relay has more thread history, instead of reporting the capped page
+/// as the total. When the window is full, a best-effort `/count` attempts to
+/// improve that lower-bound total; because it is a separate racy request, the
+/// result is clamped to the sentinel-proven minimum. The query also asks for the
+/// agent's newest reply separately so the next prompt can include the agent's
+/// own prior turn even in busy threads where the recent-message window would
+/// otherwise push it out.
 async fn fetch_thread_context(
     channel_id: Uuid,
     root_event_id: &str,
     limit: u32,
+    agent_pubkey: nostr::PublicKey,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
+    fetch_thread_context_with(
+        channel_id,
+        root_event_id,
+        limit,
+        agent_pubkey,
+        |filters| async move { rest.query(&filters).await },
+        |filters| async move { rest.count(&filters).await },
+    )
+    .await
+}
+
+async fn fetch_thread_context_with<Query, QueryFut, Count, CountFut>(
+    channel_id: Uuid,
+    root_event_id: &str,
+    limit: u32,
+    agent_pubkey: nostr::PublicKey,
+    query: Query,
+    count: Count,
+) -> Option<ConversationContext>
+where
+    Query: Fn(Vec<nostr::Filter>) -> QueryFut,
+    QueryFut: std::future::Future<Output = Result<serde_json::Value, crate::relay::RelayError>>,
+    Count: Fn(Vec<nostr::Filter>) -> CountFut,
+    CountFut: std::future::Future<Output = Result<serde_json::Value, crate::relay::RelayError>>,
+{
     use nostr::{Alphabet, SingleLetterTag};
 
     // Defense-in-depth: validate hex event ID.
@@ -2786,7 +2833,8 @@ async fn fetch_thread_context(
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
     let ch_str = channel_id.to_string();
 
-    // Two filters: (1) root event by ID, (2) replies with #e=root + #h=channel.
+    // Three filters: (1) root event by ID, (2) recent replies with #e=root +
+    // #h=channel plus a sentinel, and (3) the agent's newest reply for pinning.
     let root_filter = nostr::Filter::new().id(nostr::EventId::from_hex(root_event_id).ok()?);
     let replies_filter = nostr::Filter::new()
         .kinds([
@@ -2795,16 +2843,23 @@ async fn fetch_thread_context(
         ])
         .custom_tags(e_tag, [root_event_id])
         .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit as usize);
+        .limit(limit.saturating_add(1) as usize);
+    let agent_reply_filter = replies_filter.clone().author(agent_pubkey).limit(1);
 
-    fetch_with_retry(|| async {
+    let context = fetch_with_retry(|| async {
         match timeout(
             CONTEXT_FETCH_TIMEOUT,
-            rest.query(&[root_filter.clone(), replies_filter.clone()]),
+            query(vec![
+                root_filter.clone(),
+                replies_filter.clone(),
+                agent_reply_filter.clone(),
+            ]),
         )
         .await
         {
-            Ok(Ok(json)) => parse_nostr_thread_response(json, root_event_id),
+            Ok(Ok(json)) => {
+                parse_nostr_thread_response_with_meta(json, root_event_id, limit, &agent_pubkey)
+            }
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
@@ -2823,7 +2878,75 @@ async fn fetch_thread_context(
             }
         }
     })
-    .await
+    .await;
+
+    let mut parsed = context?;
+
+    if matches!(
+        parsed.context,
+        ConversationContext::Thread {
+            truncated: true,
+            ..
+        }
+    ) {
+        let replies_count_filter = replies_filter.clone().limit(0);
+        if let Some(total) = fetch_thread_total(
+            channel_id,
+            &replies_count_filter,
+            parsed.root_present,
+            &count,
+        )
+        .await
+        {
+            if let ConversationContext::Thread {
+                total: context_total,
+                ..
+            } = &mut parsed.context
+            {
+                let sentinel_minimum = *context_total;
+                // `/count` is a separate best-effort request after the message
+                // query. If replies are deleted between the two, the exact count
+                // can fall below the already-proven sentinel minimum; never
+                // render impossible labels like `13 of 12 messages, truncated`.
+                *context_total = total.max(sentinel_minimum);
+            }
+        }
+    }
+
+    Some(parsed.context)
+}
+
+/// Best-effort exact thread size for truncated context labels.
+async fn fetch_thread_total<Count, CountFut>(
+    channel_id: Uuid,
+    replies_filter: &nostr::Filter,
+    root_present: bool,
+    count: &Count,
+) -> Option<usize>
+where
+    Count: Fn(Vec<nostr::Filter>) -> CountFut,
+    CountFut: std::future::Future<Output = Result<serde_json::Value, crate::relay::RelayError>>,
+{
+    let replies_count =
+        match timeout(CONTEXT_COUNT_TIMEOUT, count(vec![replies_filter.clone()])).await {
+            Ok(Ok(json)) => json.get("count").and_then(|v| v.as_u64())?,
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "thread context count failed; using sentinel minimum: {e}"
+                );
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "thread context count timed out; using sentinel minimum"
+                );
+                return None;
+            }
+        };
+
+    Some(replies_count as usize + usize::from(root_present))
 }
 
 /// Fetch DM context via Nostr query: recent messages in channel by `#h` tag.
@@ -2976,48 +3099,110 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
 
 /// Parse a Nostr query response (array of events) into thread context.
 ///
-/// Separates the root event (matching `root_event_id`) from replies, sorts
-/// chronologically by `created_at`.
+/// Separates the root event (matching `root_event_id`) from replies, keeps the
+/// newest `limit` replies returned by the sentinel query, then sorts the
+/// displayed window chronologically for the prompt. If the agent's newest reply
+/// is outside that window, keep it instead of the oldest displayed reply so the
+/// next prompt always includes the agent's most recent prior turn.
+#[cfg(test)]
 fn parse_nostr_thread_response(
     json: serde_json::Value,
     root_event_id: &str,
+    limit: u32,
+    agent_pubkey: &nostr::PublicKey,
 ) -> Option<ConversationContext> {
+    parse_nostr_thread_response_with_meta(json, root_event_id, limit, agent_pubkey)
+        .map(|parsed| parsed.context)
+}
+
+struct ParsedThreadContext {
+    context: ConversationContext,
+    root_present: bool,
+}
+
+fn parse_nostr_thread_response_with_meta(
+    json: serde_json::Value,
+    root_event_id: &str,
+    limit: u32,
+    agent_pubkey: &nostr::PublicKey,
+) -> Option<ParsedThreadContext> {
     let events = json.as_array()?;
+    let agent_pubkey_hex = agent_pubkey.to_hex();
     let mut root_msg = None;
     let mut reply_msgs = Vec::new();
+    let mut seen_reply_ids = HashSet::new();
 
     for ev in events {
         let ev_id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(msg) = json_to_context_message(ev) {
             if ev_id == root_event_id {
                 root_msg = Some(msg);
-            } else {
+            } else if seen_reply_ids.insert(ev_id.to_string()) {
+                let is_agent = msg.pubkey.eq_ignore_ascii_case(&agent_pubkey_hex);
                 reply_msgs.push((
+                    ev_id.to_string(),
                     ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+                    is_agent,
                     msg,
                 ));
             }
         }
     }
 
-    // Sort replies chronologically.
-    reply_msgs.sort_by_key(|(ts, _)| *ts);
+    let root_present = root_msg.is_some();
+    let fetched_total = reply_msgs.len() + usize::from(root_present);
+    let newest_agent_reply = reply_msgs
+        .iter()
+        .filter(|(_, _, is_agent, _)| *is_agent)
+        .max_by_key(|(_, ts, _, _)| *ts)
+        .cloned();
+
+    let truncated = reply_msgs.len() > limit as usize;
+    if truncated {
+        // The relay returns limited REQ results newest-first. Sort explicitly so
+        // the sentinel we drop is the oldest reply in the fetched window, not an
+        // arbitrary last element if the HTTP bridge ever changes iteration order.
+        reply_msgs.sort_by_key(|(_, ts, _, _)| Reverse(*ts));
+        reply_msgs.truncate(limit as usize);
+    }
+
+    if let Some(agent_reply) = newest_agent_reply {
+        let agent_reply_already_displayed =
+            reply_msgs.iter().any(|(id, _, _, _)| *id == agent_reply.0);
+        if !agent_reply_already_displayed {
+            reply_msgs.sort_by_key(|(_, ts, _, _)| *ts);
+            if let Some(oldest) = reply_msgs.first_mut() {
+                *oldest = agent_reply;
+            }
+        }
+    }
+
+    // Sort displayed replies chronologically.
+    reply_msgs.sort_by_key(|(_, ts, _, _)| *ts);
 
     let mut messages = Vec::new();
     if let Some(root) = root_msg {
         messages.push(root);
     }
-    messages.extend(reply_msgs.into_iter().map(|(_, msg)| msg));
+    messages.extend(reply_msgs.into_iter().map(|(_, _, _, msg)| msg));
 
-    let total = messages.len();
     if messages.is_empty() {
         return None;
     }
 
-    Some(ConversationContext::Thread {
-        messages,
-        total,
-        truncated: false, // query returns all within limit
+    let total = if truncated {
+        fetched_total // all distinct fetched replies plus the root are proven visible history
+    } else {
+        messages.len()
+    };
+
+    Some(ParsedThreadContext {
+        context: ConversationContext::Thread {
+            messages,
+            total,
+            truncated,
+        },
+        root_present,
     })
 }
 
@@ -4202,6 +4387,572 @@ mod tests {
     fn test_parse_dm_response_missing_messages_key() {
         let json = json!({ "data": [] });
         assert!(parse_dm_response(json, 12).is_none());
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_marks_query_window_truncated() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let agent_hex = agent.public_key().to_hex();
+        let json = json!([
+            {
+                "id": root_id,
+                "pubkey": "rootpub",
+                "content": "root",
+                "created_at": 1000
+            },
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": agent_hex,
+                "content": "newest agent reply",
+                "created_at": 4000
+            },
+            {
+                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pubkey": "humanpub",
+                "content": "middle reply",
+                "created_at": 3000
+            },
+            {
+                "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "pubkey": "oldpub",
+                "content": "sentinel omitted reply",
+                "created_at": 2000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
+            .expect("should parse");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 3); // root + 2 displayed replies
+                assert_eq!(total, 4); // root + displayed replies + sentinel
+                assert!(truncated);
+                assert_eq!(messages[0].content, "root");
+                assert_eq!(messages[1].content, "middle reply");
+                assert_eq!(messages[2].content, "newest agent reply");
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "sentinel omitted reply"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_not_truncated_below_limit() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let json = json!([
+            {
+                "id": root_id,
+                "pubkey": "rootpub",
+                "content": "root",
+                "created_at": 1000
+            },
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": "replypub",
+                "content": "reply",
+                "created_at": 2000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
+            .expect("should parse");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(total, 2);
+                assert!(!truncated);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_keeps_agent_reply_outside_recent_window() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let agent_hex = agent.public_key().to_hex();
+        let json = json!([
+            {
+                "id": root_id,
+                "pubkey": "rootpub",
+                "content": "root",
+                "created_at": 1000
+            },
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": "humanpub",
+                "content": "newer human reply",
+                "created_at": 5000
+            },
+            {
+                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pubkey": "humanpub",
+                "content": "middle human reply",
+                "created_at": 4000
+            },
+            {
+                "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "pubkey": "humanpub",
+                "content": "oldest displayed reply without agent pin",
+                "created_at": 3000
+            },
+            {
+                "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "pubkey": agent_hex,
+                "content": "agent reply outside recent window",
+                "created_at": 2000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
+            .expect("should parse");
+        match ctx {
+            ConversationContext::Thread { messages, .. } => {
+                assert_eq!(messages.len(), 3); // root + 2 displayed replies
+                assert_eq!(messages[0].content, "root");
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "agent reply outside recent window"));
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "newer human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "middle human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "oldest displayed reply without agent pin"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_uses_exact_count_when_above_sentinel_minimum() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let agent_pubkey = agent.public_key();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent_pubkey,
+            move |filters| {
+                assert_thread_query_filters(&filters, channel_id, root_id, agent_pubkey, 3);
+                std::future::ready(Ok(json.clone()))
+            },
+            move |filters| {
+                assert_thread_count_filter(&filters, channel_id, root_id);
+                std::future::ready(Ok(json!({ "count": 6 })))
+            },
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(total, 7); // 6 replies + root
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_does_not_add_missing_root_to_exact_count() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Ok(json!({ "count": 6 }))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 2);
+                assert_eq!(total, 6);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_clamps_count_below_sentinel_minimum() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Ok(json!({ "count": 1 }))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(total, 4); // root + displayed replies + sentinel minimum
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_preserves_sentinel_minimum_when_count_fails() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(total, 4); // count failure leaves parser's sentinel minimum intact
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_deduplicates_and_pins_agent_reply() {
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newer human reply",
+                5000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle human reply",
+                4000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                &agent_hex,
+                "agent reply outside recent window",
+                2000
+            ),
+            // Same event as the separately fetched author-filtered result; the
+            // parser should deduplicate it before pinning.
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                &agent_hex,
+                "agent reply outside recent window",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Ok(json!({ "count": 3 }))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(total, 4);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|msg| msg.content == "agent reply outside recent window")
+                        .count(),
+                    1,
+                    "separate agent-reply query must not duplicate the same event"
+                );
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "newer human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "middle human reply"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_uses_distinct_fetched_replies_as_minimum() {
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest human reply",
+                5000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle human reply",
+                4000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel human reply",
+                3000
+            ),
+            thread_event(
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                &agent_hex,
+                "older distinct agent reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(
+                    total, 5,
+                    "root plus all four distinct fetched replies prove the lower bound"
+                );
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "older distinct agent reply"));
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "newest human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "middle human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "sentinel human reply"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    fn assert_thread_query_filters(
+        filters: &[nostr::Filter],
+        channel_id: Uuid,
+        root_id: &str,
+        agent_pubkey: nostr::PublicKey,
+        reply_limit: u64,
+    ) {
+        assert_eq!(
+            filters.len(),
+            3,
+            "root, recent replies, and agent reply filters"
+        );
+
+        let root = serde_json::to_value(&filters[0]).expect("serialize root filter");
+        assert_eq!(root.get("ids"), Some(&json!([root_id])));
+        assert!(root.get("limit").is_none());
+
+        let replies = serde_json::to_value(&filters[1]).expect("serialize replies filter");
+        assert_eq!(replies.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(replies.get("#e"), Some(&json!([root_id])));
+        assert_eq!(replies.get("#h"), Some(&json!([channel_id.to_string()])));
+        assert_eq!(replies.get("limit"), Some(&json!(reply_limit)));
+        assert!(replies.get("authors").is_none());
+
+        let agent = serde_json::to_value(&filters[2]).expect("serialize agent filter");
+        assert_eq!(agent.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(agent.get("#e"), Some(&json!([root_id])));
+        assert_eq!(agent.get("#h"), Some(&json!([channel_id.to_string()])));
+        assert_eq!(agent.get("authors"), Some(&json!([agent_pubkey.to_hex()])));
+        assert_eq!(agent.get("limit"), Some(&json!(1)));
+    }
+
+    fn assert_thread_count_filter(filters: &[nostr::Filter], channel_id: Uuid, root_id: &str) {
+        assert_eq!(filters.len(), 1, "count should query only matching replies");
+
+        let count = serde_json::to_value(&filters[0]).expect("serialize count filter");
+        assert_eq!(count.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(count.get("#e"), Some(&json!([root_id])));
+        assert_eq!(count.get("#h"), Some(&json!([channel_id.to_string()])));
+        assert_eq!(count.get("limit"), Some(&json!(0)));
+        assert!(count.get("ids").is_none());
+        assert!(count.get("authors").is_none());
+    }
+
+    fn thread_event(id: &str, pubkey: &str, content: &str, created_at: u64) -> serde_json::Value {
+        json!({
+            "id": id,
+            "pubkey": pubkey,
+            "content": content,
+            "created_at": created_at
+        })
     }
 
     #[test]

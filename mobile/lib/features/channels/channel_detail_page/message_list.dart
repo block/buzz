@@ -84,8 +84,11 @@ class _MessageList extends HookConsumerWidget {
 
     bool latestIsAtBoundary() {
       // In this reversed list, item 0's leading edge is the bottom boundary.
+      // Being merely visible is not enough: a user who has pulled a tall
+      // newest row away from the boundary must not snap back on live updates.
       return itemPositionsListener.itemPositions.value.any(
-        (position) => position.index == 0 && position.itemLeadingEdge >= 0,
+        (position) =>
+            position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
       );
     }
 
@@ -243,106 +246,110 @@ class _MessageList extends HookConsumerWidget {
             }
             return false;
           },
-          child: ScrollablePositionedList.builder(
-            key: const ValueKey('channel-message-list'),
-            itemScrollController: itemScrollController,
-            itemPositionsListener: itemPositionsListener,
-            reverse: true,
-            padding: EdgeInsets.only(
-              left: Grid.gutter,
-              right: Grid.gutter,
-              top: frostedAppBarHeight(
-                context,
-                titleContentHeight: appBarTitleContentHeight,
+          child: KeyboardDismissOnDrag(
+            child: ScrollablePositionedList.builder(
+              key: const ValueKey('channel-message-list'),
+              itemScrollController: itemScrollController,
+              itemPositionsListener: itemPositionsListener,
+              reverse: true,
+              padding: EdgeInsets.only(
+                left: Grid.gutter,
+                right: Grid.gutter,
+                top: frostedAppBarHeight(
+                  context,
+                  titleContentHeight: appBarTitleContentHeight,
+                ),
+                bottom: 0,
               ),
-              bottom: 0,
-            ),
-            itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
-            itemBuilder: (context, index) {
-              // Loading indicator at the top (last index in reversed list).
-              if (index >= displayEntries.length) {
-                return const Padding(
-                  padding: EdgeInsets.symmetric(vertical: Grid.xs),
-                  child: Center(
-                    child: BuzzLoadingIndicator(
-                      size: 24,
-                      semanticLabel: 'Loading older messages',
-                    ),
-                  ),
-                );
-              }
-
-              // Reversed list: index 0 = newest (bottom of screen).
-              final chronIdx = displayEntries.length - 1 - index;
-              final entryGroup = displayEntries[chronIdx];
-              final entry = entryGroup.first;
-              final message = entry.message;
-
-              // Day boundary check — applies to all messages including system.
-              final prevEntry = chronIdx > 0
-                  ? displayEntries[chronIdx - 1].last
-                  : null;
-              final prevMessage = prevEntry?.message;
-              final showDayDivider =
-                  prevMessage == null ||
-                  !isSameDay(prevMessage.createdAt, message.createdAt);
-
-              final showAuthor =
-                  !message.isSystem &&
-                  (message.hasAttachments ||
-                      prevMessage == null ||
-                      prevMessage.isSystem ||
-                      showDayDivider ||
-                      prevMessage.pubkey.toLowerCase() !=
-                          message.pubkey.toLowerCase() ||
-                      (message.createdAt - prevMessage.createdAt) > 300);
-
-              return Padding(
-                key: ValueKey('channel-message-group-${message.id}'),
-                padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (showDayDivider)
-                      DayDivider(label: formatDayHeading(message.createdAt)),
-                    if (message.isSystem)
-                      _SystemMessageRow(
-                        message: message,
-                        groupedMessages: entryGroup.length > 1
-                            ? entryGroup.map((entry) => entry.message).toList()
-                            : null,
-                        channelId: channelId,
-                        currentPubkey: currentPubkey,
-                        allMessages: null,
-                        isMember: isMember,
-                        isArchived: isArchived,
-                      )
-                    else ...[
-                      _MessageBubble(
-                        message: message,
-                        showAuthor: showAuthor,
-                        channelNames: channelNamesMap,
-                        currentChannelId: channelId,
-                        currentPubkey: currentPubkey,
-                        allMessages: allMessages,
-                        isMember: isMember,
-                        isArchived: isArchived,
+              itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
+              itemBuilder: (context, index) {
+                // Loading indicator at the top (last index in reversed list).
+                if (index >= displayEntries.length) {
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: Grid.xs),
+                    child: Center(
+                      child: BuzzLoadingIndicator(
+                        size: 24,
+                        semanticLabel: 'Loading older messages',
                       ),
-                      if (entry.summary != null)
-                        _ThreadSummaryRow(
-                          summary: entry.summary!,
+                    ),
+                  );
+                }
+
+                // Reversed list: index 0 = newest (bottom of screen).
+                final chronIdx = displayEntries.length - 1 - index;
+                final entryGroup = displayEntries[chronIdx];
+                final entry = entryGroup.first;
+                final message = entry.message;
+
+                // Day boundary check — applies to all messages including system.
+                final prevEntry = chronIdx > 0
+                    ? displayEntries[chronIdx - 1].last
+                    : null;
+                final prevMessage = prevEntry?.message;
+                final showDayDivider =
+                    prevMessage == null ||
+                    !isSameDay(prevMessage.createdAt, message.createdAt);
+
+                final showAuthor =
+                    !message.isSystem &&
+                    (message.hasAttachments ||
+                        prevMessage == null ||
+                        prevMessage.isSystem ||
+                        showDayDivider ||
+                        prevMessage.pubkey.toLowerCase() !=
+                            message.pubkey.toLowerCase() ||
+                        (message.createdAt - prevMessage.createdAt) > 300);
+
+                return Padding(
+                  key: ValueKey('channel-message-group-${message.id}'),
+                  padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (showDayDivider)
+                        DayDivider(label: formatDayHeading(message.createdAt)),
+                      if (message.isSystem)
+                        _SystemMessageRow(
                           message: message,
-                          allMessages: allMessages,
+                          groupedMessages: entryGroup.length > 1
+                              ? entryGroup
+                                    .map((entry) => entry.message)
+                                    .toList()
+                              : null,
                           channelId: channelId,
                           currentPubkey: currentPubkey,
+                          allMessages: null,
+                          isMember: isMember,
+                          isArchived: isArchived,
+                        )
+                      else ...[
+                        _MessageBubble(
+                          message: message,
+                          showAuthor: showAuthor,
+                          channelNames: channelNamesMap,
+                          currentChannelId: channelId,
+                          currentPubkey: currentPubkey,
+                          allMessages: allMessages,
                           isMember: isMember,
                           isArchived: isArchived,
                         ),
+                        if (entry.summary != null)
+                          _ThreadSummaryRow(
+                            summary: entry.summary!,
+                            message: message,
+                            allMessages: allMessages,
+                            channelId: channelId,
+                            currentPubkey: currentPubkey,
+                            isMember: isMember,
+                            isArchived: isArchived,
+                          ),
+                      ],
                     ],
-                  ],
-                ),
-              );
-            },
+                  ),
+                );
+              },
+            ),
           ),
         ),
         if (!isAtLatest.value)

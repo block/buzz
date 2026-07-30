@@ -23,6 +23,7 @@ import {
 } from "@/features/projects/lib/projectLanguages";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ReadmePanel } from "./ProjectReadmePanel";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 
@@ -152,7 +153,10 @@ export function ProjectOverviewPanel({
   const latestCommit = snapshot?.latestCommit ?? null;
 
   return (
-    <div className="grid overflow-hidden rounded-xl border border-border/60 bg-card xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <div
+      className={`grid xl:grid-cols-[minmax(0,1fr)_18rem] ${PROJECT_DETAIL_PANEL_CLASS}`}
+      data-project-detail-panel
+    >
       <div className="min-w-0">
         {/* ReadmePanel renders its own "no README" fallback while keeping
             the branch + source controls reachable. */}
