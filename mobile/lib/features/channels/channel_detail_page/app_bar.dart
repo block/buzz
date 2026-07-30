@@ -19,28 +19,50 @@ double _dmAppBarTitleContentHeight(BuildContext context) {
   return textHeight > 30 ? textHeight : 30;
 }
 
-class _TypingIndicator extends ConsumerWidget {
-  final List<TypingEntry> entries;
+class _ChannelActivityIndicator extends ConsumerWidget {
+  final String channelId;
+  final List<TypingEntry> typingEntries;
 
-  const _TypingIndicator({required this.entries});
+  const _ChannelActivityIndicator({
+    required this.channelId,
+    required this.typingEntries,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final userCache = ref.watch(userCacheProvider);
-    final names = entries.map((e) {
-      final profile =
-          userCache[e.pubkey.toLowerCase()] ??
-          ref.read(userCacheProvider.notifier).get(e.pubkey.toLowerCase());
-      return profile?.label ?? shortPubkey(e.pubkey);
-    }).toList();
-    final text = switch (names.length) {
-      1 => '${names[0]} is typing…',
-      2 => '${names[0]} and ${names[1]} are typing…',
-      _ => '${names[0]} and ${names.length - 1} others are typing…',
+    final normalizedWorking = {
+      for (final pubkey in ref.watch(
+        channelWorkingBotPubkeysProvider(channelId),
+      ))
+        pubkey.toLowerCase(),
     };
+    final typingPubkeys = <String>[];
+    final seenTyping = <String>{};
+    for (final entry in typingEntries) {
+      final pubkey = entry.pubkey.toLowerCase();
+      if (normalizedWorking.contains(pubkey) || !seenTyping.add(pubkey)) {
+        continue;
+      }
+      typingPubkeys.add(pubkey);
+    }
+    final orderedPubkeys = [...normalizedWorking, ...typingPubkeys];
+    if (orderedPubkeys.isEmpty) return const SizedBox.shrink();
 
-    final visibleEntries = entries.take(3).toList();
-    final avatarCount = visibleEntries.length;
+    String labelFor(String pubkey) {
+      final profile =
+          userCache[pubkey] ?? ref.read(userCacheProvider.notifier).get(pubkey);
+      return profile?.label ?? shortPubkey(pubkey);
+    }
+
+    final workingNames = normalizedWorking.map(labelFor).toList();
+    final typingNames = typingPubkeys.map(labelFor).toList();
+    final text = [
+      if (workingNames.isNotEmpty) _activityLabel(workingNames, 'working'),
+      if (typingNames.isNotEmpty) _activityLabel(typingNames, 'typing'),
+    ].join(' · ');
+    final visiblePubkeys = orderedPubkeys.take(3).toList();
+    final avatarCount = visiblePubkeys.length;
 
     return Container(
       width: double.infinity,
@@ -59,7 +81,7 @@ class _TypingIndicator extends ConsumerWidget {
                   Positioned(
                     left: i * 12.0,
                     child: SmallAvatar(
-                      pubkey: visibleEntries[i].pubkey,
+                      pubkey: visiblePubkeys[i],
                       userCache: userCache,
                     ),
                   ),
@@ -69,7 +91,7 @@ class _TypingIndicator extends ConsumerWidget {
           const SizedBox(width: Grid.xxs),
           Flexible(
             child: Text(
-              text,
+              '$text…',
               style: context.textTheme.labelSmall?.copyWith(
                 color: context.colors.outline,
                 fontStyle: FontStyle.italic,
@@ -82,6 +104,13 @@ class _TypingIndicator extends ConsumerWidget {
     );
   }
 }
+
+String _activityLabel(List<String> names, String action) =>
+    switch (names.length) {
+      1 => '${names[0]} is $action',
+      2 => '${names[0]} and ${names[1]} are $action',
+      _ => '${names[0]} and ${names.length - 1} others are $action',
+    };
 
 class _MembersButton extends ConsumerWidget {
   final String channelId;
