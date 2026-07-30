@@ -61,6 +61,16 @@ type MockManagedAgentSeed = {
   respondToAllowlist?: string[];
 };
 
+/** A channel member with role "bot" that is NOT in the local managed-agent
+ *  list nor the kind:10100 relay agent directory — models an agent owned by
+ *  another community member, as seen from this install. */
+type MockChannelBotMemberSeed = {
+  pubkey: string;
+  name: string;
+  channelNames?: string[];
+  channelIds?: string[];
+};
+
 type MockSearchProfileSeed = {
   pubkey: string;
   displayName: string | null;
@@ -211,6 +221,9 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  /** Channel members with role "bot" owned by another user: never in the
+   *  managed list, never in the kind:10100 directory. */
+  channelBotMembers?: MockChannelBotMemberSeed[];
   /** Per agent+relay runtime rows for pair-scoped lifecycle commands. */
   managedAgentRuntimes?: Array<{
     pubkey: string;

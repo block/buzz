@@ -96,6 +96,16 @@ type MockManagedAgentRuntimeSeed = {
   lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
 };
 
+/** A channel member with role "bot" that is NOT in the local managed-agent
+ *  list nor the kind:10100 relay agent directory — models an agent owned by
+ *  another community member, as seen from this install. */
+type MockChannelBotMemberSeed = {
+  pubkey: string;
+  name: string;
+  channelNames?: string[];
+  channelIds?: string[];
+};
+
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
@@ -225,6 +235,9 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    /** Channel members with role "bot" owned by another user: never in the
+     *  managed list, never in the kind:10100 directory. */
+    channelBotMembers?: MockChannelBotMemberSeed[];
     /** Per agent+relay runtime rows for the pair-scoped lifecycle commands
      *  (`list/start/stop/restart_managed_agent_runtime`). */
     managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
@@ -2123,6 +2136,35 @@ function resetMockManagedAgents(config?: E2eConfig) {
       is_agent: true,
       has_profile_event: true,
     });
+    for (const channel of mockChannels) {
+      const isSeedChannel =
+        seed.channelIds?.includes(channel.id) ||
+        seed.channelNames?.includes(channel.name);
+      if (
+        !isSeedChannel ||
+        channel.members.some((member) => member.pubkey === seed.pubkey)
+      ) {
+        continue;
+      }
+
+      channel.members.push({
+        pubkey: seed.pubkey,
+        role: "bot",
+        is_agent: true,
+        joined_at: new Date().toISOString(),
+        display_name: seed.name,
+      });
+      syncMockChannel(channel);
+      touchMockChannel(channel);
+    }
+  }
+
+  // Foreign bot members: channel membership only — deliberately NOT added to
+  // mockManagedAgents, mockRelayAgents, or mockProfiles, so the client sees
+  // exactly what it sees for an agent owned by another community member.
+  for (const seed of config?.mock?.channelBotMembers ?? []) {
+    applyMockDisplayName(seed.pubkey, seed.name);
+    mockAgentPubkeys.add(seed.pubkey);
     for (const channel of mockChannels) {
       const isSeedChannel =
         seed.channelIds?.includes(channel.id) ||

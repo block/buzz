@@ -246,7 +246,16 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      // The managed-list guard only applies to NON-member identities: it
+      // exists to drop stale/ghost agent identities surfaced by discovery,
+      // but an agent owned by ANOTHER user is never in this install's
+      // managed list, and as a relay-confirmed channel member it must stay
+      // mentionable. Member-agent visibility is owned by
+      // shouldHideAgentFromMentions below (invocable / directory-exclusion).
+      if (
+        candidate.isMember !== true &&
+        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+      ) {
         return;
       }
       if (
