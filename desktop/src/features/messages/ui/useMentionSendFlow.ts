@@ -261,6 +261,14 @@ export function useMentionSendFlow({
           continue;
         }
 
+        // A relocated identity runs on its spawner: the server copy sees the
+        // mention through the relay on its own, and any local start/attach
+        // would be refused by the backend guard. Treat it as ready.
+        if (agent.relocatedToSpawner !== null) {
+          pubkeys.push(pubkey);
+          continue;
+        }
+
         try {
           if (participantPubkeys.has(pubkey)) {
             if (isProviderBackedAgent(agent)) {

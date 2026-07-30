@@ -54,6 +54,20 @@ export const KIND_TEAM = 30176;
 export const KIND_MANAGED_AGENT = 30177;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
+
+// NIP-AS agent spawner. Mirror of buzz-core's KIND_SPAWNER_* constants.
+// 30178 is the owner-authored desired state for a server-hosted agent
+// (d-tag = client-chosen spec slug); 30179 is the spawner-authored status for
+// that same slug; 24201 is the ephemeral, NIP-44 encrypted attestation
+// handshake that lets an owner sign a NIP-OA tag for a key the spawner minted.
+// 10180 is the spawner's self-announcement, keyed by (pubkey, kind). It exists
+// so a user can pick a spawner from a list instead of pasting 64 hex
+// characters. Listing one implies nothing about trust — authorization is the
+// per-agent attestation the owner signs.
+export const KIND_SPAWNER_ANNOUNCEMENT = 10180;
+export const KIND_SPAWNER_AGENT_SPEC = 30178;
+export const KIND_SPAWNER_AGENT_STATUS = 30179;
+export const KIND_SPAWNER_ATTESTATION = 24201;
 export const KIND_AGENT_TURN_METRIC = 44200;
 export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;

@@ -151,6 +151,7 @@ fn fixture(
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
+        relocated_to_spawner: None,
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,

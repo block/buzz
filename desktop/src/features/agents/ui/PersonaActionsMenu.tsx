@@ -14,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { MoveAgentToServerMenu } from "./MoveAgentToServerMenu";
 
 export function PersonaActionsMenu({
   isActionPending,
@@ -78,6 +79,7 @@ export function PersonaActionsMenu({
           <Share2 className="h-4 w-4" />
           Share
         </DropdownMenuItem>
+        <MoveAgentToServerMenu agent={linkedAgent} disabled={disabled} />
         <DropdownMenuSeparator />
         {persona.sourceTeam ? (
           <DropdownMenuItem disabled>
