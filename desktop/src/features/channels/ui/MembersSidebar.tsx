@@ -5,10 +5,13 @@ import {
   invalidateChannelState,
   useAddChannelMembersMutation,
   useChannelMembersQuery,
+  useChannelsQuery,
 } from "@/features/channels/hooks";
 import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
+  getMentionableAgentPubkeys,
+  getSharedChannelIds,
   isAgentIdentityAllowed,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
@@ -154,6 +157,7 @@ export function MembersSidebar({
     ReadonlySet<string>
   >(() => new Set());
   const identityQuery = useIdentityQuery();
+  const channelsQuery = useChannelsQuery({ enabled: open });
   const membersQuery = useChannelMembersQuery(channelId, open);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const changeRoleMutation = useMutation({
@@ -272,45 +276,62 @@ export function MembersSidebar({
         .filter((label): label is string => Boolean(label)),
     );
     const managedAgentPubkeys = new Set(managedAgentsByPubkey.keys());
+    const relayAgentPubkeys = new Set(
+      (relayAgentsQuery.data ?? []).map((agent) =>
+        normalizePubkey(agent.pubkey),
+      ),
+    );
+    const allowedAgentPubkeys = getMentionableAgentPubkeys({
+      currentPubkey,
+      managedAgentPubkeys,
+      relayAgents: relayAgentsQuery.data,
+      sharedChannelIds: getSharedChannelIds(channelsQuery.data),
+    });
 
     const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
+      const resolvedCandidate = relayAgentPubkeys.has(pubkey)
+        ? { ...candidate, isAgent: true }
+        : candidate;
       if (
-        (candidate.isAgent &&
+        (resolvedCandidate.isAgent &&
           memberAgentLabels.has(
-            formatAddCandidateName(candidate).toLowerCase(),
+            formatAddCandidateName(resolvedCandidate).toLowerCase(),
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityAllowed(candidate, managedAgentPubkeys)
+        !isAgentIdentityAllowed(resolvedCandidate, allowedAgentPubkeys)
       ) {
         return;
       }
 
       const current = candidatesByPubkey.get(pubkey);
       if (!current) {
-        candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
+        candidatesByPubkey.set(pubkey, { ...resolvedCandidate, pubkey });
         return;
       }
 
-      const candidateName = candidate.displayName?.trim() || null;
+      const candidateName = resolvedCandidate.displayName?.trim() || null;
       const currentName = current.displayName?.trim() || null;
 
       candidatesByPubkey.set(pubkey, {
         pubkey,
-        avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
+        avatarUrl: current.avatarUrl ?? resolvedCandidate.avatarUrl ?? null,
         displayName:
-          candidate.isAgent && candidateName
+          resolvedCandidate.isAgent && candidateName
             ? candidateName
             : current.isAgent
               ? currentName
               : (currentName ?? candidateName),
-        nip05Handle: current.nip05Handle ?? candidate.nip05Handle ?? null,
-        ownerPubkey: current.ownerPubkey ?? candidate.ownerPubkey ?? null,
-        isAgent: current.isAgent || candidate.isAgent,
-        isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
-        isMember: current.isMember || candidate.isMember,
-        personaId: current.personaId ?? candidate.personaId,
+        nip05Handle:
+          current.nip05Handle ?? resolvedCandidate.nip05Handle ?? null,
+        ownerPubkey:
+          current.ownerPubkey ?? resolvedCandidate.ownerPubkey ?? null,
+        isAgent: current.isAgent || resolvedCandidate.isAgent,
+        isManagedAgent:
+          current.isManagedAgent || resolvedCandidate.isManagedAgent,
+        isMember: current.isMember || resolvedCandidate.isMember,
+        personaId: current.personaId ?? resolvedCandidate.personaId,
       });
     };
 
@@ -361,6 +382,7 @@ export function MembersSidebar({
     });
   }, [
     canAddMembers,
+    channelsQuery.data,
     isArchivedDiscovery,
     currentPubkey,
     managedAgentsQuery.data,
