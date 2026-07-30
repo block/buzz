@@ -95,14 +95,17 @@ function ThreadUnreadBadge({
   return (
     <span
       className={cn(
-        "flex h-5 shrink-0 items-center gap-0.5 rounded-full bg-primary/10 px-1.5 text-2xs font-semibold leading-none text-primary tabular-nums",
+        "flex h-5 min-w-5 shrink-0 items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-1.5 text-xs font-semibold leading-none text-sidebar-foreground tabular-nums",
         className,
       )}
       data-testid={`channel-thread-unread-${channelName}`}
     >
-      <MessagesSquare aria-hidden="true" className="h-3 w-3" />
+      <MessagesSquare aria-hidden="true" className="h-3.5 w-3.5 text-primary" />
       {formatUnreadCount(count)}
-      <span className="sr-only"> unread thread replies</span>
+      <span className="sr-only">
+        {" "}
+        unread thread {count === 1 ? "reply" : "replies"}
+      </span>
     </span>
   );
 }

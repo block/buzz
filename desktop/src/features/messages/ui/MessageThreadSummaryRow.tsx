@@ -95,9 +95,11 @@ export function MessageThreadSummaryRow({
     THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
   )})`;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
+  const unreadLabel =
+    unreadCount != null && unreadCount > 0 ? `, ${unreadCount} unread` : "";
   const summaryAriaLabel = summary.lastReplyAt
-    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
-    : `View thread with ${summary.replyCount} ${replyLabel}`;
+    ? `View thread with ${summary.replyCount} ${replyLabel}${unreadLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
+    : `View thread with ${summary.replyCount} ${replyLabel}${unreadLabel}`;
   const guideDepths = depthGuideDepths
     ? [...depthGuideDepths]
     : Array.from({ length: Math.max(0, depth - 1) }, (_, index) => index + 1);
