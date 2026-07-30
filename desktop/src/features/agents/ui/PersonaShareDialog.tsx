@@ -438,7 +438,6 @@ export function SnapshotShareDialog({
   return (
     <Dialog onOpenChange={handleDialogOpenChange} open={open}>
       <DialogContent
-        aria-describedby={undefined}
         className="max-w-xl gap-3 bg-transparent p-0 shadow-none"
         data-testid={`${testIdPrefix}-dialog`}
         showCloseButton={false}
@@ -521,7 +520,7 @@ export function SnapshotShareDialog({
                 data-testid={`${testIdPrefix}-link-settings`}
               >
                 <h3 className="text-xs font-medium text-secondary-foreground/75">
-                  Link settings
+                  Share settings
                 </h3>
                 <div
                   className="flex items-center gap-3"

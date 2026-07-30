@@ -869,6 +869,12 @@ test("custom personas share with people and keep export separate", async ({
     "Anyone you share this agent with will receive a copy they can add and use. Changes you make later won’t sync.",
   );
   await expect(shareDescription).toHaveClass(/text-sm.*text-muted-foreground/);
+  const shareDescriptionId = await shareDescription.getAttribute("id");
+  expect(shareDescriptionId).toBeTruthy();
+  await expect(shareDialog).toHaveAttribute(
+    "aria-describedby",
+    shareDescriptionId ?? "",
+  );
   const shareDescriptionMetrics = await shareDescription.evaluate(
     (element) => ({
       height: element.getBoundingClientRect().height,
@@ -1756,9 +1762,9 @@ test("one share level selector drives both the link and send paths", async ({
   await expect(catalogAccess).toHaveCSS("cursor", "default");
   await expect(
     shareDialog.getByTestId("persona-share-link-settings"),
-  ).toContainText("Link settings");
+  ).toContainText("Share settings");
   await expect(
-    shareDialog.getByText("Link settings", { exact: true }),
+    shareDialog.getByText("Share settings", { exact: true }),
   ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
   const copyLinkButton = shareDialog.getByTestId("persona-share-copy-link");
   const recipientFieldBox = await recipientField.boundingBox();
