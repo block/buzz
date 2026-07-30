@@ -35,8 +35,10 @@
 
 let
   versions = import ./versions.nix;
-  version =
+  desktopVersion =
     (builtins.fromTOML (builtins.readFile (src + "/desktop/src-tauri/Cargo.toml"))).package.version;
+  relayVersion =
+    (builtins.fromTOML (builtins.readFile (src + "/crates/buzz-relay/Cargo.toml"))).package.version;
 
   sherpaOnnxSystemConfig =
     versions.sherpaOnnx.systems.${stdenv.hostPlatform.system}
@@ -82,13 +84,13 @@ let
   '';
   sidecars = rustPlatform.buildRustPackage {
     pname = "buzz-sidecars";
-    inherit version;
+    version = desktopVersion;
 
     inherit src;
 
     cargoLock = {
       lockFileContents = builtins.readFile (src + "/Cargo.lock");
-      outputHashes = versions.sidecarCargoOutputHashes;
+      outputHashes = versions.workspaceCargoOutputHashes;
     };
 
     cargoBuildFlags = lib.concatLists (
@@ -118,13 +120,52 @@ let
       ];
     };
   };
+
+  relayRuntime = rustPlatform.buildRustPackage {
+    pname = "buzz-relay-runtime";
+    version = relayVersion;
+
+    inherit src;
+
+    cargoLock = {
+      lockFileContents = builtins.readFile (src + "/Cargo.lock");
+      outputHashes = versions.workspaceCargoOutputHashes;
+    };
+
+    cargoBuildFlags = [
+      "-p"
+      "buzz-relay"
+      "-p"
+      "buzz-admin"
+    ];
+    doCheck = false;
+
+    nativeBuildInputs = [
+      cmake
+      pkg-config
+    ];
+
+    buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
+      openssl
+    ];
+
+    meta = with lib; {
+      description = "Buzz relay server and administration CLI";
+      homepage = "https://github.com/block/buzz";
+      license = licenses.asl20;
+      platforms = platforms.linux;
+      mainProgram = "buzz-relay";
+    };
+  };
 in
 {
+  buzz-relay = relayRuntime;
   buzz-sidecars = sidecars;
 
   buzz-desktop = rustPlatform.buildRustPackage (finalAttrs: {
     pname = "buzz-desktop";
-    inherit version src;
+    version = desktopVersion;
+    inherit src;
 
     cargoRoot = "desktop/src-tauri";
     buildAndTestSubdir = "desktop/src-tauri";
