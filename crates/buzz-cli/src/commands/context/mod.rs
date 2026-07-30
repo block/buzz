@@ -59,12 +59,16 @@ pub async fn dispatch(command: &ContextCmd) -> Result<(), CliError> {
             let profile = profile::resolve_profile(&command.profile, &environment)?;
             journal::list(&profile, &environment, *json).await
         }
-        ContextSubcommand::Log { project, message } => {
+        ContextSubcommand::Log {
+            project,
+            message,
+            context,
+        } => {
             let environment = profile::ProfileEnvironment::from_process()?;
             let profile = profile::resolve_profile(&command.profile, &environment)?;
             println!(
                 "{}",
-                journal::log(&profile, &environment, project, message).await?
+                journal::log(&profile, &environment, project, message, context.as_deref()).await?
             );
             Ok(())
         }

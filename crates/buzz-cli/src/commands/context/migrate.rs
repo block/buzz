@@ -117,7 +117,8 @@ pub fn migrate(
             legacy_root.display()
         )));
     }
-    if path_has_entries(&target_data)? {
+    if path_has_entries(&target_data)? && !paths_refer_to_same_location(&legacy_root, &target_data)
+    {
         return Err(CliError::Conflict(format!(
             "new profile data already exists at {} while legacy state exists at {}; refusing ambiguous mixed state",
             target_data.display(),
@@ -185,6 +186,16 @@ fn path_has_entries(path: &Path) -> Result<bool, CliError> {
         .transpose()
         .map_err(|error| CliError::Other(format!("could not inspect {}: {error}", path.display())))?
         .is_some())
+}
+
+fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn install_profile(directory: &Path, destination: &Path, bytes: &[u8]) -> Result<(), CliError> {
@@ -362,6 +373,39 @@ mod tests {
         )
         .expect_err("mixed state must fail");
         assert!(matches!(error, CliError::Conflict(_)));
+    }
+
+    #[test]
+    fn migration_references_canonical_xdg_state_in_place() {
+        let root = TempDir::new().expect("tempdir");
+        let env = environment(&root);
+        let canonical = env.data_home.join("buzz-local-relay/default");
+        std::fs::create_dir_all(&canonical).expect("canonical state");
+        let journal = canonical.join("sovereign.ndjson");
+        std::fs::write(&journal, "canonical").expect("journal");
+
+        let request = |apply| MigrationRequest {
+            profile: "default",
+            legacy_root: Some(&canonical),
+            local_relay: "http://127.0.0.1:7777",
+            rendezvous: Some("https://relay.example"),
+            default_context: Some("context-id"),
+            apply,
+        };
+        let plan = migrate(request(false), &env).expect("in-place migration plans");
+        assert_eq!(plan.status, "planned");
+        assert_eq!(plan.legacy_root, canonical.display().to_string());
+
+        let applied = migrate(request(true), &env).expect("in-place migration applies");
+        assert_eq!(applied.status, "applied");
+        let profile: ProfileFile =
+            toml::from_str(&std::fs::read_to_string(applied.profile_path).expect("profile reads"))
+                .expect("profile parses");
+        assert_eq!(profile.data_root, canonical);
+        assert_eq!(
+            std::fs::read_to_string(journal).expect("journal reads"),
+            "canonical"
+        );
     }
 
     #[test]

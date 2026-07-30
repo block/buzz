@@ -47,6 +47,8 @@ streams = ["shared/tooling", "shared/steward-reports"]
 
 [replication]
 source = "vamc3w36217hk/sovereign"
+cursor_file = "cursors/vamc3w36217hk-sovereign.push-cursor"
+streams_file = "streams.json"
 streams = ["shared/tooling", "shared/steward-reports"]
 
 [identities.journal_author]
@@ -130,8 +132,10 @@ point elsewhere. Apply creates an owner-only XDG profile atomically. It does
 not move journals, artifacts, cursors, or credentials; the generated profile
 references the legacy state in place. It is therefore restart-safe and
 rollback means stopping the managed process and removing the new profile file.
-The legacy bytes remain untouched. Review the dry-run report before removing
-any profile.
+The legacy bytes remain untouched. If the supplied legacy root is already the
+canonical XDG data root, migration creates only the reference profile; that is
+an in-place state layout, not a mixed-state conflict. Review the dry-run report
+before removing any profile.
 
 `BUZZ_CTX_HOME=/path/to/layout buzz context doctor --offline` is the explicit
 no-migration compatibility path.
@@ -166,6 +170,18 @@ The TOML profile, credential provider references, declaration heads, versioned
 runtime paths, and release manifest are configuration/governance. Updating a
 profile does not rewrite relay state; moving relay state requires a separately
 reviewed operational procedure.
+
+`replication.cursor_file` and `replication.streams_file` are resolved relative
+to `data_root` and passed unchanged to `buzz-relay-push`. This keeps interactive
+`buzz context sync` on the same checkpoint and stream selection as scheduled
+replication. Older profiles infer `<journal>.push-cursor` and an existing
+`<data_root>/streams.json`; set both fields explicitly for managed
+installations. A profile that lists `replication.streams` without a streams
+file fails closed instead of silently widening to a whole-journal mirror.
+
+Session residue is context-bound. `buzz context log <project> <message>` uses
+`context.default_h`; `--context <h>` overrides it. The command refuses to
+write when neither boundary is available.
 
 Useful checks:
 

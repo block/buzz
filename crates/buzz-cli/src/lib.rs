@@ -310,7 +310,13 @@ pub enum ContextSubcommand {
         json: bool,
     },
     /// Append a plaintext, non-sensitive journal session record.
-    Log { project: String, message: String },
+    Log {
+        project: String,
+        message: String,
+        /// Bounded-context h tag. Defaults to context.default_h.
+        #[arg(long)]
+        context: Option<String>,
+    },
     /// Read recent project session records.
     Sessions {
         project: String,

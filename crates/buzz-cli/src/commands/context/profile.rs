@@ -130,6 +130,8 @@ pub struct ContextConfig {
 #[serde(deny_unknown_fields)]
 pub struct ReplicationConfig {
     pub source: Option<String>,
+    pub cursor_file: Option<PathBuf>,
+    pub streams_file: Option<PathBuf>,
     #[serde(default)]
     pub streams: Vec<String>,
 }
@@ -313,6 +315,24 @@ pub fn resolve_profile(
     let journal = resolve_path(&data_root, &file.paths.journal);
     let artifacts = resolve_path(&data_root, &file.paths.artifacts);
     let cursors = resolve_path(&data_root, &file.paths.cursors);
+    for path in [
+        file.replication.cursor_file.as_mut(),
+        file.replication.streams_file.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *path = resolve_path(&data_root, path);
+    }
+    if file.replication.cursor_file.is_none() {
+        file.replication.cursor_file = Some(default_push_cursor(&journal));
+    }
+    if file.replication.streams_file.is_none() {
+        let streams_file = data_root.join("streams.json");
+        if streams_file.is_file() {
+            file.replication.streams_file = Some(streams_file);
+        }
+    }
     resolve_profile_references(&mut file, &config_dir);
 
     let legacy_has_state = path_has_entries(&legacy_root)?;
@@ -409,6 +429,12 @@ fn resolve_path(base: &Path, path: &Path) -> PathBuf {
     }
 }
 
+fn default_push_cursor(journal: &Path) -> PathBuf {
+    let mut path = journal.as_os_str().to_os_string();
+    path.push(".push-cursor");
+    PathBuf::from(path)
+}
+
 fn path_has_entries(path: &Path) -> Result<bool, CliError> {
     if !path.exists() {
         return Ok(false);
@@ -479,6 +505,11 @@ pub fn legacy_profile(
         },
         replication: ReplicationConfig {
             source: Some("local/sovereign".into()),
+            cursor_file: Some(default_push_cursor(&root.join("sovereign.ndjson"))),
+            streams_file: root
+                .join("streams.json")
+                .is_file()
+                .then(|| root.join("streams.json")),
             streams: Vec::new(),
         },
         runtime: RuntimeConfig {
@@ -728,11 +759,20 @@ mod tests {
         let mut env = environment(&root);
         let legacy = env.home.join("custom-context");
         std::fs::create_dir_all(&legacy).expect("legacy dir");
+        std::fs::write(legacy.join("streams.json"), "{}").expect("streams");
         env.ctx_home_override = Some(legacy.clone());
         let resolved = resolve_profile("default", &env).expect("profile resolves");
         assert_eq!(resolved.source, ProfileSource::ExplicitOverride);
         assert_eq!(resolved.layout, LayoutStatus::Ready);
         assert_eq!(resolved.data_root, legacy);
+        assert_eq!(
+            resolved.file.replication.cursor_file,
+            Some(legacy.join("sovereign.ndjson.push-cursor"))
+        );
+        assert_eq!(
+            resolved.file.replication.streams_file,
+            Some(legacy.join("streams.json"))
+        );
     }
 
     #[test]
@@ -826,6 +866,33 @@ mod tests {
             keys.len(),
             8,
             "enterprise roles must remain independently addressable"
+        );
+    }
+
+    #[test]
+    fn replication_state_paths_resolve_from_the_profile_data_root() {
+        let root = TempDir::new().expect("tempdir");
+        let env = environment(&root);
+        let data_root = env.data_home.join("buzz-local-relay/vumc");
+        let config = env.config_home.join("buzz/profiles/vumc.toml");
+        std::fs::create_dir_all(config.parent().expect("parent")).expect("config dir");
+        let mut file = fresh_profile(&data_root);
+        file.replication.cursor_file = Some(PathBuf::from("cursors/private.push-cursor"));
+        file.replication.streams_file = Some(PathBuf::from("streams.json"));
+        std::fs::write(
+            &config,
+            toml::to_string_pretty(&file).expect("profile serializes"),
+        )
+        .expect("profile");
+
+        let resolved = resolve_profile("vumc", &env).expect("profile resolves");
+        assert_eq!(
+            resolved.file.replication.cursor_file,
+            Some(data_root.join("cursors/private.push-cursor"))
+        );
+        assert_eq!(
+            resolved.file.replication.streams_file,
+            Some(data_root.join("streams.json"))
         );
     }
 }

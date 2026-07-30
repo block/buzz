@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use nostr::Kind;
@@ -98,6 +99,7 @@ pub async fn log(
     environment: &ProfileEnvironment,
     project: &str,
     message: &str,
+    context: Option<&str>,
 ) -> Result<String, CliError> {
     validate_label(project, "project")?;
     if message.trim().is_empty() {
@@ -108,13 +110,10 @@ pub async fn log(
     let identity = runtime.identity_label(role);
     let machine = hostname();
     let session = format!("session:{project}");
+    let context = session_context(profile, context)?;
     let builder = event_builder(
         message,
-        [
-            tag(&["t", &session])?,
-            tag(&["agent", &identity])?,
-            tag(&["machine", &machine])?,
-        ],
+        session_tags(&session, &identity, &machine, context)?,
         None,
     );
     runtime.post_builder(builder).await
@@ -206,6 +205,60 @@ pub fn sync(
     environment: &ProfileEnvironment,
     dry_run: bool,
 ) -> Result<(), CliError> {
+    let invocation = replication_invocation(profile)?;
+    if dry_run {
+        println!("replication dry run");
+        println!("  executable  {}", invocation.executable.display());
+        println!("  journal     {}", invocation.journal.display());
+        println!("  rendezvous  {}", invocation.rendezvous);
+        println!("  source      {}", invocation.source);
+        println!("  credential  {}", invocation.credential);
+        println!("  cursor      {}", invocation.cursor_file.display());
+        println!(
+            "  selection   {}",
+            invocation
+                .streams_file
+                .as_deref()
+                .map_or_else(|| "whole journal".into(), |path| path.display().to_string())
+        );
+        return Ok(());
+    }
+    let path = environment
+        .variables
+        .get("PATH")
+        .map(String::as_str)
+        .unwrap_or("/usr/bin:/bin:/usr/sbin:/sbin");
+    let status = std::process::Command::new(&invocation.executable)
+        .args(replication_arguments(&invocation))
+        .env_clear()
+        .env("PATH", path)
+        .env("LANG", "C.UTF-8")
+        .status()
+        .map_err(|error| {
+            CliError::Other(format!(
+                "could not start replication runtime {}: {error}",
+                invocation.executable.display()
+            ))
+        })?;
+    if !status.success() {
+        return Err(CliError::Other(format!(
+            "replication runtime exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+struct ReplicationInvocation {
+    executable: PathBuf,
+    journal: PathBuf,
+    rendezvous: String,
+    source: String,
+    credential: String,
+    cursor_file: PathBuf,
+    streams_file: Option<PathBuf>,
+}
+
+fn replication_invocation(profile: &ResolvedProfile) -> Result<ReplicationInvocation, CliError> {
     profile.require_ready()?;
     let rendezvous = profile.file.relays.rendezvous.as_deref().ok_or_else(|| {
         CliError::Usage(format!(
@@ -240,51 +293,107 @@ pub fn sync(
         .source
         .as_deref()
         .ok_or_else(|| CliError::Usage("replication.source is not configured".into()))?;
-    if dry_run {
-        println!("replication dry run");
-        println!("  executable  {}", executable.display());
-        println!("  journal     {}", profile.journal.display());
-        println!("  rendezvous  {rendezvous}");
-        println!("  source      {source}");
-        println!("  credential  {}", transport.reference);
-        return Ok(());
-    }
-    let path = environment
-        .variables
-        .get("PATH")
-        .map(String::as_str)
-        .unwrap_or("/usr/bin:/bin:/usr/sbin:/sbin");
-    let status = std::process::Command::new(executable)
-        .arg("--data")
-        .arg(&profile.journal)
-        .arg("--to")
-        .arg(rendezvous)
-        .arg("--source")
-        .arg(source)
-        .arg("--key")
-        .arg(&transport.reference)
-        .env_clear()
-        .env("PATH", path)
-        .env("LANG", "C.UTF-8")
-        .status()
-        .map_err(|error| {
-            CliError::Other(format!(
-                "could not start replication runtime {}: {error}",
-                executable.display()
+    let cursor_file = profile
+        .file
+        .replication
+        .cursor_file
+        .clone()
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "profile {} does not configure replication.cursor_file",
+                profile.name
             ))
         })?;
-    if !status.success() {
-        return Err(CliError::Other(format!(
-            "replication runtime exited with {status}"
+    let streams_file = profile.file.replication.streams_file.clone();
+    if let Some(streams_file) = streams_file.as_deref() {
+        if !streams_file.is_file() {
+            return Err(CliError::NotFound(format!(
+                "configured replication stream selection is absent: {}",
+                streams_file.display()
+            )));
+        }
+    } else if !profile.file.replication.streams.is_empty() {
+        return Err(CliError::Usage(format!(
+            "profile {} lists replication.streams but does not configure replication.streams_file",
+            profile.name
         )));
     }
-    Ok(())
+    Ok(ReplicationInvocation {
+        executable: executable.to_path_buf(),
+        journal: profile.journal.clone(),
+        rendezvous: rendezvous.to_string(),
+        source: source.to_string(),
+        credential: transport.reference.clone(),
+        cursor_file,
+        streams_file,
+    })
+}
+
+fn replication_arguments(invocation: &ReplicationInvocation) -> Vec<OsString> {
+    let mut arguments = vec![
+        "--data".into(),
+        invocation.journal.clone().into_os_string(),
+        "--to".into(),
+        invocation.rendezvous.clone().into(),
+        "--source".into(),
+        invocation.source.clone().into(),
+        "--key".into(),
+        invocation.credential.clone().into(),
+        "--cursor-file".into(),
+        invocation.cursor_file.clone().into_os_string(),
+    ];
+    if let Some(streams_file) = &invocation.streams_file {
+        arguments.push("--streams".into());
+        arguments.push(streams_file.clone().into_os_string());
+    }
+    arguments
 }
 
 fn owner_pubkey(client: &crate::client::BuzzClient) -> String {
     client
         .auth_tag_owner_hex()
         .unwrap_or_else(|| client.keys().public_key().to_hex())
+}
+
+fn session_context<'a>(
+    profile: &'a ResolvedProfile,
+    explicit: Option<&'a str>,
+) -> Result<&'a str, CliError> {
+    select_session_context(
+        &profile.name,
+        profile.file.context.default_h.as_deref(),
+        explicit,
+    )
+}
+
+fn select_session_context<'a>(
+    profile_name: &str,
+    configured: Option<&'a str>,
+    explicit: Option<&'a str>,
+) -> Result<&'a str, CliError> {
+    let context = explicit.or(configured).ok_or_else(|| {
+        CliError::Usage(format!(
+            "profile {profile_name} does not configure context.default_h; pass --context"
+        ))
+    })?;
+    if context.trim().is_empty() {
+        return Err(CliError::Usage("session context must not be empty".into()));
+    }
+    Ok(context)
+}
+
+fn session_tags(
+    session: &str,
+    identity: &str,
+    machine: &str,
+    context: &str,
+) -> Result<Vec<nostr::Tag>, CliError> {
+    Ok(vec![
+        tag(&["t", session])?,
+        tag(&["h", context])?,
+        tag(&["agent", identity])?,
+        tag(&["machine", machine])?,
+    ])
 }
 
 fn validate_scope(scope: &str) -> Result<(), CliError> {
@@ -342,5 +451,47 @@ mod tests {
         ] {
             assert!(validate_scope(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn replication_arguments_preserve_cursor_and_stream_selection() {
+        let invocation = ReplicationInvocation {
+            executable: PathBuf::from("/opt/buzz/buzz-relay-push"),
+            journal: PathBuf::from("/state/sovereign.ndjson"),
+            rendezvous: "https://relay.example".into(),
+            source: "node/private".into(),
+            credential: "/run/credentials/transport.key".into(),
+            cursor_file: PathBuf::from("/state/cursors/private.push-cursor"),
+            streams_file: Some(PathBuf::from("/state/streams.json")),
+        };
+        let arguments = replication_arguments(&invocation);
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--cursor-file", "/state/cursors/private.push-cursor"]));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--streams", "/state/streams.json"]));
+    }
+
+    #[test]
+    fn session_residue_carries_its_bounded_context() {
+        let tags = session_tags("session:buzz", "claude-code", "host-a", "shared/evolution")
+            .expect("tags");
+        assert!(tags.iter().any(|tag| {
+            tag.as_slice() == [String::from("h"), String::from("shared/evolution")]
+        }));
+    }
+
+    #[test]
+    fn session_context_defaults_and_can_be_overridden() {
+        assert_eq!(
+            select_session_context("solo", Some("configured"), None).expect("default"),
+            "configured"
+        );
+        assert_eq!(
+            select_session_context("solo", Some("configured"), Some("explicit")).expect("override"),
+            "explicit"
+        );
+        assert!(select_session_context("solo", None, None).is_err());
     }
 }
