@@ -3,6 +3,12 @@
 @plugin "@tailwindcss/typography";
 @config "../../../tailwind.config.js";
 
+/* Bind the `dark:` variant to the theme class the ThemeProvider sets on
+   <html>, instead of Tailwind v4's default `prefers-color-scheme` media
+   query — otherwise `dark:` utilities follow the OS appearance rather
+   than the resolved theme class. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
   :root {
     /* Catppuccin Latte (mauve accent) */
