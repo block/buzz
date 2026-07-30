@@ -190,8 +190,11 @@ class _ChannelBotRoleSubscription extends Notifier<int> {
     final session = ref.read(relaySessionProvider.notifier);
     try {
       final unsubscribe = await session.subscribe(
-        NostrFilters.channelMembers(
-          channelId,
+        NostrFilter(
+          kinds: const [39002],
+          tags: {
+            '#h': [channelId],
+          },
         ).copyWithSince(DateTime.now().millisecondsSinceEpoch ~/ 1000),
         (_) {
           if (_isCurrent(subscriptionVersion)) {

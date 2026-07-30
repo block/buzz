@@ -29,7 +29,7 @@ void main() {
     });
     await relaySession.subscribed;
     expect(relaySession.liveFilters.single.kinds, const [39002]);
-    expect(relaySession.liveFilters.single.tags['#d'], [_channelId]);
+    expect(relaySession.liveFilters.single.tags['#h'], [_channelId]);
 
     relaySession.emit(_membershipEvent(role: 'member'));
     await _pumpEventQueue();
@@ -147,6 +147,7 @@ NostrEvent _membershipEvent({required String role}) => NostrEvent(
   kind: 39002,
   tags: [
     ['d', _channelId],
+    ['h', _channelId],
     ['p', _agentPubkey, 'wss://relay.example', role],
   ],
   content: '',
