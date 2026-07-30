@@ -43,6 +43,7 @@ class CommunityThemeSyncManager {
   final Duration debounce;
   final Duration subscriptionRetryBase;
   final void Function(RemoteCommunityTheme) onRemote;
+  final void Function(CommunityThemePreference) onPublished;
 
   Timer? _publishTimer;
   Timer? _subscriptionRetryTimer;
@@ -61,6 +62,7 @@ class CommunityThemeSyncManager {
     required this.signedEventRelay,
     required this.crypto,
     required this.onRemote,
+    this.onPublished = _ignorePublished,
     this.debounce = const Duration(seconds: 2),
     this.subscriptionRetryBase = const Duration(seconds: 1),
   });
@@ -90,15 +92,11 @@ class CommunityThemeSyncManager {
     }
   }
 
-  Future<CommunityThemeRemoteResult> initialize(
-    CommunityThemePreference local,
-  ) async {
+  Future<CommunityThemeRemoteResult> initialize() async {
     final result = await fetchRemote();
     if (_disposed) return result;
     if (result.status == CommunityThemeRemoteStatus.valid) {
       _accept(result.remote!);
-    } else if (result.status == CommunityThemeRemoteStatus.absent) {
-      publish(local);
     }
     await _startLiveSubscription();
     return result;
@@ -212,6 +210,7 @@ class CommunityThemeSyncManager {
       _lastCreatedAt = createdAt;
       _lastPublished = preference;
       if (_pending == preference) _pending = null;
+      onPublished(preference);
     } catch (error) {
       debugPrint('[CommunityThemeSync] publish failed: $error');
     }
@@ -236,6 +235,7 @@ class CommunityThemeSyncManager {
   }
 
   void _accept(RemoteCommunityTheme remote) {
+    if (_pending != null) return;
     if (remote.createdAt < _lastCreatedAt ||
         (remote.createdAt == _lastCreatedAt &&
             remote.eventId.compareTo(_lastEventId) <= 0)) {
@@ -258,6 +258,8 @@ class CommunityThemeSyncManager {
     _unsubscribe = null;
   }
 }
+
+void _ignorePublished(CommunityThemePreference _) {}
 
 NostrEvent _newerEvent(NostrEvent left, NostrEvent right) {
   if (right.createdAt != left.createdAt) {

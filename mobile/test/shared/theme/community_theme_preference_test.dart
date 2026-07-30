@@ -72,6 +72,33 @@ void main() {
     expect(storage.read('other-pk', 'wss://relay.example'), isNull);
   });
 
+  test('dirty outbox survives restart and clears only exact ack', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final storage = CommunityThemeStorage(prefs);
+    const pending = CommunityThemePreference(
+      theme: 'dracula',
+      accent: '#ef4444',
+      followSystem: false,
+    );
+    const newer = CommunityThemePreference(
+      theme: 'houston',
+      accent: '#a855f7',
+      followSystem: false,
+    );
+
+    await storage.writeOutbox('pk', 'wss://relay.example', pending);
+    expect(
+      CommunityThemeStorage(prefs).readOutbox('pk', 'wss://relay.example'),
+      pending,
+    );
+    await storage.writeOutbox('pk', 'wss://relay.example', newer);
+    await storage.clearOutbox('pk', 'wss://relay.example', pending);
+    expect(storage.readOutbox('pk', 'wss://relay.example'), newer);
+    await storage.clearOutbox('pk', 'wss://relay.example', newer);
+    expect(storage.readOutbox('pk', 'wss://relay.example'), isNull);
+  });
+
   test('legacy accent indexes migrate without inventing wire values', () async {
     SharedPreferences.setMockInitialValues({
       'buzz_theme_mode': 'dark',

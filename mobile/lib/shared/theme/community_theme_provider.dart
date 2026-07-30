@@ -36,10 +36,11 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     }
 
     final cached = _storage.read(pubkey, config.baseUrl);
+    final dirty = _storage.readOutbox(pubkey, config.baseUrl);
     final fallback = _storage.hasMigrated(pubkey)
         ? defaultCommunityTheme
         : _storage.legacyPreference();
-    final initial = cached ?? fallback;
+    final initial = dirty ?? cached ?? fallback;
 
     if (session.status == SessionStatus.connected) {
       late final CommunityThemeSyncManager manager;
@@ -52,16 +53,21 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
         ),
         crypto: _crypto(config.nsec!, pubkey),
         onRemote: (remote) => _applyRemote(manager, remote),
+        onPublished: (preference) =>
+            unawaited(_storage.clearOutbox(pubkey, config.baseUrl, preference)),
       );
       _manager = manager;
+      if (dirty != null) manager.publish(dirty);
       Future.microtask(() async {
-        final result = await manager.initialize(initial);
+        final result = await manager.initialize();
         if (_manager != manager) return;
+        if (result.status == CommunityThemeRemoteStatus.absent) {
+          await _storage.write(pubkey, config.baseUrl, initial);
+          await _storage.writeOutbox(pubkey, config.baseUrl, initial);
+          if (_manager == manager) manager.publish(initial);
+        }
         if (result.status == CommunityThemeRemoteStatus.valid ||
             result.status == CommunityThemeRemoteStatus.absent) {
-          if (result.status == CommunityThemeRemoteStatus.absent) {
-            await _storage.write(pubkey, config.baseUrl, initial);
-          }
           await _storage.markMigrated(pubkey);
         }
       });
@@ -117,8 +123,19 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
       unawaited(_storage.writeLegacy(preference));
       return;
     }
-    unawaited(_storage.write(pubkey, relayUrl, preference));
-    _manager?.publish(preference);
+    unawaited(_persistAndPublish(pubkey, relayUrl, preference));
+  }
+
+  Future<void> _persistAndPublish(
+    String pubkey,
+    String relayUrl,
+    CommunityThemePreference preference,
+  ) async {
+    if (!await _storage.write(pubkey, relayUrl, preference)) return;
+    if (!await _storage.writeOutbox(pubkey, relayUrl, preference)) return;
+    if (_pubkey == pubkey && _relayUrl == relayUrl) {
+      _manager?.publish(preference);
+    }
   }
 
   void _applyRemote(
@@ -126,9 +143,16 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     RemoteCommunityTheme remote,
   ) {
     if (_manager != manager) return;
-    state = remote.preference;
     final pubkey = _pubkey;
     final relayUrl = _relayUrl;
+    if (pubkey != null &&
+        relayUrl != null &&
+        _storage.readOutbox(pubkey, relayUrl) != null) {
+      final dirty = _storage.readOutbox(pubkey, relayUrl)!;
+      manager.publish(dirty);
+      return;
+    }
+    state = remote.preference;
     if (pubkey != null && relayUrl != null) {
       unawaited(_storage.write(pubkey, relayUrl, remote.preference));
     }

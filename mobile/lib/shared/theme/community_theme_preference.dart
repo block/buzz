@@ -68,6 +68,7 @@ class CommunityThemePreference {
 
 class CommunityThemeStorage {
   static const _prefix = 'buzz-community-theme.v1';
+  static const _outboxPrefix = 'buzz-community-theme-outbox.v1';
   static const _migrationPrefix = 'buzz-community-theme-migrated.v1';
   static const _legacyModeKey = 'buzz_theme_mode';
   static const _legacyAccentKey = 'buzz_accent_color';
@@ -80,9 +81,12 @@ class CommunityThemeStorage {
   String key(String pubkey, String relayUrl) =>
       '$_prefix:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
 
-  CommunityThemePreference? read(String pubkey, String relayUrl) {
+  String outboxKey(String pubkey, String relayUrl) =>
+      '$_outboxPrefix:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+  CommunityThemePreference? _readKey(String storageKey) {
     try {
-      final raw = prefs.getString(key(pubkey, relayUrl));
+      final raw = prefs.getString(storageKey);
       if (raw == null) return null;
       final decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) return null;
@@ -92,11 +96,36 @@ class CommunityThemeStorage {
     }
   }
 
+  CommunityThemePreference? read(String pubkey, String relayUrl) =>
+      _readKey(key(pubkey, relayUrl));
+
+  CommunityThemePreference? readOutbox(String pubkey, String relayUrl) =>
+      _readKey(outboxKey(pubkey, relayUrl));
+
   Future<bool> write(
     String pubkey,
     String relayUrl,
     CommunityThemePreference preference,
   ) => prefs.setString(key(pubkey, relayUrl), jsonEncode(preference.toJson()));
+
+  Future<bool> writeOutbox(
+    String pubkey,
+    String relayUrl,
+    CommunityThemePreference preference,
+  ) => prefs.setString(
+    outboxKey(pubkey, relayUrl),
+    jsonEncode(preference.toJson()),
+  );
+
+  Future<void> clearOutbox(
+    String pubkey,
+    String relayUrl,
+    CommunityThemePreference acknowledged,
+  ) async {
+    if (readOutbox(pubkey, relayUrl) == acknowledged) {
+      await prefs.remove(outboxKey(pubkey, relayUrl));
+    }
+  }
 
   bool hasMigrated(String pubkey) =>
       prefs.getBool('$_migrationPrefix:$pubkey') == true;

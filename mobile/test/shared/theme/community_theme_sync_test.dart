@@ -16,8 +16,9 @@ void main() {
     final relay = _FakeSignedRelay();
     final manager = _manager(session, relay);
 
-    final result = await manager.initialize(local);
+    final result = await manager.initialize();
     expect(result.status, CommunityThemeRemoteStatus.absent);
+    manager.publish(local);
     await manager.flush();
 
     expect(relay.submissions, hasLength(1));
@@ -38,7 +39,7 @@ void main() {
       _FakeSession(error: StateError('offline')),
     ]) {
       final relay = _FakeSignedRelay();
-      final result = await _manager(session, relay).initialize(local);
+      final result = await _manager(session, relay).initialize();
       expect(
         result.status,
         anyOf(
@@ -76,7 +77,7 @@ void main() {
         onRemote: (r) => applied.add(r.preference),
       );
 
-      await manager.initialize(local);
+      await manager.initialize();
       expect(applied.single.theme, 'dracula');
 
       session.emit(
@@ -86,38 +87,32 @@ void main() {
     },
   );
 
-  test(
-    'remote apply cancels pending user write and dispose guards scope',
-    () async {
-      final relay = _FakeSignedRelay();
-      final session = _FakeSession();
-      final manager = _manager(session, relay);
-      await manager.initialize(local);
-      manager.cancelPending();
-      manager.publish(
-        const CommunityThemePreference(
-          theme: 'dracula',
-          accent: '#ef4444',
-          followSystem: false,
-        ),
-      );
+  test('remote hydration never cancels a newer pending local write', () async {
+    final relay = _FakeSignedRelay();
+    final session = _FakeSession();
+    final manager = _manager(session, relay);
+    await manager.initialize();
+    manager.cancelPending();
+    manager.publish(
+      const CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+      ),
+    );
 
-      session.emit(
-        _event(
-          id: 'remote',
-          createdAt: 100,
-          content: jsonEncode(local.toJson()),
-        ),
-      );
-      await manager.flush();
-      expect(relay.submissions, isEmpty);
+    session.emit(
+      _event(id: 'remote', createdAt: 100, content: jsonEncode(local.toJson())),
+    );
+    await manager.flush();
+    expect(relay.submissions, hasLength(1));
+    expect(jsonDecode(relay.submissions.single.content)['theme'], 'dracula');
 
-      manager.publish(local);
-      manager.dispose();
-      await manager.flush();
-      expect(relay.submissions, isEmpty);
-    },
-  );
+    manager.publish(local);
+    manager.dispose();
+    await manager.flush();
+    expect(relay.submissions, hasLength(1));
+  });
 
   test(
     'relay CLOSED resubscribes then catches up latest replacement event',
@@ -129,7 +124,8 @@ void main() {
         _FakeSignedRelay(),
         onRemote: (remote) => applied.add(remote.preference),
       );
-      await manager.initialize(local);
+      await manager.initialize();
+      manager.cancelPending();
       expect(session.subscribeCalls, 1);
 
       const replacement = CommunityThemePreference(
@@ -156,7 +152,7 @@ void main() {
   test('relay CLOSED after dispose never resubscribes', () async {
     final session = _FakeSession();
     final manager = _manager(session, _FakeSignedRelay());
-    await manager.initialize(local);
+    await manager.initialize();
     final close = session.latestClosedCallback;
 
     manager.dispose();
