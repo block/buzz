@@ -780,6 +780,8 @@ function MessageRowItem({
 
   if (summary && onReply) {
     const isHighlighted = message.id === highlightedMessageId;
+    const hasUnreadThreadReplies =
+      (threadUnreadCounts?.get(message.id) ?? 0) > 0;
     return (
       <div
         className={cn(
@@ -799,6 +801,7 @@ function MessageRowItem({
               ? isFollowingThreadById(message.id)
               : undefined
           }
+          hasUnreadThreadReplies={hasUnreadThreadReplies}
           isUnread={isUnread}
           isContinuation={isContinuation}
           playEntrance={playEntrance}

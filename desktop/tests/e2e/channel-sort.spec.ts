@@ -38,6 +38,7 @@ function streamNames(page: Page) {
         .filter(
           (id) =>
             !id.startsWith("channel-unread") &&
+            !id.startsWith("channel-thread-unread") &&
             !id.startsWith("channel-working") &&
             !id.startsWith("channel-dm-count"),
         )
@@ -138,6 +139,7 @@ test.describe("per-group channel sort", () => {
           .filter(
             (id) =>
               !id.startsWith("channel-unread") &&
+              !id.startsWith("channel-thread-unread") &&
               !id.startsWith("channel-working"),
           )
           .map((id) => id.replace(/^channel-/, "")),

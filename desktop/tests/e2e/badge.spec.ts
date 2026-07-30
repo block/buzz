@@ -190,7 +190,10 @@ test("numeric badge increments for interested thread reply in inactive channel",
     { parentEventId: rootEventId, pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  // A plain thread reply (no mention, not a DM) renders the demoted
+  // thread-glyph badge instead of the solid numeric badge.
+  await expect(page.getByTestId("channel-thread-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 

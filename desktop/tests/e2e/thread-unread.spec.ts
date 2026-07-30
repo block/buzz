@@ -164,7 +164,20 @@ test.describe("thread unread indicator", () => {
 
     const badge = page.getByTestId("thread-unread-badge");
     await expect(badge).toBeVisible();
-    await expect(badge).toContainText("3");
+    await expect(badge).toContainText("3 new");
+
+    // The parent row carries a left accent while its thread has unreads.
+    await expect(page.getByTestId("thread-unread-accent")).toBeVisible();
+
+    // With no top-level unreads, the floating pill advertises thread replies.
+    const threadPill = page.getByTestId("thread-unread-pill");
+    await expect(threadPill).toBeVisible();
+    await expect(threadPill).toContainText("3 new replies in threads");
+
+    // Clicking jumps to the parent row and opens its thread panel.
+    await threadPill.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await expect(threadPill).toHaveCount(0);
   });
 
   test("02-thread-new-divider", async ({ page }) => {
@@ -748,10 +761,13 @@ test.describe("thread unread indicator", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
     // The crux: leave general. The unopened thread reply should still keep a
-    // numeric channel sidebar badge until the thread itself is read.
+    // channel sidebar badge — rendered as the thread-glyph badge, since the
+    // only unread is a plain thread reply — until the thread itself is read.
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
-    await expect(page.getByTestId("channel-unread-general")).toBeVisible();
+    await expect(
+      page.getByTestId("channel-thread-unread-general"),
+    ).toBeVisible();
   });
 
   // Regression guard for the all-replies window: when the loaded window holds

@@ -16,6 +16,10 @@ import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import {
+  computeThreadUnreadPillTarget,
+  threadUnreadPillLabel,
+} from "@/features/messages/lib/threadUnreadPill";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
@@ -458,6 +462,8 @@ const MessageTimelineBase = React.forwardRef<
   // channel shows its own pill.
   const [isUnreadPillDismissed, setIsUnreadPillDismissed] =
     React.useState(false);
+  const [isThreadPillDismissed, setIsThreadPillDismissed] =
+    React.useState(false);
   // Track whether the pill has been shown at least once this channel visit.
   // This prevents the dismiss effect from firing on mount (when isAtBottom
   // initializes as true) before the pill ever renders.
@@ -465,6 +471,7 @@ const MessageTimelineBase = React.forwardRef<
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset on channel switch only
   React.useEffect(() => {
     setIsUnreadPillDismissed(false);
+    setIsThreadPillDismissed(false);
     hasShownPillRef.current = false;
   }, [channelId]);
   React.useEffect(() => {
@@ -484,6 +491,36 @@ const MessageTimelineBase = React.forwardRef<
       jumpToMessage(firstUnreadMessageId);
     }
   }, [firstUnreadMessageId, jumpToMessage]);
+
+  // Thread-unread pill: the top-level pill counts top-level messages only, so
+  // a channel whose only unreads are thread replies shows nothing in the
+  // scrollback. When the top-level pill has nothing to show but the loaded
+  // window holds unread thread replies, offer a jump to the oldest thread
+  // root with unreads (its summary badge and row accent carry the signal into
+  // the thread). The top-level pill always takes precedence.
+  const threadUnreadPillTarget = React.useMemo(
+    () => computeThreadUnreadPillTarget(deferredMessages, threadUnreadCounts),
+    [deferredMessages, threadUnreadCounts],
+  );
+  const showThreadUnreadPill =
+    !showUnreadPill &&
+    !isThreadPillDismissed &&
+    !showTimelineSkeleton &&
+    threadUnreadPillTarget.oldestParentId !== null;
+  const handleJumpToOldestThreadUnread = React.useCallback(() => {
+    setIsThreadPillDismissed(true);
+    const parentId = threadUnreadPillTarget.oldestParentId;
+    if (!parentId) return;
+    jumpToMessage(parentId);
+    // Open the thread panel on the jump target so the unread replies are one
+    // gesture away instead of requiring a second click on the summary row.
+    if (onReply) {
+      const parent = deferredMessages.find(
+        (message) => message.id === parentId,
+      );
+      if (parent) onReply(parent);
+    }
+  }, [deferredMessages, jumpToMessage, onReply, threadUnreadPillTarget]);
 
   // Scroll to the active search match when it changes. `jumpToMessage` updates
   // the scroll anchor (so the post-commit restore won't yank the view back off
@@ -670,6 +707,22 @@ const MessageTimelineBase = React.forwardRef<
               label={unreadCountLabel(unreadCount)}
               onClick={handleJumpToOldestUnread}
               testId="message-unread-pill"
+            />
+          </div>
+        ) : showThreadUnreadPill ? (
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 z-30 flex translate-y-3 justify-center px-4",
+              channelChrome.top,
+            )}
+          >
+            <UnreadPill
+              direction="none"
+              label={threadUnreadPillLabel(
+                threadUnreadPillTarget.totalUnreadReplies,
+              )}
+              onClick={handleJumpToOldestThreadUnread}
+              testId="thread-unread-pill"
             />
           </div>
         ) : null}

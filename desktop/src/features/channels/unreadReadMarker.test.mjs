@@ -7,8 +7,11 @@ import {
   countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
+  isThreadOnlyBadgeObservedEvent,
+  makeObservedUnreadEvent,
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
+  unreadBadgeObservedEventsAreThreadOnly,
 } from "./unreadChannelCounts.ts";
 import {
   addThreadActivityItems,
@@ -476,4 +479,128 @@ test("addThreadActivityItems keeps newest items when input is newest-first", () 
   assert.equal(result.items.length, 100);
   assert.equal(result.items[0].id, "reply-1");
   assert.equal(result.items.at(-1).id, "reply-100");
+});
+
+function observedEvent({
+  id,
+  createdAt,
+  channelType = "stream",
+  isThreadedReply = false,
+  highPriority = false,
+  rootId = null,
+}) {
+  return makeObservedUnreadEvent({
+    id,
+    createdAt,
+    rootId,
+    highPriority,
+    channelType,
+    isThreadedReply,
+  });
+}
+
+test("thread-only classification: plain thread reply qualifies", () => {
+  const event = observedEvent({
+    id: "reply",
+    createdAt: 10,
+    isThreadedReply: true,
+    rootId: "root",
+  });
+  assert.equal(isThreadOnlyBadgeObservedEvent(event), true);
+});
+
+test("thread-only classification: thread reply that is also a mention does not qualify", () => {
+  const event = observedEvent({
+    id: "mention-reply",
+    createdAt: 10,
+    isThreadedReply: true,
+    highPriority: true,
+    rootId: "root",
+  });
+  assert.equal(isThreadOnlyBadgeObservedEvent(event), false);
+});
+
+test("thread-only classification: DM reply does not qualify", () => {
+  const event = observedEvent({
+    id: "dm-reply",
+    createdAt: 10,
+    channelType: "dm",
+    isThreadedReply: true,
+    rootId: "root",
+  });
+  assert.equal(isThreadOnlyBadgeObservedEvent(event), false);
+});
+
+test("channel is thread-only when every unread badge event is a plain thread reply", () => {
+  const events = new Map([
+    [
+      "r1",
+      observedEvent({
+        id: "r1",
+        createdAt: 10,
+        isThreadedReply: true,
+        rootId: "root",
+      }),
+    ],
+    [
+      "r2",
+      observedEvent({
+        id: "r2",
+        createdAt: 20,
+        isThreadedReply: true,
+        rootId: "root",
+      }),
+    ],
+  ]);
+  assert.equal(
+    unreadBadgeObservedEventsAreThreadOnly(events, () => null),
+    true,
+  );
+});
+
+test("channel is not thread-only when an unread mention coexists with thread replies", () => {
+  const events = new Map([
+    [
+      "r1",
+      observedEvent({
+        id: "r1",
+        createdAt: 10,
+        isThreadedReply: true,
+        rootId: "root",
+      }),
+    ],
+    ["m1", observedEvent({ id: "m1", createdAt: 20, highPriority: true })],
+  ]);
+  assert.equal(
+    unreadBadgeObservedEventsAreThreadOnly(events, () => null),
+    false,
+  );
+});
+
+test("channel is not thread-only once its thread replies are read", () => {
+  const events = new Map([
+    [
+      "r1",
+      observedEvent({
+        id: "r1",
+        createdAt: 10,
+        isThreadedReply: true,
+        rootId: "root",
+      }),
+    ],
+  ]);
+  assert.equal(
+    unreadBadgeObservedEventsAreThreadOnly(events, () => 10),
+    false,
+  );
+});
+
+// Forced-unread channels record no observed events (the unread derivation
+// short-circuits before the classifier); with no events the classifier must
+// report not-thread-only so the solid badge treatment is kept.
+test("channel without observed events (forced-unread) is not thread-only", () => {
+  assert.equal(
+    unreadBadgeObservedEventsAreThreadOnly(undefined, () => null),
+    false,
+  );
 });

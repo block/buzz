@@ -71,6 +71,7 @@ export const MessageRow = React.memo(
     huddleMemberPubkeysPending = false,
     actionBarPlacement = "floating",
     collapseDescendantsLabel,
+    hasUnreadThreadReplies = false,
     isFollowingThread,
     isContinuation = false,
     isUnread,
@@ -99,6 +100,9 @@ export const MessageRow = React.memo(
     collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
     connectDescendants?: boolean;
     depthGuideDepths?: ReadonlyArray<number>;
+    /** True when this message's thread has unread replies — renders a subtle
+     *  left accent so the unread thread is visible in the channel scroll. */
+    hasUnreadThreadReplies?: boolean;
     highlighted?: boolean;
     highlightDescendantRail?: boolean;
     highlightReplyConnector?: boolean;
@@ -788,6 +792,15 @@ export const MessageRow = React.memo(
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}
         >
+          {/* Real element, not a `before:` pseudo — `highlighted` already owns
+              the row's before: pseudo for the jump-highlight flash. */}
+          {hasUnreadThreadReplies ? (
+            <span
+              aria-hidden
+              className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-primary/60"
+              data-testid="thread-unread-accent"
+            />
+          ) : null}
           {isThreadReplyLayout ? (
             <>
               {avatarGutterNode}
@@ -842,6 +855,7 @@ export const MessageRow = React.memo(
     prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&
     prev.connectDescendants === next.connectDescendants &&
     numberArrayEqual(prev.depthGuideDepths, next.depthGuideDepths) &&
+    prev.hasUnreadThreadReplies === next.hasUnreadThreadReplies &&
     prev.highlightDescendantRail === next.highlightDescendantRail &&
     prev.highlighted === next.highlighted &&
     prev.highlightReplyConnector === next.highlightReplyConnector &&

@@ -15,12 +15,14 @@ export function UnreadPill({
   onClick,
   testId,
 }: {
-  direction: "up" | "down";
+  /** `none` renders a static pill without a direction arrow. */
+  direction: "up" | "down" | "none";
   label: string;
   onClick: () => void;
   testId: string;
 }) {
-  const Arrow = direction === "up" ? ArrowUp : ArrowDown;
+  const Arrow =
+    direction === "up" ? ArrowUp : direction === "down" ? ArrowDown : null;
   return (
     <Button
       className={UNREAD_PILL_CLASS}
@@ -30,7 +32,7 @@ export function UnreadPill({
       type="button"
       variant="outline"
     >
-      <Arrow aria-hidden />
+      {Arrow ? <Arrow aria-hidden /> : null}
       {label}
     </Button>
   );
