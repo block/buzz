@@ -453,16 +453,16 @@ export const MessageRow = React.memo(
         pubkey={message.pubkey}
         role={profilePopoverRole}
         botIdenticonValue={message.author}
-        triggerElement="span"
       >
-        <span
+        <button
           className={cn(
             "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
             avatarButtonRadiusClass,
           )}
+          type="button"
         >
           {avatarNode}
-        </span>
+        </button>
       </UserProfilePopover>
     ) : (
       <div className="flex shrink-0 items-start">{avatarNode}</div>
@@ -559,11 +559,13 @@ export const MessageRow = React.memo(
             pubkey={message.pubkey}
             role={profilePopoverRole}
             botIdenticonValue={message.author}
-            triggerElement="span"
           >
-            <span className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
+            <button
+              className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              type="button"
+            >
               {authorNode}
-            </span>
+            </button>
           </UserProfilePopover>
         ) : (
           authorNode

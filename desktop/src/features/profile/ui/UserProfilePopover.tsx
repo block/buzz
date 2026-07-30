@@ -561,7 +561,6 @@ export function UserProfilePopover({
       <PopoverAnchor asChild>
         <TriggerElement
           aria-label={triggerAriaLabel}
-          data-testid={`user-profile-trigger-${pubkey}`}
           role={canOpenProfilePanel ? "button" : undefined}
           tabIndex={canOpenProfilePanel ? 0 : undefined}
           onClick={handleTriggerClick}

@@ -835,7 +835,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     .getByTestId("message-row")
     .filter({ hasText: "Memory bot check-in" });
   await expect(messageRow).toBeVisible();
-  await page.getByTestId(`user-profile-trigger-${agentPubkey}`).click();
+  await messageRow.locator("button").first().click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await expectHashSearchParam(page, "profileTab", null);
@@ -962,7 +962,7 @@ test("restored Inbox deep link hides the back arrow", async ({ page }) => {
     .getByTestId("message-row")
     .filter({ hasText: "Indexing the channel catalog now." });
   await expect(messageRow).toBeVisible();
-  await page.getByTestId(`user-profile-trigger-${agentPubkey}`).click();
+  await messageRow.locator("button").first().click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 
   // Opened from the profile panel: a return target was captured, so the
@@ -1116,7 +1116,7 @@ test("owned agent absent from relay/managed lists still renders agent framing", 
     .getByTestId("message-row")
     .filter({ hasText: "Edna check-in" });
   await expect(messageRow).toBeVisible();
-  await page.getByTestId(`user-profile-trigger-${ednaPubkey}`).click();
+  await messageRow.locator("button").first().click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   // The bot indicator only renders when isBot resolves true — the assertion
