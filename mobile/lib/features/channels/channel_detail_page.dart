@@ -368,8 +368,11 @@ class ChannelDetailPage extends HookConsumerWidget {
                     ),
                   ),
           ),
-          if (!resolvedChannel.isForum && typingEntries.isNotEmpty)
-            _TypingIndicator(entries: typingEntries),
+          if (!resolvedChannel.isForum)
+            _ChannelActivityIndicator(
+              channelId: channel.id,
+              typingEntries: typingEntries,
+            ),
           if (!resolvedChannel.isForum &&
               resolvedChannel.isMember &&
               !resolvedChannel.isArchived)

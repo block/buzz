@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+import 'package:buzz/features/channels/agent_activity/active_agent_turns.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -46,6 +47,11 @@ final _testChannel = Channel(
   memberCount: 5,
   isMember: true,
 );
+
+final _mutableActiveTurnsProvider =
+    NotifierProvider<_MutableActiveTurnsNotifier, List<ActiveAgentTurn>>(
+      _MutableActiveTurnsNotifier.new,
+    );
 
 NostrEvent _textMsg({
   required String id,
@@ -139,6 +145,9 @@ NostrEvent _edit({
 Widget _buildTestable({
   required List<NostrEvent> messages,
   List<TypingEntry> typing = const [],
+  List<ActiveAgentTurn> activeTurns = const [],
+  bool mutableActiveTurns = false,
+  VoidCallback? onPageBuild,
   Map<String, UserProfile> users = const {},
   List<ChannelMember> members = const [],
   Channel? channel,
@@ -169,6 +178,11 @@ Widget _buildTestable({
       channelTypingProvider(
         _channelId,
       ).overrideWith(() => _FakeTypingNotifier(typing)),
+      activeAgentTurnsProvider.overrideWith(
+        (ref) => mutableActiveTurns
+            ? ref.watch(_mutableActiveTurnsProvider)
+            : activeTurns,
+      ),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
@@ -209,11 +223,16 @@ Widget _buildTestable({
         child: child!,
       ),
       navigatorObservers: navigatorObservers,
-      home: ChannelDetailPage(
-        channel: resolvedChannel,
-        initialMessageId: initialMessageId,
-        initialThreadRootId: initialThreadRootId,
-      ),
+      home: onPageBuild == null
+          ? ChannelDetailPage(
+              channel: resolvedChannel,
+              initialMessageId: initialMessageId,
+              initialThreadRootId: initialThreadRootId,
+            )
+          : _CountingChannelDetailPage(
+              channel: resolvedChannel,
+              onBuild: onPageBuild,
+            ),
     ),
   );
 }
@@ -1732,7 +1751,135 @@ void main() {
     });
   });
 
-  group('Typing indicator', () {
+  group('Channel activity indicator', () {
+    testWidgets('keeps an observer-backed bot visibly working', (tester) async {
+      final now = DateTime.utc(2026, 7, 30);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          typing: [
+            TypingEntry(
+              pubkey: 'alice',
+              expiresAtMs: now.millisecondsSinceEpoch,
+            ),
+          ],
+          activeTurns: [
+            ActiveAgentTurn(
+              agentPubkey: 'kunst',
+              channelId: _channelId,
+              turnId: 'turn-1',
+              startedAt: now,
+              lastActivityAt: now,
+            ),
+          ],
+          members: [ChannelMember(pubkey: 'kunst', role: 'bot', joinedAt: now)],
+          users: const {
+            'kunst': UserProfile(pubkey: 'kunst', displayName: 'Kunst'),
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Kunst is working · Alice is typing…'), findsOneWidget);
+      expect(find.textContaining('Kunst is typing'), findsNothing);
+    });
+
+    testWidgets('labels bot typing as a working fallback', (tester) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          typing: [
+            TypingEntry(
+              pubkey: 'kunst',
+              expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+            ),
+          ],
+          members: [
+            ChannelMember(
+              pubkey: 'kunst',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          users: const {
+            'kunst': UserProfile(pubkey: 'kunst', displayName: 'Kunst'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Kunst is working…'), findsOneWidget);
+      expect(find.text('Kunst is typing…'), findsNothing);
+    });
+
+    testWidgets('does not surface thread-only bot typing in the channel row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          typing: [
+            TypingEntry(
+              pubkey: 'kunst',
+              threadHeadId: 'thread-1',
+              expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+            ),
+          ],
+          members: [
+            ChannelMember(
+              pubkey: 'kunst',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          users: const {
+            'kunst': UserProfile(pubkey: 'kunst', displayName: 'Kunst'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Kunst is working'), findsNothing);
+    });
+
+    testWidgets('contains active-turn rebuilds within the activity row', (
+      tester,
+    ) async {
+      var pageBuilds = 0;
+      final now = DateTime.utc(2026, 7, 30);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          mutableActiveTurns: true,
+          onPageBuild: () => pageBuilds += 1,
+          members: [ChannelMember(pubkey: 'kunst', role: 'bot', joinedAt: now)],
+          users: const {
+            'kunst': UserProfile(pubkey: 'kunst', displayName: 'Kunst'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final settledPageBuilds = pageBuilds;
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(_CountingChannelDetailPage)),
+      );
+
+      container.read(_mutableActiveTurnsProvider.notifier).setTurns([
+        ActiveAgentTurn(
+          agentPubkey: 'kunst',
+          channelId: _channelId,
+          turnId: 'turn-1',
+          startedAt: now,
+          lastActivityAt: now,
+        ),
+      ]);
+      await tester.pump();
+
+      expect(find.text('Kunst is working…'), findsOneWidget);
+      expect(pageBuilds, settledPageBuilds);
+    });
+
     testWidgets('shows single typer', (tester) async {
       await tester.pumpWidget(
         _buildTestable(
@@ -2264,6 +2411,28 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 
   void connect() {
     state = const SessionState(status: SessionStatus.connected);
+  }
+}
+
+class _MutableActiveTurnsNotifier extends Notifier<List<ActiveAgentTurn>> {
+  @override
+  List<ActiveAgentTurn> build() => const [];
+
+  void setTurns(List<ActiveAgentTurn> turns) => state = turns;
+}
+
+class _CountingChannelDetailPage extends ChannelDetailPage {
+  final VoidCallback onBuild;
+
+  const _CountingChannelDetailPage({
+    required super.channel,
+    required this.onBuild,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    onBuild();
+    return super.build(context, ref);
   }
 }
 
