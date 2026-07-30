@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp buzz-message-mcp git-credential-nostr buzz)
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 TARGET=${1:-$HOST}
 BINARIES_DIR="desktop/src-tauri/binaries"

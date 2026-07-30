@@ -19,6 +19,7 @@ pub struct Shim {
     _dir: TempDir,
     pub path_env: String,
     pub git_env: Vec<(String, String)>,
+    pub buzz_path: PathBuf,
 }
 
 impl Shim {
@@ -38,6 +39,7 @@ impl Shim {
         ] {
             symlink(&self_exe, &dir.path().join(name))?;
         }
+        let buzz_path = dir.path().join("buzz");
 
         let original = std::env::var_os("PATH").unwrap_or_default();
         let mut entries = vec![PathBuf::from(dir.path())];
@@ -71,6 +73,7 @@ impl Shim {
             _dir: dir,
             path_env,
             git_env,
+            buzz_path,
         })
     }
 }

@@ -22,7 +22,11 @@
 //! channel. `next_event()` reads from the event receiver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Mutex;
 use std::time::Duration;
+
+use tokio::sync::Semaphore;
+use tokio::time::sleep_until;
 
 /// Default capacity of the event channel from background task to harness.
 /// Override with `BUZZ_ACP_EVENT_BUFFER` env var at startup.
@@ -222,6 +226,80 @@ pub(crate) fn merge_discovered_channels(
     map
 }
 
+/// Minimum gate duration when an HTTP 429 omits or provides an unusable
+/// `Retry-After` hint. Matches the WebSocket `set_rate_limit_gate` floor.
+const HTTP_RATE_LIMIT_DEFAULT_SECS: u64 = 5;
+
+/// Maximum `Retry-After` hint honoured from an HTTP 429 response.
+const HTTP_RATE_LIMIT_MAX_HINT_SECS: u64 = 300;
+
+/// Process-local HTTP bridge rate-limit deadline shared by every [`RestClient`] clone.
+static HTTP_RATE_GATE: Mutex<Option<tokio::time::Instant>> = Mutex::new(None);
+
+/// Serializes HTTP bridge requests so prompt-task clones cannot pass the gate
+/// together and stampede the relay before the first 429 arms it.
+static HTTP_BRIDGE_PERMITS: Semaphore = Semaphore::const_new(1);
+
+/// Parse an HTTP `Retry-After` header value as whole seconds.
+///
+/// Integer seconds are returned directly. HTTP-date values and garbage input
+/// return `None` so callers can apply the conservative default.
+pub(crate) fn parse_http_retry_after_secs(header: Option<&str>) -> Option<u64> {
+    let value = header?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    value.parse::<u64>().ok()
+}
+
+/// Arm or extend the shared HTTP rate-limit gate from a 429 `Retry-After` hint.
+///
+/// Hints below 2 s (including absent/`0`) floor to [`HTTP_RATE_LIMIT_DEFAULT_SECS`].
+/// Overlapping 429s only extend the deadline — a shorter hint never shortens an
+/// active gate.
+fn activate_http_rate_limit(retry_secs: Option<u64>) {
+    let secs = match retry_secs {
+        Some(s) if s >= 2 => s.min(HTTP_RATE_LIMIT_MAX_HINT_SECS),
+        _ => HTTP_RATE_LIMIT_DEFAULT_SECS,
+    };
+    let new_deadline = tokio::time::Instant::now() + jittered_duration(Duration::from_secs(secs));
+    let mut guard = HTTP_RATE_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    match *guard {
+        Some(existing) if existing > new_deadline => {}
+        _ => *guard = Some(new_deadline),
+    }
+}
+
+/// Wait until the shared HTTP rate-limit gate is clear.
+///
+/// Returns immediately when inactive. Loops after sleeping because a concurrent
+/// 429 may extend the expiry while this caller is parked. The mutex is not held
+/// across the sleep.
+async fn wait_for_http_rate_limit() {
+    loop {
+        let expiry = {
+            let mut guard = HTTP_RATE_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            match *guard {
+                Some(expiry) if expiry > tokio::time::Instant::now() => Some(expiry),
+                _ => {
+                    *guard = None;
+                    None
+                }
+            }
+        };
+        match expiry {
+            Some(expiry) => sleep_until(expiry).await,
+            None => return,
+        }
+    }
+}
+
+/// Reset the process-local HTTP rate gate. Test-only.
+#[cfg(test)]
+pub(crate) fn reset_http_rate_gate_for_test() {
+    *HTTP_RATE_GATE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Lightweight HTTP client for pre-prompt context fetches via the Nostr HTTP bridge.
 ///
 /// Extracted from `HarnessRelay` fields so it can be shared (via `Arc`) with
@@ -310,6 +388,8 @@ impl RestClient {
     /// Retry helper: executes `build_request` up to 4 times (1 attempt + 3 retries)
     /// on transient failures (429, 502, 503, 504, timeout, connect errors).
     ///
+    /// HTTP 429 responses arm a process-local gate from `Retry-After` (shared by
+    /// every [`RestClient`] clone) instead of using the short fixed backoff.
     /// NIP-98 auth events are re-signed on each attempt (they have a ±60s window).
     async fn request_with_retry<F, Fut>(
         &self,
@@ -322,22 +402,49 @@ impl RestClient {
         Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
     {
         let mut last_err = None;
+        let mut last_was_rate_limited = false;
 
         for (attempt, delay) in std::iter::once(None)
             .chain(REST_RETRY_BASE_DELAYS.iter().map(|d| Some(*d)))
             .enumerate()
         {
             if let Some(base) = delay {
-                let jittered = jittered_duration(base);
-                tracing::debug!(
-                    "retrying {method} {path} (attempt {attempt}) in {:.1}s",
-                    jittered.as_secs_f64()
-                );
-                tokio::time::sleep(jittered).await;
+                if !last_was_rate_limited {
+                    let jittered = jittered_duration(base);
+                    tracing::debug!(
+                        "retrying {method} {path} (attempt {attempt}) in {:.1}s",
+                        jittered.as_secs_f64()
+                    );
+                    tokio::time::sleep(jittered).await;
+                }
             }
+            last_was_rate_limited = false;
+
+            let _permit = HTTP_BRIDGE_PERMITS
+                .acquire()
+                .await
+                .map_err(|_| RelayError::Http("HTTP bridge semaphore closed".into()))?;
+            // Check the gate only after admission. A waiter may have entered the
+            // semaphore queue before another request armed the gate.
+            wait_for_http_rate_limit().await;
 
             match build_request().await {
                 Ok(resp) if resp.status().is_success() => return Ok(resp),
+                Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    let retry_hdr = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok());
+                    let retry_secs = parse_http_retry_after_secs(retry_hdr);
+                    activate_http_rate_limit(retry_secs);
+                    tracing::warn!(
+                        "{method} {path} returned HTTP 429 — shared gate armed (retry_after={retry_secs:?})"
+                    );
+                    last_err = Some(RelayError::Http(format!(
+                        "{method} {path} returned HTTP 429"
+                    )));
+                    last_was_rate_limited = true;
+                }
                 Ok(resp) if is_retriable_status(resp.status()) => {
                     let status = resp.status();
                     tracing::warn!("{method} {path} returned retriable HTTP {status}");
@@ -6229,5 +6336,133 @@ mod tests {
             !state.channel_dropped_since.contains_key(&channel_id),
             "channel_dropped_since must be cleared on successful drain"
         );
+    }
+
+    // ── HTTP bridge rate gate (shared across RestClient clones) ───────────────
+
+    /// Serialize gate tests — the gate is process-wide static state.
+    static HTTP_GATE_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn parse_http_retry_after_secs_valid_and_invalid() {
+        assert_eq!(parse_http_retry_after_secs(Some("12")), Some(12));
+        assert_eq!(parse_http_retry_after_secs(Some("0")), Some(0));
+        assert_eq!(parse_http_retry_after_secs(None), None);
+        assert_eq!(parse_http_retry_after_secs(Some("")), None);
+        assert_eq!(parse_http_retry_after_secs(Some("not-a-number")), None);
+        assert_eq!(
+            parse_http_retry_after_secs(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn http_rate_gate_extends_without_shortening() {
+        let _serial = HTTP_GATE_TEST_SERIAL.lock().await;
+        reset_http_rate_gate_for_test();
+
+        activate_http_rate_limit(Some(30));
+        let first = HTTP_RATE_GATE.lock().unwrap().unwrap();
+
+        activate_http_rate_limit(Some(1));
+        let second = HTTP_RATE_GATE.lock().unwrap().unwrap();
+        assert!(
+            second >= first,
+            "shorter Retry-After must not shorten an active gate"
+        );
+
+        reset_http_rate_gate_for_test();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn http_rate_gate_missing_retry_after_uses_default() {
+        let _serial = HTTP_GATE_TEST_SERIAL.lock().await;
+        reset_http_rate_gate_for_test();
+
+        let before = tokio::time::Instant::now();
+        activate_http_rate_limit(None);
+        let deadline = HTTP_RATE_GATE.lock().unwrap().unwrap();
+        let remaining = deadline.duration_since(before);
+
+        // Default is 5s with up to +20% jitter → at least 4s.
+        assert!(remaining >= Duration::from_secs(4));
+        assert!(remaining <= Duration::from_secs(6));
+
+        reset_http_rate_gate_for_test();
+    }
+
+    #[tokio::test]
+    async fn concurrent_rest_client_clones_share_http_rate_gate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _serial = HTTP_GATE_TEST_SERIAL.lock().await;
+        reset_http_rate_gate_for_test();
+
+        let server = MockServer::start().await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_mock = hits.clone();
+        let hit_times = Arc::new(StdMutex::new(Vec::new()));
+        let hit_times_for_mock = hit_times.clone();
+
+        Mock::given(method("POST"))
+            .and(path("/query"))
+            .respond_with(move |_: &wiremock::Request| {
+                hit_times_for_mock
+                    .lock()
+                    .unwrap()
+                    .push(tokio::time::Instant::now());
+                let n = hits_for_mock.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    ResponseTemplate::new(429).insert_header("Retry-After", "2")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!([]))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let base_client = RestClient {
+            http: reqwest::Client::new(),
+            base_url: server.uri(),
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+
+        let filters = [nostr::Filter::new().kind(nostr::Kind::Metadata)];
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let client = base_client.clone();
+            let filters = filters.clone();
+            handles.push(tokio::spawn(async move { client.query(&filters).await }));
+        }
+
+        for handle in handles {
+            let result = handle.await.expect("task join");
+            assert!(
+                result.is_ok(),
+                "expected shared gate retry to succeed: {result:?}"
+            );
+        }
+
+        let total_hits = hits.load(Ordering::SeqCst);
+        assert!(
+            total_hits <= 6,
+            "without shared pacing clones would each retry independently (got {total_hits} hits)"
+        );
+        assert!(
+            total_hits >= 2,
+            "expected at least one 429 and follow-up successes (got {total_hits} hits)"
+        );
+        let times = hit_times.lock().unwrap();
+        assert!(
+            times[1].duration_since(times[0]) >= Duration::from_millis(1500),
+            "the first queued clone bypassed the shared Retry-After gate"
+        );
+
+        reset_http_rate_gate_for_test();
     }
 }

@@ -568,6 +568,37 @@ pub fn run() {
                 state
                     .managed_agent_restore_pending
                     .store(true, Ordering::Release);
+
+                // Keep start-on-launch agents alive after the initial restore.
+                // A killed child can remain as a zombie until its parent calls
+                // try_wait(); the same restore path both reaps that child and
+                // starts the now-missing runtime. The pending gate prevents this
+                // loop from racing workspace relay/identity installation.
+                let keepalive_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use std::time::Duration;
+                    use tauri::Manager;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        let state = keepalive_handle.state::<AppState>();
+                        if state
+                            .managed_agent_restore_pending
+                            .load(Ordering::Acquire)
+                        {
+                            continue;
+                        }
+                        if let Err(error) = managed_agents::restore_managed_agents_on_launch(
+                            &keepalive_handle,
+                            &state.shutdown_started,
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "buzz-desktop: managed-agent keepalive restore failed: {error}"
+                            );
+                        }
+                    }
+                });
             }
 
             // Periodic sweep: reap orphaned agents from dead instances every 60s.

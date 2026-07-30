@@ -4180,21 +4180,23 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
     }
+    let server_name = std::path::Path::new(&config.mcp_command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mcp")
+        .to_string();
+    let can_sign_buzz_messages = server_name == "buzz-message-mcp";
     vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
+        name: server_name,
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
+            let mut env = vec![EnvVar {
+                name: "BUZZ_RELAY_URL".into(),
+                value: config.relay_url.clone(),
+            }];
+            if can_sign_buzz_messages {
+                env.push(EnvVar {
                     name: "BUZZ_PRIVATE_KEY".into(),
                     // bech32 encoding of a valid secret key is infallible.
                     // Panic here is correct: injecting a bogus secret would cause
@@ -4204,16 +4206,16 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         .secret_key()
                         .to_bech32()
                         .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
+                });
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // only to the restricted messaging personality.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
                 }
             }
             // Forward the agent's display name so dev-mcp can use it as the git
@@ -4999,7 +5001,7 @@ mod build_mcp_servers_tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
-            mcp_command: "test-mcp-server".into(),
+            mcp_command: "buzz-message-mcp".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5044,7 +5046,7 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
-        assert_eq!(server.name, "test-mcp-server");
+        assert_eq!(server.name, "buzz-message-mcp");
 
         let names: Vec<&str> = server.env.iter().map(|e| e.name.as_str()).collect();
         assert!(
@@ -5085,6 +5087,25 @@ mod build_mcp_servers_tests {
         let server = &servers[0];
         let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
+    }
+
+    #[test]
+    fn general_mcp_server_never_receives_signing_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
+        let mut config = test_config();
+        config.mcp_command = "buzz-dev-mcp".into();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_AUTH_TAG");
+
+        let names: Vec<&str> = servers[0]
+            .env
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert!(!names.contains(&"BUZZ_PRIVATE_KEY"));
+        assert!(!names.contains(&"BUZZ_AUTH_TAG"));
+        assert!(names.contains(&"BUZZ_RELAY_URL"));
     }
 
     #[test]
