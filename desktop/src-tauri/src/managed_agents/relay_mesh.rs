@@ -42,6 +42,16 @@ pub fn apply_relay_mesh_env(
         RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV.to_string(),
         "1".to_string(),
     );
+    // Shared compute runs small local models, which reliably finish a
+    // multi-step turn by writing the answer as prose instead of calling
+    // `send_message` — the reply is then never published. Opt this preset into
+    // the harness fallback that delivers that text. Mesh-only: cloud models
+    // publish their own replies, where the fallback would double-post.
+    // Value is `true`, not `1`: these are clap bool flags, which reject `1`.
+    env.insert(
+        "BUZZ_ACP_DELIVER_PLAIN_REPLIES".to_string(),
+        "true".to_string(),
+    );
     // Keep the requested response inside smaller local-model context windows.
     // These are defaults, not policy: the effective agent/persona/global env
     // may deliberately choose a smaller cap or a different effort. This function
@@ -133,6 +143,24 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+        // Small local models end multi-step turns with prose instead of a
+        // `send_message` call, so shared compute opts into harness delivery.
+        assert_eq!(
+            env.get("BUZZ_ACP_DELIVER_PLAIN_REPLIES").map(String::as_str),
+            // `true`, not `1`: clap bool flags reject `1` and the harness
+            // exits at startup with "invalid value '1'".
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn non_mesh_provider_does_not_opt_into_plain_reply_delivery() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(&mut env, Some("anthropic"), Some("claude-sonnet-4"));
+
+        // Cloud models publish their own replies; delivering streamed text
+        // there would double-post.
+        assert_eq!(env.get("BUZZ_ACP_DELIVER_PLAIN_REPLIES"), None);
     }
 
     #[test]
