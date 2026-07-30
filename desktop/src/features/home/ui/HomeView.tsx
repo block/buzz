@@ -15,6 +15,10 @@ import {
   formatInboxFullTimestamp,
   getInboxItemConversationId,
 } from "@/features/home/lib/inbox";
+import {
+  readInboxUnreadOnlyPreference,
+  writeInboxUnreadOnlyPreference,
+} from "@/features/home/lib/inboxUnreadOnlyPreference";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
 import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
@@ -107,7 +111,14 @@ export function HomeView({
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
-  const [unreadOnly, setUnreadOnly] = React.useState(false);
+  // Persist "Show unread only" across Inbox remounts and app restarts (#3669).
+  const [unreadOnly, setUnreadOnly] = React.useState(() =>
+    readInboxUnreadOnlyPreference(),
+  );
+  const handleUnreadOnlyChange = React.useCallback((checked: boolean) => {
+    setUnreadOnly(checked);
+    writeInboxUnreadOnlyPreference(checked);
+  }, []);
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
   // restore it from the URL. Default/automatic selection stays local-only —
@@ -697,7 +708,7 @@ export function HomeView({
                 handleUserSelectItem(null);
                 setSelectedReminderId(reminderId);
               }}
-              onUnreadOnlyChange={setUnreadOnly}
+              onUnreadOnlyChange={handleUnreadOnlyChange}
               reminderPubkey={currentPubkey}
               reminders={pendingReminders}
               selectedConversationId={selectedConversationId}
