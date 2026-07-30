@@ -13,14 +13,22 @@ function cacheTitle(href: string): Promise<string | null> {
   if (cached instanceof Promise) return cached;
   if (cached !== undefined) return Promise.resolve(cached);
 
-  const promise = invokeTauri<string | null>("fetch_page_title", { href })
+  // Authenticated sources first: Slack permalinks and private Google files
+  // resolve through `sq agent-tools` into labels like "joah in #general" or
+  // the doc's real title. Anything unresolved falls back to the generic
+  // HTML page-title fetch.
+  const promise = invokeTauri<string | null>("fetch_agent_link_label", { href })
+    .catch(() => null)
+    .then(
+      (label) =>
+        label ??
+        invokeTauri<string | null>("fetch_page_title", { href }).catch(
+          () => null,
+        ),
+    )
     .then((title) => {
       titleCache.set(href, title);
       return title;
-    })
-    .catch(() => {
-      titleCache.set(href, null);
-      return null;
     });
   titleCache.set(href, promise);
   return promise;

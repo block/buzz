@@ -15,6 +15,7 @@ export function DevLink({ href, label }: { href: string; label?: string }) {
   return (
     <a
       className="inline-flex max-w-full cursor-pointer items-baseline gap-1 align-baseline text-sky-500 hover:underline"
+      data-dev-link=""
       href={href}
       onClick={(event) => {
         event.preventDefault();

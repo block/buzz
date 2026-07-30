@@ -109,10 +109,20 @@ fn extract_page_title(html: &str) -> Option<String> {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    (!title.is_empty()).then_some(title)
+    if title.is_empty() || is_auth_wall_title(&title) {
+        return None;
+    }
+    Some(title)
 }
 
-fn is_supported_google_link(url: &Url) -> bool {
+/// Auth walls (Slack, Google, Okta, ...) title their login pages "Sign in
+/// ..." — worse than useless as a link label, so render the bare URL instead.
+fn is_auth_wall_title(title: &str) -> bool {
+    let lower = title.to_ascii_lowercase();
+    lower.starts_with("sign in") || lower.starts_with("log in") || lower.starts_with("login")
+}
+
+pub(crate) fn is_supported_google_link(url: &Url) -> bool {
     if url.scheme() != "https" {
         return false;
     }
@@ -338,6 +348,20 @@ mod tests {
             None
         );
         assert_eq!(extract_page_title("<title>   </title>"), None);
+    }
+
+    #[test]
+    fn page_title_rejects_auth_wall_titles() {
+        assert_eq!(extract_page_title("<title>Sign in to Block</title>"), None);
+        assert_eq!(
+            extract_page_title("<title>Log in | Workspace</title>"),
+            None
+        );
+        assert_eq!(extract_page_title("<title>LOGIN</title>"), None);
+        assert_eq!(
+            extract_page_title("<title>Design signals</title>").as_deref(),
+            Some("Design signals")
+        );
     }
 
     #[test]

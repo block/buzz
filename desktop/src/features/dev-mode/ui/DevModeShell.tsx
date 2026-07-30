@@ -15,6 +15,7 @@ import {
   loadLastComposerModeKey,
   storeLastComposerModeKey,
 } from "@/features/dev-mode/lib/composerModePreference";
+import { copySelectionWithLinkUrls } from "@/features/dev-mode/lib/copyLinkUrls";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import {
   aggregateLastActivity,
@@ -795,6 +796,9 @@ export function DevModeShell({
       <div
         className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background"
         data-testid="dev-mode-shell"
+        onCopy={(event) => {
+          copySelectionWithLinkUrls(event.nativeEvent);
+        }}
         onFocusCapture={handleFocusCapture}
         onMouseDown={handleShellMouseDown}
         onMouseUp={handleShellMouseUp}
