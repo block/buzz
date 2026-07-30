@@ -4,12 +4,26 @@ import { installMockBridge } from "../helpers/bridge";
 
 // The fresh composer must target the default agent — the first managed
 // (local) agent — rather than plain chat. Tab still cycles through every
-// mode, including chat.
+// mode, including chat. Relay agents need an explicit allowlist to appear
+// in the cycle, so the specs seed managed agents (always eligible).
+
+const managedAgents = [
+  {
+    pubkey: "1111111111111111111111111111111111111111111111111111111111111111",
+    name: "Fizz",
+    status: "stopped" as const,
+  },
+  {
+    pubkey: "2222222222222222222222222222222222222222222222222222222222222222",
+    name: "Honey",
+    status: "stopped" as const,
+  },
+];
 
 test("fresh composer defaults to an agent target, not chat", async ({
   page,
 }) => {
-  await installMockBridge(page);
+  await installMockBridge(page, { managedAgents });
   await page.addInitScript(() => {
     localStorage.setItem("buzz.displayStyle", "developer");
   });
@@ -18,8 +32,8 @@ test("fresh composer defaults to an agent target, not chat", async ({
   const composer = page.getByTestId("dev-mode-composer");
   await composer.waitFor();
 
-  // Mock managed agents (Fizz/Honey/Bumble) load async; the mode line must
-  // settle on "to <agent>" without any Tab press.
+  // Seeded managed agents load async; the mode line must settle on
+  // "to <agent>" without any Tab press.
   const modeLine = page.getByTestId("dev-mode-pill").first();
   await expect(modeLine).toContainText(/^to /);
   await expect(modeLine).not.toHaveText("chat");
@@ -41,7 +55,7 @@ test("fresh composer defaults to an agent target, not chat", async ({
 test("composer remembers the last Tab-cycled target across reloads", async ({
   page,
 }) => {
-  await installMockBridge(page);
+  await installMockBridge(page, { managedAgents });
   await page.addInitScript(() => {
     localStorage.setItem("buzz.displayStyle", "developer");
   });

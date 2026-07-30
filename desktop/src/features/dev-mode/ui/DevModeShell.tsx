@@ -1,7 +1,5 @@
 import * as React from "react";
 
-import { useAppShell } from "@/app/AppShellContext";
-
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   type ChannelRef,
@@ -30,6 +28,11 @@ import {
   useDevComposerModes,
   type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
+import { useDevReadMarking } from "@/features/dev-mode/lib/useDevReadMarking";
+import {
+  useDevRouteSeed,
+  useDevRouteSync,
+} from "@/features/dev-mode/lib/useDevRouteSync";
 import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActions";
 import { useDevModeShortcuts } from "@/features/dev-mode/lib/useDevModeShortcuts";
 import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
@@ -93,15 +96,22 @@ export function DevModeShell({
   const { createSessionChannel, createSubChannel, sendToSession } =
     useDevSessionActions(identityQuery.data);
 
-  const [view, setView] = React.useState<ShellView>("fresh");
+  // Toggling display styles retains the open conversation: the shell seeds
+  // from the URL the standard layout left behind and syncs back below.
+  const routeSeed = useDevRouteSeed();
+  const [view, setView] = React.useState<ShellView>(
+    routeSeed ? "channel" : "fresh",
+  );
   const [input, setInput] = React.useState("");
   const [modeKey, setModeKey] = React.useState<string | null>(
     loadLastComposerModeKey,
   );
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
-    null,
+    routeSeed?.channelId ?? null,
   );
-  const [navigatorId, setNavigatorId] = React.useState<string | null>(null);
+  const [navigatorId, setNavigatorId] = React.useState<string | null>(
+    routeSeed?.channelId ?? null,
+  );
   const [selectedRootId, setSelectedRootId] = React.useState<string | null>(
     null,
   );
@@ -265,26 +275,7 @@ export function DevModeShell({
   );
   const selectedRoot = roots.find((root) => root.id === selectedRootId) ?? null;
 
-  // Viewing an open channel marks its channel-level posts read (same passive
-  // NIP-RS path the standard channel screen uses). topLevelOnly keeps thread
-  // replies out of the marker — thread unread clears through what is actually
-  // seen: the inline first reply (transcript) and the side chat (panel).
-  const { markChannelRead } = useAppShell();
-  const latestRootAt =
-    roots.length > 0 ? roots[roots.length - 1].created_at : null;
-  const activeChannelIdForRead = activeChannel?.isMember
-    ? activeChannel.id
-    : null;
-  React.useEffect(() => {
-    if (!activeChannelIdForRead) return;
-    markChannelRead(
-      activeChannelIdForRead,
-      latestRootAt === null
-        ? null
-        : new Date(latestRootAt * 1_000).toISOString(),
-      { topLevelOnly: true },
-    );
-  }, [activeChannelIdForRead, latestRootAt, markChannelRead]);
+  useDevReadMarking(activeChannel, roots);
 
   // Card selection and the side chat belong to one channel's transcript.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — selection resets only on channel switch
@@ -321,6 +312,13 @@ export function DevModeShell({
 
   const openChannel = React.useCallback(
     (channelId: string) => {
+      // Cleared eagerly so URL sync never pairs old thread with new channel.
+      if (channelId !== effectiveSessionId) {
+        setSelectedRootId(null);
+        setThreadOpen(false);
+        setActivePane("main");
+        setSubDraftParentId(null);
+      }
       setActiveSessionId(channelId);
       // The left list only shows mains — highlight the family's parent when
       // a sub tab is opened directly (palette, #ref link, tab click).
@@ -328,7 +326,7 @@ export function DevModeShell({
       setView("channel");
       focusComposer();
     },
-    [focusComposer, subIndex],
+    [effectiveSessionId, focusComposer, subIndex],
   );
 
   const handleOpenThread = React.useCallback((rootId: string) => {
@@ -345,6 +343,17 @@ export function DevModeShell({
     roots,
     openChannel,
     openThread: handleOpenThread,
+  });
+
+  useDevRouteSync({
+    seed: routeSeed,
+    view,
+    channelId: effectiveSessionId,
+    threadOpen,
+    selectedRootId,
+    messagesReady: messagesQuery.isSuccess,
+    roots,
+    onOpenThread: handleOpenThread,
   });
 
   // "+ tab" (tab strip, palette, or ⌘⇧T): the composer's next Enter spawns

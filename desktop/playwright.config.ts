@@ -33,6 +33,7 @@ export default defineConfig({
         "**/dev-mode-palette.spec.ts",
         "**/dev-mode-shortcuts.spec.ts",
         "**/dev-mode-composer-default.spec.ts",
+        "**/dev-mode-display-toggle.spec.ts",
         "**/dev-mode-first-reply.spec.ts",
         "**/dev-mode-sub-channels.spec.ts",
         "**/dev-mode-unread.spec.ts",
