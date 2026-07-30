@@ -8,7 +8,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
 
-// Backend event emitted when the user clicks a native (Linux) notification.
+// Backend event emitted when the user clicks a native notification.
 // See src-tauri/src/commands/notifications.rs.
 const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 
@@ -63,6 +63,15 @@ function notificationExtra(
   return {
     buzzNotificationTarget: target,
   };
+}
+
+export function shouldUseNativeNotification(
+  isTauriRuntime: boolean,
+  isLinux: boolean,
+  isMac: boolean,
+  hasTarget: boolean,
+): boolean {
+  return isTauriRuntime && (isLinux || (isMac && hasTarget));
 }
 
 function parseNotificationTarget(
@@ -197,6 +206,8 @@ export async function listenForDesktopNotificationActions(
 
     // Clicks on Linux notifications come back via a backend event rather than
     // the plugin's onAction (whose connection is torn down before it can fire).
+    // Targeted macOS clicks use the same event because the plugin drops the
+    // target metadata.
     try {
       nativeUnlisten = await listen<unknown>(
         NATIVE_NOTIFICATION_ACTIVATED_EVENT,
@@ -296,8 +307,17 @@ export async function sendDesktopNotification(
   // On Linux the bundled notification plugin posts via a D-Bus connection that
   // it drops immediately; GNOME 46+ then dismisses the notification before it
   // is seen. Route through a backend command that keeps the connection alive.
+  // Targeted macOS notifications use the same command because the plugin drops
+  // their routing data when clicked.
   // See src-tauri/src/commands/notifications.rs.
-  if (isTauri() && isLinuxPlatform()) {
+  if (
+    shouldUseNativeNotification(
+      isTauri(),
+      isLinuxPlatform(),
+      isMacPlatform(),
+      Boolean(payload.target),
+    )
+  ) {
     try {
       await invoke("show_native_notification", {
         title: payload.title,
