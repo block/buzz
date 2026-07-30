@@ -571,22 +571,10 @@ export type AcpRuntime = AcpRuntimeCatalogEntry & {
   binaryPath: string;
 };
 
-export type InstallStepResult = {
-  step: string;
-  command: string;
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  hint?: string;
-};
-
-export type InstallRuntimeResult = {
-  success: boolean;
-  steps: InstallStepResult[];
-  restartedCount: number;
-  failedRestartCount: number;
-};
+export type {
+  InstallRuntimeResult,
+  InstallStepResult,
+} from "./installTypes";
 
 export type AcpAuthMethod = {
   id: string;

@@ -5780,15 +5780,21 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn test_usage_metrics_lock_has_single_owner_and_releases_on_drop() {
-        let database_url =
-            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&database_url)
+        // Use a private scratch database — not the shared TEST_DATABASE_URL.
+        // Postgres advisory locks are per-database; hardcoding the production
+        // USAGE_METRICS_LOCK_KEY (0x4255_5A5A_4D45_5452) on the shared test DB
+        // races any live buzz-relay on the same database (see #3619).
+        let admin_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
             .await
-            .expect("connect to test DB");
+            .expect("connect admin to create scratch db");
+        let (pool, scratch_name) = create_scratch_db(&admin, "usage_metrics_lock").await;
         let first = Db::from_pool(pool.clone());
-        let second = Db::from_pool(pool);
+        let second = Db::from_pool(pool.clone());
+        // Same key as production (`buzz-relay` USAGE_METRICS_LOCK_KEY) — safe here
+        // because the scratch DB is empty of other holders.
         let key = 0x4255_5A5A_4D45_5452;
 
         let mut leader = first
@@ -5815,6 +5821,11 @@ mod tests {
                 .is_some(),
             "dropping the detached session releases its advisory lock"
         );
+
+        // Release any remaining session state before DROP DATABASE.
+        drop(first);
+        drop(second);
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]
