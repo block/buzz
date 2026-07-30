@@ -1272,9 +1272,9 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
-            }
+        }
+        if let Some(event_id) = reply_anchor {
+            append_reply_instruction(&mut s, event_id);
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
@@ -1355,6 +1355,9 @@ pub struct FormatPromptArgs<'a> {
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
+    /// Require a durable reply anchor even for the first message in a DM so
+    /// turn-receipt readback can correlate the published response.
+    pub turn_receipts: bool,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
     /// (legacy agents), they are injected as `[Base]` and `[System]` sections.
@@ -1383,26 +1386,37 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
     format!("[Base]\n{}", base_prompt.trim_end())
 }
 
-/// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
+/// Resolve the exact reply anchor that will be instructed in this turn's prompt.
 ///
-/// Produces a stable prompt with these sections (in order):
-/// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
-/// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
-/// 2. `[Agent Memory — core]` — if agent core memory is set
-/// 3. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
+/// Receipt readback must reuse this value so a human thread follow-up flattened
+/// to the root is not mistakenly queried against the triggering child event.
+pub(crate) fn resolve_turn_reply_anchor(
+    batch: &FlushBatch,
+    args: &FormatPromptArgs<'_>,
+) -> Option<String> {
+    let last_event = batch.events.last()?;
+    let thread_tags = parse_thread_tags(&last_event.event);
+    let is_dm = args
+        .channel_info
+        .map(|ci| ci.channel_type == "dm")
+        .unwrap_or(false);
+    if is_dm {
+        return (thread_tags.root_event_id.is_some() || args.turn_receipts)
+            .then(|| last_event.event.id.to_hex());
+    }
+    resolve_reply_anchor(
+        &last_event.event.pubkey.to_hex(),
+        &thread_tags,
+        &last_event.event.id.to_hex(),
+        args.profile_lookup,
+    )
+}
+
+/// Format a [`FlushBatch`] into stable per-section prompt blocks for the agent.
 ///
-/// Each section is returned as its own block rather than one joined string so
-/// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
-/// the body of an oversized section in place, leaving every `[Header]` line at
-/// the head of its own leaf — so the desktop "Prompt context" panel always
-/// counts every section. The receiving agent reconstructs the full prompt by
-/// joining the blocks (legacy agents see a single `\n` between sections rather
-/// than a blank line; sections self-delimit with their `[Header]` line).
-///
-/// For agents with `protocol_version >= 2`, base_prompt and system_prompt are
-/// delivered via the system role in `session/new` and omitted from this message.
+/// Legacy agents receive base/system/memory/canvas sections here. Modern agents
+/// receive those via the system role in `session/new`; both receive context,
+/// conversation history, and triggering event sections.
 pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<String> {
     // Scope is always derived from the LAST event in the batch — that's the
     // one the agent is responding to. Thread/DM context is supplementary info
@@ -1464,20 +1478,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
-    let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
-    } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            args.profile_lookup,
-        )
-    };
+    let reply_anchor = resolve_turn_reply_anchor(batch, args);
     sections.push(format_context_hints(
         batch.channel_id,
         args.channel_info,

@@ -1,0 +1,16 @@
+[[rules]]
+name = "voxis-private-office"
+channels = ["d00b15e9-0dbe-4f35-895e-b6d36faa299e"]
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = false
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'
+
+[[rules]]
+name = "voxis-invited-huddle"
+channels = []
+admit_invited_ephemeral = true
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = true
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'

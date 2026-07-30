@@ -1,0 +1,16 @@
+[[rules]]
+name = "nexus-private-office"
+channels = ["7e8c4840-d401-4701-afc9-7ae7174cfc4e"]
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = false
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'
+
+[[rules]]
+name = "nexus-invited-huddle"
+channels = []
+admit_invited_ephemeral = true
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = true
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'

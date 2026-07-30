@@ -4,11 +4,12 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::PathBuf;
 
 use clap::Parser;
 use clap::ValueEnum;
-use nostr::Keys;
+use nostr::{Keys, PublicKey};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -45,6 +46,51 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+}
+
+fn read_owned_secret_file(path: &std::path::Path) -> Result<String, ConfigError> {
+    if !path.is_absolute() {
+        return Err(ConfigError::ConfigFile(
+            "--private-key-file must be an absolute path".into(),
+        ));
+    }
+    #[cfg(unix)]
+    let mut file = {
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+
+        let fd = open(path, OFlag::O_RDONLY | OFlag::O_NOFOLLOW, Mode::empty())
+            .map_err(std::io::Error::from)?;
+        std::fs::File::from(fd)
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new().read(true).open(path)?;
+
+    // Validate metadata from the same no-follow handle that supplies the key.
+    // This avoids a validate-then-reopen race where the path could be swapped.
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(ConfigError::ConfigFile(
+            "--private-key-file must be a regular, non-symlink file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(ConfigError::ConfigFile(
+                "--private-key-file permissions must be 0600".into(),
+            ));
+        }
+        if metadata.uid() != nix::unistd::getuid().as_raw() {
+            return Err(ConfigError::ConfigFile(
+                "--private-key-file must be owned by the current user".into(),
+            ));
+        }
+    }
+    let mut secret = String::new();
+    file.read_to_string(&mut secret)?;
+    Ok(secret.trim().to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -240,8 +286,33 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
-    pub private_key: String,
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY",
+        hide_env_values = true,
+        conflicts_with = "private_key_file",
+        required_unless_present = "private_key_file"
+    )]
+    pub private_key: Option<String>,
+
+    /// Read the Nostr private key from an operator-owned regular file.
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY_FILE",
+        hide_env_values = true,
+        conflicts_with = "private_key",
+        required_unless_present = "private_key"
+    )]
+    pub private_key_file: Option<PathBuf>,
+
+    /// Expected public key derived from `--private-key-file`.
+    #[arg(
+        long,
+        env = "BUZZ_EXPECTED_PUBLIC_KEY",
+        hide_env_values = true,
+        requires = "private_key_file"
+    )]
+    pub expected_public_key: Option<String>,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
@@ -474,6 +545,44 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Close successful OpenClaw turns with request/reply/session/run evidence.
+    /// Default-off because most ACP adapters do not expose Gateway lineage.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_TURN_RECEIPTS",
+        default_value_t = false,
+        requires = "relay_observer"
+    )]
+    pub turn_receipts: bool,
+
+    /// Fixed Gateway session key that observed ACP lineage must match.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_EXPECTED_GATEWAY_SESSION_KEY",
+        hide_env_values = true,
+        requires = "turn_receipts"
+    )]
+    pub expected_gateway_session_key: Option<String>,
+
+    /// Attach one signature-verified triggering Buzz event to ACP request
+    /// metadata. This is never rendered into model-visible prompt text.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_TRUSTED_INBOUND_ENVELOPE",
+        default_value_t = false
+    )]
+    pub trusted_inbound_envelope: bool,
+
+    /// Keep Buzz publisher credentials inside the harness instead of forwarding
+    /// them to the managed ACP subprocess.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_AGENT_PUBLISHER_CREDENTIALS",
+        hide_env_values = true,
+        default_value_t = false
+    )]
+    pub no_agent_publisher_credentials: bool,
+
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
@@ -550,6 +659,15 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Whether successful channel turns require closed observer receipt evidence.
+    pub turn_receipts: bool,
+    /// Expected stable Gateway session key for receipt verification.
+    pub expected_gateway_session_key: Option<String>,
+    /// Whether to attach a verified, non-model inbound event envelope to ACP prompts.
+    pub trusted_inbound_envelope: bool,
+    /// Whether the managed ACP subprocess may receive Buzz publisher credentials.
+    pub forward_agent_publisher_credentials: bool,
+
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
@@ -676,12 +794,14 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .next()
         .expect("rsplit always yields at least one element");
     let lower = basename.to_ascii_lowercase();
-    // Windows resolves commands through `.exe` binaries and npm's `.cmd`/`.bat`
-    // shims; all three name the same runtime identity.
-    let stem = [".exe", ".cmd", ".bat"]
-        .iter()
-        .find_map(|extension| lower.strip_suffix(extension))
-        .unwrap_or(&lower);
+    let stem = if lower == "openclaw.mjs" {
+        "openclaw"
+    } else {
+        [".exe", ".cmd", ".bat"]
+            .iter()
+            .find_map(|extension| lower.strip_suffix(extension))
+            .unwrap_or(&lower)
+    };
     stem.chars()
         .map(|character| match character {
             ' ' | '_' => '-',
@@ -833,13 +953,28 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
+        let mut private_key = if let Some(value) = args.private_key.take() {
+            value
+        } else if let Some(path) = args.private_key_file.as_ref() {
+            read_owned_secret_file(path)?
+        } else {
+            return Err(ConfigError::ConfigFile(
+                "one of --private-key or --private-key-file is required".into(),
+            ));
+        };
+        let keys = Keys::parse(&private_key)?;
+        if let Some(expected) = args.expected_public_key.as_deref() {
+            if keys.public_key().to_hex() != expected.trim().to_ascii_lowercase() {
+                return Err(ConfigError::ConfigFile(
+                    "private-key file does not derive the expected public key".into(),
+                ));
+            }
+        }
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
         // crate we can only clear the String — the allocator may retain copies.
-        args.private_key
-            .replace_range(.., &"0".repeat(args.private_key.len()));
-        args.private_key.clear();
+        private_key.replace_range(.., &"0".repeat(private_key.len()));
+        private_key.clear();
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -1052,6 +1187,46 @@ impl Config {
             };
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
+        if args.turn_receipts
+            && normalize_agent_command_identity(&agent_command).as_str() != "openclaw"
+        {
+            return Err(ConfigError::ConfigFile(
+                "--turn-receipts currently requires --agent-command=openclaw".into(),
+            ));
+        }
+        if args.turn_receipts
+            && args
+                .expected_gateway_session_key
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(ConfigError::ConfigFile(
+                "--turn-receipts requires a non-empty --expected-gateway-session-key".into(),
+            ));
+        }
+        if args.turn_receipts
+            && !receipt_owner_resolves(
+                &keys,
+                args.agent_owner.as_deref(),
+                std::env::var("BUZZ_AUTH_TAG").ok().as_deref(),
+            )
+        {
+            return Err(ConfigError::ConfigFile(
+                "--turn-receipts requires a valid --agent-owner or verified BUZZ_AUTH_TAG".into(),
+            ));
+        }
+        if args.no_agent_publisher_credentials
+            && (!args.trusted_inbound_envelope
+                || !args.turn_receipts
+                || args.no_base_prompt
+                || args.base_prompt_file.is_none())
+        {
+            return Err(ConfigError::ConfigFile(
+                "--no-agent-publisher-credentials requires --trusted-inbound-envelope, \
+                 --turn-receipts, and --base-prompt-file as one fail-closed publisher contract"
+                    .into(),
+            ));
+        }
 
         let config = Config {
             keys,
@@ -1098,6 +1273,10 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            turn_receipts: args.turn_receipts,
+            expected_gateway_session_key: args.expected_gateway_session_key,
+            trusted_inbound_envelope: args.trusted_inbound_envelope,
+            forward_agent_publisher_credentials: !args.no_agent_publisher_credentials,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
@@ -1123,7 +1302,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} agent_publisher_credentials={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1144,10 +1323,51 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            if self.forward_agent_publisher_credentials {
+                "forwarded"
+            } else {
+                "harness-only"
+            },
             respond_to_detail,
             allowed_respond_to_detail,
         )
     }
+
+    /// Build the managed agent's runtime environment.
+    ///
+    /// Buzz transport credentials are derived from the already-validated
+    /// harness identity at spawn time. They are never stored in worker
+    /// manifests or supervisor artifacts, and they replace any persona-level
+    /// values for these reserved keys.
+    pub fn agent_spawn_env(&self) -> Vec<(String, String)> {
+        let mut env = self.persona_env_vars.clone();
+        env.retain(|(key, _)| !matches!(key.as_str(), "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY"));
+        if !self.forward_agent_publisher_credentials {
+            return env;
+        }
+        env.push(("BUZZ_RELAY_URL".into(), self.relay_url.clone()));
+        env.push((
+            "BUZZ_PRIVATE_KEY".into(),
+            self.keys.secret_key().to_secret_hex(),
+        ));
+        env
+    }
+}
+
+fn receipt_owner_resolves(
+    keys: &Keys,
+    explicit_owner: Option<&str>,
+    auth_tag: Option<&str>,
+) -> bool {
+    let verified_auth_owner = auth_tag
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| buzz_sdk::nip_oa::verify_auth_tag(value, &keys.public_key()).is_ok());
+    let valid_explicit_owner = explicit_owner
+        .map(str::trim)
+        .filter(|value| value.len() == 64)
+        .is_some_and(|value| PublicKey::from_hex(value).is_ok());
+    verified_auth_owner || valid_explicit_owner
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1222,11 +1442,56 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 )));
             }
         }
+        if rule.admit_invited_ephemeral
+            && !matches!(rule.channels, crate::filter::ChannelScope::List(_))
+        {
+            return Err(ConfigError::ConfigFile(format!(
+                "rule '{}': admit_invited_ephemeral requires channels to be a UUID list",
+                rule.name
+            )));
+        }
+        if rule.admit_invited_ephemeral && !rule.require_mention {
+            return Err(ConfigError::ConfigFile(format!(
+                "rule '{}': admit_invited_ephemeral requires require_mention=true",
+                rule.name
+            )));
+        }
+        if rule.admit_invited_ephemeral && !rule.require_exact_channel_tag {
+            return Err(ConfigError::ConfigFile(format!(
+                "rule '{}': admit_invited_ephemeral requires require_exact_channel_tag=true",
+                rule.name
+            )));
+        }
         // Deserialization leaves consecutive_timeouts at its zero default; reset explicitly.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
 
     Ok(config.rules)
+}
+
+/// Add a metadata-verified ephemeral channel to every opt-in rule.
+pub fn admit_invited_ephemeral_channel(rules: &mut [SubscriptionRule], channel_id: Uuid) -> bool {
+    let channel = channel_id.to_string();
+    let mut admitted = false;
+    for rule in rules.iter_mut().filter(|rule| rule.admit_invited_ephemeral) {
+        if let crate::filter::ChannelScope::List(ids) = &mut rule.channels {
+            if !ids.contains(&channel) {
+                ids.push(channel.clone());
+            }
+            admitted = true;
+        }
+    }
+    admitted
+}
+
+/// Remove a departed ephemeral channel from opt-in rules.
+pub fn remove_invited_ephemeral_channel(rules: &mut [SubscriptionRule], channel_id: Uuid) {
+    let channel = channel_id.to_string();
+    for rule in rules.iter_mut().filter(|rule| rule.admit_invited_ephemeral) {
+        if let crate::filter::ChannelScope::List(ids) = &mut rule.channels {
+            ids.retain(|id| id != &channel);
+        }
+    }
 }
 
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
@@ -1468,11 +1733,95 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            turn_receipts: false,
+            expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
+            forward_agent_publisher_credentials: true,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn receipt_owner_requires_verified_auth_or_valid_explicit_pubkey() {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_hex();
+        let auth_tag =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+                .expect("test auth tag");
+
+        assert!(receipt_owner_resolves(&agent_keys, Some(&owner), None));
+        assert!(receipt_owner_resolves(&agent_keys, None, Some(&auth_tag)));
+        assert!(!receipt_owner_resolves(&agent_keys, None, None));
+        assert!(!receipt_owner_resolves(
+            &agent_keys,
+            Some("not-a-pubkey"),
+            Some("not-an-auth-tag")
+        ));
+    }
+
+    #[test]
+    fn managed_agent_env_uses_validated_harness_buzz_identity() {
+        let mut config = test_config(SubscribeMode::All);
+        config.persona_env_vars = vec![
+            ("BUZZ_RELAY_URL".into(), "ws://wrong.invalid".into()),
+            ("BUZZ_PRIVATE_KEY".into(), "wrong-secret".into()),
+            ("SAFE_PERSONA_SETTING".into(), "kept".into()),
+        ];
+
+        let env = config.agent_spawn_env();
+        assert_eq!(
+            env.iter()
+                .filter(|(key, _)| key == "BUZZ_RELAY_URL")
+                .count(),
+            1
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "BUZZ_RELAY_URL")
+                .map(|(_, value)| value.as_str()),
+            Some(config.relay_url.as_str())
+        );
+        assert_eq!(
+            env.iter()
+                .filter(|(key, _)| key == "BUZZ_PRIVATE_KEY")
+                .count(),
+            1
+        );
+        let expected_secret = config.keys.secret_key().to_secret_hex();
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "BUZZ_PRIVATE_KEY")
+                .map(|(_, value)| value.as_str()),
+            Some(expected_secret.as_str())
+        );
+        assert!(env.contains(&("SAFE_PERSONA_SETTING".into(), "kept".into())));
+    }
+
+    #[test]
+    fn isolated_agent_env_retains_harness_identity_but_omits_publisher_credentials() {
+        let mut config = test_config(SubscribeMode::All);
+        let harness_relay = config.relay_url.clone();
+        let harness_pubkey = config.keys.public_key().to_hex();
+        config.forward_agent_publisher_credentials = false;
+        config.persona_env_vars = vec![
+            ("BUZZ_RELAY_URL".into(), "ws://wrong.invalid".into()),
+            ("BUZZ_PRIVATE_KEY".into(), "wrong-secret".into()),
+            ("SAFE_PERSONA_SETTING".into(), "kept".into()),
+        ];
+
+        let env = config.agent_spawn_env();
+        assert!(!env.iter().any(|(key, _)| key == "BUZZ_RELAY_URL"));
+        assert!(!env.iter().any(|(key, _)| key == "BUZZ_PRIVATE_KEY"));
+        assert!(env.contains(&("SAFE_PERSONA_SETTING".into(), "kept".into())));
+        assert_eq!(config.relay_url, harness_relay);
+        assert_eq!(config.keys.public_key().to_hex(), harness_pubkey);
+        assert!(config
+            .summary()
+            .contains("agent_publisher_credentials=harness-only"));
     }
 
     fn make_rule(
@@ -1483,9 +1832,12 @@ mod tests {
     ) -> SubscriptionRule {
         use std::sync::atomic::AtomicU32;
         use std::sync::Arc;
+
         SubscriptionRule {
             name: name.into(),
             channels,
+            admit_invited_ephemeral: false,
+            require_exact_channel_tag: false,
             kinds,
             require_mention: mention,
             filter: None,
@@ -1493,6 +1845,47 @@ mod tests {
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_file_requires_regular_owned_mode_0600_and_expected_pubkey() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("buzz-acp-key-test-{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("aspect.sk");
+        let keys = Keys::generate();
+        std::fs::write(&path, keys.secret_key().to_secret_hex()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_owned_secret_file(&path).expect("owned 0600 regular file"),
+            keys.secret_key().to_secret_hex()
+        );
+
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key-file",
+            path.to_str().unwrap(),
+            "--expected-public-key",
+            &"f".repeat(64),
+        ])
+        .unwrap();
+        assert!(matches!(
+            Config::from_args(args),
+            Err(ConfigError::ConfigFile(message))
+                if message == "private-key file does not derive the expected public key"
+        ));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_owned_secret_file(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("aspect-link.sk");
+        symlink(&path, &link).unwrap();
+        assert!(read_owned_secret_file(&link).is_err());
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
@@ -1613,6 +2006,11 @@ mod tests {
             "claude-code"
         );
         assert_eq!(normalize_agent_command_identity("Goose.EXE"), "goose");
+        assert_eq!(
+            normalize_agent_command_identity("/immutable/generation/openclaw.mjs"),
+            "openclaw"
+        );
+        assert_eq!(normalize_agent_command_identity("codex.mjs"), "codex.mjs");
         // Windows npm shims resolve to `.cmd`/`.bat` wrappers.
         assert_eq!(
             normalize_agent_command_identity(r"C:\Users\test\AppData\Roaming\npm\hermes-acp.cmd"),
@@ -1896,6 +2294,195 @@ mod tests {
     }
 
     #[test]
+    fn invited_ephemeral_rule_admits_and_removes_verified_channel() {
+        let private = Uuid::new_v4();
+        let huddle = Uuid::new_v4();
+        let mut private_rule = make_rule(
+            "private-office",
+            ChannelScope::List(vec![private.to_string()]),
+            vec![9],
+            false,
+        );
+        private_rule.admit_invited_ephemeral = false;
+        let mut huddle_rule =
+            make_rule("invited-huddle", ChannelScope::List(vec![]), vec![9], true);
+        huddle_rule.admit_invited_ephemeral = true;
+        let mut rules = vec![private_rule, huddle_rule];
+
+        assert!(admit_invited_ephemeral_channel(&mut rules, huddle));
+        let config = test_config(SubscribeMode::Config);
+        let filters = resolve_channel_filters(&config, &[private, huddle], &rules);
+        assert!(!filters[&private].require_mention);
+        assert!(filters[&huddle].require_mention);
+
+        remove_invited_ephemeral_channel(&mut rules, huddle);
+        let filters = resolve_channel_filters(&config, &[private, huddle], &rules);
+        assert!(filters.contains_key(&private));
+        assert!(!filters.contains_key(&huddle));
+    }
+
+    #[test]
+    fn ordinary_unlisted_channel_is_not_admitted() {
+        let private = Uuid::new_v4();
+        let concilium = Uuid::new_v4();
+        let private_rule = make_rule(
+            "private-office",
+            ChannelScope::List(vec![private.to_string()]),
+            vec![9],
+            false,
+        );
+        let mut huddle_rule =
+            make_rule("invited-huddle", ChannelScope::List(vec![]), vec![9], true);
+        huddle_rule.admit_invited_ephemeral = true;
+        let config = test_config(SubscribeMode::Config);
+
+        let filters =
+            resolve_channel_filters(&config, &[private, concilium], &[private_rule, huddle_rule]);
+        assert!(filters.contains_key(&private));
+        assert!(!filters.contains_key(&concilium));
+    }
+
+    #[test]
+    fn aeon_six_worker_configs_load_through_real_rules_and_clap() {
+        use clap::Parser as _;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repository root");
+        let deploy = root.join("deploy/local/aeon-aspects");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(deploy.join("workers.json")).expect("workers manifest"),
+        )
+        .expect("valid workers manifest");
+        let architect = manifest["buzz"]["architectPubkey"]
+            .as_str()
+            .expect("architect pubkey");
+        let concilium = manifest["buzz"]["conciliumChannelId"]
+            .as_str()
+            .expect("concilium id");
+        let workers = manifest["workers"].as_array().expect("worker array");
+        assert_eq!(workers.len(), 6);
+        let private_office_template =
+            std::fs::read_to_string(deploy.join("prompts/private-office.template.md"))
+                .expect("private-office prompt template");
+
+        for worker in workers {
+            let aspect = worker["aspect"].as_str().expect("aspect");
+            let session = worker["sessionKey"].as_str().expect("session key");
+            let private = worker["privateChannelId"].as_str().expect("private room");
+            let config_path = deploy.join("config").join(format!("{aspect}.toml"));
+            let rules = load_rules(&config_path).expect("load production rule file");
+            assert_eq!(rules.len(), 2);
+            assert!(!rules[0].admit_invited_ephemeral);
+            assert!(rules[0].require_exact_channel_tag);
+            assert!(!rules[0].require_mention);
+            assert!(rules[1].admit_invited_ephemeral);
+            assert!(rules[1].require_exact_channel_tag);
+            assert!(rules[1].require_mention);
+            assert_eq!(rules[0].kinds, vec![9, 40002]);
+            assert_eq!(rules[1].kinds, vec![9, 40002]);
+            assert!(rules.iter().all(|rule| {
+                rule.filter
+                    .as_deref()
+                    .is_some_and(|filter| filter.contains(architect))
+            }));
+            let source = std::fs::read_to_string(&config_path).expect("config source");
+            assert!(source.contains(private));
+            assert!(!source.contains(concilium));
+
+            let agent_args = format!(
+                "acp,--session,{session},--require-existing,--token-file,/owned/token,--url,ws://127.0.0.1:18806,--provenance,meta+receipt,--no-prefix-cwd"
+            );
+            let private_key = "1".repeat(64);
+            let mut argv = vec![
+                "buzz-acp".to_owned(),
+                "--private-key".to_owned(),
+                private_key,
+                "--agent-owner".to_owned(),
+                architect.to_owned(),
+                "--agent-command".to_owned(),
+                "openclaw".to_owned(),
+                "--agent-args".to_owned(),
+                agent_args,
+                "--subscribe".to_owned(),
+                "config".to_owned(),
+                "--config".to_owned(),
+                config_path.to_string_lossy().into_owned(),
+                "--respond-to".to_owned(),
+                "owner-only".to_owned(),
+                "--allowed-respond-to".to_owned(),
+                "owner-only".to_owned(),
+                "--no-memory".to_owned(),
+            ];
+            let base_prompt_file = worker["basePromptFile"]
+                .as_str()
+                .expect("every Aspect has a private-office base prompt");
+            argv.push("--base-prompt-file".to_owned());
+            argv.push(root.join(base_prompt_file).to_string_lossy().into_owned());
+            argv.extend([
+                "--dedup".to_owned(),
+                "queue".to_owned(),
+                "--multiple-event-handling".to_owned(),
+                "queue".to_owned(),
+                "--relay-observer".to_owned(),
+                "--trusted-inbound-envelope".to_owned(),
+                "--no-agent-publisher-credentials".to_owned(),
+                "--permission-mode".to_owned(),
+                "bypass-permissions".to_owned(),
+                "--heartbeat-interval".to_owned(),
+                "0".to_owned(),
+                "--turn-liveness-secs".to_owned(),
+                "10".to_owned(),
+                "--idle-timeout".to_owned(),
+                "900".to_owned(),
+                "--max-turn-duration".to_owned(),
+                "7200".to_owned(),
+                "--context-message-limit".to_owned(),
+                "12".to_owned(),
+                "--max-turns-per-session".to_owned(),
+                "0".to_owned(),
+                "--turn-receipts".to_owned(),
+                "--expected-gateway-session-key".to_owned(),
+                session.to_owned(),
+            ]);
+            let cli = CliArgs::try_parse_from(argv)
+                .expect("real Clap parser accepts rendered worker argv");
+            assert!(cli.no_memory);
+            let expected_prompt_path = root.join(base_prompt_file);
+            assert!(!cli.no_base_prompt);
+            assert_eq!(
+                cli.base_prompt_file.as_deref(),
+                Some(expected_prompt_path.as_path())
+            );
+            let prompt = std::fs::read_to_string(expected_prompt_path).expect("base prompt");
+            let expected_prompt = private_office_template
+                .replace("{{ROOM}}", &format!("#aspect-{aspect}"))
+                .replace("{{REPLY_TOOL}}", &format!("buzz_{aspect}_reply"));
+            assert_eq!(prompt, expected_prompt);
+            assert!(!prompt.contains("buzz messages send"));
+            assert!(cli.turn_receipts);
+            assert!(cli.trusted_inbound_envelope);
+            assert!(cli.no_agent_publisher_credentials);
+            assert_eq!(cli.permission_mode, PermissionMode::BypassPermissions);
+            assert_eq!(cli.heartbeat_interval, 0);
+            assert_eq!(cli.turn_liveness_secs, 10);
+            assert_eq!(cli.idle_timeout, Some(900));
+            assert_eq!(cli.max_turn_duration, 7200);
+            assert_eq!(cli.context_message_limit, 12);
+            assert_eq!(cli.max_turns_per_session, 0);
+            assert!(cli.mcp_command.is_empty());
+            assert!(cli.model.is_none());
+            assert!(!cli.no_ignore_self);
+            assert!(!cli.no_presence);
+            assert!(!cli.no_typing);
+            assert_eq!(cli.expected_gateway_session_key.as_deref(), Some(session));
+            assert!(cli.agent_args.iter().any(|arg| arg == "--require-existing"));
+            assert!(cli.agent_args.iter().any(|arg| arg == "--no-prefix-cwd"));
+        }
+    }
+
+    #[test]
     fn test_config_mode_require_mention_most_permissive() {
         let config = test_config(SubscribeMode::Config);
         let ch = Uuid::new_v4();
@@ -2051,6 +2638,31 @@ channels = "ALL"
 
         let err = load_rules(&path).unwrap_err();
         assert!(err.to_string().contains("must be \"all\" or a list"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_rules_invited_ephemeral_requires_exact_channel_tag() {
+        let dir = std::env::temp_dir().join("buzz-acp-test-invited-exact-h");
+        let path = dir.join("rules.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+[[rules]]
+name = "invited-huddle"
+channels = []
+require_mention = true
+admit_invited_ephemeral = true
+require_exact_channel_tag = false
+"#,
+        )
+        .unwrap();
+
+        let err = load_rules(&path).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires require_exact_channel_tag=true"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2536,6 +3148,8 @@ channels = "ALL"
         assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
         // Dedup default must remain `queue` so steering's requirement is met.
         assert!(matches!(args.dedup, DedupMode::Queue));
+        assert!(!args.trusted_inbound_envelope);
+        assert!(!args.no_agent_publisher_credentials);
     }
 
     #[test]
@@ -2716,6 +3330,68 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+    const TEST_PUBLIC_KEY: &str =
+        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    #[test]
+    fn isolated_publisher_contract_rejects_missing_trusted_envelope() {
+        let prompt_path =
+            std::env::temp_dir().join(format!("buzz-acp-publisher-contract-{}.md", Uuid::new_v4()));
+        std::fs::write(&prompt_path, "trusted publisher prompt").expect("write prompt");
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-owner",
+            TEST_PUBLIC_KEY,
+            "--agent-command",
+            "openclaw",
+            "--relay-observer",
+            "--turn-receipts",
+            "--expected-gateway-session-key",
+            "agent:main:buzz-private",
+            "--base-prompt-file",
+            prompt_path.to_str().expect("prompt path"),
+            "--no-agent-publisher-credentials",
+        ])
+        .expect("clap should parse args");
+        let error = Config::from_args(args).expect_err("contract must fail closed");
+        std::fs::remove_file(prompt_path).expect("remove prompt");
+        assert!(error
+            .to_string()
+            .contains("one fail-closed publisher contract"));
+    }
+
+    #[test]
+    fn isolated_publisher_contract_accepts_complete_shape() {
+        let prompt_path =
+            std::env::temp_dir().join(format!("buzz-acp-publisher-contract-{}.md", Uuid::new_v4()));
+        std::fs::write(&prompt_path, "trusted publisher prompt").expect("write prompt");
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-owner",
+            TEST_PUBLIC_KEY,
+            "--agent-command",
+            "openclaw",
+            "--relay-observer",
+            "--turn-receipts",
+            "--expected-gateway-session-key",
+            "agent:main:buzz-private",
+            "--trusted-inbound-envelope",
+            "--base-prompt-file",
+            prompt_path.to_str().expect("prompt path"),
+            "--no-agent-publisher-credentials",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+        std::fs::remove_file(prompt_path).expect("remove prompt");
+        assert!(
+            result.is_ok(),
+            "complete publisher contract should pass: {result:?}"
+        );
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {

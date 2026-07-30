@@ -2,13 +2,13 @@
 //!
 //! Kept in a sibling file so `mod.rs` stays under the 1000-line gate;
 //! `#[path]`-included from there.
-
 use super::pipeline::BucketWithResult;
 use super::*;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use rusqlite::Connection;
 use uuid::Uuid;
 
+mod receipt_tests;
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 fn in_memory() -> Connection {

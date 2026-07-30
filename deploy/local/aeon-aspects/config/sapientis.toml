@@ -1,0 +1,16 @@
+[[rules]]
+name = "sapientis-private-office"
+channels = ["4e9f115c-cf8d-4abe-a085-c2b2c64ef2c2"]
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = false
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'
+
+[[rules]]
+name = "sapientis-invited-huddle"
+channels = []
+admit_invited_ephemeral = true
+kinds = [9, 40002]
+require_exact_channel_tag = true
+require_mention = true
+filter = 'author == "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f"'

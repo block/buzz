@@ -13,12 +13,18 @@ import {
   isBroadcastReply,
   normalizeMentionPubkeys,
   resolveReplyRootId,
+  shouldFlattenChannelTimeline,
 } from "@/features/messages/lib/threading";
 import {
   projectChannelWindowMessages,
   refreshChannelWindowMessages,
 } from "@/features/messages/lib/projectChannelWindow";
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
+import {
+  fetchFlattenTimelineReplies,
+  flattenTimelineRootIds,
+  mergeFlattenTimelineReplies,
+} from "@/features/messages/lib/flattenChannelTimeline";
 import {
   mergeMessages,
   mergeTimelineCacheMessages,
@@ -226,6 +232,31 @@ export function useChannelWindowQuery(channel: Channel | null) {
   });
 }
 
+async function withFlattenedTimelineReplies(
+  channel: Channel,
+  window: ChannelWindowStore,
+  messages: RelayEvent[],
+): Promise<RelayEvent[]> {
+  if (!shouldFlattenChannelTimeline(channel)) {
+    return messages;
+  }
+  const rootIds = flattenTimelineRootIds(window);
+  if (rootIds.length === 0) {
+    return messages;
+  }
+  try {
+    const replies = await fetchFlattenTimelineReplies(channel.id, rootIds);
+    return mergeFlattenTimelineReplies(messages, replies);
+  } catch (error) {
+    console.error(
+      "Failed to hydrate flattened timeline replies for channel",
+      channel.id,
+      error,
+    );
+    return messages;
+  }
+}
+
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
@@ -245,7 +276,8 @@ export function useChannelMessagesQuery(channel: Channel | null) {
         emptyChannelWindowStore();
       const next = replaceNewestChannelWindow(current, page);
       queryClient.setQueryData(windowKey, next);
-      return reconcileChannelWindowMessages(next, previousMessages);
+      const reconciled = reconcileChannelWindowMessages(next, previousMessages);
+      return withFlattenedTimelineReplies(channel, next, reconciled);
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
@@ -256,6 +288,7 @@ export function useChannelSubscription(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
+  const flattenTimeline = shouldFlattenChannelTimeline(channel);
   const refreshNewestWindow = useEffectEvent(async () => {
     if (!channelId) return;
     await refreshChannelWindowMessages(queryClient, channelId);
@@ -288,7 +321,9 @@ export function useChannelSubscription(channel: Channel | null) {
           (current = []) => mergeMessages(current, event),
         );
       }
-      if (!isBroadcastReply(event.tags)) return;
+      // Private/DM flatten: keep NIP-10 tags, but still admit the event into
+      // the live window overlay so it renders as a normal timeline row.
+      if (!isBroadcastReply(event.tags) && !flattenTimeline) return;
     }
     if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return;
     if (!isTimelineRow) {
