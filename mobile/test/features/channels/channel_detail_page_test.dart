@@ -1333,7 +1333,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Bob'), findsOneWidget);
-      final addedAction = findRichText('was added by Alice');
+      final addedAction = findRichText('added by Alice');
       expect(addedAction, findsOneWidget);
       expect(find.text('Alice added Bob to the channel'), findsNothing);
       expect(
@@ -1351,7 +1351,7 @@ void main() {
       expect(timestampRect.left, greaterThan(nameRect.right));
       final addedText = tester.widget<RichText>(addedAction);
       expect(
-        effectiveFontSizeForText(addedText.text, 'was added by Alice'),
+        effectiveFontSizeForText(addedText.text, 'added by Alice'),
         systemMessageBodyTextStyle.fontSize,
       );
     });
@@ -1420,7 +1420,7 @@ void main() {
 
       expect(find.text('Bob'), findsOneWidget);
       expect(
-        findRichText('was added by Alice, along with Carol, Dave, Erin, and '),
+        findRichText('added by Alice, along with Carol, Dave, Erin, and '),
         findsOneWidget,
       );
       expect(find.byKey(const Key('membership-overflow')), findsOneWidget);
