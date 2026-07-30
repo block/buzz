@@ -5,6 +5,16 @@ Status: implemented by `buzz-ctx`, `buzz-handoff-state`, `buzz-runner`, and
 execution remains disabled until the claim transition has relay-enforced
 exclusivity. Cross-node result-artifact verification remains a closure gate.
 
+Behavior chain: journeys
+`specs/journeys/delegate-work-through-journal-handoff.md` and
+`specs/journeys/return-and-close-delegated-work.md`; stories under
+`specs/stories/journal-handoff/`; model
+`specs/models/journal-handoff/journal-handoff.model.yaml` with lifecycle
+`journal-handoff.lifecycle.yaml`; behavior
+`specs/features/journal-handoff/handoff-lifecycle.feature`. The lifecycle
+model's `invalid:` block records the v0.2 gaps: open retirement, payload
+schema versioning, and relay-enforced claim exclusivity.
+
 ## Purpose
 
 A journal handoff is a durable, signed delegation lifecycle carried by

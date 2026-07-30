@@ -1,0 +1,120 @@
+id: journal-handoff-lifecycle
+type: model
+entity: JournalHandoff
+description: |
+  Derived lifecycle states for one delegation, reduced from the union of the
+  sovereign and rendezvous views. Reduction is deterministic and replayable:
+  the same signed events always produce the same state, and rejected
+  transitions are preserved as ignored events with reasons rather than
+  silently dropped.
+
+sources:
+  stories:
+    - specs/stories/journal-handoff/open-attributable-work-offer.md
+    - specs/stories/journal-handoff/claim-delegated-work-exclusively.md
+    - specs/stories/journal-handoff/return-verifiable-work-evidence.md
+    - specs/stories/journal-handoff/close-verified-handoff.md
+  journeys:
+    - specs/journeys/delegate-work-through-journal-handoff.md
+    - specs/journeys/return-and-close-delegated-work.md
+
+initial_state: open
+
+states:
+  open:
+    description: A valid open exists with no accepted claim.
+    terminal: false
+  claimed:
+    description: Exactly one authorized signer holds the earliest accepted claim.
+    terminal: false
+  conflicted:
+    description: |
+      More than one authorized signer has claimed. Deterministically
+      reported; no return is accepted until resolved.
+    terminal: false
+  returned:
+    description: |
+      The exact claimant has posted a valid return (status done or failed)
+      that no valid close yet terminates.
+    terminal: false
+  closed:
+    description: |
+      The opener's effective owner closed over the newest valid return.
+    terminal: true
+  invalid:
+    description: |
+      The open itself fails validation (malformed anchor, missing claimants,
+      missing context, defective envelope), orphaning every dependent
+      transition. Not a transition target from any valid state — a property
+      of the open discovered at reduction time. v0.1 has no retirement path
+      out of this state.
+    terminal: false
+
+transitions:
+  claim:
+    from: open
+    to: claimed
+    trigger: allowed_claimant
+    guards:
+      - claim-links-open-with-e-root
+      - signer-named-in-open-p-tags
+      - posts-strictly-after-open
+      - same-h-context
+  competing_authorized_claim:
+    from: claimed
+    to: conflicted
+    trigger: second_allowed_claimant
+    description: Deterministic conflict, not last-writer-wins.
+  resolve_conflict:
+    from: conflicted
+    to: claimed
+    trigger: parties
+    description: |
+      v0.1 resolution is manual and out-of-band; the reducer re-evaluates
+      whatever the parties durably retract or supersede.
+  return:
+    from: claimed
+    to: returned
+    trigger: exact_claimant
+    guards:
+      - links-open-and-accepted-claim
+      - restates-claim-id
+      - posts-strictly-after-claim
+      - status-done-or-failed
+      - advertised-artifacts-pass-custody-verification
+  close:
+    from: returned
+    to: closed
+    trigger: opener_owner_or_attested_signer
+    guards:
+      - links-open-and-newest-valid-return
+      - restates-return-id
+      - posts-after-that-return
+      - signer-is-opener-effective-owner
+
+invalid:
+  - transition: label_authorized_claim
+    reason: Runner, host, and agent labels confer no authority; only signatures and attestations do.
+  - transition: owner_sibling_return
+    reason: A return signed by another key of the claimant's owner is not the exact claimant.
+  - transition: close_earlier_return_to_closed
+    reason: Only the newest valid return governs closure; earlier-return closes cannot suppress later returns.
+  - transition: legacy_open_only_close
+    reason: A close that identifies only the open is not causally valid and does not suppress steward findings.
+  - transition: withdraw_open
+    reason: |
+      No retirement transition exists in v0.1. Stale, mistaken, or invalid
+      opens are re-reported by stewards indefinitely. A journal-verifiable
+      withdraw/acknowledge primitive is the v0.2 gap this model records.
+  - transition: retroactive_revalidation
+    reason: |
+      Hardening validators retroactively re-classify history because event
+      payloads carry no schema version. Per-version strictness (or a
+      journal-sequence cutoff — never author-controlled created_at) is
+      required before validation rules may change again.
+  - transition: unattended_claim_race
+    reason: |
+      Query-then-post is not compare-and-set. Unattended execution stays
+      disabled until the relay enforces claim exclusivity.
+  - transition: steward_mutation
+    reason: Observe and report powers never mutate lifecycle state.

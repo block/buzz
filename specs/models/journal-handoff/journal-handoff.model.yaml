@@ -1,0 +1,218 @@
+id: journal-handoff
+type: model
+entity: JournalHandoff
+aggregate: JournalHandoff
+description: |
+  Represents one durable, signed delegation of work, carried entirely by
+  ordinary kind-1 Nostr events and re-derivable by any party from the union
+  of the sovereign and rendezvous views. Authority flows from signatures and
+  NIP-OA owner attestations only; runner, host, and agent labels are
+  presentation metadata. The journal carries the commitment; the repository,
+  addressed by the anchored commit, carries the contract.
+
+sources:
+  stories:
+    - specs/stories/journal-handoff/open-attributable-work-offer.md
+    - specs/stories/journal-handoff/claim-delegated-work-exclusively.md
+    - specs/stories/journal-handoff/return-verifiable-work-evidence.md
+    - specs/stories/journal-handoff/close-verified-handoff.md
+  journeys:
+    - specs/journeys/delegate-work-through-journal-handoff.md
+    - specs/journeys/return-and-close-delegated-work.md
+  architecture:
+    - specs/architecture/journal-handoff-v0.1.md
+
+identity:
+  fields: [open_event_id]
+  description: |
+    A handoff is identified by its open event. There is no mutable head;
+    every lifecycle transition is a new immutable event referencing the open.
+
+attributes:
+  open_event_id:
+    type: EventId
+    required: true
+    immutable: true
+  context:
+    type: SharedContextId
+    required: true
+    immutable: true
+    description: Exactly one NIP-29 `h` tag, restated by every transition.
+  title:
+    type: string
+    required: true
+    immutable: true
+  base_commit:
+    type: GitObjectId
+    required: true
+    immutable: true
+    description: |
+      Canonical lowercase 40-character object ID anchoring the work to one
+      repository state. The bridge between journal and repository.
+  opener_owner:
+    type: OwnerIdentity
+    required: true
+    immutable: true
+    derived: true
+    description: |
+      The open author, or the owner recovered from exactly one valid,
+      event-covering NIP-OA auth tag. The only identity permitted to close.
+  allowed_claimants:
+    type: set<ClaimantKey>
+    required: true
+    immutable: true
+    description: The open's `p` tags; the only keys whose claims are accepted.
+  scope_contract:
+    type: string
+    required: true
+    immutable: true
+  acceptance_contract:
+    type: string
+    required: true
+    immutable: true
+    description: |
+      How completion is judged. Should reference repository specifications
+      and executable checks at base_commit rather than inline them.
+  embodiment_contract:
+    type: EmbodimentContract
+    required: true
+    immutable: true
+  lifecycle_state:
+    type: enum
+    required: true
+    derived: true
+    values: [open, claimed, conflicted, returned, closed, invalid]
+    see: journal-handoff.lifecycle.yaml
+  accepted_claim_event_id:
+    type: EventId
+    required: false
+    derived: true
+  newest_valid_return_event_id:
+    type: EventId
+    required: false
+    derived: true
+  ignored_events:
+    type: list<IgnoredEvent>
+    required: true
+    derived: true
+    description: |
+      Transitions rejected during reduction, each with its reason. Preserved
+      so stewards report defects instead of silently dropping them.
+
+entities:
+  - name: LifecycleEvent
+    identity: event_id
+    immutable: true
+    attributes:
+      - event_id
+      - lifecycle_tag
+      - author_key
+      - effective_owner
+      - context
+      - created_at
+      - causal_links
+      - content
+    description: |
+      One signed kind-1 event carrying exactly one lifecycle `t` tag
+      (handoff:open, handoff:claim, handoff:return, handoff:close), the
+      open's `h` context, and strict causal newness over its predecessor.
+  - name: ResultArtifact
+    identity: [return_event_id, sha256]
+    immutable: true
+    description: |
+      An x-tag edge from a return to content-addressed bytes. Advertised
+      only after rendezvous manifest presence, authenticated readability,
+      and byte-hash equality are proven.
+
+value_objects:
+  - name: OwnerIdentity
+    representation: nostr_public_key
+    purpose: Holds policy authority; verifies and closes.
+  - name: ClaimantKey
+    representation: nostr_public_key
+    purpose: |
+      The exact signing key accountable for the work. An agent key is
+      accountable itself; its owner attestation attributes, never substitutes.
+  - name: GitObjectId
+    representation: lowercase_hex_40
+    equality: Exact string equality; abbreviation is invalidity, not shorthand.
+  - name: SharedContextId
+    representation: nip29_h_tag
+  - name: EventId
+    representation: lowercase_hex_sha256
+  - name: EmbodimentContract
+    representation: structured_object
+    purpose: |
+      Declares stdin policy, network policy, trust boundary, and tooling.
+      The execution environment is an allowlist; host credentials, agent
+      sockets, and private keys are never inherited.
+  - name: IgnoredEvent
+    representation: [event_id, reason]
+
+relationships:
+  claims:
+    type: has-many-immutable
+    entity: LifecycleEvent
+    description: Reduced to one accepted claim per authorized signer set, or CONFLICT.
+  returns:
+    type: has-many-immutable
+    entity: LifecycleEvent
+    description: Only the exact claimant's returns are valid; newest valid return governs closure.
+  closes:
+    type: has-many-immutable
+    entity: LifecycleEvent
+    description: Only an opener-owner close pinning the newest valid return terminates.
+  result_artifacts:
+    type: exposes-many-conditionally
+    entity: ResultArtifact
+    through: verified_returns
+
+commands:
+  - name: OpenHandoff
+    actor: delegating_owner_or_attested_agent
+    input: [context, title, base_commit, allowed_claimants, scope, acceptance, embodiment, artifact_refs]
+    output: open_lifecycle_event
+  - name: ClaimHandoff
+    actor: allowed_claimant
+    input: [open_event_id, context]
+    output: claim_lifecycle_event
+  - name: ReturnHandoff
+    actor: exact_claimant
+    input: [open_event_id, claim_event_id, status, evidence, artifact_refs]
+    output: return_lifecycle_event
+    preconditions:
+      - every advertised artifact passes rendezvous custody verification
+  - name: VerifyReturnArtifacts
+    actor: any_authenticated_node
+    input: [return_event_id]
+    output: byte_verified_or_defect_report
+  - name: CloseHandoff
+    actor: opener_owner_or_attested_signer
+    input: [open_event_id, return_event_id]
+    output: close_lifecycle_event
+  - name: ReduceLifecycle
+    input: [sovereign_view_events, rendezvous_view_events]
+    output: [lifecycle_state, accepted_claim, newest_valid_return, ignored_events]
+
+rules:
+  - id: authority-from-signatures-only
+    description: Labels such as runner, host, agent, and verifier are presentation metadata and confer no authority.
+    enforced: domain
+  - id: one-owner-per-lifecycle-event
+    description: Effective ownership is the author or exactly one valid event-covering NIP-OA auth tag; mutable JSON is never consulted.
+    enforced: domain
+  - id: canonical-anchor
+    description: base_commit is a canonical lowercase 40-character object ID; a runner additionally requires ancestry of its trusted ref.
+    enforced: domain
+  - id: strict-causal-order
+    description: Every transition posts strictly after its causal predecessor and restates the open's h context.
+    enforced: domain
+  - id: union-reduction
+    description: Lifecycle state reduces from the union of sovereign and rendezvous views; counterparty halves may land on either node first.
+    enforced: domain
+  - id: custody-before-advertisement
+    description: A return may not advertise artifact bytes the rendezvous cannot independently serve and hash-match.
+    enforced: domain
+  - id: newest-return-governs
+    description: A close for an earlier return cannot suppress a later return; legacy open-only closes are not causally valid.
+    enforced: domain
