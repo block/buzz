@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { ArrowUp } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 
 import {
   getIdentity,
@@ -20,7 +21,10 @@ import {
 } from "./EncryptedBackupCreator";
 import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
 import { LandingBees } from "./LandingBees";
-import { NostrKeyImportForm } from "./NostrKeyImportForm";
+import {
+  NostrKeyImportForm,
+  type NostrKeyImportStage,
+} from "./NostrKeyImportForm";
 import {
   ONBOARDING_LANDING_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
@@ -72,6 +76,8 @@ export function MachineOnboardingFlow({
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
+  const [keyImportStage, setKeyImportStage] =
+    React.useState<NostrKeyImportStage>("key-entry");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
@@ -89,6 +95,7 @@ export function MachineOnboardingFlow({
   // Owned here so switching between the yellow onboarding view and the dark
   // security subview keeps the created backup, password, and test progress.
   const backupSession = useEncryptedBackupSession();
+  const reduceMotion = useReducedMotion() ?? false;
   const isSecuritySubview = page === "backup" && backupSubview !== "created";
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
@@ -232,7 +239,10 @@ export function MachineOnboardingFlow({
                 <Button
                   className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
                   disabled={isPending}
-                  onClick={() => setPage("key-import")}
+                  onClick={() => {
+                    setKeyImportStage("key-entry");
+                    setPage("key-import");
+                  }}
                   type="button"
                   variant="ghost"
                 >
@@ -250,18 +260,31 @@ export function MachineOnboardingFlow({
               effect="fade"
               transitionKey="machine-key-import"
             >
-              <div className="shrink-0">
+              <motion.div
+                animate={{ opacity: 1, y: 0 }}
+                className="shrink-0"
+                initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+                key={keyImportStage}
+                transition={{
+                  duration: reduceMotion ? 0 : 0.3,
+                  ease: "easeOut",
+                }}
+              >
                 <h1 className="text-title font-normal text-foreground">
-                  {identityLost
-                    ? "Re-import your key"
-                    : "Enter your private key"}
+                  {keyImportStage === "backup-password"
+                    ? "Unlock your account"
+                    : identityLost
+                      ? "Re-import your key"
+                      : "Enter your private key"}
                 </h1>
                 <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                  {identityLost
-                    ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                    : "If you already have a Buzz account, enter your private key below to get started."}
+                  {keyImportStage === "backup-password"
+                    ? "Enter your backup password to unlock your key and restore your identity."
+                    : identityLost
+                      ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
+                      : "If you already have a Buzz account, enter your private key below to get started."}
                 </p>
-              </div>
+              </motion.div>
               <div className="buzz-onboarding-key-import-position w-full">
                 <NostrKeyImportForm
                   backLabel={identityLost ? "Start new identity" : "Back"}
@@ -271,6 +294,7 @@ export function MachineOnboardingFlow({
                       : () => setPage("identity")
                   }
                   onImport={importExistingIdentity}
+                  onStageChange={setKeyImportStage}
                   variant="spotlight"
                 />
               </div>
@@ -315,6 +339,7 @@ export function MachineOnboardingFlow({
                 // they used to reach setup; imported keys skip backup entirely.
                 back: () => {
                   if (identityWasImported) {
+                    setKeyImportStage("key-entry");
                     setPage("key-import");
                     return;
                   }

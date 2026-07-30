@@ -10,6 +10,8 @@ const BLANK_TYLER_IDENTITY = {
 };
 
 const SHOT_DIR = "test-results/onboarding-docked-cta";
+const NCRYPTSEC =
+  "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
@@ -46,6 +48,20 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/01b-enter-key.png` });
 
+  await page.getByTestId("nostr-import-nsec-input").fill(NCRYPTSEC);
+  await expect(
+    page.getByRole("heading", { name: "Unlock your account" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("backup-password-timeline")).toBeVisible();
+  await expect(page.getByTestId("restore-ncryptsec-affordance")).toBeVisible();
+  await expect(page.getByTestId("restore-unlock-icon")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-passphrase")).toBeFocused();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/01c-restore-backup.png` });
+
+  // The first Back returns to key selection; the second leaves import.
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(importCard).toBeVisible();
   await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Create a new identity key" }),

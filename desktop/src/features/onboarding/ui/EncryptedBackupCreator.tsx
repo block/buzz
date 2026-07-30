@@ -1,11 +1,4 @@
-import {
-  AlertTriangle,
-  Eye,
-  EyeOff,
-  LockKeyhole,
-  RefreshCw,
-} from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
+import { AlertTriangle, Eye, EyeOff, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { createPortal } from "react-dom";
 
@@ -44,6 +37,7 @@ import {
   BackupTestFlow,
   initialBackupTestProgress,
 } from "./BackupTestFlow";
+import { BackupPasswordTimeline } from "./BackupPasswordTimeline";
 import {
   ONBOARDING_SECURITY_PRIMARY_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
@@ -80,101 +74,6 @@ const PENDING_TICKER_INTERVAL_MS = 2500;
 
 /** Matches the `duration-300` slide transition on the ticker column. */
 const PENDING_TICKER_SLIDE_MS = 300;
-
-const BACKUP_KEY_DOTS = [
-  "key-dot-1",
-  "key-dot-2",
-  "key-dot-3",
-  "key-dot-4",
-  "key-dot-5",
-  "key-dot-6",
-  "key-dot-7",
-  "key-dot-8",
-  "key-dot-9",
-] as const;
-
-const TIMELINE_CONNECTOR_DOTS = [
-  "connector-dot-1",
-  "connector-dot-2",
-  "connector-dot-3",
-  "connector-dot-4",
-] as const;
-
-const TIMELINE_DOT_INITIAL = { opacity: 0.35, scale: 0.85 };
-const TIMELINE_DOT_PULSE = {
-  opacity: [0.35, 1, 0.35],
-  scale: [0.85, 1.25, 0.85],
-};
-const TIMELINE_DOT_TRANSITION = {
-  duration: 0.7,
-  ease: "easeInOut" as const,
-  repeat: Number.POSITIVE_INFINITY,
-  repeatDelay: 1.2,
-};
-const TIMELINE_TOP_DOT_TRANSITIONS = TIMELINE_CONNECTOR_DOTS.map(
-  (_, index) => ({
-    ...TIMELINE_DOT_TRANSITION,
-    delay: index * 0.16,
-  }),
-);
-const TIMELINE_BOTTOM_DOT_TRANSITIONS = TIMELINE_CONNECTOR_DOTS.map(
-  (_, index) => ({
-    ...TIMELINE_DOT_TRANSITION,
-    delay: (index + TIMELINE_CONNECTOR_DOTS.length) * 0.16 + 0.24,
-  }),
-);
-
-/**
- * Decorative key → password → lock timeline for the onboarding security
- * surface. The password field is layered over its center by the caller.
- */
-function BackupPasswordTimeline() {
-  const reduceMotion = useReducedMotion() ?? false;
-
-  return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute inset-0 [@media(max-height:40rem)]:hidden"
-      data-testid="backup-password-timeline"
-    >
-      <div className="absolute inset-x-0 top-4 flex items-center justify-center gap-2">
-        {BACKUP_KEY_DOTS.map((dot) => (
-          <span
-            className="block size-2 rounded-full bg-foreground/85"
-            key={dot}
-          />
-        ))}
-      </div>
-      <div className="absolute left-1/2 top-11 flex h-12 -translate-x-1/2 flex-col justify-between">
-        {TIMELINE_CONNECTOR_DOTS.map((dot, index) => (
-          <motion.span
-            animate={reduceMotion ? undefined : TIMELINE_DOT_PULSE}
-            className="block size-1.5 rounded-full bg-foreground/65"
-            initial={reduceMotion ? false : TIMELINE_DOT_INITIAL}
-            key={`top-${dot}`}
-            transition={
-              reduceMotion ? undefined : TIMELINE_TOP_DOT_TRANSITIONS[index]
-            }
-          />
-        ))}
-      </div>
-      <div className="absolute bottom-15 left-1/2 flex h-12 -translate-x-1/2 flex-col justify-between">
-        {TIMELINE_CONNECTOR_DOTS.map((dot, index) => (
-          <motion.span
-            animate={reduceMotion ? undefined : TIMELINE_DOT_PULSE}
-            className="block size-1.5 rounded-full bg-foreground/65"
-            initial={reduceMotion ? false : TIMELINE_DOT_INITIAL}
-            key={`bottom-${dot}`}
-            transition={
-              reduceMotion ? undefined : TIMELINE_BOTTOM_DOT_TRANSITIONS[index]
-            }
-          />
-        ))}
-      </div>
-      <LockKeyhole className="absolute bottom-0 left-1/2 size-10 -translate-x-1/2 text-foreground/85" />
-    </div>
-  );
-}
 
 /**
  * Vertical ticker for the queued-download button label — cycles through the

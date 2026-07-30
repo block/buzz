@@ -11,6 +11,7 @@ import {
   classifyKeyImportInput,
   isPlausibleNcryptsec,
   keyImportSubmitEnabled,
+  NCRYPTSEC_ENCODED_LENGTH,
 } from "./keyImportInput.ts";
 
 // NIP-49 spec vector — structurally valid encrypted backup.
@@ -44,9 +45,15 @@ test("uppercase_bech32_encoding_classifies_and_gates_like_lowercase", () => {
   assert.equal(keyImportSubmitEnabled(mixed, "hunter2hunter2"), false);
 });
 
-test("plausible_ncryptsec_requires_bech32_charset", () => {
+test("plausible_ncryptsec_requires_complete_checksummed_nip49_payload", () => {
+  assert.equal(NCRYPTSEC.length, NCRYPTSEC_ENCODED_LENGTH);
   assert.equal(isPlausibleNcryptsec(NCRYPTSEC), true);
-  // '1' and 'b' / 'i' / 'o' are not in the bech32 charset.
+  assert.equal(isPlausibleNcryptsec(`  ${NCRYPTSEC}\n`), true);
+  assert.equal(isPlausibleNcryptsec(NCRYPTSEC.slice(0, -1)), false);
+  assert.equal(isPlausibleNcryptsec(`${NCRYPTSEC}q`), false);
+  // Same length and charset, but a changed checksum must not advance the UI.
+  assert.equal(isPlausibleNcryptsec(`${NCRYPTSEC.slice(0, -1)}q`), false);
+  // '1' and 'b' / 'i' / 'o' are not in the Bech32 data charset.
   assert.equal(isPlausibleNcryptsec("ncryptsec1bio"), false);
   assert.equal(isPlausibleNcryptsec("ncryptsec1"), false);
   assert.equal(isPlausibleNcryptsec("ncryptsec1 with spaces"), false);

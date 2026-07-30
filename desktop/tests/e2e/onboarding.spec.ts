@@ -624,6 +624,7 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
 test("first-launch encrypted backup import asks for a passphrase and continues", async ({
   page,
 }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
@@ -634,11 +635,29 @@ test("first-launch encrypted backup import asks for a passphrase and continues",
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
   const mockNcryptsec =
     "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
-  await page.getByTestId("nostr-import-nsec-input").fill(mockNcryptsec);
+  await page
+    .getByTestId("nostr-import-nsec-input")
+    .fill(mockNcryptsec.slice(0, -1));
+  await expect(
+    page.getByRole("heading", { name: "Enter your private key" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-import-passphrase")).toHaveCount(0);
 
-  // No npub preview is possible; the form switches to encrypted mode and
-  // requires a passphrase before submit unlocks.
-  await expect(page.getByTestId("nostr-import-encrypted-badge")).toBeVisible();
+  await page
+    .getByTestId("nostr-import-nsec-input")
+    .pressSequentially(mockNcryptsec.slice(-1));
+
+  // A complete, checksummed NIP-49 value advances immediately without
+  // submitting. The password stage updates its copy, illustration, and focus.
+  await expect(
+    page.getByRole("heading", { name: "Unlock your account" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("backup-password-timeline")).toBeVisible();
+  await expect(page.getByTestId("restore-ncryptsec-affordance")).toBeVisible();
+  await expect(page.getByTestId("restore-unlock-icon")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toHaveCount(0);
+  await expect(page.getByTestId("nostr-import-file-button")).toHaveCount(0);
+  await expect(page.getByTestId("nostr-import-passphrase")).toBeFocused();
   await expect(page.getByTestId("nostr-import-submit")).toBeDisabled();
 
   // Wrong passphrase surfaces the decrypt error and stays on the form.
@@ -697,8 +716,27 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     name: "identity.ncryptsec",
   });
 
-  // File contents land in the key field and switch the form to encrypted mode.
-  await expect(page.getByTestId("nostr-import-encrypted-badge")).toBeVisible();
+  // File contents advance to the same focused password stage as manual input.
+  await expect(
+    page.getByRole("heading", { name: "Unlock your account" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("backup-password-timeline")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-passphrase")).toBeFocused();
+
+  // Back first returns to key/file selection instead of leaving import.
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your private key" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-file-button")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-nsec-input")).toHaveValue("");
+
+  await fileInput.setInputFiles({
+    buffer: Buffer.from(`${mockNcryptsec}\n`),
+    mimeType: "text/plain",
+    name: "identity.ncryptsec",
+  });
   await page
     .getByTestId("nostr-import-passphrase")
     .fill("mock horse battery staple lake orbit");
