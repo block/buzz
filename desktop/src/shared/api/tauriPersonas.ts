@@ -258,6 +258,11 @@ export type AgentSnapshotImportPreview = {
   /** True when the snapshot's respond_to_allowlist is non-empty. */
   hasSourceAllowlist: boolean;
   sourceAllowlistCount: number;
+  /**
+   * Env var key names that will be pre-created with blank values on import.
+   * Snapshots never carry values — the owner fills them in after import.
+   */
+  environmentKeys: string[];
 };
 
 /** Confirmation sent to `confirm_agent_snapshot_import`. */

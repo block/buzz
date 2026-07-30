@@ -169,6 +169,8 @@ mod tests {
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
                 name_pool: vec![],
+                environment: vec![],
+                environment_values: Default::default(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Tree Trunks".to_string(),

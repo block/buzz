@@ -21,6 +21,7 @@ function makePreview(overrides = {}) {
     memoryEntryCount: 0,
     hasSourceAllowlist: false,
     sourceAllowlistCount: 0,
+    environmentKeys: [],
     ...overrides,
   };
 }
@@ -72,6 +73,22 @@ test("preview_memory_entry_count_drives_warning_display", () => {
   });
   assert.equal(withMemory.memoryEntryCount, 3);
   assert.equal(withMemory.memoryLevel, "everything");
+});
+
+// ── Preview: environment scaffolding ──────────────────────────────────────────
+
+test("preview_environment_keys_default_empty", () => {
+  const preview = makePreview();
+  assert.deepEqual(preview.environmentKeys, []);
+});
+
+test("preview_environment_keys_drive_section_display", () => {
+  const preview = makePreview({
+    environmentKeys: ["ALPHA_ENDPOINT", "ZEBRA_TOKEN"],
+  });
+  assert.equal(preview.environmentKeys.length, 2);
+  // Keys arrive pre-filtered and sorted from the backend.
+  assert.deepEqual(preview.environmentKeys, ["ALPHA_ENDPOINT", "ZEBRA_TOKEN"]);
 });
 
 // ── Allowlist: default is clear (server-side enforced) ───────────────────────
