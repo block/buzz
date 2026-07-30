@@ -7,8 +7,13 @@ const MAX_HINTS_BYTES: usize = 128 * 1024;
 pub const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
 const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills"];
 
+/// `$HOME` is not defined on Windows — it exists only inside shells like Git Bash
+/// that export it, and the desktop spawns agents from a GUI process that has no
+/// such variable. Reading it directly meant `~/.agents/skills` and friends were
+/// never discovered there. `dirs::home_dir` consults the platform's own notion of
+/// the profile directory.
 fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    dirs::home_dir()
 }
 
 #[derive(Clone)]
@@ -614,6 +619,13 @@ mod tests {
         let skills = discover_skills_impl(cwd.path(), None);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "local");
+    }
+
+    #[test]
+    fn home_dir_resolves_on_this_platform() {
+        // Regression guard: reading `$HOME` yielded None on Windows, so the
+        // global skill directories were silently never scanned there.
+        assert!(home_dir().is_some());
     }
 
     #[test]
