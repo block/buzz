@@ -28,8 +28,8 @@ use crate::webhook_secret;
 
 use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
-    emit_group_discovery_events, emit_membership_notification, emit_system_message,
-    publish_dm_visibility_snapshot,
+    emit_dm_created, emit_group_discovery_events, emit_membership_notification,
+    emit_system_message, publish_dm_visibility_snapshot,
 };
 
 /// Route a command-kind event to the appropriate handler.
@@ -307,6 +307,35 @@ fn compute_definition_hash(json_str: &str) -> Vec<u8> {
     Sha256::digest(json_str.as_bytes()).to_vec()
 }
 
+async fn publish_dm_discovery(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel: &buzz_db::channel::ChannelRecord,
+    participant_pubkeys: &[Vec<u8>],
+    operation: &'static str,
+) {
+    match u64::try_from(channel.created_at.timestamp()) {
+        Ok(created_at) => {
+            if let Err(e) =
+                emit_dm_created(tenant, state, channel.id, created_at, participant_pubkeys).await
+            {
+                warn!(
+                    channel = %channel.id,
+                    operation,
+                    "DM discovery emission failed: {e}"
+                );
+            }
+        }
+        Err(_) => {
+            warn!(
+                channel = %channel.id,
+                operation,
+                "DM discovery has an invalid channel creation timestamp"
+            );
+        }
+    }
+}
+
 async fn handle_dm_open(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -425,6 +454,11 @@ async fn handle_dm_open(
             warn!("DM re-open: visibility snapshot failed: {e}");
         }
     }
+
+    // Use the channel creation timestamp so retries produce the same event id.
+    // This also backfills discovery for DMs created before kind:41001 emission
+    // was implemented without adding duplicate rows on each re-open.
+    publish_dm_discovery(tenant, state, &channel, &all_bytes, "open").await;
 
     // 6. Return response
     Ok(IngestResult {
@@ -563,6 +597,8 @@ async fn handle_dm_add_member(
             }
         }
     }
+
+    publish_dm_discovery(tenant, state, &new_channel, &all_bytes, "add_member").await;
 
     // 8. Return response
     Ok(IngestResult {

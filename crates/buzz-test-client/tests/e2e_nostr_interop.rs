@@ -146,6 +146,44 @@ async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
         .to_string()
 }
 
+/// Add a participant to an existing DM and return the newly created immutable
+/// group-DM channel id from the relay response.
+async fn add_dm_member(requester_keys: &Keys, channel_id: &str, new_pubkey_hex: &str) -> String {
+    let client = reqwest::Client::new();
+    let event = EventBuilder::new(Kind::Custom(41011), "")
+        .tags(vec![
+            Tag::parse(["h", channel_id]).unwrap(),
+            Tag::parse(["p", new_pubkey_hex]).unwrap(),
+        ])
+        .sign_with_keys(requester_keys)
+        .unwrap();
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", requester_keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("add DM member request");
+    assert!(
+        resp.status().is_success(),
+        "add DM member failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse add-member response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "DM add-member not accepted: {body}"
+    );
+    let msg = body["message"].as_str().expect("message");
+    let payload = msg.strip_prefix("response:").expect("response: prefix");
+    let parsed: serde_json::Value = serde_json::from_str(payload).expect("response JSON");
+    parsed["channel_id"]
+        .as_str()
+        .expect("channel_id")
+        .to_string()
+}
+
 /// Submit a signed command event via REST and assert it was accepted.
 async fn post_signed_event(keys: &Keys, kind: u16, tags: Vec<Tag>) {
     let client = reqwest::Client::new();
@@ -752,8 +790,9 @@ async fn test_nip17_gift_wrap_recipient_receives() {
     client_b.disconnect().await.expect("disconnect B");
 }
 
-/// Create a DM via REST, then subscribe as a participant to verify discovery events.
+/// Create a DM via REST, then subscribe as both participants to verify discovery events.
 /// Verify: kind:39000 event received with `hidden` and `private` tags.
+/// Verify: kind:41001 is queryable by every participant and identifies the DM.
 /// Verify: kind:44100 membership notification received.
 #[tokio::test]
 #[ignore]
@@ -761,13 +800,25 @@ async fn test_dm_discovery_events_emitted() {
     let url = relay_url();
     let keys_a = Keys::generate();
     let keys_b = Keys::generate();
+    let keys_c = Keys::generate();
     let a_pubkey_hex = keys_a.public_key().to_hex();
     let b_pubkey_hex = keys_b.public_key().to_hex();
+    let c_pubkey_hex = keys_c.public_key().to_hex();
 
     // Create the DM via REST (A creates DM with B). This persists the relay's
     // kind:39000 discovery event and the kind:44100 membership notification
     // (stored globally, channel_id = None), then fans both out live.
     let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    // Re-open from the recipient before querying. The relay should self-heal a
+    // missing confirmation for older DMs and must not create a duplicate for a
+    // DM that already has one.
+    post_signed_event(
+        &keys_b,
+        41010,
+        vec![Tag::parse(["p", &a_pubkey_hex]).unwrap()],
+    )
+    .await;
 
     // Connect A and subscribe AFTER create_dm. Both events are now in history,
     // so each subscription replays its event before EOSE — no dependency on
@@ -856,6 +907,132 @@ async fn test_dm_discovery_events_emitted() {
         has_private,
         "kind:39000 missing 'private' tag. tags: {tags:?}"
     );
+
+    for (label, keys, pubkey_hex) in [
+        ("creator", &keys_a, &a_pubkey_hex),
+        ("recipient", &keys_b, &b_pubkey_hex),
+    ] {
+        let mut client = BuzzTestClient::connect(&url, keys)
+            .await
+            .unwrap_or_else(|e| panic!("{label} connect: {e}"));
+        let sid = sub_id(&format!("dm-discovery-41001-{label}"));
+        let filter = Filter::new()
+            .kind(Kind::Custom(41001))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), pubkey_hex.as_str());
+        client
+            .subscribe(&sid, vec![filter])
+            .await
+            .unwrap_or_else(|e| panic!("{label} subscribe: {e}"));
+        let events = client
+            .collect_until_eose(&sid, Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|e| panic!("{label} discovery EOSE: {e}"));
+        assert_eq!(
+            events.len(),
+            1,
+            "create plus re-open must leave one kind:41001 event for {label}; events: {events:?}"
+        );
+
+        let event = events
+            .iter()
+            .find(|event| {
+                event.kind == Kind::Custom(41001)
+                    && event.tags.iter().any(|tag| {
+                        let values = tag.as_slice();
+                        values.len() >= 2 && values[0] == "d" && values[1] == channel_id
+                    })
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "kind:41001 for DM {channel_id} must be discoverable by {label}; events: {events:?}"
+                )
+            });
+        let event_tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| {
+                tag.as_slice()
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect()
+            })
+            .collect();
+        for participant in [&a_pubkey_hex, &b_pubkey_hex] {
+            assert!(
+                event_tags
+                    .iter()
+                    .any(|tag| tag.len() >= 2 && tag[0] == "p" && tag[1] == *participant),
+                "kind:41001 missing participant {participant}; tags: {event_tags:?}"
+            );
+        }
+        assert!(
+            event_tags
+                .iter()
+                .any(|tag| tag.len() >= 2 && tag[0] == "h" && tag[1] == channel_id),
+            "kind:41001 missing h tag = DM channel id; tags: {event_tags:?}"
+        );
+
+        client.disconnect().await.expect("disconnect");
+    }
+
+    // Adding a participant creates a new immutable group DM. That producer
+    // path must emit the same participant-addressed discovery event.
+    let group_channel_id = add_dm_member(&keys_a, &channel_id, &c_pubkey_hex).await;
+    assert_ne!(
+        group_channel_id, channel_id,
+        "adding a participant must create a new group DM"
+    );
+    let mut client_c = BuzzTestClient::connect(&url, &keys_c)
+        .await
+        .expect("new group-DM participant connect");
+    let sid_group = sub_id("dm-discovery-41001-group-recipient");
+    let group_filter = Filter::new().kind(Kind::Custom(41001)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        c_pubkey_hex.as_str(),
+    );
+    client_c
+        .subscribe(&sid_group, vec![group_filter])
+        .await
+        .expect("subscribe group-DM discovery");
+    let group_events = client_c
+        .collect_until_eose(&sid_group, Duration::from_secs(10))
+        .await
+        .expect("group-DM discovery EOSE");
+    let group_event = group_events
+        .iter()
+        .find(|event| {
+            event.kind == Kind::Custom(41001)
+                && event.tags.iter().any(|tag| {
+                    let values = tag.as_slice();
+                    values.len() >= 2
+                        && values[0] == "d"
+                        && values[1] == group_channel_id
+                })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "kind:41001 for group DM {group_channel_id} must be discoverable by its new participant; events: {group_events:?}"
+            )
+        });
+    let group_tags: Vec<Vec<String>> = group_event
+        .tags
+        .iter()
+        .map(|tag| {
+            tag.as_slice()
+                .iter()
+                .map(|value| value.to_string())
+                .collect()
+        })
+        .collect();
+    for participant in [&a_pubkey_hex, &b_pubkey_hex, &c_pubkey_hex] {
+        assert!(
+            group_tags
+                .iter()
+                .any(|tag| tag.len() >= 2 && tag[0] == "p" && tag[1] == *participant),
+            "group kind:41001 missing participant {participant}; tags: {group_tags:?}"
+        );
+    }
+    client_c.disconnect().await.expect("disconnect");
 
     client_a.disconnect().await.expect("disconnect");
 }
