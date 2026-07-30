@@ -11,6 +11,8 @@ const FILTER_FIELDS = new Set([
   "limit",
 ]);
 
+export type QueryFilter = Filter & { before_id?: string };
+
 export class ProtocolInputError extends Error {
   constructor(message: string) {
     super(message);
@@ -48,13 +50,24 @@ export function eventFromUnknown(value: unknown): Event {
 }
 
 export function filtersFromUnknown(value: unknown): Filter[] {
+  return filtersFromUnknownWithCursor(value, false);
+}
+
+export function queryFiltersFromUnknown(value: unknown): QueryFilter[] {
+  return filtersFromUnknownWithCursor(value, true);
+}
+
+function filtersFromUnknownWithCursor(
+  value: unknown,
+  allowCursor: boolean,
+): QueryFilter[] {
   if (!Array.isArray(value)) {
     throw new ProtocolInputError("filters must be a JSON array");
   }
-  return value.map((candidate) => filterFromUnknown(candidate));
+  return value.map((candidate) => filterFromUnknown(candidate, allowCursor));
 }
 
-function filterFromUnknown(value: unknown): Filter {
+function filterFromUnknown(value: unknown, allowCursor: boolean): QueryFilter {
   if (!isRecord(value)) {
     throw new ProtocolInputError("each filter must be a JSON object");
   }
@@ -65,6 +78,12 @@ function filterFromUnknown(value: unknown): Filter {
   for (const [field, fieldValue] of Object.entries(value)) {
     if (field.startsWith("#")) {
       requireStringArray(field, fieldValue);
+      continue;
+    }
+    if (field === "before_id" && allowCursor) {
+      if (typeof fieldValue !== "string" || !HEX_32_BYTES.test(fieldValue)) {
+        throw new ProtocolInputError("before_id must be a 64-hex event id");
+      }
       continue;
     }
     if (!FILTER_FIELDS.has(field)) {
@@ -81,7 +100,10 @@ function filterFromUnknown(value: unknown): Filter {
       throw new ProtocolInputError(`${field} must be an integer`);
     }
   }
-  return value as Filter;
+  if ("before_id" in value && !("until" in value)) {
+    throw new ProtocolInputError("before_id requires until to be set");
+  }
+  return value as QueryFilter;
 }
 
 function requireStringArray(field: string, value: unknown): void {

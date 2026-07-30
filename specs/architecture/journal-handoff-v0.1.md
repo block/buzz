@@ -109,6 +109,28 @@ Only a close for the newest valid return produces `CLOSED`. A close for an
 earlier return cannot suppress a later return. Legacy closes that identify
 only the open are not causally valid and do not suppress steward findings.
 
+## Invalid archival acknowledgment
+
+An invalid open remains invalid: it cannot be repaired by relaxing current
+validation or replaying its legacy transitions as if they met the hardened
+contract. Its effective owner may instead publish one
+`t=handoff:ack-invalid` archival acknowledgment that:
+
+- carries the same `h` context as every referenced invalid open;
+- identifies each exact open with an `e/invalid` tag;
+- restates the same unique event IDs in `content.open_ids`;
+- carries `status=acknowledged-invalid`;
+- posts after every referenced open;
+- is signed directly by each opener owner or by a signer with a valid
+  attestation from that owner.
+
+The reducer reports `ACKNOWLEDGED_INVALID`, preserving the original validation
+reason and acknowledgment event ID. This state is neither `CLOSED` nor evidence
+that the legacy lifecycle was valid. The steward omits recurring invalid
+findings for acknowledged records while retaining their archival count.
+Exact event IDs avoid insecure timestamp cutoffs and non-portable custody
+sequence assumptions.
+
 ## Execution boundary
 
 Host mode is manual and explicit. `buzz-runner` refuses unattended host

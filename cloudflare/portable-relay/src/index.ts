@@ -10,6 +10,7 @@ import {
   eventFromUnknown,
   filtersFromUnknown,
   ProtocolInputError,
+  queryFiltersFromUnknown,
 } from "./protocol";
 import {
   replicationReadRequestFromUnknown,
@@ -130,10 +131,16 @@ export default {
         );
       }
 
-      const filters = filtersFromUnknown(body);
       if (url.pathname === "/query") {
-        return unwrap(await node.queryEvents(stableNodeKey, filters, auth));
+        return unwrap(
+          await node.queryEvents(
+            stableNodeKey,
+            queryFiltersFromUnknown(body),
+            auth,
+          ),
+        );
       }
+      const filters = filtersFromUnknown(body);
       const counted = await node.countEvents(stableNodeKey, filters, auth);
       return "denied" in counted
         ? denialResponse(counted.denied)

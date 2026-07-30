@@ -11,7 +11,7 @@ use std::io::{self, Read};
 use anyhow::{bail, Context};
 use buzz_core::verification::verify_event;
 use nostr::{Event, PublicKey};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const KIND_TEXT_NOTE: u16 = 1;
@@ -19,6 +19,8 @@ const HANDOFF_OPEN: &str = "handoff:open";
 const HANDOFF_CLAIM: &str = "handoff:claim";
 const HANDOFF_RETURN: &str = "handoff:return";
 const HANDOFF_CLOSE: &str = "handoff:close";
+const HANDOFF_ACK_INVALID: &str = "handoff:ack-invalid";
+const MAX_INVALID_ACK_TARGETS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -29,6 +31,7 @@ enum LifecycleState {
     Returned,
     Closed,
     Invalid,
+    AcknowledgedInvalid,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +58,8 @@ struct HandoffState {
     return_created_at: Option<u64>,
     close_id: Option<String>,
     close_created_at: Option<u64>,
+    acknowledgment_id: Option<String>,
+    acknowledgment_created_at: Option<u64>,
     conflicting_claims: Vec<String>,
     ignored: Vec<IgnoredEvent>,
 }
@@ -70,13 +75,42 @@ struct OpenAuthority {
     created_at: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct AcceptedEvent<'a> {
     event: &'a Event,
 }
 
+#[derive(Debug)]
+struct InvalidOpenAuthority {
+    id: String,
+    context: String,
+    opener_owner_pubkey: PublicKey,
+    created_at: u64,
+}
+
+#[derive(Debug, Default)]
+struct InvalidAcknowledgments<'a> {
+    accepted_by_open: BTreeMap<String, Vec<AcceptedEvent<'a>>>,
+    ignored_by_open: BTreeMap<String, Vec<IgnoredEvent>>,
+}
+
+#[derive(Debug)]
+struct ValidatedInvalidAck<'a> {
+    event: &'a Event,
+    open_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OwnerAttestationRequest {
+    signer_pubkey: String,
+    auth_tag: Vec<String>,
+    kind: u16,
+    created_at: u64,
+}
+
 fn main() -> anyhow::Result<()> {
     let mut selected_open = None;
+    let mut verify_owner_attestation = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -86,15 +120,21 @@ fn main() -> anyhow::Result<()> {
                         .context("--open requires a 64-character event id")?,
                 );
             }
+            "--verify-owner-attestation" => verify_owner_attestation = true,
             "-h" | "--help" => {
                 println!(
                     "buzz-handoff-state [--open EVENT_ID]\n\
-                     Reads a JSON array of signed Nostr events from stdin."
+                     buzz-handoff-state --verify-owner-attestation\n\
+                     Reduces a JSON array of signed Nostr events, or verifies an\n\
+                     owner-attestation request, from stdin."
                 );
                 return Ok(());
             }
             other => bail!("unknown argument: {other}"),
         }
+    }
+    if verify_owner_attestation && selected_open.is_some() {
+        bail!("--verify-owner-attestation cannot be combined with --open");
     }
     if let Some(open_id) = selected_open.as_ref() {
         if !is_lower_hex(open_id, 64) {
@@ -106,8 +146,16 @@ fn main() -> anyhow::Result<()> {
     io::stdin()
         .read_to_string(&mut input)
         .context("could not read event JSON from stdin")?;
+    if verify_owner_attestation {
+        let request: OwnerAttestationRequest = serde_json::from_str(&input)
+            .context("stdin must be a JSON owner-attestation request")?;
+        let owner = verify_owner_attestation_request(&request).map_err(anyhow::Error::msg)?;
+        println!("{}", owner.to_hex());
+        return Ok(());
+    }
     let events: Vec<Event> =
         serde_json::from_str(&input).context("stdin must be a JSON array of Nostr events")?;
+    let invalid_acknowledgments = build_invalid_acknowledgments(&events);
 
     let mut states = Vec::new();
     for event in events
@@ -121,7 +169,11 @@ fn main() -> anyhow::Result<()> {
         {
             continue;
         }
-        states.push(reduce_handoff(event, &events));
+        states.push(reduce_handoff_with_invalid_acknowledgments(
+            event,
+            &events,
+            &invalid_acknowledgments,
+        ));
     }
     states.sort_by(|left, right| {
         right
@@ -142,22 +194,57 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn reduce_handoff(open: &Event, events: &[Event]) -> HandoffState {
+fn reduce_handoff_with_invalid_acknowledgments(
+    open: &Event,
+    events: &[Event],
+    invalid_acknowledgments: &InvalidAcknowledgments<'_>,
+) -> HandoffState {
     let open_id = open.id.to_hex();
     let mut ignored = Vec::new();
     let authority = match validate_open(open) {
         Ok(authority) => authority,
         Err(reason) => {
+            let mut ignored = vec![IgnoredEvent {
+                id: open.id.to_hex(),
+                reason,
+            }];
+            let invalid_authority = invalid_open_authority(open).ok();
+            if let Some(rejected) = invalid_acknowledgments.ignored_by_open.get(&open_id) {
+                ignored.extend(rejected.iter().map(|event| IgnoredEvent {
+                    id: event.id.clone(),
+                    reason: event.reason.clone(),
+                }));
+            }
+            let acknowledgments = invalid_acknowledgments
+                .accepted_by_open
+                .get(&open_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let acknowledgment = acknowledgments.first().map(|accepted| accepted.event);
+            for duplicate in acknowledgments.iter().skip(1) {
+                ignored.push(ignored_event(
+                    duplicate.event,
+                    "duplicate acknowledgment for invalid handoff",
+                ));
+            }
             return HandoffState {
                 open_id,
                 title: open_title(open),
                 context: tag_values(open, "h").first().cloned().unwrap_or_default(),
                 opener_pubkey: open.pubkey.to_hex(),
-                opener_owner_pubkey: String::new(),
+                opener_owner_pubkey: invalid_authority
+                    .map(|authority| authority.opener_owner_pubkey.to_hex())
+                    .unwrap_or_default(),
                 allowed_claimants: Vec::new(),
                 created_at: open.created_at.as_secs(),
-                updated_at: open.created_at.as_secs(),
-                state: LifecycleState::Invalid,
+                updated_at: acknowledgment.map_or(open.created_at.as_secs(), |event| {
+                    event.created_at.as_secs()
+                }),
+                state: if acknowledgment.is_some() {
+                    LifecycleState::AcknowledgedInvalid
+                } else {
+                    LifecycleState::Invalid
+                },
                 claim_id: None,
                 claimant_pubkey: None,
                 claim_created_at: None,
@@ -165,11 +252,10 @@ fn reduce_handoff(open: &Event, events: &[Event]) -> HandoffState {
                 return_created_at: None,
                 close_id: None,
                 close_created_at: None,
+                acknowledgment_id: acknowledgment.map(|event| event.id.to_hex()),
+                acknowledgment_created_at: acknowledgment.map(|event| event.created_at.as_secs()),
                 conflicting_claims: Vec::new(),
-                ignored: vec![IgnoredEvent {
-                    id: open.id.to_hex(),
-                    reason,
-                }],
+                ignored,
             };
         }
     };
@@ -279,6 +365,12 @@ fn reduce_handoff(open: &Event, events: &[Event]) -> HandoffState {
     )
 }
 
+#[cfg(test)]
+fn reduce_handoff(open: &Event, events: &[Event]) -> HandoffState {
+    let invalid_acknowledgments = build_invalid_acknowledgments(events);
+    reduce_handoff_with_invalid_acknowledgments(open, events, &invalid_acknowledgments)
+}
+
 fn validate_open(event: &Event) -> Result<OpenAuthority, String> {
     validate_envelope(event, HANDOFF_OPEN)?;
     let context = exactly_one_tag(event, "h")?;
@@ -325,6 +417,159 @@ fn validate_open(event: &Event) -> Result<OpenAuthority, String> {
         opener_owner_pubkey: owner,
         allowed_claimants,
         created_at: event.created_at.as_secs(),
+    })
+}
+
+fn invalid_open_authority(event: &Event) -> Result<InvalidOpenAuthority, String> {
+    validate_envelope(event, HANDOFF_OPEN)?;
+    Ok(InvalidOpenAuthority {
+        id: event.id.to_hex(),
+        context: exactly_one_tag(event, "h")?,
+        opener_owner_pubkey: event_owner(event)?,
+        created_at: event.created_at.as_secs(),
+    })
+}
+
+fn build_invalid_acknowledgments(events: &[Event]) -> InvalidAcknowledgments<'_> {
+    let invalid_opens = events
+        .iter()
+        .filter(|event| lifecycle(event) == Some(HANDOFF_OPEN))
+        .filter(|event| validate_open(event).is_err())
+        .filter_map(|event| {
+            invalid_open_authority(event)
+                .ok()
+                .map(|authority| (authority.id.clone(), authority))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut acknowledgments = InvalidAcknowledgments::default();
+
+    for event in events
+        .iter()
+        .filter(|event| lifecycle(event) == Some(HANDOFF_ACK_INVALID))
+    {
+        match validate_invalid_ack(event, &invalid_opens) {
+            Ok(validated) => {
+                for open_id in validated.open_ids {
+                    acknowledgments
+                        .accepted_by_open
+                        .entry(open_id)
+                        .or_default()
+                        .push(AcceptedEvent {
+                            event: validated.event,
+                        });
+                }
+            }
+            Err(reason) => {
+                for open_id in invalid_ack_references(event) {
+                    if invalid_opens.contains_key(&open_id) {
+                        acknowledgments
+                            .ignored_by_open
+                            .entry(open_id)
+                            .or_default()
+                            .push(ignored_event(event, reason.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    for accepted in acknowledgments.accepted_by_open.values_mut() {
+        accepted.sort_by(event_order);
+    }
+    acknowledgments
+}
+
+fn validate_invalid_ack<'a>(
+    event: &'a Event,
+    invalid_opens: &BTreeMap<String, InvalidOpenAuthority>,
+) -> Result<ValidatedInvalidAck<'a>, String> {
+    validate_envelope(event, HANDOFF_ACK_INVALID)?;
+    let context = exactly_one_tag(event, "h")?;
+    let owner = event_owner(event)?;
+
+    let tagged_ids = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().map(String::as_str) == Some("e")
+                && values.get(3).map(String::as_str) == Some("invalid"))
+            .then(|| values.get(1).cloned())
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    if tagged_ids.is_empty()
+        || tagged_ids
+            .iter()
+            .any(|event_id| !is_lower_hex(event_id, 64))
+    {
+        return Err(
+            "invalid acknowledgment must carry lowercase 64-character e/invalid tags".into(),
+        );
+    }
+    if tagged_ids.len() > MAX_INVALID_ACK_TARGETS {
+        return Err(format!(
+            "invalid acknowledgment cannot target more than {MAX_INVALID_ACK_TARGETS} opens"
+        ));
+    }
+    let tagged_set = tagged_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if tagged_set.len() != tagged_ids.len() {
+        return Err("invalid acknowledgment contains duplicate e/invalid tags".into());
+    }
+
+    let content = content_object(event)?;
+    if content.get("status").and_then(Value::as_str) != Some("acknowledged-invalid") {
+        return Err("invalid acknowledgment status must be acknowledged-invalid".into());
+    }
+    let content_ids = content
+        .get("open_ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "invalid acknowledgment content must contain open_ids".to_string())?;
+    if content_ids.len() > MAX_INVALID_ACK_TARGETS {
+        return Err(format!(
+            "invalid acknowledgment cannot target more than {MAX_INVALID_ACK_TARGETS} opens"
+        ));
+    }
+    let content_ids = content_ids
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|event_id| is_lower_hex(event_id, 64))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    "invalid acknowledgment open_ids must be lowercase 64-character event ids"
+                        .to_string()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let content_set = content_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if content_set.len() != content_ids.len() {
+        return Err("invalid acknowledgment contains duplicate open_ids".into());
+    }
+    if content_set != tagged_set {
+        return Err("invalid acknowledgment open_ids do not match its e/invalid tags".into());
+    }
+
+    for open_id in &content_set {
+        let open = invalid_opens.get(open_id).ok_or_else(|| {
+            format!("invalid acknowledgment target {open_id} is not an invalid open")
+        })?;
+        if context != open.context {
+            return Err("invalid acknowledgment targets opens from different h contexts".into());
+        }
+        if event.created_at.as_secs() <= open.created_at {
+            return Err("invalid acknowledgment must post after every targeted open".into());
+        }
+        if owner != open.opener_owner_pubkey {
+            return Err(
+                "invalid acknowledgment is not authorized by every opener's owner identity".into(),
+            );
+        }
+    }
+    Ok(ValidatedInvalidAck {
+        event,
+        open_ids: content_set,
     })
 }
 
@@ -442,28 +687,45 @@ fn event_owner(event: &Event) -> Result<PublicKey, String> {
         .as_slice()
         .get(2)
         .ok_or_else(|| "owner-attestation conditions are missing".to_string())?;
-    if !conditions_cover_event(conditions, event) {
+    if !conditions_cover(conditions, event.kind.as_u16(), event.created_at.as_secs()) {
         return Err("owner-attestation conditions do not cover this event".into());
     }
     Ok(owner)
 }
 
-fn conditions_cover_event(conditions: &str, event: &Event) -> bool {
+fn verify_owner_attestation_request(
+    request: &OwnerAttestationRequest,
+) -> Result<PublicKey, String> {
+    if !is_lower_hex(&request.signer_pubkey, 64) {
+        return Err("signer_pubkey must be a lowercase 64-character public key".into());
+    }
+    let signer = PublicKey::from_hex(&request.signer_pubkey)
+        .map_err(|_| "signer_pubkey is not a valid public key".to_string())?;
+    if request.auth_tag.len() != 4 || request.auth_tag.first().map(String::as_str) != Some("auth") {
+        return Err("owner-attestation must be a four-element auth tag".into());
+    }
+    let tag_json = serde_json::to_string(&request.auth_tag)
+        .map_err(|_| "owner-attestation tag is not JSON".to_string())?;
+    let owner = buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &signer)
+        .map_err(|_| "owner-attestation signature is invalid".to_string())?;
+    if !conditions_cover(&request.auth_tag[2], request.kind, request.created_at) {
+        return Err("owner-attestation conditions do not cover this event".into());
+    }
+    Ok(owner)
+}
+
+fn conditions_cover(conditions: &str, kind: u16, created_at: u64) -> bool {
     conditions.split('&').all(|clause| {
         if clause.is_empty() {
             true
         } else if let Some(value) = clause.strip_prefix("kind=") {
             value
                 .parse::<u16>()
-                .is_ok_and(|kind| kind == event.kind.as_u16())
+                .is_ok_and(|required_kind| required_kind == kind)
         } else if let Some(value) = clause.strip_prefix("created_at<") {
-            value
-                .parse::<u64>()
-                .is_ok_and(|limit| event.created_at.as_secs() < limit)
+            value.parse::<u64>().is_ok_and(|limit| created_at < limit)
         } else if let Some(value) = clause.strip_prefix("created_at>") {
-            value
-                .parse::<u64>()
-                .is_ok_and(|limit| event.created_at.as_secs() > limit)
+            value.parse::<u64>().is_ok_and(|limit| created_at > limit)
         } else {
             false
         }
@@ -545,6 +807,21 @@ fn linked_event(event: &Event, marker: &str) -> Option<String> {
     })
 }
 
+fn invalid_ack_references(event: &Event) -> BTreeSet<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().map(String::as_str) == Some("e")
+                && values.get(3).map(String::as_str) == Some("invalid"))
+            .then(|| values.get(1).cloned())
+            .flatten()
+            .filter(|event_id| is_lower_hex(event_id, 64))
+        })
+        .collect()
+}
+
 fn event_order(left: &AcceptedEvent<'_>, right: &AcceptedEvent<'_>) -> std::cmp::Ordering {
     left.event
         .created_at
@@ -586,6 +863,8 @@ fn state_from_authority(
         return_created_at: returned.map(|event| event.created_at.as_secs()),
         close_id: close.map(|event| event.id.to_hex()),
         close_created_at: close.map(|event| event.created_at.as_secs()),
+        acknowledgment_id: None,
+        acknowledgment_created_at: None,
         conflicting_claims,
         ignored,
     }
@@ -721,6 +1000,52 @@ mod tests {
                 auth_tag(owner, verifier),
             ],
             json!({"return_id": returned.id.to_hex(), "note": "verified"}),
+        )
+    }
+
+    fn invalid_open(opener: &Keys, owner: &Keys, at: u64) -> Event {
+        signed(
+            opener,
+            HANDOFF_OPEN,
+            at,
+            vec![auth_tag(owner, opener)],
+            json!({
+                "title": "legacy handoff",
+                "scope": "historical",
+                "base_commit": "6efeba90c",
+                "acceptance": "already delivered",
+                "embodiment": {
+                    "stdin": "closed",
+                    "network": "none",
+                    "trust": "historical",
+                    "tooling": "none"
+                }
+            }),
+        )
+    }
+
+    fn acknowledge_invalid(verifier: &Keys, owner: &Keys, opens: &[&Event], at: u64) -> Event {
+        let open_ids = opens
+            .iter()
+            .map(|open| open.id.to_hex())
+            .collect::<Vec<_>>();
+        let mut tags = opens
+            .iter()
+            .map(|open| {
+                Tag::parse(["e", open.id.to_hex().as_str(), "", "invalid"]).expect("invalid e tag")
+            })
+            .collect::<Vec<_>>();
+        tags.push(auth_tag(owner, verifier));
+        signed(
+            verifier,
+            HANDOFF_ACK_INVALID,
+            at,
+            tags,
+            json!({
+                "status": "acknowledged-invalid",
+                "reason": "pre-hardening archival record",
+                "open_ids": open_ids
+            }),
         )
     }
 
@@ -884,6 +1209,39 @@ mod tests {
     }
 
     #[test]
+    fn preflights_owner_attestation_signature_and_conditions() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let tag = auth_tag(&owner, &agent);
+        let request = OwnerAttestationRequest {
+            signer_pubkey: agent.public_key().to_hex(),
+            auth_tag: tag.as_slice().to_vec(),
+            kind: KIND_TEXT_NOTE,
+            created_at: 20,
+        };
+        assert_eq!(
+            verify_owner_attestation_request(&request).expect("attestation verifies"),
+            owner.public_key()
+        );
+
+        let expiring_json =
+            nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=1&created_at<20")
+                .expect("auth tag computes");
+        let expired = OwnerAttestationRequest {
+            signer_pubkey: agent.public_key().to_hex(),
+            auth_tag: nip_oa::parse_auth_tag(&expiring_json)
+                .expect("auth tag parses")
+                .as_slice()
+                .to_vec(),
+            kind: KIND_TEXT_NOTE,
+            created_at: 20,
+        };
+        assert!(verify_owner_attestation_request(&expired)
+            .expect_err("expired attestation is rejected")
+            .contains("conditions"));
+    }
+
+    #[test]
     fn requires_strictly_causal_transition_times() {
         let owner = Keys::generate();
         let claimant = Keys::generate();
@@ -946,5 +1304,135 @@ mod tests {
         assert_eq!(state.state, LifecycleState::Claimed);
         assert_eq!(state.claim_id, Some(first.id.to_hex()));
         assert_eq!(state.ignored.len(), 1);
+    }
+
+    #[test]
+    fn owner_can_acknowledge_exact_invalid_open_ids_without_validating_them() {
+        let owner = Keys::generate();
+        let opener = Keys::generate();
+        let verifier = Keys::generate();
+        let first = invalid_open(&opener, &owner, 10);
+        let second = invalid_open(&opener, &owner, 11);
+        let acknowledgment = acknowledge_invalid(&verifier, &owner, &[&first, &second], 20);
+        let events = [first.clone(), second.clone(), acknowledgment.clone()];
+
+        for open in [&first, &second] {
+            let state = reduce_handoff(open, &events);
+            assert_eq!(state.state, LifecycleState::AcknowledgedInvalid);
+            assert_eq!(state.acknowledgment_id, Some(acknowledgment.id.to_hex()));
+            assert_eq!(state.opener_owner_pubkey, owner.public_key().to_hex());
+            assert!(state.ignored[0]
+                .reason
+                .contains("base_commit must be a canonical"));
+        }
+    }
+
+    #[test]
+    fn rejects_an_entire_acknowledgment_if_any_target_is_not_eligible() {
+        let owner = Keys::generate();
+        let opener = Keys::generate();
+        let verifier = Keys::generate();
+        let claimant = Keys::generate();
+        let invalid = invalid_open(&opener, &owner, 10);
+        let valid = open(&owner, &[claimant.public_key()]);
+        let acknowledgment = acknowledge_invalid(&verifier, &owner, &[&invalid, &valid], 20);
+
+        let state = reduce_handoff(&invalid, &[invalid.clone(), valid, acknowledgment.clone()]);
+        assert_eq!(state.state, LifecycleState::Invalid);
+        assert_eq!(state.acknowledgment_id, None);
+        assert!(state.ignored.iter().any(|ignored| {
+            ignored.id == acknowledgment.id.to_hex()
+                && ignored.reason.contains("is not an invalid open")
+        }));
+
+        let missing_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let missing_target = signed(
+            &verifier,
+            HANDOFF_ACK_INVALID,
+            21,
+            vec![
+                Tag::parse(["e", invalid.id.to_hex().as_str(), "", "invalid"])
+                    .expect("invalid e tag"),
+                Tag::parse(["e", missing_id, "", "invalid"]).expect("missing e tag"),
+                auth_tag(&owner, &verifier),
+            ],
+            json!({
+                "status": "acknowledged-invalid",
+                "reason": "must reject atomically",
+                "open_ids": [invalid.id.to_hex(), missing_id]
+            }),
+        );
+        let state = reduce_handoff(&invalid, &[invalid.clone(), missing_target.clone()]);
+        assert_eq!(state.state, LifecycleState::Invalid);
+        assert!(state.ignored.iter().any(|ignored| {
+            ignored.id == missing_target.id.to_hex()
+                && ignored.reason.contains("is not an invalid open")
+        }));
+
+        let other_owner = Keys::generate();
+        let other_opener = Keys::generate();
+        let other_invalid = invalid_open(&other_opener, &other_owner, 11);
+        let mixed_owner = acknowledge_invalid(&verifier, &owner, &[&invalid, &other_invalid], 22);
+        let state = reduce_handoff(
+            &invalid,
+            &[invalid.clone(), other_invalid, mixed_owner.clone()],
+        );
+        assert_eq!(state.state, LifecycleState::Invalid);
+        assert!(state.ignored.iter().any(|ignored| {
+            ignored.id == mixed_owner.id.to_hex()
+                && ignored.reason.contains("every opener's owner identity")
+        }));
+
+        let later_invalid = invalid_open(&opener, &owner, 30);
+        let premature = acknowledge_invalid(&verifier, &owner, &[&invalid, &later_invalid], 29);
+        let state = reduce_handoff(
+            &invalid,
+            &[invalid.clone(), later_invalid, premature.clone()],
+        );
+        assert_eq!(state.state, LifecycleState::Invalid);
+        assert!(state.ignored.iter().any(|ignored| {
+            ignored.id == premature.id.to_hex()
+                && ignored.reason.contains("after every targeted open")
+        }));
+    }
+
+    #[test]
+    fn unauthorized_or_mismatched_invalid_acknowledgments_are_ignored() {
+        let owner = Keys::generate();
+        let opener = Keys::generate();
+        let stranger = Keys::generate();
+        let open = invalid_open(&opener, &owner, 10);
+        let unauthorized = signed(
+            &stranger,
+            HANDOFF_ACK_INVALID,
+            20,
+            vec![
+                Tag::parse(["e", open.id.to_hex().as_str(), "", "invalid"]).expect("invalid e tag")
+            ],
+            json!({
+                "status": "acknowledged-invalid",
+                "reason": "unauthorized",
+                "open_ids": [open.id.to_hex()]
+            }),
+        );
+        let mismatched = signed(
+            &opener,
+            HANDOFF_ACK_INVALID,
+            21,
+            vec![
+                Tag::parse(["e", open.id.to_hex().as_str(), "", "invalid"]).expect("invalid e tag"),
+                auth_tag(&owner, &opener),
+            ],
+            json!({
+                "status": "acknowledged-invalid",
+                "reason": "mismatched",
+                "open_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+            }),
+        );
+
+        let state = reduce_handoff(&open, &[open.clone(), unauthorized, mismatched]);
+        assert_eq!(state.state, LifecycleState::Invalid);
+        assert_eq!(state.acknowledgment_id, None);
+        assert_eq!(state.ignored.len(), 3);
     }
 }

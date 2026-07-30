@@ -140,6 +140,10 @@ pub async fn dispatch(command: &ContextCmd) -> Result<(), CliError> {
                         .await?;
                     Ok(())
                 }
+                crate::ContextHandoffSubcommand::AcknowledgeInvalid { open_ids } => {
+                    handoff::acknowledge_invalid(&profile, &environment, open_ids).await?;
+                    Ok(())
+                }
                 crate::ContextHandoffSubcommand::VerifyArtifacts { return_id } => {
                     handoff::verify_artifacts(&profile, &environment, return_id).await
                 }

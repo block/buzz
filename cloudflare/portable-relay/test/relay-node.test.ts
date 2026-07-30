@@ -150,6 +150,52 @@ describe("portable relay Cloudflare boundary", () => {
     });
   });
 
+  it("paginates dense query history with the composite event cursor", async () => {
+    const origin = "https://query-cursor.example";
+    const secretKey = generateSecretKey();
+    const events = ["first", "second", "third"].map((content) =>
+      finalizeEvent(
+        {
+          kind: 1,
+          created_at: 400,
+          tags: [],
+          content,
+        },
+        secretKey,
+      ),
+    );
+    for (const event of events) {
+      expect((await postJson(`${origin}/events`, event)).status).toBe(200);
+    }
+
+    const firstResponse = await postJson(`${origin}/query`, [
+      { kinds: [1], limit: 2 },
+    ]);
+    const firstPage = (await firstResponse.json()) as typeof events;
+    expect(firstPage).toHaveLength(2);
+    const cursor = firstPage.at(-1);
+    expect(cursor).toBeDefined();
+
+    const secondResponse = await postJson(`${origin}/query`, [
+      {
+        kinds: [1],
+        limit: 2,
+        until: cursor?.created_at,
+        before_id: cursor?.id,
+      },
+    ]);
+    const secondPage = (await secondResponse.json()) as typeof events;
+    expect(secondPage).toHaveLength(1);
+    expect(
+      new Set([...firstPage, ...secondPage].map((event) => event.id)),
+    ).toEqual(new Set(events.map((event) => event.id)));
+
+    const countResponse = await postJson(`${origin}/count`, [
+      { kinds: [1], until: cursor?.created_at, before_id: cursor?.id },
+    ]);
+    expect(countResponse.status).toBe(400);
+  });
+
   it("rejects a tampered event without mutating queryable state", async () => {
     const origin = "https://tampered-vector.example";
     const tampered = { ...signedEvent, content: "tampered after signing" };

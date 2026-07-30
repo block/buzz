@@ -178,6 +178,21 @@ impl<'a> ContextRuntime<'a> {
         }
         Ok(unique.into_values().collect())
     }
+
+    pub async fn query_union_all(&self, filter: serde_json::Value) -> Result<Vec<Event>, CliError> {
+        let local = self.local_journal_client()?;
+        let local_events = query_all_events(&local, filter.clone()).await?;
+        if self.profile.file.relays.rendezvous.is_none() {
+            return Ok(local_events);
+        }
+        let cloud = self.cloud_reader_client()?;
+        let cloud_events = query_all_events(&cloud, filter).await?;
+        let mut unique = BTreeMap::new();
+        for event in local_events.into_iter().chain(cloud_events) {
+            unique.insert(event.id.to_hex(), event);
+        }
+        Ok(unique.into_values().collect())
+    }
 }
 
 pub async fn query_events(
@@ -187,6 +202,17 @@ pub async fn query_events(
     let raw = client.query_multi(filters).await?;
     let values: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|error| CliError::Other(format!("relay query returned invalid JSON: {error}")))?;
+    verified_events(values)
+}
+
+pub async fn query_all_events(
+    client: &BuzzClient,
+    filter: serde_json::Value,
+) -> Result<Vec<Event>, CliError> {
+    verified_events(client.query_all(filter).await?)
+}
+
+fn verified_events(values: Vec<serde_json::Value>) -> Result<Vec<Event>, CliError> {
     let mut events = Vec::with_capacity(values.len());
     for value in values {
         let event: Event = serde_json::from_value(value).map_err(|error| {

@@ -51,7 +51,8 @@ use identity::{
 };
 use nostr::hashes::Hash as _;
 use nostr::{
-    Alphabet, Event, EventBuilder, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag, TagKind,
+    Alphabet, Event, EventBuilder, EventId, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag,
+    TagKind,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -176,6 +177,15 @@ pub enum QueryError {
     /// The filter used a field outside the supported NIP-01 subset.
     #[error("unsupported filter field: {0}")]
     UnsupportedFilterField(String),
+    /// A composite query cursor omitted its timestamp boundary.
+    #[error("before_id requires until to be set")]
+    IncompleteCursor,
+}
+
+#[derive(Clone)]
+struct CursorFilter {
+    filter: Filter,
+    before_id: Option<EventId>,
 }
 
 /// Errors returned while reading the laptop relay's replication stream.
@@ -326,7 +336,26 @@ impl EventStore {
 
     /// Returns matching effective events in newest-first order.
     pub async fn query(&self, filters: &[Filter]) -> Result<Vec<Event>, QueryError> {
-        validate_filters(filters)?;
+        let filters: Vec<CursorFilter> = filters
+            .iter()
+            .cloned()
+            .map(|filter| CursorFilter {
+                filter,
+                before_id: None,
+            })
+            .collect();
+        self.query_with_cursors(&filters).await
+    }
+
+    async fn query_with_cursors(&self, filters: &[CursorFilter]) -> Result<Vec<Event>, QueryError> {
+        if filters
+            .iter()
+            .any(|item| item.before_id.is_some() && item.filter.until.is_none())
+        {
+            return Err(QueryError::IncompleteCursor);
+        }
+        let plain_filters: Vec<Filter> = filters.iter().map(|item| item.filter.clone()).collect();
+        validate_filters(&plain_filters)?;
         if filters.is_empty() {
             return Ok(Vec::new());
         }
@@ -343,7 +372,8 @@ impl EventStore {
 
         let mut selected_ids = HashSet::new();
         let mut matches = Vec::new();
-        for filter in filters {
+        for cursor_filter in filters {
+            let filter = &cursor_filter.filter;
             let limit = filter
                 .limit
                 .unwrap_or(DEFAULT_QUERY_LIMIT)
@@ -351,7 +381,18 @@ impl EventStore {
             for stored in ordered
                 .iter()
                 .copied()
-                .filter(|stored| filters_match(std::slice::from_ref(filter), stored))
+                .filter(|stored| {
+                    filters_match(std::slice::from_ref(filter), stored)
+                        && match (cursor_filter.before_id.as_ref(), filter.until) {
+                            (Some(before_id), Some(until)) => {
+                                stored.event.created_at < until
+                                    || (stored.event.created_at == until
+                                        && stored.event.id.to_hex() > before_id.to_hex())
+                            }
+                            (None, _) => true,
+                            (Some(_), None) => false,
+                        }
+                })
                 .take(limit)
             {
                 if selected_ids.insert(stored.event.id) {
@@ -1177,8 +1218,30 @@ impl LocalRelay {
         operation: ReadOperation,
         filters: &[Filter],
     ) -> Result<Vec<Event>, ApiError> {
-        self.authorize_query(principal, operation, filters)?;
-        let mut events = self.store.query(filters).await?;
+        let cursor_filters: Vec<CursorFilter> = filters
+            .iter()
+            .cloned()
+            .map(|filter| CursorFilter {
+                filter,
+                before_id: None,
+            })
+            .collect();
+        self.query_for_cursors(principal, operation, &cursor_filters)
+            .await
+    }
+
+    async fn query_for_cursors(
+        &self,
+        principal: Option<&AuthenticatedPrincipal>,
+        operation: ReadOperation,
+        cursor_filters: &[CursorFilter],
+    ) -> Result<Vec<Event>, ApiError> {
+        let filters: Vec<Filter> = cursor_filters
+            .iter()
+            .map(|item| item.filter.clone())
+            .collect();
+        self.authorize_query(principal, operation, &filters)?;
+        let mut events = self.store.query_with_cursors(cursor_filters).await?;
         events.retain(|event| self.event_is_visible(principal, operation, event));
         // The pulse is synthesized, never stored: a filter that explicitly
         // names the pulse kind receives a fresh witness statement. Open
@@ -1360,10 +1423,10 @@ async fn query_events(
     body: Bytes,
 ) -> Result<Json<Vec<Event>>, ApiError> {
     let principal = authenticate_http(&relay, &headers, "/query", &body).await?;
-    let filters = parse_filter_body(&body)?;
+    let filters = parse_query_filter_body(&body)?;
     Ok(Json(
         relay
-            .query_for(principal.as_ref(), ReadOperation::Query, &filters)
+            .query_for_cursors(principal.as_ref(), ReadOperation::Query, &filters)
             .await?,
     ))
 }
@@ -2028,7 +2091,7 @@ where
     }
 
     let filter_values: Vec<Value> = parts.iter().skip(2).cloned().collect();
-    if let Err(error) = validate_filter_fields(&filter_values) {
+    if let Err(error) = validate_filter_fields(&filter_values, &SUPPORTED_FILTER_FIELDS) {
         return send_json(
             sender,
             json!(["CLOSED", subscription_id, error.to_string()]),
@@ -2265,19 +2328,29 @@ fn validate_filters(filters: &[Filter]) -> Result<(), QueryError> {
 const SUPPORTED_FILTER_FIELDS: [&str; 7] = [
     "ids", "authors", "kinds", "since", "until", "limit", "search",
 ];
+const SUPPORTED_QUERY_FILTER_FIELDS: [&str; 8] = [
+    "ids",
+    "authors",
+    "kinds",
+    "since",
+    "until",
+    "limit",
+    "search",
+    "before_id",
+];
 
 /// Rejects filter fields outside the supported NIP-01 subset.
 ///
 /// Serde silently drops unknown fields, which would broaden a query the
 /// caller believed was narrower. This check runs on the raw JSON before
 /// deserialization so unsupported extensions fail closed instead.
-fn validate_filter_fields(filters: &[Value]) -> Result<(), QueryError> {
+fn validate_filter_fields(filters: &[Value], supported_fields: &[&str]) -> Result<(), QueryError> {
     for filter in filters {
         let Some(object) = filter.as_object() else {
             continue;
         };
         for field in object.keys() {
-            if !field.starts_with('#') && !SUPPORTED_FILTER_FIELDS.contains(&field.as_str()) {
+            if !field.starts_with('#') && !supported_fields.contains(&field.as_str()) {
                 return Err(QueryError::UnsupportedFilterField(field.clone()));
             }
         }
@@ -2289,9 +2362,41 @@ fn validate_filter_fields(filters: &[Value]) -> Result<(), QueryError> {
 fn parse_filter_body(body: &[u8]) -> Result<Vec<Filter>, ApiError> {
     let values: Vec<Value> = serde_json::from_slice(body)
         .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
-    validate_filter_fields(&values)?;
+    validate_filter_fields(&values, &SUPPORTED_FILTER_FIELDS)?;
     serde_json::from_value(Value::Array(values))
         .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))
+}
+
+fn parse_query_filter_body(body: &[u8]) -> Result<Vec<CursorFilter>, ApiError> {
+    let values: Vec<Value> = serde_json::from_slice(body)
+        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
+    validate_filter_fields(&values, &SUPPORTED_QUERY_FILTER_FIELDS)?;
+    let filters: Vec<Filter> = serde_json::from_value(Value::Array(values.clone()))
+        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
+
+    filters
+        .into_iter()
+        .zip(values)
+        .map(|(filter, value)| {
+            let before_id = value
+                .get("before_id")
+                .map(|value| {
+                    let raw = value.as_str().ok_or_else(|| {
+                        ApiError::BadRequest("before_id must be a 64-hex event id".into())
+                    })?;
+                    EventId::from_hex(raw).map_err(|_| {
+                        ApiError::BadRequest("before_id must be a 64-hex event id".into())
+                    })
+                })
+                .transpose()?;
+            if before_id.is_some() && filter.until.is_none() {
+                return Err(ApiError::BadRequest(
+                    "before_id requires until to be set".into(),
+                ));
+            }
+            Ok(CursorFilter { filter, before_id })
+        })
+        .collect()
 }
 
 /// Parses the bind address used by the local relay binary.
@@ -2599,16 +2704,104 @@ mod tests {
 
     #[test]
     fn filter_field_validation_fails_closed_on_unknown_fields() {
-        assert!(validate_filter_fields(&[
-            json!({ "ids": ["a"], "authors": ["b"], "kinds": [1], "#t": ["x"], "limit": 5 })
-        ])
+        assert!(validate_filter_fields(
+            &[json!({ "ids": ["a"], "authors": ["b"], "kinds": [1], "#t": ["x"], "limit": 5 })],
+            &SUPPORTED_FILTER_FIELDS,
+        )
         .is_ok());
 
-        let error = validate_filter_fields(&[json!({ "kinds": [1], "unknown_extension": 1 })])
-            .expect_err("unknown filter fields must not silently broaden a query");
+        let error = validate_filter_fields(
+            &[json!({ "kinds": [1], "unknown_extension": 1 })],
+            &SUPPORTED_FILTER_FIELDS,
+        )
+        .expect_err("unknown filter fields must not silently broaden a query");
         assert!(matches!(
             error,
             QueryError::UnsupportedFilterField(field) if field == "unknown_extension"
+        ));
+        assert!(validate_filter_fields(
+            &[json!({ "kinds": [1], "until": 1, "before_id": "a".repeat(64) })],
+            &SUPPORTED_QUERY_FILTER_FIELDS,
+        )
+        .is_ok());
+        assert!(validate_filter_fields(
+            &[json!({ "kinds": [1], "until": 1, "before_id": "a".repeat(64) })],
+            &SUPPORTED_FILTER_FIELDS,
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn composite_query_cursor_drains_dense_history_past_default_limit() {
+        let store = EventStore::open(StorageMode::Ephemeral)
+            .await
+            .expect("store opens");
+        let keys = Keys::generate();
+        let created_at = Timestamp::from_secs(1_700_000_000);
+        let events: Vec<Event> = (0..=DEFAULT_QUERY_LIMIT)
+            .map(|index| {
+                EventBuilder::new(Kind::TextNote, format!("event {index}"))
+                    .custom_created_at(created_at)
+                    .sign_with_keys(&keys)
+                    .expect("test event signs")
+            })
+            .collect();
+        {
+            let mut inner = store.inner.lock().await;
+            inner.events.extend(events.into_iter().map(stored_event));
+        }
+
+        let first_filters = parse_query_filter_body(
+            serde_json::to_vec(&json!([{ "kinds": [1], "limit": DEFAULT_QUERY_LIMIT }]))
+                .expect("filter serializes")
+                .as_slice(),
+        )
+        .expect("first filter parses");
+        let first_page = store
+            .query_with_cursors(&first_filters)
+            .await
+            .expect("first page queries");
+        assert_eq!(first_page.len(), DEFAULT_QUERY_LIMIT);
+
+        let last = first_page.last().expect("full page has a cursor");
+        let second_filters = parse_query_filter_body(
+            serde_json::to_vec(&json!([{
+                "kinds": [1],
+                "limit": DEFAULT_QUERY_LIMIT,
+                "until": last.created_at.as_secs(),
+                "before_id": last.id.to_hex(),
+            }]))
+            .expect("filter serializes")
+            .as_slice(),
+        )
+        .expect("second filter parses");
+        let second_page = store
+            .query_with_cursors(&second_filters)
+            .await
+            .expect("second page queries");
+
+        assert_eq!(second_page.len(), 1);
+        let ids: HashSet<EventId> = first_page
+            .into_iter()
+            .chain(second_page)
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(ids.len(), DEFAULT_QUERY_LIMIT + 1);
+    }
+
+    #[tokio::test]
+    async fn composite_query_cursor_rejects_missing_timestamp_boundary() {
+        let store = EventStore::open(StorageMode::Ephemeral)
+            .await
+            .expect("store opens");
+        let filters = [CursorFilter {
+            filter: Filter::new().kind(Kind::TextNote),
+            before_id: Some(signed_event(1, "cursor").id),
+        }];
+
+        assert!(matches!(
+            store.query_with_cursors(&filters).await,
+            Err(QueryError::IncompleteCursor)
         ));
     }
 

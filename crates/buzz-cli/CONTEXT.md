@@ -175,4 +175,12 @@ buzz context doctor --json
 buzz context artifact sync --dry-run --json
 buzz context artifact sync --json
 buzz context artifact sync --json
+buzz context handoff acknowledge-invalid <open-event-id>...
 ```
+
+`handoff acknowledge-invalid` is an archival operation for exact invalid legacy
+opens. Every target must already reduce to `INVALID`, share one `h` context and
+effective owner, and be authorized by the selected application identity. The
+command signs and reduces the complete candidate batch before publication.
+Successful acknowledgment reports `ACKNOWLEDGED_INVALID`; it never validates,
+returns, or closes the original lifecycle.

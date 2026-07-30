@@ -408,6 +408,11 @@ pub enum ContextHandoffSubcommand {
         return_id: String,
         note: Option<String>,
     },
+    /// Archive exact invalid legacy opens without validating or closing them.
+    AcknowledgeInvalid {
+        #[arg(required = true)]
+        open_ids: Vec<String>,
+    },
     VerifyArtifacts {
         return_id: String,
     },

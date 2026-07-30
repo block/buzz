@@ -38,6 +38,7 @@ import {
   eventFromUnknown,
   filtersFromUnknown,
   ProtocolInputError,
+  type QueryFilter,
 } from "./protocol";
 import {
   MAX_READ_BATCH,
@@ -293,7 +294,7 @@ export class RelayNode extends DurableObject<Env> {
    */
   queryEvents(
     stableNodeKey: string,
-    filters: Filter[],
+    filters: QueryFilter[],
     auth?: HttpAuthEvidence,
   ): RpcOutcome<Event[]> {
     this.initializeNode(stableNodeKey);
@@ -1154,7 +1155,10 @@ export class RelayNode extends DurableObject<Env> {
     };
   }
 
-  #queryEffective(filters: Filter[], reader: string | null = null): Event[] {
+  #queryEffective(
+    filters: QueryFilter[],
+    reader: string | null = null,
+  ): Event[] {
     if (filters.length === 0) {
       return [];
     }
@@ -1174,8 +1178,15 @@ export class RelayNode extends DurableObject<Env> {
         if (!matchFilter(filter, event)) {
           continue;
         }
-        selected.set(event.id, event);
+        if (
+          filter.before_id !== undefined &&
+          event.created_at === filter.until &&
+          event.id <= filter.before_id
+        ) {
+          continue;
+        }
         matched += 1;
+        selected.set(event.id, event);
         if (matched >= limit) {
           break;
         }

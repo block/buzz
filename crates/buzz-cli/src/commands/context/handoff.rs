@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -8,16 +9,19 @@ use serde_json::{Map, Value};
 use super::artifact_sync;
 use super::profile::{ProfileEnvironment, ResolvedProfile};
 use super::runtime::{
-    event_builder, hostname, now_secs, parse_id, query_events, read_text, tag, ContextRuntime,
+    event_builder, hostname, now_secs, parse_id, query_all_events, read_text, submit_checked, tag,
+    ContextRuntime,
 };
 use crate::error::CliError;
 
-const LIFECYCLE_TAGS: [&str; 4] = [
+const LIFECYCLE_TAGS: [&str; 5] = [
     "handoff:open",
     "handoff:claim",
     "handoff:return",
     "handoff:close",
+    "handoff:ack-invalid",
 ];
+const MAX_INVALID_ACK_TARGETS: usize = 256;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct HandoffState {
@@ -37,6 +41,10 @@ struct HandoffState {
     return_created_at: Option<u64>,
     close_id: Option<String>,
     close_created_at: Option<u64>,
+    #[serde(default)]
+    acknowledgment_id: Option<String>,
+    #[serde(default)]
+    acknowledgment_created_at: Option<u64>,
     #[serde(default)]
     conflicting_claims: Vec<String>,
     #[serde(default)]
@@ -308,6 +316,127 @@ pub async fn close(
     Ok(event_id)
 }
 
+pub async fn acknowledge_invalid(
+    profile: &ResolvedProfile,
+    environment: &ProfileEnvironment,
+    requested_open_ids: &[String],
+) -> Result<String, CliError> {
+    let open_ids = validate_acknowledgment_targets(requested_open_ids)?;
+    let runtime = ContextRuntime::new(profile, environment)?;
+    let (client, role) = runtime.local_event_client()?;
+    let signer_owner = client
+        .auth_tag_owner_hex()
+        .unwrap_or_else(|| client.keys().public_key().to_hex());
+    let events = lifecycle_events(profile, environment).await?;
+    let states = reduce(profile, &events, None)?
+        .into_iter()
+        .map(|state| (state.open_id.clone(), state))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut context = None;
+    let mut owner = None;
+    let mut predecessor = 0;
+    for open_id in &open_ids {
+        let state = states.get(open_id).ok_or_else(|| {
+            CliError::NotFound(format!("handoff open event {open_id} was not found"))
+        })?;
+        if state.state != "INVALID" {
+            return Err(CliError::Conflict(format!(
+                "handoff {open_id} is {}, not INVALID",
+                state.state
+            )));
+        }
+        validate_lower_hex(
+            &state.opener_owner_pubkey,
+            64,
+            &format!("invalid handoff {open_id} owner"),
+        )?;
+        match owner.as_deref() {
+            None => owner = Some(state.opener_owner_pubkey.clone()),
+            Some(expected) if expected == state.opener_owner_pubkey => {}
+            Some(_) => {
+                return Err(CliError::Auth(
+                    "all acknowledged invalid opens must share one owner identity".into(),
+                ));
+            }
+        }
+        if state.context.is_empty() {
+            return Err(CliError::Conflict(format!(
+                "invalid handoff {open_id} has no h context"
+            )));
+        }
+        match context.as_deref() {
+            None => context = Some(state.context.clone()),
+            Some(expected) if expected == state.context => {}
+            Some(_) => {
+                return Err(CliError::Conflict(
+                    "all acknowledged invalid opens must share one h context".into(),
+                ));
+            }
+        }
+        predecessor = predecessor.max(state.created_at);
+    }
+
+    let owner = owner.ok_or_else(|| {
+        CliError::Other("validated acknowledgment targets had no owner identity".into())
+    })?;
+    if signer_owner != owner {
+        return Err(CliError::Auth(format!(
+            "acknowledgment signer owner {signer_owner} is not opener owner {owner}"
+        )));
+    }
+    let context = context.ok_or_else(|| {
+        CliError::Other("validated acknowledgment targets had no h context".into())
+    })?;
+    let identity = runtime.identity_label(role);
+    let machine = hostname();
+    let content = serde_json::json!({
+        "status": "acknowledged-invalid",
+        "reason": "pre-hardening lifecycle retained as invalid archival history",
+        "open_ids": open_ids.clone(),
+    });
+    let mut tags = vec![
+        tag(&["t", "handoff:ack-invalid"])?,
+        tag(&["h", &context])?,
+        tag(&["agent", &identity])?,
+        tag(&["machine", &machine])?,
+    ];
+    tags.extend(
+        open_ids
+            .iter()
+            .map(|open_id| tag(&["e", open_id, "", "invalid"]))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let event = client.sign_event(event_builder(
+        serde_json::to_string(&content).map_err(json_error)?,
+        tags,
+        Some(causal_timestamp(predecessor)),
+    ))?;
+    let event_id = event.id.to_hex();
+
+    let mut preflight_events = events;
+    preflight_events.push(event.clone());
+    require_acknowledged_states(
+        reduce(profile, &preflight_events, None)?,
+        &open_ids,
+        &event_id,
+        "candidate",
+    )?;
+
+    submit_checked(&client, event).await?;
+    let published_events = lifecycle_events(profile, environment).await?;
+    require_acknowledged_states(
+        reduce(profile, &published_events, None)?,
+        &open_ids,
+        &event_id,
+        "published",
+    )?;
+
+    println!("acknowledged invalid handoffs: {}", open_ids.len());
+    println!("acknowledgment event: {event_id}");
+    Ok(event_id)
+}
+
 pub async fn verify_artifacts(
     profile: &ResolvedProfile,
     environment: &ProfileEnvironment,
@@ -316,7 +445,7 @@ pub async fn verify_artifacts(
     let return_id = parse_id(return_id, "return event id")?;
     let runtime = ContextRuntime::new(profile, environment)?;
     let reader = runtime.cloud_reader_client()?;
-    let events = query_events(&reader, &lifecycle_filters()).await?;
+    let events = query_all_events(&reader, lifecycle_filter()).await?;
     let states = reduce(profile, &events, None)?;
     let state = states
         .into_iter()
@@ -377,6 +506,10 @@ pub async fn list(
     for state in states {
         let suffix = match state.state.as_str() {
             "CLOSED" => "  cryptographically verified".into(),
+            "ACKNOWLEDGED_INVALID" => format!(
+                "  archival acknowledgment={}",
+                state.acknowledgment_id.as_deref().unwrap_or("unknown")
+            ),
             "CONFLICT" => format!("  claims={}", state.conflicting_claims.join(",")),
             "INVALID" => format!(
                 "  {}",
@@ -422,15 +555,15 @@ async fn lifecycle_events(
     environment: &ProfileEnvironment,
 ) -> Result<Vec<Event>, CliError> {
     ContextRuntime::new(profile, environment)?
-        .query_union(&lifecycle_filters())
+        .query_union_all(lifecycle_filter())
         .await
 }
 
-fn lifecycle_filters() -> Vec<Value> {
-    vec![serde_json::json!({
+fn lifecycle_filter() -> Value {
+    serde_json::json!({
         "kinds": [nostr::Kind::TextNote.as_u16()],
         "#t": LIFECYCLE_TAGS,
-    })]
+    })
 }
 
 fn reduce(
@@ -554,6 +687,57 @@ fn artifacts(object: &Map<String, Value>, label: &str) -> Result<Vec<String>, Cl
         .collect()
 }
 
+fn validate_acknowledgment_targets(open_ids: &[String]) -> Result<Vec<String>, CliError> {
+    if open_ids.is_empty() {
+        return Err(CliError::Usage(
+            "at least one invalid open event id is required".into(),
+        ));
+    }
+    if open_ids.len() > MAX_INVALID_ACK_TARGETS {
+        return Err(CliError::Usage(format!(
+            "invalid acknowledgment cannot target more than {MAX_INVALID_ACK_TARGETS} opens"
+        )));
+    }
+    let open_ids = open_ids
+        .iter()
+        .map(|open_id| parse_id(open_id, "open event id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique = open_ids.iter().collect::<BTreeSet<_>>();
+    if unique.len() != open_ids.len() {
+        return Err(CliError::Usage(
+            "invalid acknowledgment contains duplicate open event ids".into(),
+        ));
+    }
+    Ok(open_ids)
+}
+
+fn require_acknowledged_states(
+    states: Vec<HandoffState>,
+    open_ids: &[String],
+    acknowledgment_id: &str,
+    stage: &str,
+) -> Result<(), CliError> {
+    let states = states
+        .into_iter()
+        .map(|state| (state.open_id.clone(), state))
+        .collect::<BTreeMap<_, _>>();
+    for open_id in open_ids {
+        let state = states.get(open_id).ok_or_else(|| {
+            CliError::Conflict(format!(
+                "{stage} acknowledgment lost invalid handoff {open_id}"
+            ))
+        })?;
+        if state.state != "ACKNOWLEDGED_INVALID"
+            || state.acknowledgment_id.as_deref() != Some(acknowledgment_id)
+        {
+            return Err(CliError::Conflict(format!(
+                "{stage} acknowledgment did not archive invalid handoff {open_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_lower_hex(value: &str, length: usize, label: &str) -> Result<(), CliError> {
     if value.len() == length
         && value
@@ -616,5 +800,45 @@ mod tests {
     fn causal_time_is_strictly_after_predecessor() {
         assert_eq!(causal_timestamp(u64::MAX), u64::MAX);
         assert!(causal_timestamp(now_secs() + 10) > now_secs());
+    }
+
+    #[test]
+    fn acknowledgment_targets_reject_duplicates_and_oversized_batches() {
+        let id = "a".repeat(64);
+        assert!(validate_acknowledgment_targets(&[id.clone(), id]).is_err());
+        let oversized = (0..=MAX_INVALID_ACK_TARGETS)
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        assert!(validate_acknowledgment_targets(&oversized).is_err());
+    }
+
+    #[test]
+    fn acknowledgment_state_requires_the_exact_candidate_event() {
+        let open_id = "a".repeat(64);
+        let acknowledgment_id = "b".repeat(64);
+        let state = HandoffState {
+            open_id: open_id.clone(),
+            title: "legacy".into(),
+            context: "context".into(),
+            opener_pubkey: "c".repeat(64),
+            opener_owner_pubkey: "d".repeat(64),
+            allowed_claimants: Vec::new(),
+            created_at: 1,
+            updated_at: 2,
+            state: "ACKNOWLEDGED_INVALID".into(),
+            claim_id: None,
+            claimant_pubkey: None,
+            claim_created_at: None,
+            return_id: None,
+            return_created_at: None,
+            close_id: None,
+            close_created_at: None,
+            acknowledgment_id: Some(acknowledgment_id.clone()),
+            acknowledgment_created_at: Some(2),
+            conflicting_claims: Vec::new(),
+            ignored: Vec::new(),
+        };
+        require_acknowledged_states(vec![state], &[open_id], &acknowledgment_id, "candidate")
+            .expect("matching acknowledgment accepted");
     }
 }
