@@ -2387,3 +2387,51 @@ test("duplicate instances move from the agents gallery into the agent profile", 
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toBeVisible();
 });
+
+// ── external backend: the user runs the harness themselves ──────────────────
+//
+// Buzz mints the identity and publishes the profile, then exports an env block.
+// It must never offer to start, stop, or tail logs for such an agent.
+
+const EXTERNAL_AGENT_PUBKEY = "e".repeat(64);
+
+test("external agent exposes its container env and no start control", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: EXTERNAL_AGENT_PUBKEY,
+        name: "hermes-vps",
+        status: "external",
+        backend: { type: "external" },
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  // Buzz cannot start what it does not run — no start affordance on the card.
+  await expect(
+    page.getByTestId(`agent-runtime-start-${EXTERNAL_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+
+  await page.getByTestId(`managed-agent-${EXTERNAL_AGENT_PUBKEY}`).click();
+  await page.getByRole("tab", { name: "Runtime" }).click();
+
+  const envBlock = page.getByTestId("external-agent-env-block");
+  await expect(envBlock).toBeVisible();
+
+  // Collapsed until asked for — the secret is not rendered on open.
+  await expect(envBlock).not.toContainText("BUZZ_PRIVATE_KEY");
+  await envBlock.getByRole("button", { name: "Show" }).click();
+
+  await expect(envBlock).toContainText("BUZZ_PRIVATE_KEY=");
+  await expect(envBlock).toContainText("BUZZ_AUTH_TAG=");
+  await expect(envBlock).toContainText("BUZZ_RELAY_URL=");
+  await expect(envBlock).toContainText("BUZZ_ACP_AGENT_COMMAND=hermes-acp");
+
+  // Hiding clears it from the DOM, matching the nsec-reveal contract.
+  await envBlock.getByRole("button", { name: "Hide" }).click();
+  await expect(envBlock).not.toContainText("BUZZ_PRIVATE_KEY");
+});

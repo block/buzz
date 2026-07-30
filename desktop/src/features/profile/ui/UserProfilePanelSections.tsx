@@ -21,6 +21,7 @@ import {
   canBuzzControlManagedAgent,
   getManagedAgentPrimaryActionLabel,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { ExternalAgentEnvBlock } from "@/features/agents/ui/ExternalAgentEnvBlock";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -441,6 +442,12 @@ export function ProfileSummaryView({
                     pubkey={managedAgent.pubkey}
                   />
                 </div>
+              ) : null}
+              {isOwner === true && managedAgent?.backend.type === "external" ? (
+                <ExternalAgentEnvBlock
+                  agentName={managedAgent.name}
+                  pubkey={managedAgent.pubkey}
+                />
               ) : null}
             </>
           ) : null}

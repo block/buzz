@@ -47,11 +47,12 @@ type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   personaId?: string | null;
-  status?: "running" | "stopped" | "deployed" | "not_deployed";
+  status?: "running" | "stopped" | "deployed" | "not_deployed" | "external";
   channelNames?: string[];
   channelIds?: string[];
   backend?:
     | { type: "local" }
+    | { type: "external" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   lastError?: string | null;
   lastErrorCode?: number | null;

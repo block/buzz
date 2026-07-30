@@ -265,6 +265,10 @@ Each channel has at most one prompt in flight. Multiple channels can be processe
 
 Buzz Desktop supports registering any ACP-speaking agent tool as a selectable runtime without a PR.
 
+These tiers decide *which* agent runs, not *where*. Any tier can run locally, on a
+provider backend, or on hardware you manage yourself — see
+[Running the Harness Yourself](#running-the-harness-yourself-external-backend).
+
 ### How it works
 
 **Tier-1 — compiled-in runtimes** (Goose, Claude Code, Codex, Buzz Agent): have auto-installers, auth probes, and first-class onboarding. Their IDs (`goose`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden.
@@ -319,6 +323,72 @@ To add a new runtime to the tier-2 gallery:
 5. Run `cargo test --lib` and `just desktop-typecheck` to verify everything compiles.
 
 The built-in `BUILTIN_IDS` set (`goose`, `claude`, `codex`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
+
+## Running the Harness Yourself (external backend)
+
+The BYOH tiers above decide *which* agent runs. They are orthogonal to *where*
+the harness runs — any tier works with any backend.
+
+When the agent already lives somewhere Buzz does not control (a container on your
+own VPS, a remote box), pick **Run on → "Somewhere I run myself"** at agent
+creation. Buzz then mints the agent's identity and publishes its `kind:0` profile
+— so it appears as a real community member immediately — but never spawns,
+deploys, stops, or reads logs for it. Its status reads `external`, and liveness
+comes from relay presence alone.
+
+Note the shape: **the harness moves, not the transport.** `buzz-acp` talks to its
+agent over local stdio and dials the relay outbound over WebSocket, so you run
+`buzz-acp` *next to* the agent and expose nothing inbound. There is no
+network-ACP transport, and exposing the agent's own API to the desktop would not
+help — tools execute wherever the agent runs either way.
+
+### Three steps
+
+1. Create the agent with **Run on → "Somewhere I run myself"**.
+2. Copy the env block from the reveal dialog. It is available again later by
+   expanding the agent's row in the Agents list.
+3. Save it as a file and start the container with `--env-file`.
+
+```bash
+docker run -d --restart unless-stopped --env-file hermes.env my-hermes-image buzz-acp
+```
+
+Prefer `--env-file` over `-e`: values passed with `-e` land in your shell history
+and in `docker inspect`.
+
+### What the image needs
+
+| Binary | Why |
+|---|---|
+| `buzz-acp` | The harness. Holds the relay connection. |
+| whatever `BUZZ_ACP_AGENT_COMMAND` names (e.g. `hermes-acp`) | The agent itself. |
+| `buzz` | The CLI the agent calls for Buzz operations. |
+| `git-credential-nostr` *(optional)* | Buzz-hosted git auth. Needs only `NOSTR_PRIVATE_KEY`, which the block sets. |
+
+Outbound network access to your relay is required; no inbound ports are.
+
+### The env block
+
+Identity and wiring are always present: `BUZZ_PRIVATE_KEY`,
+`NOSTR_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, `BUZZ_RELAY_URL`,
+`BUZZ_ACP_AGENT_COMMAND`, `BUZZ_ACP_AGENT_ARGS`, `BUZZ_ACP_MCP_COMMAND`,
+`BUZZ_ACP_AGENTS`, the respond-to gate, and the protocol defaults. Prompt, model,
+session title, team instructions, and the timeouts appear only when set — an
+absent timeout means the harness applies its own default, which is the single
+source of truth.
+
+Commands are emitted **bare**, not as absolute paths, so the container resolves
+them on its own `PATH`. Host-specific values are deliberately excluded: `PATH`,
+`RUST_LOG`, `GIT_CONFIG_*`, and the desktop-ownership stamps. See
+`external_env.rs` for the full exclusion list and the reasoning per group.
+
+`BUZZ_AUTH_TAG` is what gets the agent admitted: the relay verifies it and grants
+membership via its owner (`MembershipDecision::ViaOwner`), so the agent does not
+need its own roster entry.
+
+> **Config changes need a restart.** Editing this agent's model, prompt, or env
+> in Buzz does not reach an already-running container. Re-copy the block and
+> restart it.
 
 ## Using Any ACP Agent
 

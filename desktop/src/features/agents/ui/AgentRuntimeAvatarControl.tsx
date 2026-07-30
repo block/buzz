@@ -23,6 +23,13 @@ type AgentRuntimeAvatarControlProps = {
   startTestId: string;
   onOpenError?: () => void;
   onStart: () => void;
+  /**
+   * Whether Buzz can start this agent at all. False for `external` backends,
+   * where the user runs the harness themselves — the start affordance is hidden
+   * rather than disabled, since there is nothing for Buzz to start. An error
+   * badge still shows so the failure stays reachable.
+   */
+  canStart?: boolean;
 };
 
 const TAILWIND_SPACING = {
@@ -106,6 +113,7 @@ export function AgentRuntimeAvatarControl({
   startTestId,
   onOpenError,
   onStart,
+  canStart = true,
 }: AgentRuntimeAvatarControlProps) {
   const shouldReduceMotion = useReducedMotion();
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
@@ -129,7 +137,7 @@ export function AgentRuntimeAvatarControl({
             >
               <PresenceDot className={ACTIVE_DOT_CLASS_NAME} status="online" />
             </span>
-          ) : (
+          ) : canStart || hasError ? (
             <button
               aria-label={hasError ? errorActionLabel : actionLabel}
               className={cn(
@@ -164,7 +172,7 @@ export function AgentRuntimeAvatarControl({
                 )}
               </span>
             </button>
-          )}
+          ) : null}
         </span>
       }
       badgeBox={badge.shell}
