@@ -117,11 +117,29 @@ export function shouldHideAgentFromMentions({
   // to honor the agent's `channel_add_policy` declaration — a follow-up, not
   // this change. Members only for now.
   if (candidate.isMember !== true) return true;
-  const policy = relayAgentPolicies.get(pubkey);
-  if (!policy) return true;
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
+  const ownerPubkey = candidate.ownerPubkey
+    ? normalizePubkey(candidate.ownerPubkey)
+    : null;
+  const policy = relayAgentPolicies.get(pubkey);
+  if (!policy) {
+    // No declaration: offer only to the verified owner. Sound because the
+    // harness's inbound author gate admits the owner under every respond-to
+    // mode, so an owner's mention is never a void chip — and it covers the
+    // owner-on-another-device reports (#2349, #3277) without requiring a
+    // directory entry that nothing publishes for native agents yet. For
+    // anyone else there is still no proof the agent will answer. Stale
+    // same-name identities an owner might now see fold into the live one
+    // via the same-label/same-owner coalescing (and NIP-IA archived
+    // identities are peeled before candidates are built).
+    return (
+      normalizedCurrentPubkey === null ||
+      ownerPubkey === null ||
+      ownerPubkey !== normalizedCurrentPubkey
+    );
+  }
   switch (policy.respondTo) {
     case "anyone":
       return false;
@@ -132,16 +150,12 @@ export function shouldHideAgentFromMentions({
           .map((entry) => normalizePubkey(entry))
           .includes(normalizedCurrentPubkey)
       );
-    case "owner-only": {
-      const ownerPubkey = candidate.ownerPubkey
-        ? normalizePubkey(candidate.ownerPubkey)
-        : null;
+    case "owner-only":
       return (
         normalizedCurrentPubkey === null ||
         ownerPubkey === null ||
         ownerPubkey !== normalizedCurrentPubkey
       );
-    }
     default:
       return true;
   }

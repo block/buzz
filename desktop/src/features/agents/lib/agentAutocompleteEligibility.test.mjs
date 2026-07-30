@@ -267,8 +267,26 @@ test("shouldHideAgentFromMentions: owner-only admits the verified owner", () => 
   );
 });
 
-test("shouldHideAgentFromMentions: hides external agents without a directory declaration", () => {
+test("shouldHideAgentFromMentions: declaration-less agents are offered only to their verified owner", () => {
+  // No entry at all (stranger's view) → hidden.
   assert.equal(shouldHideAgentFromMentions(hideArgs()), true);
+  // Same agent, viewed by its NIP-OA-verified owner → offered. The harness
+  // author gate admits the owner under every respond-to mode, so this is
+  // never a void chip; it covers owner-on-another-device (#2349, #3277).
+  assert.equal(
+    shouldHideAgentFromMentions(
+      hideArgs({ candidate: { ownerPubkey: CURRENT_PUBKEY } }),
+    ),
+    false,
+  );
+  // Unverified ownership stays hidden — attribution without proof is not
+  // enough.
+  assert.equal(
+    shouldHideAgentFromMentions(
+      hideArgs({ candidate: { ownerPubkey: OTHER_OWNER_PUBKEY } }),
+    ),
+    true,
+  );
 });
 
 test("shouldHideAgentFromMentions: hides non-member external agents regardless of policy", () => {
