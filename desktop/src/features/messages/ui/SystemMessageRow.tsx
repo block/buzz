@@ -184,13 +184,27 @@ function resolveDisplayLabel(
   return resolveLabel(pubkey, currentPubkey, profiles);
 }
 
+function isSelfPubkey(
+  pubkey: string | undefined,
+  currentPubkey: string | undefined,
+): boolean {
+  return Boolean(
+    pubkey &&
+      currentPubkey &&
+      normalizePubkey(pubkey) === normalizePubkey(currentPubkey),
+  );
+}
+
 /** Same label as `resolveDisplayLabel`, adjusted for mid-sentence use. */
 function resolveInlineDisplayLabel(
   pubkey: string | undefined,
   currentPubkey: string | undefined,
   profiles: UserProfileLookup | undefined,
 ): string {
-  return toInlineName(resolveLabel(pubkey, currentPubkey, profiles));
+  return toInlineName(
+    resolveLabel(pubkey, currentPubkey, profiles),
+    isSelfPubkey(pubkey, currentPubkey),
+  );
 }
 
 function isKnownAgentPubkey(

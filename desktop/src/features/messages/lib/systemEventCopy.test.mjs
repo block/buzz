@@ -26,11 +26,11 @@ test("an empty value reads as cleared, not as a change to empty quotes", () => {
   for (const blank of ["", undefined, null]) {
     assert.equal(
       describeChannelTextFieldChange("topic", blank),
-      "cleared the channel topic",
+      "cleared the topic",
     );
     assert.equal(
       describeChannelTextFieldChange("purpose", blank),
-      "cleared the channel purpose",
+      "cleared the purpose",
     );
   }
 });
@@ -38,7 +38,7 @@ test("an empty value reads as cleared, not as a change to empty quotes", () => {
 test("a whitespace-only value reads as cleared", () => {
   assert.equal(
     describeChannelTextFieldChange("topic", "   \n\t "),
-    "cleared the channel topic",
+    "cleared the topic",
   );
 });
 
@@ -61,9 +61,24 @@ test("no caption announces empty quotes", () => {
   }
 });
 
-test("the current user is lowercase mid-sentence", () => {
+test("the reader's own name is lowercase mid-sentence", () => {
   // "added by You" next to an agent's "managed by you" was the inconsistency.
-  assert.equal(toInlineName("You"), "you");
+  assert.equal(toInlineName("You", true), "you");
+});
+
+test("cleared and changed captions use the same noun", () => {
+  // Not "cleared the channel topic" against "changed the topic to …".
+  assert.match(describeChannelTextFieldChange("topic", ""), /\bthe topic\b/);
+  assert.match(
+    describeChannelTextFieldChange("topic", "Ship it"),
+    /\bthe topic\b/,
+  );
+  for (const value of ["", "Ship it"]) {
+    assert.doesNotMatch(
+      describeChannelTextFieldChange("topic", value),
+      /channel topic/,
+    );
+  }
 });
 
 test("every other name keeps its own capitalization", () => {
@@ -73,12 +88,20 @@ test("every other name keeps its own capitalization", () => {
     "Someone",
     "npub1abc…def",
   ]) {
-    assert.equal(toInlineName(name), name);
+    assert.equal(toInlineName(name, false), name);
   }
 });
 
-test("only the exact self label is rewritten", () => {
-  // A person really named "Your Highness" or "Youssef" is not the current user.
-  assert.equal(toInlineName("Youssef"), "Youssef");
-  assert.equal(toInlineName("You Know Who"), "You Know Who");
+test("someone else whose display name is literally You is left alone", () => {
+  // The decisive case: the label is user-controlled, identity is not. Matching
+  // on the string would rewrite this person's name as if they were the reader.
+  assert.equal(toInlineName("You", false), "You");
+  assert.equal(toInlineName("Youssef", false), "Youssef");
+  assert.equal(toInlineName("You Know Who", false), "You Know Who");
+});
+
+test("the reader is lowercased whatever their profile name says", () => {
+  // Self resolution never consults the profile, but the rule keys on identity,
+  // so it does not matter what the label happens to be.
+  assert.equal(toInlineName("Alice Chen", true), "you");
 });

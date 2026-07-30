@@ -17,6 +17,11 @@ export type ChannelTextField = "topic" | "purpose";
 /**
  * Caption for a channel topic or purpose change.
  *
+ * Bare "the topic" rather than "the channel topic": this row only ever renders
+ * in a channel timeline, under that channel's own header, so naming the channel
+ * again is redundant — and it keeps the cleared and changed captions on the same
+ * noun instead of one saying "channel topic" and the other "topic".
+ *
  * A blank value means the field was cleared: the relay reports a clear as a
  * `topic_changed` / `purpose_changed` event carrying an empty string, not as a
  * separate event type. Without this branch the timeline renders `changed the
@@ -29,7 +34,7 @@ export function describeChannelTextFieldChange(
 ): string {
   const trimmed = value?.trim();
   if (!trimmed) {
-    return `cleared the channel ${field}`;
+    return `cleared the ${field}`;
   }
   return `changed the ${field} to ${OPEN_QUOTE}${trimmed}${CLOSE_QUOTE}`;
 }
@@ -41,9 +46,14 @@ export function describeChannelTextFieldChange(
  * `resolveUserLabel` returns "You" for the current user, which is right standing
  * alone and wrong mid-phrase. Agent ownership already draws the same distinction
  * from the other side: `formatOwnerLabel` returns lowercase "you" because it is
- * only ever read as "managed by you". Every other name is a proper noun and is
- * returned untouched.
+ * only ever read as "managed by you".
+ *
+ * `isSelf` is the caller's pubkey comparison, not an inspection of `label`.
+ * Matching on the string would also rewrite a different person whose display
+ * name happens to be "You" — the label is user-controlled, identity is not.
+ * Every name that isn't the reader's own is a proper noun and is returned
+ * untouched.
  */
-export function toInlineName(label: string): string {
-  return label === "You" ? "you" : label;
+export function toInlineName(label: string, isSelf: boolean): string {
+  return isSelf ? "you" : label;
 }
