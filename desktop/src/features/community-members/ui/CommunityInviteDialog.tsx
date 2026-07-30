@@ -3,6 +3,7 @@ import * as React from "react";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
@@ -29,12 +30,14 @@ export function CommunityInviteDialog({
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
-        aria-describedby={undefined}
         className="max-h-[85vh] max-w-xl overflow-y-auto"
         data-testid="community-invite-dialog"
       >
-        <DialogHeader className="space-y-0">
+        <DialogHeader>
           <DialogTitle>Invite to community</DialogTitle>
+          <DialogDescription>
+            Anyone with this link can join this community.
+          </DialogDescription>
         </DialogHeader>
 
         <InviteLinkSection onTtlSecsChange={setTtlSecs} ttlSecs={ttlSecs} />

@@ -338,6 +338,12 @@ externalRedis:
 s3:
   endpoint: ""
   bucket: "buzz-media"
+  # Optional SigV4 signing region. Leave empty to preserve the relay's
+  # AWS_REGION fallback; set the provider's credential value when needed.
+  region: ""
+  # path: https://endpoint/bucket/key (bundled MinIO-compatible default)
+  # virtual: https://bucket.endpoint/key (standard S3; required by new Railway buckets)
+  addressingStyle: path
   accessKey: ""
   secretKey: ""
 

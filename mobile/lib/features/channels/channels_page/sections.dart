@@ -152,56 +152,72 @@ class _CustomSectionHeader extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: _kChannelLabelGap),
-            Text(
-              section.name,
-              style: contentListTitleTextStyle.copyWith(
-                color: sectionColor,
-                fontWeight: FontWeight.w600,
+            Expanded(
+              child: Text(
+                section.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: contentListTitleTextStyle.copyWith(
+                  color: sectionColor,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-            const Spacer(),
-            GestureDetector(
-              onTapUp: (details) async {
-                final overlay =
-                    Overlay.of(context).context.findRenderObject()!
-                        as RenderBox;
-                final position = RelativeRect.fromRect(
-                  details.globalPosition & Size.zero,
-                  Offset.zero & overlay.size,
-                );
-                final value = await showMenu<String>(
-                  context: context,
-                  position: position,
-                  items: [
-                    const PopupMenuItem(value: 'rename', child: Text('Rename')),
-                    PopupMenuItem(
-                      value: 'move_up',
-                      enabled: !isFirst,
-                      child: const Text('Move Up'),
+            Builder(
+              builder: (buttonContext) => IconButton(
+                key: ValueKey('section-menu-${section.id}'),
+                tooltip: '${section.name} options',
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  LucideIcons.ellipsisVertical,
+                  size: _kChannelIconSize,
+                  color: sectionColor,
+                ),
+                onPressed: () async {
+                  final value = await showAnchoredPopover<String>(
+                    context: buttonContext,
+                    width: 216,
+                    alignment: AnchoredPopoverAlignment.end,
+                    color: context.colors.surface,
+                    elevation: 4,
+                    shadowColor: context.colors.shadow.withValues(alpha: 0.18),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(Radii.md),
+                      side: BorderSide(color: context.colors.outline),
                     ),
-                    PopupMenuItem(
-                      value: 'move_down',
-                      enabled: !isLast,
-                      child: const Text('Move Down'),
-                    ),
-                    const PopupMenuItem(value: 'delete', child: Text('Delete')),
-                  ],
-                );
-                switch (value) {
-                  case 'rename':
-                    onRename();
-                  case 'move_up':
-                    onMoveUp();
-                  case 'move_down':
-                    onMoveDown();
-                  case 'delete':
-                    onDelete();
-                }
-              },
-              child: Icon(
-                LucideIcons.ellipsisVertical,
-                size: _kChannelIconSize,
-                color: sectionColor,
+                    surfaceKey: ValueKey('section-popover-${section.id}'),
+                    items: [
+                      const PopupMenuItem(
+                        value: 'rename',
+                        child: Text('Rename'),
+                      ),
+                      PopupMenuItem(
+                        value: 'move_up',
+                        enabled: !isFirst,
+                        child: const Text('Move Up'),
+                      ),
+                      PopupMenuItem(
+                        value: 'move_down',
+                        enabled: !isLast,
+                        child: const Text('Move Down'),
+                      ),
+                      const PopupMenuItem(
+                        value: 'delete',
+                        child: Text('Delete'),
+                      ),
+                    ],
+                  );
+                  switch (value) {
+                    case 'rename':
+                      onRename();
+                    case 'move_up':
+                      onMoveUp();
+                    case 'move_down':
+                      onMoveDown();
+                    case 'delete':
+                      onDelete();
+                  }
+                },
               ),
             ),
             const SizedBox(width: Grid.quarter),

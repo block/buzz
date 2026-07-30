@@ -1897,6 +1897,18 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Turn start, labelled exactly as `log_stop_reason` labels the end, so a
+    // log reads as start/stop pairs. Purely observational: an unpaired start is
+    // the only durable evidence that a turn was entered and never returned, and
+    // without it a stalled agent and an agent nobody woke leave identical logs —
+    // zero completions either way, so anything reading them afterwards has to
+    // guess which happened.
+    tracing::info!(
+        target: "pool::prompt",
+        "turn starting for {}",
+        prompt_label(&source)
+    );
+
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -3131,12 +3143,19 @@ fn classify_control_cancel_failure(
     }
 }
 
-/// Log a stop reason at the appropriate tracing level.
-fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
-    let label = match source {
+/// How a turn's source is named in the `pool::prompt` log lines.
+///
+/// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
+fn prompt_label(source: &PromptSource) -> String {
+    match source {
         PromptSource::Channel(cid) => format!("channel {cid}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
-    };
+    }
+}
+
+/// Log a stop reason at the appropriate tracing level.
+fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
+    let label = prompt_label(source);
     match stop_reason {
         StopReason::EndTurn => {
             tracing::info!(target: "pool::prompt", "turn complete for {label}: end_turn");
@@ -3390,33 +3409,35 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
     }
 }
 
-/// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
+/// Build the `(turn, cumulative)` `TokenCounts` pair for a NIP-AM kind-44200
+/// payload from a completed `TurnUsage`.
 ///
-/// Does nothing when `usage` is `None` (goose emitted no usage notification
-/// for this turn) or when `owner_pubkey` is unconfigured (no NIP-AO identity).
-/// Errors are logged at WARN and never surface to the caller — metric
-/// publishing must never fail a turn.
-async fn publish_agent_turn_metric(
-    ctx: &PromptContext,
-    usage: Option<crate::usage::TurnUsage>,
-    channel_id: Option<uuid::Uuid>,
-    session_id: &str,
-    turn_id: &str,
-    stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
+/// Extracted as a pure function so the mapping logic can be tested independently
+/// of relay/crypto infrastructure. `publish_agent_turn_metric` is the only
+/// production caller.
+///
+/// - `turn` is `None` when `delta_reliable` is false; otherwise it carries the
+///   per-turn i/o/total/cost deltas for this turn.
+/// - `cumulative` always carries the session-aggregate i/o/cost totals.
+///   `total_tokens` is `Some` only when the session accumulated a genuine
+///   provider-reported total on every turn — never derived from i/o sums
+///   (NIP-AM MUST NOT).
+pub(crate) fn build_turn_metric_counts(
+    usage: &crate::usage::TurnUsage,
+) -> (
+    Option<buzz_core::agent_turn_metric::TokenCounts>,
+    Option<buzz_core::agent_turn_metric::TokenCounts>,
 ) {
-    use buzz_core::agent_turn_metric::{AgentTurnMetricPayload, TokenCounts};
-    use nostr::{EventBuilder, Kind, Tag};
-
-    let (usage, owner_pk) = match (usage, ctx.agent_owner_pubkey.as_ref()) {
-        (Some(u), Some(pk)) => (u, pk),
-        _ => return,
-    };
+    use buzz_core::agent_turn_metric::TokenCounts;
 
     let turn_counts = if usage.delta_reliable {
         Some(TokenCounts {
             input_tokens: usage.turn_input_tokens,
             output_tokens: usage.turn_output_tokens,
-            total_tokens: None,
+            // Field-local: present only when both the previous and current
+            // cumulative totals were available and monotonic. Never derived
+            // from input+output.
+            total_tokens: usage.turn_total_tokens,
             cost_usd: usage.turn_cost_usd,
             cache_read_tokens: None,
             cache_write_tokens: None,
@@ -3431,11 +3452,40 @@ async fn publish_agent_turn_metric(
     let cumulative_counts = Some(TokenCounts {
         input_tokens: Some(usage.cumulative_input_tokens),
         output_tokens: Some(usage.cumulative_output_tokens),
-        total_tokens: None,
+        // Present when every turn in the session reported a genuine provider
+        // total. None when the session has never emitted one or any turn lacked
+        // one. Never derived from input+output (NIP-AM MUST NOT).
+        total_tokens: usage.cumulative_total_tokens,
         cost_usd: usage.cumulative_cost_usd,
         cache_read_tokens: None,
         cache_write_tokens: None,
     });
+    (turn_counts, cumulative_counts)
+}
+
+/// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
+///
+/// Does nothing when `usage` is `None` (goose emitted no usage notification
+/// for this turn) or when `owner_pubkey` is unconfigured (no NIP-AO identity).
+/// Errors are logged at WARN and never surface to the caller — metric
+/// publishing must never fail a turn.
+async fn publish_agent_turn_metric(
+    ctx: &PromptContext,
+    usage: Option<crate::usage::TurnUsage>,
+    channel_id: Option<uuid::Uuid>,
+    session_id: &str,
+    turn_id: &str,
+    stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
+) {
+    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let (usage, owner_pk) = match (usage, ctx.agent_owner_pubkey.as_ref()) {
+        (Some(u), Some(pk)) => (u, pk),
+        _ => return,
+    };
+
+    let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let payload = AgentTurnMetricPayload {
         harness: ctx.harness_name.clone(),
@@ -5219,9 +5269,11 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(100),
             turn_output_tokens: Some(50),
+            turn_total_tokens: None,
             turn_cost_usd: None,
             cumulative_input_tokens: 100,
             cumulative_output_tokens: 50,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
         };
@@ -5251,9 +5303,11 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(200),
             turn_output_tokens: Some(80),
+            turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 80,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
             model: None,
         };
@@ -5284,9 +5338,11 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(50),
             turn_output_tokens: Some(20),
+            turn_total_tokens: None,
             turn_cost_usd: None,
             cumulative_input_tokens: 150,
             cumulative_output_tokens: 70,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
         };
@@ -5317,9 +5373,11 @@ mod tests {
             delta_reliable: false, // first turn from buzz-agent
             turn_input_tokens: None,
             turn_output_tokens: None,
+            turn_total_tokens: None,
             turn_cost_usd: None,
             cumulative_input_tokens: 400,
             cumulative_output_tokens: 100,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
         };
@@ -5333,6 +5391,110 @@ mod tests {
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
         )
         .await;
+    }
+
+    /// `build_turn_metric_counts` maps exact turn and cumulative totals from
+    /// `TurnUsage` to the corresponding `TokenCounts.total_tokens` fields.
+    /// Reverting the production fields at the call site to `None` would break
+    /// this test; the test constrains the real code path.
+    #[test]
+    fn test_build_turn_metric_counts_exact_totals_map_through() {
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-total".to_string(),
+            turn_seq: 2,
+            delta_reliable: true,
+            turn_input_tokens: Some(100),
+            turn_output_tokens: Some(30),
+            turn_total_tokens: Some(130), // genuine per-turn total
+            turn_cost_usd: None,
+            cumulative_input_tokens: 500,
+            cumulative_output_tokens: 120,
+            cumulative_total_tokens: Some(620), // genuine cumulative total
+            cumulative_cost_usd: None,
+            model: None,
+        };
+
+        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+
+        // Serialise to JSON — this is what ultimately goes on the wire.
+        let turn_json = serde_json::to_value(turn.as_ref().expect("turn counts present")).unwrap();
+        let cum_json =
+            serde_json::to_value(cumulative.as_ref().expect("cumulative counts present")).unwrap();
+
+        // Per-turn total must be the genuine provider-reported value.
+        assert_eq!(
+            turn_json["totalTokens"],
+            serde_json::json!(130),
+            "per-turn total must map to TokenCounts.totalTokens in wire JSON"
+        );
+        assert_eq!(turn_json["inputTokens"], serde_json::json!(100));
+        assert_eq!(turn_json["outputTokens"], serde_json::json!(30));
+
+        // Cumulative total must be the genuine session total.
+        assert_eq!(
+            cum_json["totalTokens"],
+            serde_json::json!(620),
+            "cumulative total must map to TokenCounts.totalTokens in wire JSON"
+        );
+        assert_eq!(cum_json["inputTokens"], serde_json::json!(500));
+        assert_eq!(cum_json["outputTokens"], serde_json::json!(120));
+    }
+
+    /// When totals are absent, `build_turn_metric_counts` must produce null
+    /// `total_tokens` — never a derived input+output sum (NIP-AM MUST NOT).
+    /// Reverting the production fields to hardcoded `None` would leave this test
+    /// passing but input/output would disagree, making the null-path detectable.
+    #[test]
+    fn test_build_turn_metric_counts_null_totals_never_derived() {
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-nototal".to_string(),
+            turn_seq: 1,
+            delta_reliable: true,
+            turn_input_tokens: Some(200),
+            turn_output_tokens: Some(60),
+            turn_total_tokens: None, // provider did not supply a total
+            turn_cost_usd: None,
+            cumulative_input_tokens: 200,
+            cumulative_output_tokens: 60,
+            cumulative_total_tokens: None, // session has no total
+            cumulative_cost_usd: None,
+            model: None,
+        };
+
+        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+
+        let turn_json = serde_json::to_value(turn.as_ref().expect("turn counts present")).unwrap();
+        let cum_json =
+            serde_json::to_value(cumulative.as_ref().expect("cumulative counts present")).unwrap();
+
+        // total_tokens must be null in the wire JSON.
+        assert!(
+            turn_json["totalTokens"].is_null(),
+            "absent turn total must serialize as null — not derived from in+out"
+        );
+        assert!(
+            cum_json["totalTokens"].is_null(),
+            "absent cumulative total must serialize as null — not derived from in+out"
+        );
+
+        // Input/output must still carry their real values.
+        assert_eq!(
+            turn_json["inputTokens"],
+            serde_json::json!(200),
+            "inputTokens must be present even when total is absent"
+        );
+        assert_eq!(
+            turn_json["outputTokens"],
+            serde_json::json!(60),
+            "outputTokens must be present even when total is absent"
+        );
+
+        // The null total must not equal the input+output sum — it must be genuinely null.
+        let derived_sum = serde_json::json!(200u64 + 60u64);
+        assert_ne!(
+            turn_json["totalTokens"], derived_sum,
+            "total_tokens must never equal input+output when provider omitted it"
+        );
     }
 
     fn make_prompt_context_no_owner() -> PromptContext {

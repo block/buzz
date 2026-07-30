@@ -926,8 +926,8 @@ function createMockRelayMembershipEvent(): RelayEvent {
  * sets from distinct pubkeys so the e2e exercises the union/collapse path, not
  * a single relay-owned set. `:buzz:` is the stable shortcode exercised by
  * custom-emoji.spec.ts (claimed by BOTH members with different URLs, so the
- * palette must collapse it to one deterministic winner); `:narf:` proves a
- * second member's distinct emoji unions in.
+ * palette must collapse it to one deterministic winner); `:narf:` and
+ * `:bufo_joy:` prove a second member's distinct emoji unions in.
  */
 function createMockCustomEmojiSetEvents(): RelayEvent[] {
   return [
@@ -954,6 +954,7 @@ function createMockCustomEmojiSetEvents(): RelayEvent[] {
         // member B claims :buzz: with a DIFFERENT url — unionCustomEmoji must
         // collapse it to one deterministic winner, never expose two URLs.
         ["emoji", "buzz", "https://example.com/e2e/buzz-b.png"],
+        ["emoji", "bufo_joy", "https://example.com/e2e/bufo-joy.png"],
       ],
       "b".repeat(64),
     ),

@@ -135,23 +135,29 @@ pub async fn sign_event(
 }
 
 #[tauri::command]
-pub fn decrypt_observer_event(
+pub async fn decrypt_observer_event(
     event_json: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let keys = state.signing_keys()?;
-    let event = Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
 
-    // Defense-in-depth: verify event ID and signature before decrypting.
-    if !event.verify_id() {
-        return Err("observer event has invalid ID".into());
-    }
-    if !event.verify_signature() {
-        return Err("observer event has invalid signature".into());
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let event =
+            Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
 
-    buzz_core_pkg::observer::decrypt_observer_payload(&keys, &event)
-        .map_err(|error| format!("decrypt observer event failed: {error}"))
+        // Defense-in-depth: verify event ID and signature before decrypting.
+        if !event.verify_id() {
+            return Err("observer event has invalid ID".into());
+        }
+        if !event.verify_signature() {
+            return Err("observer event has invalid signature".into());
+        }
+
+        buzz_core_pkg::observer::decrypt_observer_payload(&keys, &event)
+            .map_err(|error| format!("decrypt observer event failed: {error}"))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]

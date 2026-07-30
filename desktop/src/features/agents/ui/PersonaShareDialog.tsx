@@ -54,6 +54,7 @@ type PersonaShareDialogProps = {
   catalogShareLevel: CatalogPersonaShareLevel;
   isPending: boolean;
   linkedAgentPubkey: string | null;
+  effectiveAvatarUrl: string | null;
   onCatalogShareLevelChange: (shareLevel: CatalogPersonaShareLevel) => void;
   onExport: () => void;
   onOpenChange: (open: boolean) => void;
@@ -694,6 +695,7 @@ export function PersonaShareDialog({
   catalogShareLevel,
   isPending,
   linkedAgentPubkey,
+  effectiveAvatarUrl,
   onCatalogShareLevelChange,
   onExport,
   onOpenChange,
@@ -715,12 +717,12 @@ export function PersonaShareDialog({
         memoryLevel: linkedAgentPubkey ? memoryLevel : "none",
         format: "png",
         memorySourcePubkey: linkedAgentPubkey,
-        avatarPngDataUrl: await resolveSnapshotAvatarPng(persona.avatarUrl),
+        avatarPngDataUrl: await resolveSnapshotAvatarPng(effectiveAvatarUrl),
       }),
     [
       encodeSnapshotMutation.mutateAsync,
+      effectiveAvatarUrl,
       linkedAgentPubkey,
-      persona.avatarUrl,
       persona.id,
     ],
   );
