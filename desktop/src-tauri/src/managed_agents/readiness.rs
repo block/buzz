@@ -156,6 +156,15 @@ pub(crate) fn resolve_effective_harness_descriptor(
             normalize_agent_args(&effective_command, record_args)
         } else if let Some(ref def) = harness_def {
             normalize_agent_args(&effective_command, def.args.clone())
+        } else if let Some(preset_args) =
+            crate::managed_agents::discovery::preset_args_for_command(&effective_command)
+        {
+            // No runtime id resolved a harness preset, but the command itself
+            // is a known ACP runtime (e.g. an explicit override like `omp`).
+            // Use that preset's launch args so we start its ACP/stdio mode
+            // rather than the bare command, which would launch the interactive
+            // TUI and time out at ACP `initialize` under headless Buzz.
+            normalize_agent_args(&effective_command, preset_args)
         } else {
             normalize_agent_args(&effective_command, record_args)
         }
@@ -1547,6 +1556,106 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_effective_harness_descriptor_uses_preset_args_for_pinned_command() {
+        // An agent pinned to a known ACP runtime via agent_command_override,
+        // with no runtime id and no instance args, must take the launch args
+        // from the matching PRESET_HARNESSES entry. Otherwise the bare command
+        // (e.g. `omp`) launches the interactive TUI, which times out at ACP
+        // `initialize` under headless Buzz (no controlling TTY).
+        let mk = |command: &str| crate::managed_agents::types::ManagedAgentRecord {
+            pubkey: "k".to_string(),
+            name: "agent".to_string(),
+            agent_command_override: Some(command.to_string()),
+            agent_args: vec![],
+            runtime: None,
+            persona_id: None,
+            private_key_nsec: String::new(),
+            auth_tag: None,
+            relay_url: String::new(),
+            avatar_url: None,
+            acp_command: "buzz-acp".to_string(),
+            agent_command: String::new(),
+            mcp_command: String::new(),
+            turn_timeout_seconds: 320,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 1,
+            system_prompt: None,
+            model: None,
+            provider: None,
+            persona_source_version: None,
+            env_vars: BTreeMap::new(),
+            start_on_app_launch: false,
+            auto_restart_on_config_change: true,
+            runtime_pid: None,
+            backend: Default::default(),
+            backend_agent_id: None,
+            provider_policy_pending: false,
+            provider_binary_path: None,
+            team_id: None,
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            last_error_code: None,
+            respond_to: Default::default(),
+            respond_to_allowlist: vec![],
+            display_name: None,
+            slug: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            shared: false,
+            source_team: None,
+            source_team_persona_slug: None,
+            catalog_source: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_parallelism: None,
+            relay_mesh: None,
+        };
+        let global = crate::managed_agents::GlobalAgentConfig::default();
+
+        let desc = |command: &str| {
+            resolve_effective_harness_descriptor(&mk(command), &[], &global).unwrap()
+        };
+
+        // ACP-mode runtimes resolve to `acp`.
+        assert_eq!(desc("devin").args, vec!["acp".to_string()]);
+        assert_eq!(desc("omp").args, vec!["acp".to_string()]);
+        assert_eq!(desc("opencode").args, vec!["acp".to_string()]);
+        assert_eq!(desc("kimi").args, vec!["acp".to_string()]);
+        assert_eq!(desc("cursor-agent").args, vec!["acp".to_string()]);
+        assert_eq!(desc("openclaw").args, vec!["acp".to_string()]);
+        // Grok launches its agent stdio mode (not the TUI).
+        assert_eq!(
+            desc("grok").args,
+            vec![
+                "agent".to_string(),
+                "--always-approve".to_string(),
+                "stdio".to_string()
+            ]
+        );
+
+        // Explicit instance args always win over the preset fallback.
+        let mut explicit = mk("omp");
+        explicit.agent_args = vec!["acp".to_string(), "--foo".to_string()];
+        let explicit_desc = resolve_effective_harness_descriptor(&explicit, &[], &global).unwrap();
+        assert_eq!(
+            explicit_desc.args,
+            vec!["acp".to_string(), "--foo".to_string()]
+        );
+
+        // An unknown command with no preset keeps the (empty) instance args.
+        assert!(desc("my-fancy-cli").args.is_empty());
+    }
+
+    // ── provider-specific model fallback tests ────────────────────────────
     #[test]
     fn buzz_agent_databricks_v2_with_databricks_model_but_no_buzz_agent_model_is_ready() {
         // The baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL.
