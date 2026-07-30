@@ -39,6 +39,8 @@ import {
   channelWindowThreadSummaries,
   type ChannelWindowThreadSummary,
 } from "@/features/messages/lib/channelWindowStore";
+import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScroll";
+import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -320,6 +322,9 @@ export function DevTranscript({
 
   const { scrollRef, contentRef, handleScroll } = usePinnedScroll(channel.id);
 
+  const { fetchOlder, hasOlderMessages, isFetchingOlder } =
+    useFetchOlderMessages(channel);
+
   const roots = React.useMemo(
     () => selectRootEvents(messagesQuery.data),
     [messagesQuery.data],
@@ -369,6 +374,43 @@ export function DevTranscript({
     );
   }, [memberships, roots]);
 
+  // Scroll-up pagination. Chromium's native scroll anchoring keeps the view
+  // stable when older pages prepend — except at scrollTop 0, where the spec
+  // suppresses anchoring. Capture the pre-fetch metrics and compensate
+  // manually in that one case once the prepended rows commit.
+  const topSentinelRef = React.useRef<HTMLDivElement>(null);
+  const pendingPrependRef = React.useRef<{ height: number } | null>(null);
+  const fetchOlderCompensated = React.useCallback(async () => {
+    const node = scrollRef.current;
+    if (node) pendingPrependRef.current = { height: node.scrollHeight };
+    await fetchOlder();
+  }, [fetchOlder, scrollRef]);
+
+  const oldestItemKey =
+    items[0] === undefined
+      ? null
+      : items[0].type === "prompt"
+        ? items[0].root.id
+        : items[0].change.event.id;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: oldestItemKey changing is the prepend-commit signal
+  React.useLayoutEffect(() => {
+    const pending = pendingPrependRef.current;
+    if (!pending) return;
+    pendingPrependRef.current = null;
+    const node = scrollRef.current;
+    // scrollTop > 0 means the browser's scroll anchoring already adjusted.
+    if (!node || node.scrollTop > 0) return;
+    node.scrollTop = node.scrollHeight - pending.height;
+  }, [oldestItemKey, scrollRef]);
+
+  useLoadOlderOnScroll({
+    fetchOlder: fetchOlderCompensated,
+    hasOlderMessages,
+    isLoading: messagesQuery.isLoading,
+    scrollContainerRef: scrollRef,
+    sentinelRef: topSentinelRef,
+  });
+
   const threadSummaries = React.useMemo(
     () =>
       windowQuery.data
@@ -416,6 +458,15 @@ export function DevTranscript({
       onScroll={handleScroll}
     >
       <div ref={contentRef}>
+        <div aria-hidden ref={topSentinelRef} />
+        {isFetchingOlder ? (
+          <div
+            className="pb-2 text-sm text-muted-foreground/60"
+            data-testid="dev-mode-loading-older"
+          >
+            loading older messages…
+          </div>
+        ) : null}
         {items.map((item) =>
           item.type === "membership" ? (
             <MembershipRow
