@@ -11516,6 +11516,13 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+      case "read_numbat_findings":
+        return {
+          nextOffset: 0,
+          reset: false,
+          rejectedRecords: 0,
+          findings: [],
+        };
       case "set_prevent_sleep_active":
         return null;
       case "plugin:window|is_fullscreen":

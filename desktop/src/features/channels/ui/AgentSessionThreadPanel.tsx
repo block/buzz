@@ -59,6 +59,8 @@ import { useLoadArchivedObserverEvents } from "@/features/agents/ui/useObserverE
 import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScroll";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { NumbatSecurityFindings } from "@/features/agents/ui/NumbatSecurityFindings";
+import { useNumbatFindings } from "@/features/agents/ui/useNumbatFindings";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
@@ -104,6 +106,7 @@ export function AgentSessionThreadPanel({
     sessionChannelId,
   );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
+  const numbatFindings = useNumbatFindings(agent.pubkey, sessionChannelId);
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -126,6 +129,14 @@ export function AgentSessionThreadPanel({
     () => mergeObserverEventWindows(scopedEvents, archivedChannelEvents),
     [scopedEvents, archivedChannelEvents],
   );
+  const activeTurnId = React.useMemo(() => {
+    if (!isWorking) return null;
+    for (let index = combinedHeaderEvents.length - 1; index >= 0; index -= 1) {
+      const turnId = combinedHeaderEvents[index]?.turnId;
+      if (turnId) return turnId;
+    }
+    return null;
+  }, [combinedHeaderEvents, isWorking]);
   const latestActivityAt = React.useMemo(
     () => getLatestActivityTimestamp(combinedHeaderEvents),
     [combinedHeaderEvents],
@@ -461,6 +472,13 @@ export function AgentSessionThreadPanel({
       >
         <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef}>
+          <NumbatSecurityFindings
+            activeTurnId={activeTurnId}
+            canCancelTurn={canStopCurrentTurn}
+            error={numbatFindings.error}
+            findings={numbatFindings.findings}
+            onCancelTurn={() => void handleInterruptTurn()}
+          />
           <ManagedAgentSessionPanel
             agent={agent}
             channelId={sessionChannelId}

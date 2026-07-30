@@ -705,6 +705,7 @@ pub fn run() {
             sign_out,
             decrypt_observer_event,
             build_observer_control_event,
+            read_numbat_findings,
             create_auth_event,
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,
