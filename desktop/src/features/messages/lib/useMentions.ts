@@ -16,7 +16,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
+  isAgentIdentityAllowed,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -238,6 +238,24 @@ export function useMentions(
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
     [members],
   );
+  const allowedExternalAgentPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (members ?? [])
+          .filter((member) => member.isAgent === true || member.role === "bot")
+          .map((member) => normalizePubkey(member.pubkey))
+          .filter(
+            (pubkey) =>
+              directoryAgentPubkeys.has(pubkey) &&
+              mentionableAgentPubkeys.has(pubkey),
+          ),
+      ),
+    [directoryAgentPubkeys, members, mentionableAgentPubkeys],
+  );
+  const allowedAgentIdentityPubkeys = React.useMemo(
+    () => new Set([...managedAgentPubkeys, ...allowedExternalAgentPubkeys]),
+    [allowedExternalAgentPubkeys, managedAgentPubkeys],
+  );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
 
@@ -246,7 +264,7 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (!isAgentIdentityAllowed(candidate, allowedAgentIdentityPubkeys)) {
         return;
       }
       if (
@@ -412,6 +430,7 @@ export function useMentions(
   }, [
     activePersonaById,
     activePersonas,
+    allowedAgentIdentityPubkeys,
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
@@ -420,7 +439,6 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
-    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,

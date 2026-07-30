@@ -849,6 +849,45 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
   await expect(autocomplete(page)).toHaveCount(0);
 });
 
+test("directory-backed channel agents are mentionable without a local runtime", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+        name: "mira",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelIds: ["9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@mira");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("mira")).toBeVisible();
+  await expect(dropdown.getByText("agent")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" hello");
+
+  const baselineStartCount = commandCount(
+    await readCommandLog(page),
+    "start_managed_agent",
+  );
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "start_managed_agent"),
+    )
+    .toBe(baselineStartCount);
+});
+
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({
   page,
 }) => {
