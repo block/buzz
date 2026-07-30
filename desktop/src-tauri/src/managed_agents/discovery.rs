@@ -1617,6 +1617,17 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's own environment separately.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "devin",
+        label: "Devin",
+        command: "devin",
+        args: &["acp"],
+        install_instructions_url: "https://docs.devin.ai/cli/index",
+        install_hint: "Buzz talks to Devin through the Devin CLI's ACP mode (devin acp). \
+            Install the Devin CLI from https://docs.devin.ai/cli/index and run \
+            `devin auth login` to authenticate.",
+        underlying_cli: Some("devin"),
+    },
 ];
 
 /// Return the static preset harness definitions as `HarnessDefinition` values.

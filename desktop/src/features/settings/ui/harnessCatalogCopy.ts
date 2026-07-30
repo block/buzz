@@ -43,6 +43,8 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // Sources: https://github.com/openclaw/openclaw,
   // https://docs.openclaw.ai/start/getting-started
   openclaw: "A personal AI assistant that runs on your own devices.",
+  // Source: https://docs.devin.ai/cli/index
+  devin: "Cognition's autonomous AI software engineer, connected via the Devin CLI's ACP mode.",
 };
 
 /**
