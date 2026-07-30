@@ -7,8 +7,19 @@ This guide covers the most common rendering failures on Linux and how to resolve
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | Blank or transparent window, then `SIGABRT` with `colrv1_configure_skpaint` in the output | COLRv1 color emoji font (AppImage only) | Upgrade to the latest AppImage (v0.5.2+) |
+| Window disappears and `WebKitWebProcess` reports `SIGILL` on an older x86_64 CPU | WebKitGTK 2.52 JavaScriptCore emits AVX instructions on a CPU without AVX | Buzz automatically sets `JSC_useJIT=0`; set it manually when running an older build |
 | Blank window on startup, no crash output | dmabuf renderer incompatibility (NVIDIA or AppImage) | `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Buzz.AppImage` or `--safe-rendering` |
 | Blank window on any hardware, no crash output | Unknown GPU/driver combination | `--safe-rendering` flag (see below) |
+
+---
+
+## Crash: `WebKitWebProcess` `SIGILL` on an AVX-less CPU
+
+**Affected hardware:** Older x86_64 CPUs that do not advertise the AVX feature, when used with affected WebKitGTK 2.52 builds. Issue [#3747](https://github.com/block/buzz/issues/3747).
+
+**Symptom:** Buzz starts and its WebKit child process exits with `SIGILL` (illegal instruction), often at an AVX `vmovaps` instruction in JavaScriptCore.
+
+**Fix:** Buzz detects AVX-less x86_64 CPUs before WebKit starts and sets `JSC_useJIT=0` automatically. An explicitly provided `JSC_useJIT` value is always preserved. For an older Buzz build, launch with `JSC_useJIT=0 buzz-desktop` (or prefix the AppImage command the same way).
 
 ---
 

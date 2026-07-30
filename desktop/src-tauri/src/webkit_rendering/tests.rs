@@ -33,10 +33,26 @@ fn env_from(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
     }
 }
 
-/// The variables a plan would set, or `None` for a plan that sets nothing.
-fn applied(plan: &Plan) -> Option<&[&str]> {
+fn cpu_info(features: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().expect("cpu info");
+    std::fs::write(file.path(), format!("processor : 0\nflags : {features}\n"))
+        .expect("cpu features");
+    file
+}
+
+fn test_plan(
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    env: EnvLookup<'_>,
+    drm_root: &Path,
+) -> Plan {
+    let cpu_info = cpu_info("sse sse2 avx avx2");
+    plan(args, env, drm_root, "x86_64", cpu_info.path())
+}
+
+/// The assignments a plan would apply, or `None` for a plan that changes nothing.
+fn applied(plan: &Plan) -> Option<&[(&str, &str)]> {
     match plan {
-        Plan::Apply { vars, .. } => Some(vars),
+        Plan::Apply { assignments, .. } => Some(assignments),
         _ => None,
     }
 }
@@ -46,11 +62,11 @@ fn applied(plan: &Plan) -> Option<&[&str]> {
 #[test]
 fn test_nvidia_gpu_disables_the_dmabuf_renderer() {
     let drm = drm(&["0x10de"]);
-    let plan = plan(NO_ARGS, &env_from(&[]), drm.path());
+    let plan = test_plan(NO_ARGS, &env_from(&[]), drm.path());
 
     assert_eq!(
         applied(&plan),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        Some(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")][..])
     );
     let Plan::Apply { why, .. } = &plan else {
         unreachable!()
@@ -65,8 +81,8 @@ fn test_an_nvidia_gpu_alongside_another_vendor_still_counts() {
     let drm = drm(&["0x8086", "0x10de"]);
 
     assert_eq!(
-        applied(&plan(NO_ARGS, &env_from(&[]), drm.path())),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        applied(&test_plan(NO_ARGS, &env_from(&[]), drm.path())),
+        Some(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")][..])
     );
 }
 
@@ -75,8 +91,8 @@ fn test_the_vendor_id_match_ignores_case() {
     let drm = drm(&["0x10DE"]);
 
     assert_eq!(
-        applied(&plan(NO_ARGS, &env_from(&[]), drm.path())),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        applied(&test_plan(NO_ARGS, &env_from(&[]), drm.path())),
+        Some(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")][..])
     );
 }
 
@@ -86,11 +102,11 @@ fn test_an_appimage_launch_disables_the_dmabuf_renderer() {
     // #2338's reporter (Intel Mesa under the AppRun's pinned XWayland backend).
     let drm = drm(&["0x8086"]);
     let env = env_from(&[("APPIMAGE", "/home/u/Buzz.AppImage")]);
-    let plan = plan(NO_ARGS, &env, drm.path());
+    let plan = test_plan(NO_ARGS, &env, drm.path());
 
     assert_eq!(
         applied(&plan),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        Some(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")][..])
     );
     let Plan::Apply { why, .. } = &plan else {
         unreachable!()
@@ -103,7 +119,7 @@ fn test_a_plain_non_nvidia_launch_changes_nothing() {
     let drm = drm(&["0x8086", "0x1002"]);
 
     assert!(matches!(
-        plan(NO_ARGS, &env_from(&[]), drm.path()),
+        test_plan(NO_ARGS, &env_from(&[]), drm.path()),
         Plan::Leave { .. }
     ));
 }
@@ -116,7 +132,7 @@ fn test_an_unreadable_drm_tree_is_not_treated_as_a_hit() {
     let missing = std::path::Path::new("/nonexistent/class/drm");
 
     assert!(matches!(
-        plan(NO_ARGS, &env_from(&[]), missing),
+        test_plan(NO_ARGS, &env_from(&[]), missing),
         Plan::Leave { .. }
     ));
 }
@@ -132,8 +148,8 @@ fn test_a_device_without_a_vendor_file_is_skipped_not_fatal() {
     std::fs::write(device.join("vendor"), "0x10de\n").expect("vendor");
 
     assert_eq!(
-        applied(&plan(NO_ARGS, &env_from(&[]), root.path())),
-        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+        applied(&test_plan(NO_ARGS, &env_from(&[]), root.path())),
+        Some(&[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")][..])
     );
 }
 
@@ -145,7 +161,7 @@ fn test_a_user_set_variable_disables_the_heuristic_wholesale() {
     // dmabuf renderer *on*, on a machine the heuristic would have opted out.
     let drm = drm(&["0x10de"]);
     let env = env_from(&[(DISABLE_DMABUF, "0")]);
-    let plan = plan(NO_ARGS, &env, drm.path());
+    let plan = test_plan(NO_ARGS, &env, drm.path());
 
     let Plan::Leave { why } = &plan else {
         panic!("a user assignment must not be overwritten: {plan:?}");
@@ -159,7 +175,7 @@ fn test_an_empty_assignment_is_still_a_user_assignment() {
     let env = env_from(&[(DISABLE_DMABUF, "")]);
 
     assert!(matches!(
-        plan(NO_ARGS, &env, drm.path()),
+        test_plan(NO_ARGS, &env, drm.path()),
         Plan::Leave { .. }
     ));
 }
@@ -173,7 +189,7 @@ fn test_a_user_set_compositing_variable_also_stands_the_heuristic_down() {
     let env = env_from(&[(DISABLE_COMPOSITING, "1")]);
 
     assert!(matches!(
-        plan(NO_ARGS, &env, drm.path()),
+        test_plan(NO_ARGS, &env, drm.path()),
         Plan::Leave { .. }
     ));
 }
@@ -186,14 +202,14 @@ fn test_safe_rendering_applies_the_safest_set_without_any_hardware_signal() {
     // must not depend on either one.
     let drm = drm(&["0x8086"]);
     let args = ["buzz://channel/1", SAFE_RENDERING];
-    let plan = plan(args, &env_from(&[]), drm.path());
+    let plan = test_plan(args, &env_from(&[]), drm.path());
 
     assert_eq!(
         applied(&plan),
         Some(
             &[
-                "WEBKIT_DISABLE_DMABUF_RENDERER",
-                "WEBKIT_DISABLE_COMPOSITING_MODE"
+                ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+                ("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
             ][..]
         )
     );
@@ -204,7 +220,7 @@ fn test_an_unrelated_flag_is_not_mistaken_for_safe_rendering() {
     let drm = drm(&["0x8086"]);
 
     assert!(matches!(
-        plan(["--safe-renderingX"], &env_from(&[]), drm.path()),
+        test_plan(["--safe-renderingX"], &env_from(&[]), drm.path()),
         Plan::Leave { .. }
     ));
 }
@@ -213,7 +229,7 @@ fn test_an_unrelated_flag_is_not_mistaken_for_safe_rendering() {
 fn test_safe_rendering_against_a_user_set_variable_is_fatal_not_guessed() {
     let drm = drm(&["0x8086"]);
     let env = env_from(&[(DISABLE_DMABUF, "0")]);
-    let plan = plan([SAFE_RENDERING], &env, drm.path());
+    let plan = test_plan([SAFE_RENDERING], &env, drm.path());
 
     let Plan::Fatal { diagnostic } = &plan else {
         panic!("the flag and the environment disagree; neither may be guessed: {plan:?}");
@@ -242,9 +258,77 @@ fn test_a_non_utf8_user_assignment_is_reported_not_ignored() {
             false => None,
         };
 
-        let Plan::Fatal { diagnostic } = plan([SAFE_RENDERING], &env, drm.path()) else {
+        let Plan::Fatal { diagnostic } = test_plan([SAFE_RENDERING], &env, drm.path()) else {
             panic!("a non-UTF-8 assignment is still a user assignment");
         };
         assert!(diagnostic.contains(DISABLE_DMABUF), "{diagnostic}");
     }
+}
+
+// ── JavaScriptCore AVX fallback ─────────────────────────────────────────────
+
+#[test]
+fn test_avx_absent_disables_the_jsc_jit() {
+    let drm = drm(&["0x8086"]);
+    let cpu_info = cpu_info("sse sse2 ssse3");
+    let plan = plan(
+        NO_ARGS,
+        &env_from(&[]),
+        drm.path(),
+        "x86_64",
+        cpu_info.path(),
+    );
+
+    assert_eq!(applied(&plan), Some(&[(DISABLE_JSC_JIT, "0")][..]));
+}
+
+#[test]
+fn test_avx_present_leaves_the_jsc_jit_unchanged() {
+    let drm = drm(&["0x8086"]);
+    let cpu_info = cpu_info("sse sse2 avx avx2");
+
+    assert!(matches!(
+        plan(
+            NO_ARGS,
+            &env_from(&[]),
+            drm.path(),
+            "x86_64",
+            cpu_info.path(),
+        ),
+        Plan::Leave { .. }
+    ));
+}
+
+#[test]
+fn test_a_user_set_jsc_jit_value_is_never_overwritten() {
+    let drm = drm(&["0x8086"]);
+    let cpu_info = cpu_info("sse sse2");
+    let env = env_from(&[(DISABLE_JSC_JIT, "1")]);
+
+    assert!(matches!(
+        plan(NO_ARGS, &env, drm.path(), "x86_64", cpu_info.path()),
+        Plan::Leave { .. }
+    ));
+}
+
+#[test]
+fn test_non_x86_and_unreadable_cpu_data_do_not_disable_the_jit() {
+    let drm = drm(&["0x8086"]);
+    let cpu_info = cpu_info("sse sse2");
+    let missing = Path::new("/nonexistent/proc/cpuinfo");
+
+    assert!(matches!(
+        plan(
+            NO_ARGS,
+            &env_from(&[]),
+            drm.path(),
+            "aarch64",
+            cpu_info.path(),
+        ),
+        Plan::Leave { .. }
+    ));
+    assert!(matches!(
+        plan(NO_ARGS, &env_from(&[]), drm.path(), "x86_64", missing),
+        Plan::Leave { .. }
+    ));
 }
