@@ -64,37 +64,87 @@ export function isAgentIdentityInManagedList(
   );
 }
 
+/** The respond-to declaration from an agent's kind:10100 directory entry. */
+export type RelayAgentMentionPolicy = Pick<
+  RelayAgent,
+  "respondTo" | "respondToAllowlist"
+>;
+
+/**
+ * Hide an agent-classified mention candidate unless there is evidence the
+ * mention will be received and answered.
+ *
+ * Offering a mention asserts "this agent will receive the message and its
+ * policy admits responding to you". That is decided from the same proofs
+ * other agent surfaces already trust, never from the local store alone:
+ *
+ * 1. A local managed record — this desktop runs the agent, so it can vouch
+ *    directly (the native path, unchanged).
+ * 2. Channel membership (relay-authoritative — candidates originate from the
+ *    member list) plus the agent's own kind:10100 respond-to declaration:
+ *    `anyone`, an allowlist naming the current user, or `owner-only` when
+ *    the current user IS the agent's owner. Ownership uses
+ *    `candidate.ownerPubkey` — the NIP-OA-verified value the "managed by"
+ *    surface renders — so external agents owned by the current user are
+ *    mentionable exactly like managed ones.
+ *
+ * Liveness is deliberately not required: buzz-acp replays missed mentions on
+ * reconnect (`since` filter), and stopped managed agents are offered today.
+ * An agent-classified candidate with no local record and no directory
+ * declaration stays hidden — with no proof it will answer, a mention chip
+ * would fire into the void.
+ */
 export function shouldHideAgentFromMentions({
-  isAgent,
-  isMember,
-  pubkey,
-  mentionableAgentPubkeys,
-  directoryAgentPubkeys,
+  candidate,
+  currentPubkey,
+  managedAgentPubkeys,
+  relayAgentPolicies,
 }: {
-  isAgent: boolean;
-  isMember: boolean;
-  pubkey: string;
-  mentionableAgentPubkeys: ReadonlySet<string>;
-  directoryAgentPubkeys: ReadonlySet<string>;
+  candidate: {
+    isAgent?: boolean;
+    isMember?: boolean;
+    ownerPubkey?: string | null;
+    pubkey: string;
+  };
+  currentPubkey: string | null | undefined;
+  managedAgentPubkeys: ReadonlySet<string>;
+  relayAgentPolicies: ReadonlyMap<string, RelayAgentMentionPolicy>;
 }) {
-  if (!isAgent) return false;
-  const normalized = normalizePubkey(pubkey);
-  // Invocable => always show.
-  if (mentionableAgentPubkeys.has(normalized)) return false;
-  // Non-member, non-invocable => hide (preserves prior behavior).
-  if (!isMember) return true;
-  // Member (Option B): hide only when we have an explicit not-invocable
-  // signal — a relay directory (kind:10100) entry that excludes us.
-  // Unknown invocability (not in directory) => show.
-  //
-  // NOTE: this assumes `directoryAgentPubkeys` and `mentionableAgentPubkeys`
-  // share the same source query (`relayAgentsQuery.data`), so directory
-  // presence without membership in `mentionableAgentPubkeys` is a real
-  // explicit-exclusion signal. If a future change sources the directory set
-  // from a different query, an agent that's directory-present but whose
-  // mentionability is still loading could be hidden prematurely — keep the
-  // two sets derived from the same query.
-  return directoryAgentPubkeys.has(normalized);
+  if (candidate.isAgent !== true) return false;
+  const pubkey = normalizePubkey(candidate.pubkey);
+  if (managedAgentPubkeys.has(pubkey)) return false;
+  // Offering a non-member external agent would need the add-via-mention flow
+  // to honor the agent's `channel_add_policy` declaration — a follow-up, not
+  // this change. Members only for now.
+  if (candidate.isMember !== true) return true;
+  const policy = relayAgentPolicies.get(pubkey);
+  if (!policy) return true;
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
+  switch (policy.respondTo) {
+    case "anyone":
+      return false;
+    case "allowlist":
+      return (
+        normalizedCurrentPubkey === null ||
+        !policy.respondToAllowlist
+          .map((entry) => normalizePubkey(entry))
+          .includes(normalizedCurrentPubkey)
+      );
+    case "owner-only": {
+      const ownerPubkey = candidate.ownerPubkey
+        ? normalizePubkey(candidate.ownerPubkey)
+        : null;
+      return (
+        normalizedCurrentPubkey === null ||
+        ownerPubkey === null ||
+        ownerPubkey !== normalizedCurrentPubkey
+      );
+    }
+    default:
+      return true;
+  }
 }
 
 type AgentAutocompleteCandidate = {

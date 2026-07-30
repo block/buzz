@@ -16,7 +16,6 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -179,12 +178,16 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
-  const directoryAgentPubkeys = React.useMemo(
+  const relayAgentPolicies = React.useMemo(
     () =>
-      new Set(
-        (relayAgentsQuery.data ?? []).map((agent) =>
+      new Map(
+        (relayAgentsQuery.data ?? []).map((agent) => [
           normalizePubkey(agent.pubkey),
-        ),
+          {
+            respondTo: agent.respondTo,
+            respondToAllowlist: agent.respondToAllowlist,
+          },
+        ]),
       ),
     [relayAgentsQuery.data],
   );
@@ -246,16 +249,18 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
-        return;
-      }
       if (
         shouldHideAgentFromMentions({
-          isAgent: candidate.isAgent === true,
-          isMember: candidate.isMember === true,
-          pubkey,
-          mentionableAgentPubkeys,
-          directoryAgentPubkeys,
+          candidate: {
+            isAgent: candidate.isAgent === true,
+            isMember: candidate.isMember === true,
+            ownerPubkey:
+              candidate.ownerPubkey ?? profiles?.[pubkey]?.ownerPubkey ?? null,
+            pubkey,
+          },
+          currentPubkey,
+          managedAgentPubkeys,
+          relayAgentPolicies,
         })
       ) {
         return;
@@ -415,7 +420,6 @@ export function useMentions(
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
-    directoryAgentPubkeys,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
@@ -428,6 +432,7 @@ export function useMentions(
     personaNameByPubkey,
     profiles,
     relayAgentNamesByPubkey,
+    relayAgentPolicies,
     relayAgentsQuery.data,
   ]);
 

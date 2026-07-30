@@ -162,84 +162,161 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   );
 });
 
+function hideArgs(overrides = {}) {
+  const {
+    candidate = {},
+    currentPubkey = CURRENT_PUBKEY,
+    managedAgentPubkeys = new Set(),
+    relayAgentPolicies = new Map(),
+  } = overrides;
+  return {
+    candidate: {
+      isAgent: true,
+      isMember: true,
+      ownerPubkey: null,
+      pubkey: PUB_A,
+      ...candidate,
+    },
+    currentPubkey,
+    managedAgentPubkeys,
+    relayAgentPolicies,
+  };
+}
+
+function policy(respondTo, respondToAllowlist = []) {
+  return new Map([[PUB_A, { respondTo, respondToAllowlist }]]);
+}
+
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
-    shouldHideAgentFromMentions({
-      isAgent: false,
-      isMember: false,
-      pubkey: PUB_A,
-      mentionableAgentPubkeys: new Set(),
-      directoryAgentPubkeys: new Set([PUB_A]),
-    }),
+    shouldHideAgentFromMentions(
+      hideArgs({ candidate: { isAgent: false, isMember: false } }),
+    ),
     false,
   );
 });
 
-test("shouldHideAgentFromMentions: shows invocable agents even when non-member", () => {
+test("shouldHideAgentFromMentions: always offers managed agents, member or not", () => {
+  // The local record is the desktop's own proof the agent will answer; it
+  // also covers the non-member auto-add flow for managed agents.
+  for (const isMember of [true, false]) {
+    assert.equal(
+      shouldHideAgentFromMentions(
+        hideArgs({
+          candidate: { isMember },
+          managedAgentPubkeys: new Set([PUB_A]),
+        }),
+      ),
+      false,
+    );
+  }
+});
+
+test("shouldHideAgentFromMentions: offers external member agents declaring respond-to anyone", () => {
   assert.equal(
-    shouldHideAgentFromMentions({
-      isAgent: true,
-      isMember: false,
-      pubkey: PUB_A,
-      mentionableAgentPubkeys: new Set([PUB_A]),
-      directoryAgentPubkeys: new Set([PUB_A]),
-    }),
+    shouldHideAgentFromMentions(
+      hideArgs({ relayAgentPolicies: policy("anyone") }),
+    ),
     false,
   );
 });
 
-test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () => {
+test("shouldHideAgentFromMentions: allowlist admits only listed users", () => {
   assert.equal(
-    shouldHideAgentFromMentions({
-      isAgent: true,
-      isMember: false,
-      pubkey: PUB_A,
-      mentionableAgentPubkeys: new Set(),
-      directoryAgentPubkeys: new Set(),
-    }),
+    shouldHideAgentFromMentions(
+      hideArgs({ relayAgentPolicies: policy("allowlist", [CURRENT_PUBKEY]) }),
+    ),
+    false,
+  );
+  assert.equal(
+    shouldHideAgentFromMentions(
+      hideArgs({ relayAgentPolicies: policy("allowlist", [OWNER_PUBKEY]) }),
+    ),
     true,
   );
 });
 
-test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Fizz)", () => {
+test("shouldHideAgentFromMentions: owner-only admits the verified owner", () => {
+  // ownerPubkey is the NIP-OA-verified value the "managed by" surface
+  // renders — external agents owned by the current user mention like
+  // managed ones.
   assert.equal(
-    shouldHideAgentFromMentions({
-      isAgent: true,
-      isMember: true,
-      pubkey: PUB_A,
-      mentionableAgentPubkeys: new Set(),
-      directoryAgentPubkeys: new Set([PUB_A]),
-    }),
+    shouldHideAgentFromMentions(
+      hideArgs({
+        candidate: { ownerPubkey: CURRENT_PUBKEY },
+        relayAgentPolicies: policy("owner-only"),
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    shouldHideAgentFromMentions(
+      hideArgs({
+        candidate: { ownerPubkey: OTHER_OWNER_PUBKEY },
+        relayAgentPolicies: policy("owner-only"),
+      }),
+    ),
+    true,
+  );
+  // Unverified ownership is no proof at all.
+  assert.equal(
+    shouldHideAgentFromMentions(
+      hideArgs({ relayAgentPolicies: policy("owner-only") }),
+    ),
     true,
   );
 });
 
-test("shouldHideAgentFromMentions: shows member agents with unknown invocability (not in directory)", () => {
+test("shouldHideAgentFromMentions: hides external agents without a directory declaration", () => {
+  assert.equal(shouldHideAgentFromMentions(hideArgs()), true);
+});
+
+test("shouldHideAgentFromMentions: hides non-member external agents regardless of policy", () => {
+  // Offering these would need the add-via-mention flow to honor the
+  // directory's channel_add_policy — an explicit follow-up.
   assert.equal(
-    shouldHideAgentFromMentions({
-      isAgent: true,
-      isMember: true,
-      pubkey: PUB_A,
-      mentionableAgentPubkeys: new Set(),
-      directoryAgentPubkeys: new Set(),
-    }),
-    false,
+    shouldHideAgentFromMentions(
+      hideArgs({
+        candidate: { isMember: false },
+        relayAgentPolicies: policy("anyone"),
+      }),
+    ),
+    true,
   );
 });
 
-test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
+test("shouldHideAgentFromMentions: hides agents when the viewer is unknown", () => {
+  for (const respondTo of ["allowlist", "owner-only"]) {
+    assert.equal(
+      shouldHideAgentFromMentions(
+        hideArgs({
+          candidate: { ownerPubkey: OWNER_PUBKEY },
+          currentPubkey: null,
+          relayAgentPolicies: policy(respondTo, [CURRENT_PUBKEY]),
+        }),
+      ),
+      true,
+    );
+  }
+});
+
+test("shouldHideAgentFromMentions: normalizes pubkeys before every comparison", () => {
   const mixedCase = "Ab".repeat(32);
   const normalized = mixedCase.toLowerCase();
 
   assert.equal(
-    shouldHideAgentFromMentions({
-      isAgent: true,
-      isMember: true,
-      pubkey: mixedCase,
-      mentionableAgentPubkeys: new Set(),
-      directoryAgentPubkeys: new Set([normalized]),
-    }),
-    true,
+    shouldHideAgentFromMentions(
+      hideArgs({
+        candidate: {
+          ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+          pubkey: mixedCase,
+        },
+        relayAgentPolicies: new Map([
+          [normalized, { respondTo: "owner-only", respondToAllowlist: [] }],
+        ]),
+      }),
+    ),
+    false,
   );
 });
 
