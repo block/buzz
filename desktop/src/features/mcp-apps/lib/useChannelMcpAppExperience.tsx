@@ -70,6 +70,7 @@ export function useMcpAppUi(
   channel: Channel | null,
   pubkey: string | null | undefined,
   sendMessage: SendChannelMessage,
+  communityRef?: string | null,
 ) {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [pendingPost, setPendingPost] =
@@ -336,10 +337,15 @@ export function useMcpAppUi(
         <ChannelMcpAppPane
           app={activeApp}
           header={header}
+          invocationContext={{
+            communityRef: communityRef ?? undefined,
+            channelRef: channel?.id,
+            installationRef: activeApp.id,
+          }}
           onMessage={handleMessage}
         />
       ) : null,
-    [activeApp, handleMessage],
+    [activeApp, channel?.id, communityRef, handleMessage],
   );
 
   return {

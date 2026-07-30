@@ -20,6 +20,8 @@ export type SendChannelMessage = (
 export type ChannelSurfaceContext = {
   channel: Channel | null;
   pubkey: string | null | undefined;
+  /** Stable Buzz community reference, when the shell has one. */
+  communityRef?: string | null;
   sendMessage: SendChannelMessage;
 };
 
@@ -83,6 +85,7 @@ export function useChannelSurface(
     context.channel,
     context.pubkey,
     context.sendMessage,
+    context.communityRef,
   );
 
   return React.useMemo(

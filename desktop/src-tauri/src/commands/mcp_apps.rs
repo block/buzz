@@ -50,8 +50,9 @@ const SANDBOX_PROXY_HTML: &str = include_str!("mcp_apps_sandbox_proxy.html");
 mod model;
 use model::*;
 pub use model::{
-    McpAppHostState, McpAppResource, McpAppResourceCsp, McpAppResourcePermissions,
-    McpAppResourcePolicy, McpAppServerDescriptor, McpAppTool, McpAppToolCaller, PreparedMcpAppView,
+    McpAppHostState, McpAppInvocationContext, McpAppResource, McpAppResourceCsp,
+    McpAppResourcePermissions, McpAppResourcePolicy, McpAppServerDescriptor, McpAppTool,
+    McpAppToolCaller, PreparedMcpAppView,
 };
 
 #[path = "mcp_apps_policy.rs"]
@@ -859,7 +860,9 @@ async fn probe_modern(client: &Client, endpoint: &Url) -> Result<ModernProbe, St
 #[path = "mcp_apps_host.rs"]
 mod host;
 #[cfg(test)]
-use host::{app_tool_allowed, sandbox_proxy_html, sandbox_url_for_platform};
+use host::{
+    app_tool_allowed, build_tool_call_params, sandbox_proxy_html, sandbox_url_for_platform,
+};
 pub use host::{
     call_mcp_app_tool, connect_mcp_app_server, disconnect_mcp_app_server, handle_mcp_app_protocol,
     inspect_mcp_app_resource, list_mcp_app_resources, list_mcp_app_tools, prepare_mcp_app_view,

@@ -8,6 +8,62 @@ pub(super) fn app_tool_allowed(tool: &McpAppTool, caller: McpAppToolCaller) -> b
     }
 }
 
+const BUZZ_CONTEXT_META_KEY: &str = "xyz.block.buzz/context";
+
+/// Build a `tools/call` params object with host-owned Buzz binding context.
+///
+/// MCP callers may provide generic `_meta` (for example a progress token), so
+/// unrelated entries are preserved. The host removes the complete Buzz context
+/// value before it writes a replacement. This prevents an App from mixing
+/// caller-owned fields into host-owned context. The values are context only;
+/// authorization remains in the host and relay layers.
+pub(super) fn build_tool_call_params(
+    name: &str,
+    arguments: Value,
+    caller_meta: Option<Value>,
+    context: Option<&McpAppInvocationContext>,
+) -> Value {
+    let mut params = serde_json::Map::from_iter([
+        ("name".to_string(), Value::String(name.to_string())),
+        ("arguments".to_string(), arguments),
+    ]);
+    let mut meta = match caller_meta {
+        Some(Value::Object(value)) => value,
+        _ => serde_json::Map::new(),
+    };
+
+    meta.remove(BUZZ_CONTEXT_META_KEY);
+    if let Some(context) = context {
+        let mut buzz_context = serde_json::Map::new();
+        insert_context_refs(&mut buzz_context, context);
+        if !buzz_context.is_empty() {
+            meta.insert(
+                BUZZ_CONTEXT_META_KEY.to_string(),
+                Value::Object(buzz_context),
+            );
+        }
+    }
+    if !meta.is_empty() {
+        params.insert("_meta".to_string(), Value::Object(meta));
+    }
+    Value::Object(params)
+}
+
+fn insert_context_refs(
+    target: &mut serde_json::Map<String, Value>,
+    context: &McpAppInvocationContext,
+) {
+    for (key, value) in [
+        ("communityRef", context.community_ref.as_deref()),
+        ("channelRef", context.channel_ref.as_deref()),
+        ("installationRef", context.installation_ref.as_deref()),
+    ] {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            target.insert(key.to_string(), Value::String(value.to_string()));
+        }
+    }
+}
+
 /// Connect to a reviewed Streamable HTTP MCP server and discover its Apps.
 ///
 /// Dual-era: the connection probes the modern (`2026-07-28`) revision first
@@ -168,6 +224,8 @@ pub async fn call_mcp_app_tool(
     name: String,
     arguments: Value,
     caller: McpAppToolCaller,
+    caller_meta: Option<Value>,
+    context: Option<McpAppInvocationContext>,
     state: State<'_, McpAppHostState>,
 ) -> Result<Value, String> {
     let connection = state
@@ -188,7 +246,7 @@ pub async fn call_mcp_app_tool(
     request(
         &connection,
         "tools/call",
-        json!({"name": name, "arguments": arguments}),
+        build_tool_call_params(name.as_str(), arguments, caller_meta, context.as_ref()),
     )
     .await
     .and_then(|value| extract_result(&value, "tools/call"))

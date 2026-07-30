@@ -21,6 +21,7 @@ import {
   listMcpAppResources,
   readMcpAppResource,
   type McpAppResource,
+  type McpAppInvocationContext,
 } from "@/shared/api/tauriMcpApps";
 
 const HOST_INFO = { name: "Buzz Desktop", version: "1.0.0" };
@@ -146,6 +147,7 @@ export function defaultMcpAppHostContext(): McpUiHostContext {
 export function createMcpAppBridge(
   serverId: string,
   callbacks: McpAppBridgeCallbacks,
+  invocationContext?: McpAppInvocationContext,
 ): AppBridge {
   const bridge = new AppBridge(
     null,
@@ -162,12 +164,14 @@ export function createMcpAppBridge(
     { hostContext: defaultMcpAppHostContext() },
   );
 
-  bridge.oncalltool = async ({ name, arguments: args }) =>
+  bridge.oncalltool = async ({ name, arguments: args, _meta }) =>
     (await callMcpAppTool(
       serverId,
       name,
       (args ?? {}) as Record<string, unknown>,
       "app",
+      invocationContext,
+      _meta as Record<string, unknown> | undefined,
     )) as CallToolResult;
   bridge.onlistresources = async () =>
     ({

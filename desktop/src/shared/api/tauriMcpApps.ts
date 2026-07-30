@@ -33,6 +33,21 @@ export type McpAppServerDescriptor = {
   resources: McpAppResource[];
 };
 
+/**
+ * Host-authored local binding context for one MCP App tool call.
+ *
+ * These references provide context to the App. They do not authorize access
+ * to the channel, community, or installation.
+ */
+export type McpAppInvocationContext = {
+  /** Buzz community identifier, when the channel belongs to one. */
+  communityRef?: string;
+  /** Buzz channel identifier, when the call is channel-scoped. */
+  channelRef?: string;
+  /** Local channel-app installation identifier, when available. */
+  installationRef?: string;
+};
+
 export type McpAppResourceCsp = {
   connectDomains?: string[];
   resourceDomains?: string[];
@@ -81,12 +96,16 @@ export async function callMcpAppTool(
   name: string,
   args: Record<string, unknown>,
   caller: "host" | "app",
+  context?: McpAppInvocationContext,
+  callerMeta?: Record<string, unknown>,
 ): Promise<CallToolResult> {
   return invokeTauri("call_mcp_app_tool", {
     serverId,
     name,
     arguments: args,
     caller,
+    context: context ?? null,
+    callerMeta: callerMeta ?? null,
   });
 }
 

@@ -67,6 +67,18 @@ pub struct McpAppTool {
     pub(super) param_headers: Vec<McpParamHeader>,
 }
 
+/// Host-authored references for one channel app tool call.
+///
+/// These values identify the local Buzz binding only. They are context, not
+/// authorization, and are written after any caller-supplied metadata merge.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAppInvocationContext {
+    pub(super) community_ref: Option<String>,
+    pub(super) channel_ref: Option<String>,
+    pub(super) installation_ref: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAppResource {

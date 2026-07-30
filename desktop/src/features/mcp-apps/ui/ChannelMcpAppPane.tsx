@@ -10,6 +10,7 @@ import {
 import {
   connectMcpAppServer,
   disconnectMcpAppServer,
+  type McpAppInvocationContext,
 } from "@/shared/api/tauriMcpApps";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -19,6 +20,7 @@ type ChannelMcpAppPaneProps = Pick<
   "onModelContext" | "onOpenLink"
 > & {
   app: ChannelMcpAppInstallation;
+  invocationContext: McpAppInvocationContext;
   header: React.ReactNode;
   onMessage?: (
     app: ChannelMcpAppInstallation,
@@ -28,6 +30,7 @@ type ChannelMcpAppPaneProps = Pick<
 
 export function ChannelMcpAppPane({
   app,
+  invocationContext,
   header,
   onMessage,
   onModelContext,
@@ -109,6 +112,7 @@ export function ChannelMcpAppPane({
             approvedPolicy={app.approvedPolicy}
             className="min-h-0 flex-1"
             initialTool={initialTool}
+            invocationContext={invocationContext}
             onMessage={handleMessage}
             onModelContext={onModelContext}
             onOpenLink={onOpenLink}

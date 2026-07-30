@@ -4,6 +4,7 @@ import {
   callMcpAppTool,
   prepareMcpAppView,
   releaseMcpAppView,
+  type McpAppInvocationContext,
   type McpAppResourcePermissions,
   type McpAppResourcePolicy,
 } from "@/shared/api/tauriMcpApps";
@@ -34,6 +35,7 @@ export async function runInitialMcpAppTool(
   initialTool: NonNullable<McpAppFrameProps["initialTool"]>,
   lifecycle: InitialToolLifecycle,
   callTool: typeof callMcpAppTool = callMcpAppTool,
+  invocationContext?: McpAppInvocationContext,
 ): Promise<void> {
   lifecycle.started = true;
   try {
@@ -43,6 +45,7 @@ export async function runInitialMcpAppTool(
       initialTool.name,
       initialTool.arguments,
       "host",
+      invocationContext,
     );
     if (!lifecycle.terminalSent) {
       lifecycle.terminalSent = true;
@@ -64,6 +67,7 @@ export type McpAppFrameProps = McpAppBridgeCallbacks & {
   resourceUri: string;
   approvedPolicy: McpAppResourcePolicy;
   title: string;
+  invocationContext?: McpAppInvocationContext;
   initialTool?: {
     name: string;
     arguments: Record<string, unknown>;
@@ -119,6 +123,7 @@ export function McpAppFrame({
   resourceUri,
   approvedPolicy,
   title,
+  invocationContext,
   initialTool,
   className,
   onReady,
@@ -161,12 +166,16 @@ export function McpAppFrame({
         onPermissionsRequested?.(prepared.requestedPermissions);
         const sandboxOrigin = mcpAppSandboxOrigin(prepared.sandboxUrl);
 
-        bridge = createMcpAppBridge(serverId, {
-          onMessage,
-          onModelContext,
-          onOpenLink,
-          onSizeChange,
-        });
+        bridge = createMcpAppBridge(
+          serverId,
+          {
+            onMessage,
+            onModelContext,
+            onOpenLink,
+            onSizeChange,
+          },
+          invocationContext,
+        );
         await waitForSandboxProxy(
           iframe,
           prepared.sandboxUrl,
@@ -198,7 +207,13 @@ export function McpAppFrame({
             initialTool,
             initialToolLifecycle,
             (serverId, name, argumentsValue, caller) =>
-              callMcpAppTool(serverId, name, argumentsValue, caller),
+              callMcpAppTool(
+                serverId,
+                name,
+                argumentsValue,
+                caller,
+                invocationContext,
+              ),
           );
         }
         if (abortController.signal.aborted) return;
@@ -249,6 +264,7 @@ export function McpAppFrame({
     onSizeChange,
     resourceUri,
     serverId,
+    invocationContext,
   ]);
 
   return (

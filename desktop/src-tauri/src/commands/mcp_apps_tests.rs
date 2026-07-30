@@ -40,6 +40,98 @@ fn caller_visibility_is_enforced() {
 }
 
 #[test]
+fn tool_call_context_is_host_metadata_not_tool_arguments() {
+    let context = McpAppInvocationContext {
+        community_ref: Some("community-1".to_string()),
+        channel_ref: Some("channel-1".to_string()),
+        installation_ref: Some("installation-1".to_string()),
+    };
+    let params = build_tool_call_params(
+        "board.open",
+        json!({"_meta": {"channelRef": "argument-value"}}),
+        None,
+        Some(&context),
+    );
+
+    assert_eq!(
+        params.pointer("/arguments/_meta/channelRef"),
+        Some(&json!("argument-value"))
+    );
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context/communityRef"),
+        Some(&json!("community-1"))
+    );
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context/channelRef"),
+        Some(&json!("channel-1"))
+    );
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context/installationRef"),
+        Some(&json!("installation-1"))
+    );
+}
+
+#[test]
+fn tool_call_context_omits_unavailable_references() {
+    let params = build_tool_call_params(
+        "board.open",
+        json!({}),
+        Some(json!({
+            "progressToken": 7,
+            "xyz.block.buzz/context": {
+                "communityRef": "spoofed",
+                "callerOwned": "discard"
+            }
+        })),
+        Some(&McpAppInvocationContext {
+            community_ref: None,
+            channel_ref: None,
+            installation_ref: None,
+        }),
+    );
+
+    assert_eq!(params.pointer("/_meta/progressToken"), Some(&json!(7)));
+    assert!(params.pointer("/_meta/xyz.block.buzz~1context").is_none());
+}
+
+#[test]
+fn caller_metadata_cannot_override_host_context() {
+    let params = build_tool_call_params(
+        "board.open",
+        json!({}),
+        Some(json!({
+            "xyz.block.buzz/context": {
+                "communityRef": "spoofed-community",
+                "channelRef": "spoofed-channel",
+                "installationRef": "spoofed-installation",
+                "callerOwned": "discard"
+            }
+        })),
+        Some(&McpAppInvocationContext {
+            community_ref: Some("community-1".to_string()),
+            channel_ref: Some("channel-1".to_string()),
+            installation_ref: Some("installation-1".to_string()),
+        }),
+    );
+
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context/communityRef"),
+        Some(&json!("community-1"))
+    );
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context/channelRef"),
+        Some(&json!("channel-1"))
+    );
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context/installationRef"),
+        Some(&json!("installation-1"))
+    );
+    assert!(params
+        .pointer("/_meta/xyz.block.buzz~1context/callerOwned")
+        .is_none());
+}
+
+#[test]
 fn endpoint_policy_allows_https_and_loopback_http() {
     assert!(validate_mcp_endpoint("https://apps.example.com/mcp").is_ok());
     assert!(validate_mcp_endpoint("https://localhost:1337/mcp").is_ok());

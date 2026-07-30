@@ -517,6 +517,7 @@ export function ChannelScreen({
   });
   const channelSurface = useChannelSurface({
     channel: activeChannel,
+    communityRef: activeCommunity?.id,
     pubkey: currentPubkey,
     sendMessage: handleSendMessage,
   });
