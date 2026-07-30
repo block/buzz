@@ -85,3 +85,4 @@ node.
 - [Bounded attention context lifecycle](models/sticky-attention/bounded-attention-context.lifecycle.yaml)
 - [Context brief behavior](features/sticky-attention/context-brief.feature)
 - [Node release distribution](architecture/node-release-distribution-v0.1.md)
+- [Sovereign sync realtime (draft)](architecture/sovereign-sync-realtime-v0.2-draft.md)
