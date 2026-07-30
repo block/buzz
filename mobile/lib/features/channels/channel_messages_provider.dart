@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
 import 'pending_local_messages_provider.dart';
@@ -19,6 +20,7 @@ const _channelLiveEventKinds = [
 class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final String channelId;
   void Function()? _unsubscribe;
+  void Function()? _membershipUnsubscribe;
   bool _reachedOldest = false;
   bool _initInFlight = false;
   bool _usingChannelWindow = false;
@@ -96,6 +98,23 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           return;
         }
         _unsubscribe = unsubscribe;
+
+        final unsubscribeMembership = await session.subscribe(
+          NostrFilter(
+            kinds: const [39002],
+            tags: {
+              '#h': [channelId],
+            },
+            since: _currentUnixSeconds(),
+            limit: 1,
+          ),
+          _handleMembershipSnapshot,
+        );
+        if (!_isCurrentInit(initVersion)) {
+          unsubscribeMembership();
+          return;
+        }
+        _membershipUnsubscribe = unsubscribeMembership;
       } catch (error) {
         if (!_isCurrentInit(initVersion)) return;
         debugPrint(
@@ -226,6 +245,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (event.kind == EventKind.systemMessage &&
         _isMembershipEvent(event.content)) {
       ref.invalidate(channelMembersProvider(channelId));
+      ref.invalidate(channelBotPubkeysProvider(channelId));
     }
   }
 
@@ -236,6 +256,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     );
     _lastKnownMessages = flattened;
     state = AsyncData(flattened);
+  }
+
+  void _handleMembershipSnapshot(NostrEvent event) {
+    ref.invalidate(channelMembersProvider(channelId));
+    ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
   bool _mergeWindowEventIntoStore(NostrEvent event) {
@@ -393,6 +418,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   void _clearSubscription() {
     _unsubscribe?.call();
     _unsubscribe = null;
+    _membershipUnsubscribe?.call();
+    _membershipUnsubscribe = null;
   }
 
   bool get reachedOldest => _reachedOldest;

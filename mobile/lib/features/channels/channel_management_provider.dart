@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
@@ -557,6 +558,7 @@ class ChannelActions {
       );
     }
     _ref.invalidate(channelMembersProvider(channelId));
+    _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
   Future<void> joinChannel(String channelId) async {
@@ -626,6 +628,7 @@ class ChannelActions {
     await _ref.read(channelsProvider.notifier).refresh();
     _ref.invalidate(channelDetailsProvider(channelId));
     _ref.invalidate(channelMembersProvider(channelId));
+    _ref.invalidate(channelBotPubkeysProvider(channelId));
     _ref.invalidate(channelCanvasProvider(channelId));
   }
 
@@ -659,6 +662,7 @@ class ChannelActions {
       ],
     );
     _ref.invalidate(channelMembersProvider(channelId));
+    _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
   Future<void> removeMember({
@@ -674,6 +678,7 @@ class ChannelActions {
       ],
     );
     _ref.invalidate(channelMembersProvider(channelId));
+    _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
   Future<void> addReaction(String eventId, String emoji) async {

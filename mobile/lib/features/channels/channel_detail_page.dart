@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -39,7 +40,6 @@ import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
-import 'mentions/mention_candidates_provider.dart';
 import 'read_state/deferred_read_state_update.dart';
 import 'read_state/read_state_provider.dart';
 import 'read_state/read_state_time.dart';
