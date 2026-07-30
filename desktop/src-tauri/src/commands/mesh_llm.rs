@@ -11,6 +11,10 @@ struct MeshSharingConfig {
     enabled: bool,
     model_id: String,
     max_vram_gb: Option<u64>,
+    /// Community where the member explicitly enabled sharing. This binding is
+    /// stable across navigation; sharing does not follow the active workspace.
+    #[serde(default)]
+    relay_url: Option<String>,
 }
 
 fn mesh_sharing_config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -41,6 +45,19 @@ fn load_mesh_sharing_config(app: &AppHandle) -> Result<Option<MeshSharingConfig>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("failed to read {}: {error}", path.display())),
     }
+}
+
+/// Resolve the community for a persisted sharing session. Once present, the
+/// saved relay is authoritative; the active workspace is only a migration
+/// fallback for configs written before community pinning existed.
+fn sharing_relay_url(config: &MeshSharingConfig, active_relay_url: &str) -> String {
+    config
+        .relay_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|relay_url| !relay_url.is_empty())
+        .unwrap_or(active_relay_url)
+        .to_string()
 }
 
 const RELAY_MESH_RUNTIME_NO_TARGET: &str =
@@ -91,6 +108,7 @@ fn sharing_config_from_request(
         enabled: true,
         model_id: model_id.to_string(),
         max_vram_gb: request.max_vram_gb,
+        relay_url: request.relay_url.clone(),
     })
 }
 
@@ -110,6 +128,7 @@ fn restarting_share_status(config: &MeshSharingConfig) -> mesh_llm::MeshNodeStat
         endpoint_id: None,
         device_id: None,
         device_name: None,
+        community_relay_url: config.relay_url.clone(),
     }
 }
 
@@ -150,8 +169,13 @@ fn advance_mesh_status_cursor(
     Ok(cursor)
 }
 
-async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
-    let mut events = relay::query_relay(state, &[mesh_llm::relay_membership_filter()]).await?;
+async fn query_mesh_discovery_events_at(
+    state: &AppState,
+    relay_url: &str,
+) -> Result<Vec<nostr::Event>, String> {
+    let api_base_url = relay::relay_http_base_url(relay_url);
+    let mut events =
+        relay::query_relay_at(state, &api_base_url, &[mesh_llm::relay_membership_filter()]).await?;
     let member_pubkeys = mesh_llm::current_member_pubkeys(&events);
     if member_pubkeys.is_empty() {
         // Distinguish "relay returned a membership snapshot listing zero
@@ -172,7 +196,7 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
     let mut previous_cursor: Option<(u64, String)> = None;
 
     loop {
-        let page = relay::query_relay(state, &[status_filter.clone()]).await?;
+        let page = relay::query_relay_at(state, &api_base_url, &[status_filter.clone()]).await?;
         let done = page.len() < mesh_llm::MESH_STATUS_PAGE_SIZE;
         if !done {
             let cursor = advance_mesh_status_cursor(&mut status_filter, &page)?;
@@ -188,6 +212,10 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
     }
 }
 
+async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
+    query_mesh_discovery_events_at(state, &relay::relay_ws_url_with_override(state)).await
+}
+
 /// Resolve the admission roster by intersecting member-signed mesh status
 /// reporters with the current NIP-43 direct-member list.
 ///
@@ -198,6 +226,14 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
 /// allowlist on error instead of restarting the node down to self-only.
 pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Result<Vec<String>, String> {
     let events = query_mesh_discovery_events(state).await?;
+    Ok(mesh_llm::owner_ids_from_events(&events))
+}
+
+pub(crate) async fn resolve_trusted_owner_ids_at(
+    state: &AppState,
+    relay_url: &str,
+) -> Result<Vec<String>, String> {
+    let events = query_mesh_discovery_events_at(state, relay_url).await?;
     Ok(mesh_llm::owner_ids_from_events(&events))
 }
 
@@ -244,10 +280,11 @@ fn buzz_mesh_join_targets(
 /// Resolve the validated member endpoint this runtime should join to enter the
 /// existing Buzz community mesh. `Ok(None)` means this machine is the first
 /// live serving member (or is itself the shared bootstrap contact).
-pub(crate) async fn resolve_buzz_mesh_join_targets(
+pub(crate) async fn resolve_buzz_mesh_join_targets_at(
     state: &AppState,
+    relay_url: &str,
 ) -> Result<Vec<mesh_llm::MeshServeTarget>, String> {
-    let events = query_mesh_discovery_events(state).await?;
+    let events = query_mesh_discovery_events_at(state, relay_url).await?;
     let self_owner_id = mesh_llm::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?
         .owner_id;
@@ -261,8 +298,11 @@ pub(crate) async fn resolve_buzz_mesh_join_targets(
 /// snapshot. A node start used to repeat the full membership + status query
 /// for each value, making Share Compute startup both slower and more exposed
 /// to inconsistent snapshots.
-async fn resolve_buzz_mesh_startup(state: &AppState) -> (Vec<String>, Option<String>) {
-    match query_mesh_discovery_events(state).await {
+async fn resolve_buzz_mesh_startup_at(
+    state: &AppState,
+    relay_url: &str,
+) -> (Vec<String>, Option<String>) {
+    match query_mesh_discovery_events_at(state, relay_url).await {
         Ok(events) => {
             let trusted_owner_ids = mesh_llm::owner_ids_from_events(&events);
             let join_token = mesh_llm::ensure_owner_identity()
@@ -300,7 +340,8 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     if state.mesh_llm_runtime.lock().await.is_some() {
         return Ok(());
     }
-    let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(state).await;
+    let relay_url = sharing_relay_url(&config, &relay::relay_ws_url_with_override(state));
+    let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup_at(state, &relay_url).await;
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
         return Ok(());
@@ -310,7 +351,8 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         model_id: Some(config.model_id),
         max_vram_gb: config.max_vram_gb,
         join_token,
-        mesh_name: Some(buzz_mesh_name(state)),
+        mesh_name: Some(buzz_mesh_name_for_relay(&relay_url)),
+        relay_url: Some(relay_url),
         trusted_owner_ids: Some(trusted_owner_ids),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
@@ -328,6 +370,8 @@ pub async fn mesh_start_node(
     state: State<'_, AppState>,
     mut request: mesh_llm::StartMeshNodeRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    let relay_url = relay::relay_ws_url_with_override(&state);
+    request.relay_url = Some(relay_url.clone());
     let sharing_config = if request.mode == mesh_llm::MeshNodeMode::Serve {
         Some(sharing_config_from_request(&request)?)
     } else {
@@ -362,13 +406,14 @@ pub async fn mesh_start_node(
     // Frontend requests never carry a roster. Resolve it and the bootstrap
     // endpoint from one snapshot so UI startup does not repeat relay probes.
     if request.trusted_owner_ids.is_none() || request.join_token.is_none() {
-        let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(&state).await;
+        let (trusted_owner_ids, join_token) =
+            resolve_buzz_mesh_startup_at(&state, &relay_url).await;
         request.trusted_owner_ids.get_or_insert(trusted_owner_ids);
         if request.join_token.is_none() {
             request.join_token = join_token;
         }
     }
-    request.mesh_name = Some(buzz_mesh_name(&state));
+    request.mesh_name = Some(buzz_mesh_name_for_relay(&relay_url));
     let mut runtime = state.mesh_llm_runtime.lock().await;
 
     let plan = match runtime.as_ref() {
@@ -612,6 +657,7 @@ pub(crate) async fn ensure_client_node_for_model(
         max_vram_gb: None,
         join_token: Some(join_token.clone()),
         mesh_name: Some(buzz_mesh_name(state)),
+        relay_url: Some(relay::relay_ws_url_with_override(state)),
         trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
@@ -792,14 +838,17 @@ pub async fn mesh_stop_node(
     // role under the lock and, when it's a consume session, leave it running
     // and return its live status unchanged. The frontend also guards this, but
     // status can be stale between polls, so the backend is authoritative.
-    let taken = {
+    let (taken, bound_relay_url) = {
         let mut guard = state.mesh_llm_runtime.lock().await;
         if let Some(runtime) = guard.as_ref() {
             if !share_stop_should_teardown(runtime.mode()) {
                 return runtime.status().await.map_err(|error| error.to_string());
             }
         }
-        guard.take()
+        let bound_relay_url = guard
+            .as_ref()
+            .and_then(|runtime| runtime.start_request().relay_url.clone());
+        (guard.take(), bound_relay_url)
     };
     if let Some(runtime) = taken {
         runtime.stop().await.map_err(|error| error.to_string())?;
@@ -810,9 +859,10 @@ pub async fn mesh_stop_node(
             enabled: false,
             model_id: String::new(),
             max_vram_gb: None,
+            relay_url: None,
         },
     )?;
-    mesh_llm::publish_stopped_status_once(&app, "stop").await;
+    mesh_llm::publish_stopped_status_once_at(&app, bound_relay_url.as_deref(), "stop").await;
     Ok(mesh_llm::stopped_status())
 }
 

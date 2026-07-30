@@ -111,6 +111,47 @@ fn buzz_mesh_name_is_stable_and_does_not_expose_the_relay() {
 }
 
 #[test]
+fn sharing_config_pins_the_starting_community_relay() {
+    let request = mesh_llm::StartMeshNodeRequest {
+        mode: mesh_llm::MeshNodeMode::Serve,
+        model_id: Some("org/community-model:q4".to_string()),
+        max_vram_gb: Some(24),
+        join_token: None,
+        mesh_name: None,
+        relay_url: Some("wss://community-a.example".to_string()),
+        trusted_owner_ids: None,
+    };
+
+    let config = sharing_config_from_request(&request).expect("sharing config");
+
+    assert_eq!(config.model_id, "org/community-model:q4");
+    assert_eq!(config.max_vram_gb, Some(24));
+    assert_eq!(
+        config.relay_url.as_deref(),
+        Some("wss://community-a.example")
+    );
+    assert_eq!(
+        sharing_relay_url(&config, "wss://community-b.example"),
+        "wss://community-a.example"
+    );
+}
+
+#[test]
+fn legacy_sharing_config_binds_to_the_active_community_once() {
+    let config = MeshSharingConfig {
+        enabled: true,
+        model_id: "org/legacy-model:q4".to_string(),
+        max_vram_gb: None,
+        relay_url: None,
+    };
+
+    assert_eq!(
+        sharing_relay_url(&config, "wss://active-community.example"),
+        "wss://active-community.example"
+    );
+}
+
+#[test]
 fn readiness_failure_is_catalog_sync_when_model_never_visible() {
     assert_eq!(
         classify_mesh_readiness_failure(false),
@@ -282,10 +323,15 @@ fn client_status_serializes_with_running_state_and_client_mode() {
         endpoint_id: None,
         device_id: None,
         device_name: None,
+        community_relay_url: Some("wss://community.example".to_string()),
     };
     let value = serde_json::to_value(&status).expect("serialize mesh status");
     assert_eq!(value["state"], serde_json::json!("running"));
     assert_eq!(value["mode"], serde_json::json!("client"));
+    assert_eq!(
+        value["communityRelayUrl"],
+        serde_json::json!("wss://community.example")
+    );
 }
 
 #[tokio::test]
@@ -345,6 +391,7 @@ fn ensure_serve_runtime_serves_other_model() {
                         max_vram_gb: None,
                         join_token: None,
                         mesh_name: None,
+                        relay_url: None,
                         trusted_owner_ids: None,
                     })
                     .await

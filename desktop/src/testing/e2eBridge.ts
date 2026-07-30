@@ -1096,6 +1096,8 @@ declare global {
        * so the Share toggle must stay off. Drives the toggle-on regression test.
        */
       nodeMode?: "serve" | "client" | null;
+      /** Community relay the existing runtime remains pinned to. */
+      communityRelayUrl?: string | null;
       /** Seed host-side serving usage to exercise the "who's using my compute" indicator. */
       servingUsage?: Partial<{
         inflight: number;
@@ -2855,6 +2857,7 @@ const mockMeshState: {
   denyReason: string;
   nodeState: "off" | "running";
   nodeMode: "serve" | "client" | null;
+  communityRelayUrl: string | null;
   servingUsage: MockServingUsage;
 } = {
   admitted: true,
@@ -2864,6 +2867,7 @@ const mockMeshState: {
   denyReason: "not a relay member",
   nodeState: "off",
   nodeMode: null,
+  communityRelayUrl: null,
   servingUsage: { ...ZERO_SERVING_USAGE },
 };
 
@@ -2875,6 +2879,7 @@ function resetMockMesh() {
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
+  mockMeshState.communityRelayUrl = null;
   mockMeshState.servingUsage = { ...ZERO_SERVING_USAGE };
 }
 let mockPersonas: RawPersona[] = [];
@@ -9366,6 +9371,8 @@ export function maybeInstallE2eTauriMocks() {
       mockMeshState.denyReason = mesh.denyReason;
     if (mesh.nodeState !== undefined) mockMeshState.nodeState = mesh.nodeState;
     if (mesh.nodeMode !== undefined) mockMeshState.nodeMode = mesh.nodeMode;
+    if (mesh.communityRelayUrl !== undefined)
+      mockMeshState.communityRelayUrl = mesh.communityRelayUrl;
     if (mesh.servingUsage !== undefined)
       mockMeshState.servingUsage = {
         ...mockMeshState.servingUsage,
@@ -9411,6 +9418,10 @@ export function maybeInstallE2eTauriMocks() {
     endpointId: state === "running" ? "mock-endpoint-id" : null,
     deviceId: state === "running" ? "mock-endpoint-id" : null,
     deviceName: state === "running" ? "Mock desktop" : null,
+    communityRelayUrl:
+      state === "running"
+        ? (mockMeshState.communityRelayUrl ?? getRelayWsUrl(getConfig()))
+        : null,
   });
   const handleMockCommand = async (command: string, payload: unknown) => {
     const activeConfig = getConfig();
@@ -9520,6 +9531,7 @@ export function maybeInstallE2eTauriMocks() {
         )?.request;
         mockMeshState.nodeState = "running";
         mockMeshState.nodeMode = req?.mode ?? "serve";
+        mockMeshState.communityRelayUrl = getRelayWsUrl(activeConfig);
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       }
       case "mesh_stop_node":
@@ -9533,6 +9545,7 @@ export function maybeInstallE2eTauriMocks() {
         }
         mockMeshState.nodeState = "off";
         mockMeshState.nodeMode = null;
+        mockMeshState.communityRelayUrl = null;
         return meshNodeStatus("off", null);
       case "get_identity": {
         const isLost =

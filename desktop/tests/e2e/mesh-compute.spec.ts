@@ -12,6 +12,7 @@ type E2eWindow = Window & {
   __BUZZ_E2E_SET_MESH__?: (mesh: {
     nodeState?: "off" | "running";
     nodeMode?: "serve" | "client" | null;
+    communityRelayUrl?: string | null;
   }) => void;
 };
 
@@ -27,6 +28,12 @@ test("Share compute has a clear empty state and starts and stops sharing", async
   const model = page.getByTestId("mesh-share-compute-model");
 
   await expect(card).toContainText("Not sharing right now");
+  await expect(page.getByTestId("mesh-community-binding")).toContainText(
+    "When enabled, the selected model will be tied to E2E Test",
+  );
+  await expect(page.getByTestId("mesh-community-binding")).toContainText(
+    "stop sharing before enabling it there",
+  );
   await expect(model).not.toBeVisible();
   await expect(toggle).toBeDisabled();
   await page.getByTestId("mesh-smart-recommend").click();
@@ -55,7 +62,18 @@ test("Share compute has a clear empty state and starts and stops sharing", async
 
   await toggle.click();
   await expect(toggle).toBeChecked();
-  await expect(card).toContainText("Sharing SmolLM2 135M with relay members");
+  await expect(card).toContainText(
+    "Sharing SmolLM2 135M with E2E Test members",
+  );
+  await expect(page.getByTestId("mesh-community-binding")).toContainText(
+    "SmolLM2 135M is tied to E2E Test",
+  );
+  await expect(page.getByTestId("mesh-community-binding")).toContainText(
+    "Switching communities will not move or stop it",
+  );
+  await expect(card).toContainText(
+    "Only members of E2E Test can discover and use this shared model",
+  );
   await expect
     .poll(() =>
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
@@ -65,6 +83,80 @@ test("Share compute has a clear empty state and starts and stops sharing", async
   await toggle.click();
   await expect(toggle).not.toBeChecked();
   await expect(card).toContainText("Not sharing right now");
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
+    )
+    .toContain("mesh_stop_node");
+});
+
+test("sharing stays pinned to the community where it was enabled", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "buzz-communities",
+      JSON.stringify([
+        {
+          id: "e2e-default-community",
+          name: "Current Community",
+          relayUrl: "ws://localhost:3000",
+          addedAt: new Date().toISOString(),
+        },
+        {
+          id: "shared-community",
+          name: "Compute Commons",
+          relayUrl: "wss://compute.example",
+          addedAt: new Date().toISOString(),
+        },
+      ]),
+    );
+    window.localStorage.setItem(
+      "buzz.mesh-compute.share.model.v1",
+      "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M",
+    );
+  });
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof (window as E2eWindow).__BUZZ_E2E_SET_MESH__ === "function",
+  );
+  await page.evaluate(() => {
+    (window as E2eWindow).__BUZZ_E2E_SET_MESH__?.({
+      nodeState: "running",
+      nodeMode: "serve",
+      communityRelayUrl: "wss://compute.example",
+    });
+  });
+  await openSettings(page, "compute");
+
+  const card = page.getByTestId("settings-mesh-share-compute");
+  await expect(page.getByTestId("mesh-share-compute-toggle")).toBeChecked();
+  await expect(page.getByTestId("mesh-sharing-community")).toContainText(
+    "Sharing SmolLM2 135M with Compute Commons",
+  );
+  await expect(card).toContainText(
+    "Switch to that community to manage its compute settings",
+  );
+  const binding = page.getByTestId("mesh-community-binding");
+  await expect(binding).toContainText(
+    "SmolLM2 135M is tied to Compute Commons",
+  );
+  await expect(binding).toContainText(
+    "Switching communities will not move or stop it",
+  );
+  await expect(card).toContainText(
+    "Only members of Compute Commons can discover and use this shared model",
+  );
+  await expect(card).toContainText("Other Buzz communities cannot access it");
+  const commandsBeforeStop = await page.evaluate(
+    () => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commandsBeforeStop).not.toContain("mesh_start_node");
+  expect(commandsBeforeStop).not.toContain("mesh_stop_node");
+
+  await page.getByTestId("mesh-share-compute-toggle").click();
+  await expect(page.getByTestId("mesh-share-compute-toggle")).not.toBeChecked();
   await expect
     .poll(() =>
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),

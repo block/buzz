@@ -132,7 +132,7 @@ pub async fn start_coordinator(app: AppHandle) {
 /// MeshLLM establishes the encrypted peer transport itself.
 async fn reconcile_buzz_mesh_join(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let peer_ids = {
+    let (peer_ids, relay_url) = {
         let runtime = state.mesh_llm_runtime.lock().await;
         let Some(runtime) = runtime.as_ref() else {
             return Ok(());
@@ -141,10 +141,16 @@ async fn reconcile_buzz_mesh_join(app: &AppHandle) -> Result<(), String> {
             .status_report_payload()
             .await
             .map_err(|error| error.to_string())?;
-        visible_peer_ids(&payload)
+        let relay_url = runtime
+            .start_request()
+            .relay_url
+            .clone()
+            .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
+        (visible_peer_ids(&payload), relay_url)
     };
 
-    let targets = crate::commands::mesh_llm::resolve_buzz_mesh_join_targets(&state).await?;
+    let targets =
+        crate::commands::mesh_llm::resolve_buzz_mesh_join_targets_at(&state, &relay_url).await?;
     let Some(target) = targets
         .into_iter()
         .find(|target| !target_is_visible(target, &peer_ids))
@@ -283,7 +289,12 @@ async fn reconcile_roster(
     // other member on a transient relay blip (the flapping restart loop). Keep
     // the current allowlist and try again on the next poll. A shrink is held
     // for one extra poll (hysteresis) so a single short-read never tears down.
-    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids(&state).await;
+    let relay_url = current_request
+        .relay_url
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
+    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids_at(&state, &relay_url).await;
     let fresh = match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
         RosterReconcileAction::Keep => {
             *pending_shrink = None;
@@ -307,8 +318,10 @@ async fn reconcile_roster(
     // left or to a device whose iroh identity rotated while offline. Resolve a
     // fresh validated peer for this restart; starting isolated is safe because
     // the join watcher will converge it when a member next publishes.
-    request.join_token = match crate::commands::mesh_llm::resolve_buzz_mesh_join_targets(&state)
-        .await
+    request.join_token = match crate::commands::mesh_llm::resolve_buzz_mesh_join_targets_at(
+        &state, &relay_url,
+    )
+    .await
     {
         Ok(targets) => targets
             .into_iter()
@@ -377,11 +390,15 @@ pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
     }
 }
 
-pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
+pub(crate) async fn publish_stopped_status_once_at(
+    app: &AppHandle,
+    relay_url: Option<&str>,
+    reason: &str,
+) {
     let state = app.state::<AppState>();
     match tokio::time::timeout(
         STATUS_PUBLISH_TIMEOUT,
-        publish_stopped_status_for_state(&state),
+        publish_stopped_status_for_state(&state, relay_url),
     )
     .await
     {
@@ -396,26 +413,43 @@ pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
 async fn publish_current_status_for_state(state: &AppState) -> Result<(), String> {
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
-    let mut payload = {
+    let (mut payload, relay_url) = {
         let runtime = state.mesh_llm_runtime.lock().await;
         match runtime.as_ref() {
-            Some(runtime) => runtime
-                .status_report_payload()
-                .await
-                .map_err(|error| error.to_string())?,
-            None => stopped_status_payload(&identity),
+            Some(runtime) => {
+                let payload = runtime
+                    .status_report_payload()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let relay_url = runtime
+                    .start_request()
+                    .relay_url
+                    .clone()
+                    .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(state));
+                (payload, relay_url)
+            }
+            None => (
+                stopped_status_payload(&identity),
+                crate::relay::relay_ws_url_with_override(state),
+            ),
         }
     };
     bind_payload_to_member(state, &identity, &mut payload)?;
-    publish_status_report(state, payload).await
+    publish_status_report_at(state, &relay_url, payload).await
 }
 
-async fn publish_stopped_status_for_state(state: &AppState) -> Result<(), String> {
+async fn publish_stopped_status_for_state(
+    state: &AppState,
+    relay_url: Option<&str>,
+) -> Result<(), String> {
     let identity = super::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?;
     let mut payload = stopped_status_payload(&identity);
     bind_payload_to_member(state, &identity, &mut payload)?;
-    publish_status_report(state, payload).await
+    let relay_url = relay_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(state));
+    publish_status_report_at(state, &relay_url, payload).await
 }
 
 fn stopped_status_payload(identity: &super::identity::OwnerIdentity) -> serde_json::Value {
@@ -469,13 +503,21 @@ pub(crate) fn build_status_report_event(
     .tags([d, k]))
 }
 
-pub(crate) async fn publish_status_report(
+async fn publish_status_report_at(
     state: &AppState,
+    relay_url: &str,
     payload: serde_json::Value,
 ) -> Result<(), String> {
-    crate::relay::submit_event(build_status_report_event(payload)?, state)
-        .await
-        .map(|_| ())
+    let api_base_url = crate::relay::relay_http_base_url(relay_url);
+    let keys = state.signing_keys()?;
+    crate::relay::submit_event_at_with_keys(
+        build_status_report_event(payload)?,
+        state,
+        &api_base_url,
+        &keys,
+    )
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]

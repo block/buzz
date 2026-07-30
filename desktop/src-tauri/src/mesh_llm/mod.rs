@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 mod coordinator;
-pub(crate) use coordinator::{publish_current_status_once, publish_stopped_status_once};
+pub(crate) use coordinator::{publish_current_status_once, publish_stopped_status_once_at};
 pub use coordinator::{start_coordinator, MeshCoordinator, KIND_BUZZ_MESH_MEMBER_STATUS};
 
 mod discovery;
@@ -18,6 +18,11 @@ pub use catalog::{model_catalog, MeshModelCatalog};
 
 mod identity;
 pub use identity::ensure_owner_identity;
+
+mod node_types;
+pub use node_types::{
+    stopped_status, MeshNodeMode, MeshNodeState, MeshNodeStatus, StartMeshNodeRequest,
+};
 
 mod progress;
 pub use progress::install_progress_sink;
@@ -166,83 +171,6 @@ impl MeshAvailability {
             models: Vec::new(),
             serve_targets: Vec::new(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MeshNodeMode {
-    Serve,
-    Client,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MeshNodeState {
-    Off,
-    Starting,
-    Running,
-    Stopping,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct StartMeshNodeRequest {
-    pub mode: MeshNodeMode,
-    #[serde(default)]
-    pub model_id: Option<String>,
-    #[serde(default)]
-    pub max_vram_gb: Option<u64>,
-    #[serde(default)]
-    pub join_token: Option<String>,
-    /// Stable, relay-scoped mesh name injected by the Buzz backend. It is not
-    /// accepted from the frontend and contains no relay address.
-    #[serde(default, skip_deserializing)]
-    pub mesh_name: Option<String>,
-    /// Mesh owner ids admitted to this node (the member roster from
-    /// member-signed discovery notes). `None` = caller did not resolve a roster
-    /// (tests, direct invocations): the node runs without allowlist
-    /// enforcement, matching an open relay. `Some` = enforce
-    /// `TrustPolicy::Allowlist` over exactly these owners (self is always
-    /// included by the caller).
-    #[serde(default)]
-    pub trusted_owner_ids: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct MeshNodeStatus {
-    pub state: MeshNodeState,
-    pub mode: Option<MeshNodeMode>,
-    pub health: MeshHealth,
-    pub api_base_url: Option<String>,
-    pub console_url: Option<String>,
-    pub model_id: Option<String>,
-    pub model_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub invite_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_name: Option<String>,
-}
-
-pub fn stopped_status() -> MeshNodeStatus {
-    MeshNodeStatus {
-        state: MeshNodeState::Off,
-        mode: None,
-        health: MeshHealth::ok(),
-        api_base_url: None,
-        console_url: None,
-        model_id: None,
-        model_name: None,
-        invite_token: None,
-        endpoint_id: None,
-        device_id: None,
-        device_name: None,
     }
 }
 
@@ -725,6 +653,7 @@ impl DesktopMeshRuntime {
             endpoint_id,
             device_id,
             device_name,
+            community_relay_url: self.start_request.relay_url.clone(),
         })
     }
 
@@ -741,6 +670,7 @@ impl DesktopMeshRuntime {
             endpoint_id: None,
             device_id: None,
             device_name: None,
+            community_relay_url: self.start_request.relay_url.clone(),
         }
     }
 
@@ -757,6 +687,7 @@ impl DesktopMeshRuntime {
             endpoint_id: None,
             device_id: None,
             device_name: None,
+            community_relay_url: self.start_request.relay_url.clone(),
         }
     }
 

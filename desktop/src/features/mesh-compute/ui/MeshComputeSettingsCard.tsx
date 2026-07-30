@@ -31,6 +31,7 @@ import {
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
 import { deriveMeshShareToggle } from "../shareToggleState";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { deriveServingIndicator } from "../servingUsage";
 
 const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
@@ -66,6 +67,7 @@ function writeDraft(key: string, value: string): void {
  * exposing implementation protocols or raw mesh controls.
  */
 export function MeshComputeSettingsCard() {
+  const { communities, activeCommunity } = useCommunities();
   const { status, error, refresh } = useMeshNodeStatus();
   const [installedModels, setInstalledModels] = React.useState<
     MeshModelOption[]
@@ -179,6 +181,22 @@ export function MeshComputeSettingsCard() {
   // toggling off must never tear down that unrelated consume session.
   const { isSharing, isConsuming, slotOccupied } =
     deriveMeshShareToggle(status);
+  const boundCommunity = React.useMemo(() => {
+    const relayUrl = status?.communityRelayUrl;
+    if (!relayUrl) return null;
+    return (
+      communities.find((community) => community.relayUrl === relayUrl) ?? null
+    );
+  }, [communities, status?.communityRelayUrl]);
+  const isSharingElsewhere =
+    isSharing &&
+    status?.communityRelayUrl != null &&
+    activeCommunity?.relayUrl !== status.communityRelayUrl;
+  const sharingCommunityLabel =
+    boundCommunity?.name ??
+    status?.communityRelayUrl ??
+    activeCommunity?.name ??
+    "this community";
   // Host-side "who is using the compute I'm sharing" — only polled while
   // actively sharing (serve mode). Read-only; reads the node's own metrics.
   const servingUsage = useMeshServingUsage(isSharing);
@@ -230,13 +248,37 @@ export function MeshComputeSettingsCard() {
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
       <SettingsSectionHeader
         title="Share compute"
-        description={
-          <>
-            Share this machine with your relay. When on, other members can run
-            their agents here.
-          </>
-        }
+        description="Share one model with one community. Other communities cannot discover or use it."
       />
+
+      <div
+        className="mb-3 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-sm"
+        data-testid="mesh-community-binding"
+      >
+        <p className="font-medium text-foreground">Community-bound compute</p>
+        <p className="mt-0.5 text-muted-foreground">
+          {isSharing ? (
+            <>
+              <span className="font-medium text-foreground">
+                {status?.modelName ?? status?.modelId ?? "This model"}
+              </span>{" "}
+              is tied to{" "}
+              <span className="font-medium">{sharingCommunityLabel}</span>.
+              Switching communities will not move or stop it. To share with a
+              different community, stop sharing first.
+            </>
+          ) : (
+            <>
+              When enabled, the selected model will be tied to{" "}
+              <span className="font-medium">
+                {activeCommunity?.name ?? "the active community"}
+              </span>
+              . To share with a different community, stop sharing before
+              enabling it there.
+            </>
+          )}
+        </p>
+      </div>
 
       {error ? (
         <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -263,7 +305,9 @@ export function MeshComputeSettingsCard() {
             </label>
             <StatusLine
               isConsuming={isConsuming}
+              isSharingElsewhere={isSharingElsewhere}
               pendingAction={pendingAction}
+              sharingCommunityLabel={sharingCommunityLabel}
               status={status}
             />
             {servingIndicator.show ? (
@@ -509,7 +553,8 @@ export function MeshComputeSettingsCard() {
       </SettingsOptionGroup>
 
       <p className="mt-3 rounded-lg bg-muted/30 px-3 py-2 text-sm font-normal text-muted-foreground">
-        Only members of this relay can use this machine's shared compute.
+        Only members of <strong>{sharingCommunityLabel}</strong> can discover
+        and use this shared model. Other Buzz communities cannot access it.
       </p>
     </section>
   );
@@ -738,11 +783,15 @@ function CatalogPicker({
 
 function StatusLine({
   isConsuming,
+  isSharingElsewhere,
   pendingAction,
+  sharingCommunityLabel,
   status,
 }: {
   isConsuming: boolean;
+  isSharingElsewhere: boolean;
   pendingAction: "start" | "stop" | null;
+  sharingCommunityLabel: string;
   status: MeshNodeStatus | null;
 }) {
   if (pendingAction === "start") {
@@ -781,6 +830,18 @@ function StatusLine({
     return <p className="text-sm text-muted-foreground">{reason}</p>;
   }
   if (state === "running") {
+    if (isSharingElsewhere) {
+      return (
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="mesh-sharing-community"
+        >
+          Sharing{modelLabel ? ` ${modelLabel}` : ""} with{" "}
+          {sharingCommunityLabel}. Switch to that community to manage its
+          compute settings, or turn this off here to stop sharing.
+        </p>
+      );
+    }
     if (health.status === "failed") {
       return (
         <p className="text-sm text-destructive">
@@ -796,8 +857,12 @@ function StatusLine({
       );
     }
     return (
-      <p className="text-sm text-muted-foreground">
-        Sharing{modelLabel ? ` ${modelLabel}` : ""} with relay members.
+      <p
+        className="text-sm text-muted-foreground"
+        data-testid="mesh-sharing-community"
+      >
+        Sharing{modelLabel ? ` ${modelLabel}` : ""} with {sharingCommunityLabel}{" "}
+        members.
       </p>
     );
   }
