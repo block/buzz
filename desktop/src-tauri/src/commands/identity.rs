@@ -194,6 +194,143 @@ pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
         .map_err(|error| format!("encode nsec: {error}"))
 }
 
+/// Generate a passphrase for a new encrypted backup (EFF short wordlist, OS
+/// entropy). `words` is clamped to the range allowed by `key_backup`;
+/// `separator` joins the words (defaults to a space).
+#[tauri::command]
+pub fn generate_backup_passphrase(
+    words: Option<u32>,
+    separator: Option<String>,
+) -> Result<String, String> {
+    crate::key_backup::generate_passphrase(
+        words.map_or(crate::key_backup::DEFAULT_PASSPHRASE_WORDS, |w| w as usize),
+        separator.as_deref().unwrap_or(" "),
+    )
+}
+
+/// Core of [`create_ncryptsec_backup`], factored so tests can drive it with a
+/// bare `AppState` + temp dir (and a fast scrypt tier) without an `AppHandle`.
+pub(crate) fn create_backup_with_log_n(
+    state: &AppState,
+    password: &str,
+    log_n: u8,
+) -> Result<String, String> {
+    if password.chars().count() < crate::key_backup::MIN_PASSPHRASE_LEN {
+        return Err(format!(
+            "passphrase must be at least {} characters",
+            crate::key_backup::MIN_PASSPHRASE_LEN
+        ));
+    }
+
+    // Serialize against import_identity/persist_current_identity: the blob
+    // must be derived from — and persisted for — one stable identity. Also
+    // caps KDF concurrency at one.
+    let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
+
+    // Recovery mode (lost/locked) → Err, same gate as signing.
+    let keys = state.signing_keys()?;
+
+    crate::key_backup::create_backup_blob(&keys, password, log_n)
+}
+
+/// Create a NIP-49 backup of the live identity in memory.
+///
+/// Encrypts under `password`, decrypt-verifies the fresh blob against the live
+/// pubkey, and returns the `ncryptsec1…` string for the native save flow. The
+/// body runs under `identity_mutation`, so identity changes cannot race the KDF.
+#[tauri::command]
+pub async fn create_ncryptsec_backup(
+    password: String,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let password = zeroize::Zeroizing::new(password);
+        let state = app_handle.state::<AppState>();
+        create_backup_with_log_n(&state, &password, crate::key_backup::BACKUP_LOG_N)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupVerification {
+    pub pubkey: String,
+    pub npub: String,
+    pub matches_current_identity: bool,
+}
+
+fn verify_ncryptsec_backup_inner(
+    state: &AppState,
+    ncryptsec: &str,
+    password: &str,
+) -> Result<BackupVerification, String> {
+    let keys = crate::key_backup::decrypt_ncryptsec(ncryptsec, password)?;
+    let pubkey = keys.public_key();
+    let current = state.signing_keys()?.public_key();
+    Ok(BackupVerification {
+        pubkey: pubkey.to_hex(),
+        npub: pubkey
+            .to_bech32()
+            .map_err(|e| format!("encode backup identity: {e}"))?,
+        matches_current_identity: pubkey == current,
+    })
+}
+
+/// Decrypt and validate a NIP-49 backup without exposing its secret key.
+#[tauri::command]
+pub async fn verify_ncryptsec_backup(
+    ncryptsec: String,
+    password: String,
+    app_handle: tauri::AppHandle,
+) -> Result<BackupVerification, String> {
+    tokio::task::spawn_blocking(move || {
+        let password = zeroize::Zeroizing::new(password);
+        let state = app_handle.state::<AppState>();
+        verify_ncryptsec_backup_inner(&state, &ncryptsec, &password)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Save a portable copy of an `ncryptsec1…` backup to a user-chosen path.
+///
+/// The input must parse as a structurally valid NIP-49 payload. The dialog is
+/// selection-only; the write uses secret-file semantics (atomic + 0o600).
+/// Never mutates canonical app state. Returns the chosen path, or `None` when
+/// the user cancelled.
+#[tauri::command]
+pub async fn save_ncryptsec_copy(
+    ncryptsec: String,
+    app_handle: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    // Reject anything that is not a valid encrypted-key blob — this command
+    // must not become a generic file writer.
+    crate::key_backup::parse_ncryptsec(&ncryptsec)?;
+    let normalized = ncryptsec.trim().to_string();
+
+    let dest = match crate::commands::export_util::pick_save_path(
+        &app_handle,
+        crate::key_backup::BACKUP_FILE_NAME,
+        "Password-protected key backup",
+        &["ncryptsec"],
+    )
+    .await?
+    {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let dest_for_write = dest.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::key_backup::write_backup_file(&dest_for_write, &normalized)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    Ok(Some(dest.display().to_string()))
+}
+
 #[tauri::command]
 pub async fn import_identity(
     nsec: String,
@@ -589,3 +726,7 @@ mod nostr_identity_binding_tests {
         assert_eq!(error, "expires_at is expired");
     }
 }
+
+#[cfg(test)]
+#[path = "identity_key_backup_tests.rs"]
+mod identity_key_backup_tests;

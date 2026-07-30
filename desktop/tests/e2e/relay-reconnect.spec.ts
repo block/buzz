@@ -49,6 +49,31 @@ async function restartMockWebsockets(page: import("@playwright/test").Page) {
   expect(restarted).toBeGreaterThan(0);
 }
 
+async function setMockWebsocketUnavailable(
+  page: import("@playwright/test").Page,
+  unavailable: boolean,
+) {
+  await page.evaluate((value) => {
+    const setUnavailable = window.__BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__;
+    if (!setUnavailable) {
+      throw new Error("E2E websocket availability seam is not installed.");
+    }
+    setUnavailable(value);
+  }, unavailable);
+}
+
+async function getMockWebsocketConnectAttempts(
+  page: import("@playwright/test").Page,
+) {
+  return page.evaluate(() => {
+    const getAttempts = window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__;
+    if (!getAttempts) {
+      throw new Error("E2E websocket attempt seam is not installed.");
+    }
+    return getAttempts();
+  });
+}
+
 async function emitMockMessages(
   page: import("@playwright/test").Page,
   messages: Array<{ content: string; createdAt: number }>,
@@ -119,6 +144,55 @@ test("failed initial relay dial retries automatically", async ({ page }) => {
     )
     .toBe("connected");
   await expect(page.getByTestId("channel-general")).toBeVisible();
+});
+
+test("routine traffic cannot bypass outage backoff and recovery stays automatic", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+
+  await setMockWebsocketUnavailable(page, true);
+  await disconnectMockWebsockets(page);
+
+  // Exercise the production query path throughout the outage. Before the
+  // coordinator fix, each rejected query called ensureConnected(), cancelled
+  // the scheduled timer, and dialed immediately. The fixed session keeps these
+  // callers behind its single jittered exponential-backoff attempt.
+  await page.evaluate(async () => {
+    const deadline = Date.now() + 4_200;
+    while (Date.now() < deadline) {
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+  });
+
+  const attempts = await getMockWebsocketConnectAttempts(page);
+  expect(attempts.length).toBeGreaterThanOrEqual(2);
+  expect(attempts.length).toBeLessThanOrEqual(3);
+  for (let index = 1; index < attempts.length; index += 1) {
+    expect(attempts[index] - attempts[index - 1]).toBeGreaterThanOrEqual(700);
+  }
+
+  await setMockWebsocketUnavailable(page, false);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 10_000 },
+    )
+    .toBe("connected");
+
+  const afterRecovery = `automatic outage recovery ${Date.now()}`;
+  await emitMockMessages(page, [
+    { content: afterRecovery, createdAt: Math.floor(Date.now() / 1_000) },
+  ]);
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    afterRecovery,
+  );
 });
 
 test("service restart close resets accumulated backoff", async ({ page }) => {

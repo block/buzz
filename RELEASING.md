@@ -5,7 +5,7 @@ Mobile uses immutable release-candidate tags cut directly from remote `main`:
 
 | Lane | Entry point | Artifact |
 |------|-------------|----------|
-| Desktop | `just release-desktop` | Signed desktop app (macOS/Linux) |
+| Desktop | `Prepare Desktop Release` / `just release-desktop` | Signed desktop app (macOS/Linux) |
 | Relay | `just release-relay` | `ghcr.io/block/buzz` container image |
 | Mobile | `scripts/mobile-release.sh candidate X.Y.Z` | Exact `mobile-vX.Y.Z-rc.N` source identity |
 
@@ -31,7 +31,7 @@ just release-relay 0.4.0
 scripts/mobile-release.sh candidate 0.5.0
 ```
 
-Desktop and relay releases use metadata PRs. Mobile does not. Each
+Desktop uses an immutable generated candidate PR; relay continues using its metadata PR. Mobile does not. Each
 `mobile-vX.Y.Z-rc.N` tag is an immutable candidate and the artifact of record.
 There is no mobile release branch, stable mobile tag alias, finalization step,
 or mobile GitHub Release.
@@ -42,12 +42,11 @@ or mobile GitHub Release.
 
 ### Desktop
 
-1. **`just release-desktop`** runs locally on `main`, creates or updates a
-   `version-bump/<version>` PR, bumps the desktop manifests, regenerates
-   lockfiles, and updates `CHANGELOG.md`.
-2. **Merge the PR.** `auto-tag-on-release-pr-merge` pushes `v<version>`.
-3. **The tag triggers `release.yml`.** It builds, signs, notarizes, and
-   publishes the desktop app for macOS and Linux.
+1. Run **Prepare Desktop Release** with a version (or `just release-desktop <version>`). Automation records current `origin/main`, regenerates `version-bump/<version>` as one deterministic candidate commit, and opens or updates the PR.
+2. Review the full-SHA changelog, CI, recorded base, and candidate SHA. Any regeneration creates a new head and requires fresh approval.
+3. Merge with **Create a merge commit**. Squash and rebase are invalid for desktop release PRs.
+4. `auto-tag-on-release-pr-merge` proves that merge parent 2 is the exact approved candidate, then tags that candidate `desktop-v<version>`.
+5. The tag triggers `release.yml`. It creates a draft, builds and stages every platform, publishes the complete versioned release, and updates the rolling updater manifest last for stable versions.
 
 ### Relay
 
@@ -147,8 +146,8 @@ for distributable builds or builds from an immutable release tag.
 ## Manual Release Retry
 
 The **Release** workflow's manual dispatch is only a retry mechanism for an
-existing immutable `v<version>` tag. Select that tag in the ref picker and
-provide the matching semver version without the `v` prefix. It cannot build
+existing immutable `desktop-v<version>` tag. Select that tag in the ref picker and
+provide the matching semver version without the `desktop-v` prefix. It cannot build
 from `main` or another caller-selected source ref.
 
 Mobile intentionally has no branch or arbitrary-ref fallback. The private
@@ -171,7 +170,7 @@ for the private pipeline contract.
 
 Desktop publishes two GitHub releases:
 
-1. **`v<version>`**: the user-facing release with installers.
+1. **`desktop-v<version>`**: the user-facing release with installers.
 2. **`buzz-desktop-latest`**: the rolling auto-updater release.
 
 Mobile publishes only annotated `mobile-vX.Y.Z-rc.N` git tags. Store artifacts
@@ -186,7 +185,7 @@ The release workflow builds **two separate macOS DMGs**: Apple
 Silicon (`darwin-aarch64`, the `release` job) and Intel
 (`darwin-x86_64`, the `release-macos-x64` job), plus Linux `.deb` and
 `.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
-the same `v<version>` release. Intel users download the `_x64.dmg`.
+the same `desktop-v<version>` release. Intel users download the `_x64.dmg`.
 
 The Linux AppImage is post-processed by `desktop/scripts/fix-appimage.sh`,
 which strips infra libraries over-bundled by linuxdeploy (they crash on
