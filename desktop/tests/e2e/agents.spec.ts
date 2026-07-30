@@ -42,6 +42,34 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("shows invocable relay-native agents separately from local runtimes", async ({
+  page,
+}) => {
+  const externalPubkey = "9".repeat(64);
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: externalPubkey,
+        name: "Hermes Native",
+        agentType: "hermes",
+        respondTo: "allowlist",
+        respondToAllowlist: ["deadbeef".repeat(8)],
+        status: "online",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const section = page.getByTestId("external-agents-section");
+  await expect(section).toContainText("Connected agents");
+  await expect(section).toContainText("Hermes Native");
+  await expect(section).toContainText("hermes · managed externally");
+  await expect(
+    page.getByTestId(`external-agent-${externalPubkey}`),
+  ).toBeVisible();
+});
+
 async function gotoApp(page: import("@playwright/test").Page) {
   let lastError: unknown = null;
 
