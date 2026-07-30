@@ -468,21 +468,34 @@ fn env_secret_values() -> Vec<String> {
 /// mutating the process environment — setting a real `HTTPS_PROXY` in a test
 /// would be read by every HTTP client the rest of the suite builds.
 ///
-/// Two kinds of variable are recognised, because they need opposite treatment:
+/// Three kinds of variable are recognised, because they need different
+/// treatment:
 ///
-/// * **name-marked secrets**, whose whole value is the credential; and
-/// * **proxy URLs**, where only the userinfo is the credential.
+/// * **URL-valued variables**, where only the userinfo is the credential;
+/// * **exactly named credentials**, whose whole value is the secret; and
+/// * **name-marked secrets**, matched by a marker substring.
 fn secret_values_from(vars: impl IntoIterator<Item = (String, String)>) -> Vec<String> {
     vars.into_iter()
         .filter_map(|(name, value)| {
             let name = name.to_ascii_uppercase();
-            if PROXY_VAR_NAMES.contains(&name.as_str()) {
-                // Only the userinfo, so the proxy itself stays named in the
-                // record: an install that fails behind a proxy is diagnosable
-                // only if the log still says which proxy it went through, and
-                // the host and port are not the secret. Redacting the whole
-                // value would erase that while protecting nothing more.
-                return proxy_userinfo(&value).map(str::to_string);
+            if URL_CREDENTIAL_VAR_NAMES.contains(&name.as_str()) {
+                // Only the userinfo, so the endpoint itself stays named in the
+                // record: an install that fails against a proxy or a private
+                // registry is diagnosable only if the log still says which one
+                // it went through, and the host and port are not the secret.
+                // Redacting the whole value would erase that while protecting
+                // nothing more.
+                return url_userinfo(&value).map(str::to_string);
+            }
+            if SECRET_VAR_NAMES.contains(&name.as_str()) {
+                // Deliberately not subject to the 8-byte floor below: an exact
+                // name is a fact, not the guess the marker rule makes, so there
+                // is nothing for a floor to protect against. npm's one-time
+                // password is six digits and is a credential at that length —
+                // short, but still above the four-byte minimum
+                // [`crate::managed_agents::redact_secrets_with`] applies, so it
+                // survives to be scrubbed.
+                return (!value.is_empty()).then_some(value);
             }
             // A value under 8 bytes is more likely a flag like `true` or a
             // version than a credential, and scrubbing those makes ordinary
@@ -492,20 +505,35 @@ fn secret_values_from(vars: impl IntoIterator<Item = (String, String)>) -> Vec<S
         .collect()
 }
 
-/// Proxy variables whose value embeds a credential in its userinfo.
+/// Variables whose value is a URL that may embed a credential in its userinfo.
 ///
 /// npm's own `npm_config_*` aliases are here too: npm resolves them ahead of
 /// the conventional names and echoes the result from `npm config list`, and
-/// neither name carries a marker [`name_marks_secret`] would catch. Matching is
-/// case-insensitive because the caller uppercases the name first, which is what
-/// npm's lowercase spelling needs.
-const PROXY_VAR_NAMES: &[&str] = &[
+/// none of these names carries a marker [`name_marks_secret`] would catch.
+/// Matching is case-insensitive because the caller uppercases the name first,
+/// which is what npm's lowercase spelling needs.
+const URL_CREDENTIAL_VAR_NAMES: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
     "NPM_CONFIG_PROXY",
     "NPM_CONFIG_HTTPS_PROXY",
+    "NPM_CONFIG_REGISTRY",
 ];
+
+/// Variables whose whole value is a credential, recognised by exact name.
+///
+/// These are npm's supported credential settings, whose names carry no marker
+/// [`name_marks_secret`] would catch. They are listed exactly rather than
+/// matched on `KEY` or `AUTH` substrings: those occur throughout an ordinary
+/// environment, and scrubbing on them would delete unrelated values from the
+/// whole log.
+///
+/// * `NPM_CONFIG_KEY` — the PEM client key used to reach a registry.
+/// * `NPM_CONFIG__AUTH` — the base64 basic-auth blob (npm's own double
+///   underscore, matching the `_auth` setting).
+/// * `NPM_CONFIG_OTP` — the registry one-time password.
+const SECRET_VAR_NAMES: &[&str] = &["NPM_CONFIG_KEY", "NPM_CONFIG__AUTH", "NPM_CONFIG_OTP"];
 
 /// Whether an environment variable's name marks its value as a credential.
 ///
@@ -533,17 +561,17 @@ fn name_marks_secret(name: &str) -> bool {
             .any(|marker| name.contains(marker))
 }
 
-/// The `user:password` credential embedded in a proxy URL, if it has one.
+/// The `user:password` credential embedded in a URL, if it has one.
 ///
-/// Parsed rather than pattern-matched so a proxy URL with no credential —
-/// the common case — contributes nothing to scrub. The last `@` in the
+/// Parsed rather than pattern-matched so a URL with no credential — the common
+/// case — contributes nothing to scrub. The last `@` in the
 /// authority separates userinfo from host, so a password containing an
 /// encoded `@` still splits correctly.
 ///
 /// A bare username with no password is not treated as a credential: it is not
 /// secret on its own, and scrubbing it would erase every occurrence of a word
 /// like `user` from the whole record.
-fn proxy_userinfo(value: &str) -> Option<&str> {
+fn url_userinfo(value: &str) -> Option<&str> {
     let authority = value
         .split_once("://")?
         .1

@@ -443,6 +443,161 @@ fn test_an_npm_alias_credential_is_redacted_from_the_log_and_the_returned_step()
     );
 }
 
+// ── npm's own credential settings ────────────────────────────────────────────
+
+/// npm accepts every one of its settings as an `npm_config_*` variable, so a
+/// registry client key, a basic-auth blob or a one-time password can arrive
+/// under a name that carries no marker. Their whole value is the credential —
+/// unlike a proxy, none of it is diagnostic — and npm spells them in lowercase.
+#[test]
+fn test_npm_credential_configs_are_secret_in_either_case() {
+    let secrets = secret_values_from([
+        (
+            "npm_config_key".to_string(),
+            "-----BEGIN PRIVATE KEY-----lowerkey".to_string(),
+        ),
+        (
+            "NPM_CONFIG_KEY".to_string(),
+            "-----BEGIN PRIVATE KEY-----upperkey".to_string(),
+        ),
+        ("npm_config__auth".to_string(), "bG93ZXJhdXRo".to_string()),
+        ("NPM_CONFIG__AUTH".to_string(), "dXBwZXJhdXRo".to_string()),
+        ("npm_config_otp".to_string(), "618243".to_string()),
+        ("NPM_CONFIG_OTP".to_string(), "907154".to_string()),
+    ]);
+
+    assert_eq!(
+        secrets,
+        vec![
+            "-----BEGIN PRIVATE KEY-----lowerkey",
+            "-----BEGIN PRIVATE KEY-----upperkey",
+            "bG93ZXJhdXRo",
+            "dXBwZXJhdXRo",
+            "618243",
+            "907154",
+        ]
+    );
+}
+
+/// An unset-but-exported credential is empty, and an empty needle would match
+/// everywhere. The name being exact does not make a blank value a secret.
+#[test]
+fn test_an_empty_npm_credential_config_contributes_no_secret() {
+    let secrets = secret_values_from([
+        ("NPM_CONFIG_KEY".to_string(), String::new()),
+        ("npm_config_otp".to_string(), String::new()),
+    ]);
+
+    assert!(secrets.is_empty(), "got: {secrets:?}");
+}
+
+/// A private registry's URL follows the proxy policy rather than the whole-value
+/// one: which registry an install talked to is exactly what a 401 or an ETIMEDOUT
+/// has to be read against, so only the userinfo is the secret.
+#[test]
+fn test_npm_registry_userinfo_is_secret_but_the_registry_host_is_not() {
+    let secrets = secret_values_from([(
+        "npm_config_registry".to_string(),
+        "https://builder:hunter2pass@registry.example/api/npm/".to_string(),
+    )]);
+
+    assert_eq!(secrets, vec!["builder:hunter2pass"]);
+}
+
+/// The public registry — and any private one reached with a token header rather
+/// than URL credentials — contributes nothing, so the registry stays named in
+/// the record.
+#[test]
+fn test_an_npm_registry_without_credentials_contributes_no_secret() {
+    let secrets = secret_values_from([
+        (
+            "npm_config_registry".to_string(),
+            "https://registry.npmjs.org/".to_string(),
+        ),
+        (
+            "NPM_CONFIG_REGISTRY".to_string(),
+            "https://builder@registry.example/api/npm/".to_string(),
+        ),
+    ]);
+
+    assert!(secrets.is_empty(), "got: {secrets:?}");
+}
+
+/// The credential settings are matched by exact name, never by a `KEY` or
+/// `AUTH` substring. Those occur throughout an ordinary environment on values
+/// that are paths, agent sockets and people's names, and scrubbing them would
+/// delete unrelated text from every record.
+#[test]
+fn test_key_and_auth_inside_a_variable_name_do_not_make_it_secret() {
+    let secrets = secret_values_from([
+        (
+            "SSH_AUTH_SOCK".to_string(),
+            "/tmp/ssh-agent.socket".to_string(),
+        ),
+        ("GIT_AUTHOR_NAME".to_string(), "Ada Lovelace".to_string()),
+        (
+            "KEYCHAIN".to_string(),
+            "/Users/dev/Library/login.keychain".to_string(),
+        ),
+        (
+            "NPM_CONFIG_KEYFILE".to_string(),
+            "/Users/dev/.npm/client.pem".to_string(),
+        ),
+    ]);
+
+    assert!(secrets.is_empty(), "got: {secrets:?}");
+}
+
+/// The wiring, not just the classification: npm prints its resolved config on an
+/// auth failure, so each of these has to be gone from the log and from the step
+/// the frontend renders. The one-time password is the interesting one — at six
+/// digits it is far shorter than any other secret here, and a value under four
+/// bytes is dropped by the shared redactor rather than scrubbed.
+#[test]
+fn test_npm_credential_configs_are_redacted_from_the_log_and_the_returned_step() {
+    let client_key = "-----BEGIN PRIVATE KEY-----MIIEvQIBADAN";
+    let auth = "YnVpbGRlcjpodW50ZXIycGFzcw==";
+    let otp = "618243";
+    let registry_password = "hunter2pass";
+    let h = harness_with_secrets(secret_values_from([
+        ("npm_config_key".to_string(), client_key.to_string()),
+        ("npm_config__auth".to_string(), auth.to_string()),
+        ("npm_config_otp".to_string(), otp.to_string()),
+        (
+            "npm_config_registry".to_string(),
+            format!("https://builder:{registry_password}@registry.example/api/npm/"),
+        ),
+    ]));
+
+    let returned = h.reporter.record_attempt(
+        1,
+        InstallOutcome {
+            step: InstallStepResult {
+                stderr: format!("npm ERR! 401 otp={otp} _auth={auth}"),
+                ..step("cli", false, "")
+            },
+            log_stdout: format!("npm config: key = {client_key}"),
+            log_stderr: format!(
+                "npm config: registry = https://builder:{registry_password}@registry.example/api/npm/"
+            ),
+        },
+    );
+
+    let log = h.log_contents();
+    for secret in [client_key, auth, otp, registry_password] {
+        assert!(!log.contains(secret), "log leaked {secret}: {log}");
+    }
+    assert!(
+        log.contains("registry.example"),
+        "the registry host is diagnostic and must survive: {log}"
+    );
+    assert!(
+        !returned.stderr.contains(otp) && !returned.stderr.contains(auth),
+        "the returned step leaked a credential: {}",
+        returned.stderr
+    );
+}
+
 /// `*_PATH` variables must not be mistaken for personal access tokens. A
 /// `contains("_PAT")` rule would match `PATH` itself and scrub every directory
 /// name out of the log, which is why the rule matches `_PAT` as a suffix.
