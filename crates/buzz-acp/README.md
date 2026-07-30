@@ -122,27 +122,37 @@ agent. Each channel session becomes its own conversation on that one agent.
 ### Letta backends
 
 `LETTA_ACP_BACKEND` selects where the agent lives and where its tools run.
-Since the agent answers Buzz by shelling out to the `buzz` CLI, the CLI and
-the `BUZZ_*` environment have to be wherever the tools run:
+The agent answers Buzz by shelling out to the `buzz` CLI, so **tools have to
+execute where that CLI and the `BUZZ_*` environment are** — on this machine for
+a Desktop-spawned agent. Set these in the agent's **env vars**, not the
+definition env:
 
 | `LETTA_ACP_BACKEND` | Agent state | Tools run | Extra config |
 |---|---|---|---|
-| `local` (default) | this machine | this machine | `letta login`, or `letta --backend local connect anthropic --api-key ...` for model access |
-| `cloud-oauth` | Letta Cloud | this machine | `letta login` once; no key in the harness env |
+| `cloud-oauth` | Letta Cloud | this machine | `LETTA_API_KEY`, or `letta login` once — Letta supplies the model |
+| `local` | this machine | this machine | `letta login`, or `letta --backend local connect anthropic --api-key ...` for model access |
 | `remote` | your app server | the app server | `LETTA_APP_SERVER_URL`, `LETTA_APP_SERVER_TOKEN`; install the `buzz` CLI there |
-| `cloud` | Letta Cloud | Letta's sandbox | not usable from Buzz — the sandbox has no `buzz` CLI |
 
-`local` and `cloud-oauth` need nothing beyond the harness environment they
-already inherit; `cloud-oauth` is the way to run a cloud-hosted agent whose
-tools still execute here. Plain `cloud` puts tool execution in Letta's
-sandbox, out of reach of the `buzz` CLI.
+`cloud-oauth` is the recommended setup: the agent and its memory live in Letta
+Cloud with cloud-side model access, while tools run here. It is spelled
+`cloud-oauth` for historical reasons and works with an API key — no `letta
+login` required.
+
+Newer adapters can infer the backend from the environment when
+`LETTA_ACP_BACKEND` is unset, logging the choice at startup. Set it explicitly
+anyway: the inferred value has varied across releases, and `cloud-oauth` is
+accepted by every version.
+
+> **Note — inherited provider keys:** on `local` the agent resolves its own
+> model credentials, so an unrelated `OPENAI_API_KEY` in the Desktop
+> environment is inherited and used. A stale one fails the turn with an OpenAI
+> 401 that Buzz can only report as "the agent's harness reported an internal
+> error". `cloud-oauth` sidesteps this by taking the model from Letta.
 
 MCP servers configured in Buzz are forwarded to the adapter in `session/new`
 and run in the adapter process (letta-acp 0.1.6+ declares
-`mcpCapabilities: { http: true, sse: true }` and supports stdio as well). They
-do not close the `cloud` gap: adapter-hosted MCP tools reach the agent over
-Letta's external-tool protocol, and the `cloud` sandbox has no executor for
-those, so it rejects them the same way it rejects the editor fs tools.
+`mcpCapabilities: { http: true, sse: true }` and supports stdio as well), so
+they execute alongside the agent's other tools.
 
 ## Configuration
 

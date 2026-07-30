@@ -122,7 +122,11 @@ test("qualifies labels shared by several model ids, leaving unique ones clean", 
 
   assert.deepEqual(
     options.slice(1).map((option) => option.label),
-    ["GPT-5.6 Sol (gpt-5.6-sol-none)", "GPT-5.6 Sol (gpt-5.6-sol-max)", "Letta GLM"],
+    [
+      "GPT-5.6 Sol (gpt-5.6-sol-none)",
+      "GPT-5.6 Sol (gpt-5.6-sol-max)",
+      "Letta GLM",
+    ],
   );
 });
 

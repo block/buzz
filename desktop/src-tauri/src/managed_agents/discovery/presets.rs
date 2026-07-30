@@ -93,8 +93,11 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &[],
         install_instructions_url: "https://github.com/letta-ai/letta-acp",
         install_hint: "Buzz talks to Letta through the letta-acp adapter \
-            (npm install -g @letta-ai/letta-acp). Set LETTA_AGENT_ID in the \
-            agent's env vars to pin one persistent Letta agent — the adapter \
+            (npm install -g @letta-ai/letta-acp). For a cloud-hosted agent \
+            whose tools still run on this machine, set LETTA_ACP_BACKEND to \
+            cloud-oauth and LETTA_API_KEY in the agent's env vars; without \
+            them the agent runs locally and needs its own model credentials. \
+            LETTA_AGENT_ID pins one persistent Letta agent — the adapter \
             creates one and logs its id on first run otherwise.",
         underlying_cli: None,
     },
