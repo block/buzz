@@ -25,6 +25,7 @@ export function useChannelPaneHandlers({
   getReplyDescendantIdsForMessage,
   markRevealedRepliesRead,
   onOptimisticOpenThreadHeadIdChange,
+  onRequestEmptyEditDelete,
   openThreadHeadId,
   sendMessageMutation,
   setExpandedThreadReplyIds,
@@ -45,6 +46,7 @@ export function useChannelPaneHandlers({
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
     React.SetStateAction<string | null | undefined>
   >;
+  onRequestEmptyEditDelete: (eventId: string) => void;
   openThreadHeadId: string | null;
   sendMessageMutation: ReturnType<typeof useSendMessageMutation>;
   setExpandedThreadReplyIds: React.Dispatch<React.SetStateAction<Set<string>>>;
@@ -155,18 +157,18 @@ export function useChannelPaneHandlers({
       }
 
       // Clearing an edit to empty (no text, no attachments) is the keyboard
-      // shorthand for "Delete message": delete the message instead of
-      // publishing an empty edit — the same `deleteMutate` the Delete button
-      // uses. This is the single decision point for both the main timeline and
-      // the thread panel, since both route edit-save through here. Exit edit
-      // mode first so the composer collapses immediately; the delete's own
-      // onError toast surfaces failures.
+      // shorthand for "Delete message". Rather than publish an empty edit,
+      // route it through the same "Delete message?" confirmation the Delete
+      // button shows: exit edit mode and ask the pane to open the dialog, which
+      // runs the actual delete on confirm. This is the single decision point
+      // for both the main timeline and the thread panel, since both route
+      // edit-save through here.
       const isEmptyDeletion =
         content.trim().length === 0 &&
         (mediaTags === undefined || mediaTags.length === 0);
       if (isEmptyDeletion) {
         setEditTargetId(null);
-        await deleteMutateRef.current({ eventId }).catch(() => {});
+        onRequestEmptyEditDelete(eventId);
         return;
       }
 
@@ -178,7 +180,7 @@ export function useChannelPaneHandlers({
       });
       setEditTargetId(null);
     },
-    [setEditTargetId],
+    [onRequestEmptyEditDelete, setEditTargetId],
   );
 
   const handleOpenThread = React.useCallback(

@@ -21,8 +21,9 @@ async function openMoreActionsMenu(
   });
 }
 
-// Enter edit mode for a message and wait until the editor is populated.
-async function enterEditMode(
+// Enter edit mode for a message, clear it to empty, and submit — the gesture
+// that triggers the empty-edit delete confirmation.
+async function submitEmptyEdit(
   page: import("@playwright/test").Page,
   messageId: string,
 ) {
@@ -33,7 +34,11 @@ async function enterEditMode(
   // wait for it to populate before we clear it.
   const input = page.getByTestId("message-input");
   await expect(input).not.toBeEmpty({ timeout: 5_000 });
-  return input;
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.press("Backspace");
+  await expect(input).toBeEmpty();
+  await page.keyboard.press("Enter");
 }
 
 test.beforeEach(async ({ page }) => {
@@ -43,31 +48,54 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("clearing an edit to empty deletes the message", async ({ page }) => {
+test("clearing an edit to empty prompts to delete, then deletes on confirm", async ({
+  page,
+}) => {
   const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
   await expect(row).toBeVisible({ timeout: 10_000 });
 
-  const input = await enterEditMode(page, OWN_MESSAGE_ID);
+  await submitEmptyEdit(page, OWN_MESSAGE_ID);
 
-  // Clear the whole message, then submit the (now empty) edit.
-  await input.click();
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.press("Backspace");
-  await expect(input).toBeEmpty();
-  await page.keyboard.press("Enter");
+  // The same "Delete message?" confirmation the Delete menu action shows — an
+  // empty edit is routed through it, not silently deleted.
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible({ timeout: 5_000 });
+  await expect(dialog).toContainText("Delete message?");
 
-  // Empty-edit delete is immediate — no confirmation dialog (unlike the
-  // explicit "Delete message" button). Edit mode exits and the row is gone.
-  await expect(page.getByRole("alertdialog")).toHaveCount(0);
-  await expect(page.getByTestId("edit-target")).toBeHidden({ timeout: 5_000 });
+  // Confirm → the message row is removed and edit mode has exited.
+  await dialog.getByRole("button", { name: "Delete" }).click();
+  await expect(dialog).toBeHidden({ timeout: 5_000 });
+  await expect(page.getByTestId("edit-target")).toBeHidden();
   await expect(row).toBeHidden({ timeout: 5_000 });
+});
+
+test("cancelling the empty-edit delete keeps the message", async ({ page }) => {
+  const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
+  await expect(row).toBeVisible({ timeout: 10_000 });
+
+  await submitEmptyEdit(page, OWN_MESSAGE_ID);
+
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible({ timeout: 5_000 });
+
+  // Cancel → nothing is deleted; the original message survives.
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden({ timeout: 5_000 });
+  await expect(row).toBeVisible();
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    ORIGINAL_CONTENT,
+  );
 });
 
 test("a non-empty edit still edits and never deletes", async ({ page }) => {
   const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
   await expect(row).toBeVisible({ timeout: 10_000 });
 
-  const input = await enterEditMode(page, OWN_MESSAGE_ID);
+  await openMoreActionsMenu(page, OWN_MESSAGE_ID);
+  await page.getByTestId(`edit-message-${OWN_MESSAGE_ID}`).click();
+  await expect(page.getByTestId("edit-target")).toBeVisible({ timeout: 5_000 });
+  const input = page.getByTestId("message-input");
+  await expect(input).not.toBeEmpty({ timeout: 5_000 });
   const editedContent = `Edited, not deleted ${Date.now()}`;
 
   await input.click();
@@ -75,8 +103,8 @@ test("a non-empty edit still edits and never deletes", async ({ page }) => {
   await page.keyboard.type(editedContent);
   await page.keyboard.press("Enter");
 
-  // Edit mode exits, the row survives, and its content is the new text — the
-  // empty-delete branch must not fire when there is still text.
+  // No delete confirmation, edit mode exits, the row survives with new text.
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
   await expect(page.getByTestId("edit-target")).toBeHidden({ timeout: 5_000 });
   await expect(row).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
