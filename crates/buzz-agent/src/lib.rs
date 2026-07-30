@@ -3,6 +3,7 @@ mod agent;
 pub mod auth;
 mod builtin;
 pub mod catalog;
+pub mod catalog_bedrock;
 pub mod config;
 pub mod sigv4;
 mod handoff;
@@ -13,6 +14,7 @@ pub mod types;
 mod wire;
 
 pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use catalog_bedrock::discover_bedrock_models;
 pub use config::Provider;
 pub use types::AgentError;
 

@@ -482,6 +482,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         Some("anthropic") => Some("ANTHROPIC_MODEL"),
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
         Some("openrouter") => Some("OPENROUTER_MODEL"),
+        Some("bedrock") => Some("BEDROCK_MODEL"),
         _ => None,
     };
     let model_present = effective
@@ -530,6 +531,21 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
                     key: "OPENROUTER_API_KEY".to_string(),
                 });
             }
+        Some("bedrock") => {
+            // Bedrock uses SigV4 signing, not bearer auth.
+            // AWS_ACCESS_KEY_ID is required; AWS_SECRET_ACCESS_KEY is checked
+            // at request time. AWS_REGION is required for base URL derivation.
+            if env_key_missing("AWS_ACCESS_KEY_ID") {
+                missing.push(Requirement::EnvKey {
+                    key: "AWS_ACCESS_KEY_ID".to_string(),
+                });
+            }
+            if env_key_missing("AWS_REGION") && env_key_missing("AWS_DEFAULT_REGION") {
+                missing.push(Requirement::EnvKey {
+                    key: "AWS_REGION".to_string(),
+                });
+            }
+        }
         _ => {
             // Unknown provider or no provider yet — only the NormalizedField
             // requirement above captures this gap.

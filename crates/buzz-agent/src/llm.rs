@@ -12,6 +12,7 @@ use crate::config::{
     is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_openai_route,
     Config, OpenAiApi, Provider, ThinkingEffort,
 };
+use crate::sigv4;
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
 };
@@ -159,9 +160,15 @@ impl Llm {
                 parse_openai_with_reasoning_details(v)
             }
             Provider::Bedrock => {
-                return Err(AgentError::Llm(
-                    "Bedrock provider not yet implemented for completion".into(),
-                ));
+                let body = bedrock_converse_body(
+                    cfg,
+                    system_prompt,
+                    history,
+                    tools,
+                    effective_model,
+                );
+                let v = self.post_bedrock(cfg, &body, effective_model).await?;
+                parse_bedrock_converse(v)
             }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(
@@ -276,9 +283,14 @@ impl Llm {
                 Ok(parse_openai(v)?.text)
             }
             Provider::Bedrock => {
-                return Err(AgentError::Llm(
-                    "Bedrock provider not yet implemented for summarize".into(),
-                ));
+                let body = bedrock_converse_summary_body(
+                    effective_model,
+                    system_prompt,
+                    user_prompt,
+                    max_output_tokens,
+                );
+                let v = self.post_bedrock(cfg, &body, effective_model).await?;
+                Ok(parse_bedrock_converse(v)?.text)
             }
             Provider::OpenAi | Provider::Databricks => {
                 let r = self
@@ -367,6 +379,68 @@ impl Llm {
         })
         .await
         .map_err(PostError::into_agent)
+    }
+
+    /// POST to the Bedrock Converse API with AWS SigV4 signing.
+    async fn post_bedrock(
+        &self,
+        cfg: &Config,
+        body: &Value,
+        effective_model: &str,
+    ) -> Result<Value, AgentError> {
+        let model_id = urlencoding::encode(effective_model);
+        let url = format!(
+            "{}/model/{}/converse",
+            cfg.base_url.trim_end_matches('/'),
+            model_id,
+        );
+
+        let region = sigv4::parse_bedrock_region(&cfg.base_url)
+            .map_err(|e| AgentError::Llm(format!("Bedrock: {e}")))?;
+        let creds = sigv4::load_aws_credentials()
+            .map_err(|e| AgentError::Llm(format!("Bedrock: {e}")))?;
+
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
+
+        // Build an http::Request, sign it with SigV4, then convert to reqwest
+        let req = http::Request::builder()
+            .uri(&url)
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .body(body_bytes)
+            .map_err(|e| AgentError::Llm(format!("build request: {e}")))?;
+
+        let signed = sigv4::sign_request(req, &creds, "bedrock", &region)
+            .map_err(|e| AgentError::Llm(format!("sign request: {e}")))?;
+
+        let (parts, signed_body) = signed.into_parts();
+        let parsed_url = reqwest::Url::parse(&url)
+            .map_err(|e| AgentError::Llm(format!("parse url: {e}")))?;
+        let mut rq = reqwest::Request::new(parts.method, parsed_url);
+        *rq.headers_mut() = parts.headers;
+        *rq.body_mut() = Some(signed_body.into());
+
+        let response = self
+            .http
+            .execute(rq)
+            .await
+            .map_err(|e| AgentError::Llm(format!("Bedrock transport: {e}")))?;
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .map_err(|e| AgentError::Llm(format!("Bedrock read response: {e}")))?;
+
+        if !status.is_success() {
+            return Err(AgentError::Llm(format!(
+                "Bedrock {status}: {response_body}"
+            )));
+        }
+
+        serde_json::from_str(&response_body)
+            .map_err(|e| AgentError::Llm(format!("Bedrock parse response: {e}")))
     }
 
     /// OpenAI dispatch with Buzz's relay-mesh `auto` policy layered over the
@@ -1932,8 +2006,12 @@ where
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::Bedrock => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
+        }
+        Provider::Bedrock => {
+            // Bedrock uses SigV4 signing per-request, not bearer auth.
+            Ok(Arc::new(StaticTokenSource::new(String::new())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
             if !cfg.api_key.is_empty() {
@@ -1956,6 +2034,215 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
             Ok(PkceOAuthTokenSource::new(pkce)?)
         }
     }
+}
+
+/// Build the Converse API request body for `Llm::complete` on `Provider::Bedrock`.
+fn bedrock_converse_body(
+    cfg: &Config,
+    system_prompt: &str,
+    history: &[HistoryItem],
+    tools: &[ToolDef],
+    _effective_model: &str,
+) -> Value {
+    let mut messages: Vec<Value> = Vec::new();
+
+    for item in history {
+        match item {
+            HistoryItem::User(text) => {
+                messages.push(json!({
+                    "role": "user",
+                    "content": [{"text": text}],
+                }));
+            }
+            HistoryItem::Assistant {
+                text,
+                tool_calls,
+                ..
+            } => {
+                let mut content: Vec<Value> = Vec::new();
+                if !text.is_empty() {
+                    content.push(json!({"text": text}));
+                }
+                for tc in tool_calls {
+                    content.push(json!({
+                        "toolUse": {
+                            "toolUseId": tc.provider_id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        }
+                    }));
+                }
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": content,
+                }));
+            }
+            HistoryItem::ToolResult(tr) => {
+                let mut content: Vec<Value> = Vec::new();
+                for tc in &tr.content {
+                    match tc {
+                        ToolResultContent::Text(t) => {
+                            content.push(json!({
+                                "toolResult": {
+                                    "toolUseId": tr.provider_id,
+                                    "content": [{"text": t}],
+                                    "status": if tr.is_error { "error" } else { "success" },
+                                }
+                            }));
+                        }
+                        ToolResultContent::Image { data, mime_type } => {
+                            let fmt = mime_type
+                                .strip_prefix("image/")
+                                .unwrap_or(mime_type.as_str());
+                            content.push(json!({
+                                "toolResult": {
+                                    "toolUseId": tr.provider_id,
+                                    "content": [{
+                                        "image": {
+                                            "format": fmt,
+                                            "source": { "bytes": data },
+                                        }
+                                    }],
+                                    "status": if tr.is_error { "error" } else { "success" },
+                                }
+                            }));
+                        }
+                    }
+                }
+                messages.push(json!({
+                    "role": "user",
+                    "content": content,
+                }));
+            }
+        }
+    }
+
+    let mut body = json!({
+        "messages": messages,
+        "system": [{"text": system_prompt}],
+        "inferenceConfig": {
+            "maxTokens": cfg.max_output_tokens,
+        },
+    });
+
+    if !tools.is_empty() {
+        let bedrock_tools: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "toolSpec": {
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": {
+                            "json": t.input_schema,
+                        },
+                    }
+                })
+            })
+            .collect();
+        body["toolConfig"] = json!({
+            "tools": bedrock_tools,
+        });
+    }
+
+    body
+}
+
+/// Build a simpler Converse API body for `Llm::summarize` on `Provider::Bedrock`.
+fn bedrock_converse_summary_body(
+    _effective_model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    max_output_tokens: u32,
+) -> Value {
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"text": user_prompt}],
+            }
+        ],
+        "system": [{"text": system_prompt}],
+        "inferenceConfig": {
+            "maxTokens": max_output_tokens,
+        },
+    })
+}
+
+/// Parse a Bedrock Converse API response into an `LlmResponse`.
+fn parse_bedrock_converse(v: Value) -> Result<LlmResponse, AgentError> {
+    let output = v
+        .get("output")
+        .and_then(|o| o.get("message"))
+        .ok_or_else(|| AgentError::Llm("Bedrock: no output message in response".into()))?;
+
+    let content = output
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AgentError::Llm("Bedrock: no content array in response".into()))?;
+
+    // Extract text from the first text block
+    let text = content
+        .iter()
+        .filter_map(|block| block.get("text"))
+        .next()
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Extract tool calls
+    let mut tool_calls = Vec::new();
+    for block in content {
+        if let Some(tool_use) = block.get("toolUse") {
+            let provider_id = tool_use
+                .get("toolUseId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = tool_use
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let arguments = tool_use.get("input").cloned().unwrap_or(Value::Null);
+            tool_calls.push(ToolCall {
+                provider_id,
+                name,
+                arguments,
+                provider_extra: serde_json::Map::new(),
+            });
+        }
+    }
+
+    // Map stop reason
+    let stop = match v.get("stopReason").and_then(|s| s.as_str()) {
+        Some("end_turn") => ProviderStop::EndTurn,
+        Some("tool_use") => ProviderStop::ToolUse,
+        Some("max_tokens") => ProviderStop::MaxTokens,
+        Some("content_filtered") => ProviderStop::Refusal,
+        _ => ProviderStop::Other,
+    };
+
+    // Read usage
+    let usage = v.get("usage");
+    let input_tokens = usage
+        .and_then(|u| u.get("inputTokens"))
+        .and_then(|v| v.as_u64());
+    let output_tokens = usage
+        .and_then(|u| u.get("outputTokens"))
+        .and_then(|v| v.as_u64());
+
+    Ok(LlmResponse {
+        text,
+        tool_calls,
+        stop,
+        input_tokens,
+        cached_input_tokens: None,
+        output_tokens,
+        total_tokens: None,
+        reasoning: String::new(),
+        reasoning_details: None,
+    })
 }
 
 /// Build the request body for `Llm::summarize` on `Provider::OpenRouter`.
