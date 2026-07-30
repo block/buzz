@@ -37,7 +37,8 @@ git merge-base --is-ancestor "$PR_HEAD_SHA" origin/main || { echo "candidate is 
 git checkout --detach "$PR_HEAD_SHA"
 scripts/desktop_release.py validate --candidate "$PR_HEAD_SHA" --version "$VERSION" --repo "$GITHUB_REPOSITORY"
 
-jq -e '.review_decision == "APPROVED"' <<<"$(gh api graphql -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewDecision}}}' -F owner="${GITHUB_REPOSITORY%/*}" -F repo="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" --jq '.data.repository.pullRequest')" >/dev/null || {
+review=$(gh api graphql -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewDecision}}}' -F owner="${GITHUB_REPOSITORY%/*}" -F repo="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" --jq '.data.repository.pullRequest')
+jq -e -f scripts/review-decision-approved.jq <<<"$review" >/dev/null || {
   echo "pull request effective review decision is not APPROVED" >&2
   exit 1
 }

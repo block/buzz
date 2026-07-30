@@ -64,6 +64,23 @@ grep -Fq 'git/refs' "$auto_tag"
 grep -Fq 'TAG_PREFIX="desktop-v"' "$auto_tag"
 grep -Fq 'target_sha=${{ github.event.pull_request.head.sha }}' "$auto_tag"
 grep -Fq 'scripts/verify-desktop-release-merge.sh' "$auto_tag"
+review_filter="$repo_root/scripts/review-decision-approved.jq"
+for fixture in \
+  '{"reviewDecision":"CHANGES_REQUESTED"}' \
+  '{"reviewDecision":"REVIEW_REQUIRED"}' \
+  '{"reviewDecision":null}' \
+  '{}'; do
+  if jq -e -f "$review_filter" <<<"$fixture" >/dev/null; then
+    echo "review-decision filter accepted non-approved fixture: $fixture" >&2
+    exit 1
+  fi
+done
+jq -e -f "$review_filter" >/dev/null <<'JSON' || {
+{"reviewDecision":"APPROVED"}
+JSON
+  echo "review-decision filter rejected approved GraphQL response" >&2
+  exit 1
+}
 required_check_filter="$repo_root/scripts/required-check-succeeded.jq"
 check_fixture() {
   local expected="$1" conclusion="$2" status="${3:-completed}"
