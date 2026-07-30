@@ -214,3 +214,18 @@ test("profile labels fall back to the independent Nostr name field", () => {
   );
   assert.equal(resolveOwnerHandle(profile, profile.pubkey), "legacy-name");
 });
+
+test("owner labels keep display_name ahead of the Nostr name fallback", () => {
+  const profile = {
+    pubkey: "deadbeef".repeat(8),
+    name: "legacy-name",
+    displayName: "Human Name",
+    avatarUrl: null,
+    about: null,
+    nip05Handle: null,
+    ownerPubkey: null,
+    hasProfileEvent: true,
+  };
+
+  assert.equal(resolveOwnerHandle(profile, profile.pubkey), "Human Name");
+});
