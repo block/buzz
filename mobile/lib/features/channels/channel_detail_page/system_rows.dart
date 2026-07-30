@@ -140,6 +140,7 @@ class _SystemMessageRow extends ConsumerWidget {
                             : Grid.xxs),
                   ),
                   child: ReactionRow(
+                    messageId: message.id,
                     reactions: reactions,
                     onToggle: groupedMessages == null
                         ? (emoji) => toggleReaction(ref, message, emoji)

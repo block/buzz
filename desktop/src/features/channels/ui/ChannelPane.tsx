@@ -21,10 +21,7 @@ import {
   getDmHuddleMemberPubkeys,
   hasOtherDmParticipant,
 } from "@/features/channels/lib/dmHuddleMembers";
-import {
-  buildVideoReviewCommentsByRootId,
-  buildVideoReviewContextForMessage,
-} from "@/features/messages/lib/videoReviewContext";
+import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
@@ -150,6 +147,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   profilePanelTab,
   profilePanelView,
   targetMessageId,
+  threadAllMessages,
   threadHeadMessage,
   threadMessages,
   threadMessagesPending = false,
@@ -472,25 +470,26 @@ export const ChannelPane = React.memo(function ChannelPane({
     threadHeadMessage,
     threadMessages,
   });
-  const videoReviewCommentsByRootId = React.useMemo(
-    () => buildVideoReviewCommentsByRootId(messages),
-    [messages],
-  );
   const activeVideoReviewCommentSender = activeChannel?.archivedAt
     ? undefined
     : onSendVideoReviewComment;
-  const threadHeadVideoReviewContext = React.useMemo(() => {
-    if (!threadHeadMessage) {
-      return undefined;
+  const threadVideoReviewContextsByMessageId = React.useMemo(() => {
+    const messagesById = new Map(
+      messages.map((message) => [message.id, message]),
+    );
+    if (threadHeadMessage) {
+      messagesById.set(threadHeadMessage.id, threadHeadMessage);
+    }
+    for (const message of threadAllMessages) {
+      messagesById.set(message.id, message);
     }
 
-    return buildVideoReviewContextForMessage({
+    return buildVideoReviewContextsByMessageId({
       channelId: activeChannel?.id ?? null,
       channelName: activeChannel?.name,
       channelType: activeChannel?.channelType ?? null,
-      comments: videoReviewCommentsByRootId.get(threadHeadMessage.id) ?? [],
       isSendingVideoReviewComment: isSending,
-      message: threadHeadMessage,
+      messages: [...messagesById.values()],
       onSendVideoReviewComment: activeVideoReviewCommentSender,
       onToggleReaction,
       profiles,
@@ -499,10 +498,11 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel,
     activeVideoReviewCommentSender,
     isSending,
+    messages,
     onToggleReaction,
     profiles,
+    threadAllMessages,
     threadHeadMessage,
-    videoReviewCommentsByRootId,
   ]);
 
   const isOverlay = useIsThreadPanelOverlay();
@@ -876,7 +876,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
                 threadHead={threadHeadMessage}
-                threadHeadVideoReviewContext={threadHeadVideoReviewContext}
+                videoReviewContextsByMessageId={
+                  threadVideoReviewContextsByMessageId
+                }
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}
                 threadRepliesPending={threadMessagesPending}

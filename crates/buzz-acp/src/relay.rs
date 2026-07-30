@@ -405,6 +405,19 @@ impl RestClient {
             .map_err(|e| RelayError::Http(e.to_string()))
     }
 
+    /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
+    ///
+    /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
+    /// Returns the bridge response as a `serde_json::Value` (usually `{ "count": n }`).
+    pub async fn count(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/count", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
     /// Submit a signed event via the HTTP bridge: `POST /events` with NIP-98 auth.
     ///
     /// The event must already be signed. Returns the relay response JSON.

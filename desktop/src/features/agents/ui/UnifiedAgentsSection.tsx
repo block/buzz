@@ -68,7 +68,7 @@ type UnifiedAgentsSectionProps = {
 const AGENT_CARD_COLUMN_CLASS = "w-full";
 export const AGENT_CARD_GRID_COLUMNS_CLASS =
   "grid-cols-[repeat(auto-fill,minmax(220px,240px))]";
-const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid justify-start gap-3`;
+export const IDENTITY_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid justify-start gap-3 [@container(max-width:40rem)]:justify-center`;
 
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
@@ -153,7 +153,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
-          <div className={AGENT_CARD_GRID_CLASS}>
+          <div className={IDENTITY_CARD_GRID_CLASS}>
             {groups.map((group) => {
               const profileAgent = pickProfileAgent(group.agents);
               return (
@@ -479,7 +479,7 @@ function NewAgentCard({
 
 function LoadingSkeleton() {
   return (
-    <div className={AGENT_CARD_GRID_CLASS}>
+    <div className={IDENTITY_CARD_GRID_CLASS}>
       <IdentityCardSkeleton
         footerSubtitleWidthClass="w-14"
         footerTitleWidthClass="w-24"
@@ -537,7 +537,7 @@ function CollapsibleAgentGroup({
         <span className="text-xs text-muted-foreground">({agents.length})</span>
       </button>
       {!isCollapsed ? (
-        <div className={AGENT_CARD_GRID_CLASS}>
+        <div className={IDENTITY_CARD_GRID_CLASS}>
           {agents.map((agent) => (
             <StandaloneAgentCard
               agent={agent}

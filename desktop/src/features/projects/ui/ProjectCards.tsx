@@ -421,7 +421,8 @@ export function ProjectGridCard({
 }: ProjectItemProps) {
   return (
     <Card
-      className="group relative flex min-h-44 flex-col overflow-hidden border-border/60 bg-card shadow-none transition-colors duration-150 hover:bg-muted/20"
+      className="group relative flex min-h-44 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
+      data-projects-grid-card
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
