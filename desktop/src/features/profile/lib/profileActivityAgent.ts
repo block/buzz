@@ -18,7 +18,11 @@ export function resolveProfileActivityAgent({
   effectivePubkey: string | null;
   isBot: boolean;
   managedAgent: ManagedAgent | undefined;
-  profile: { avatarUrl?: string | null; displayName?: string | null } | null;
+  profile: {
+    avatarUrl?: string | null;
+    displayName?: string | null;
+    name?: string | null;
+  } | null;
   relayAgent: RelayAgent | undefined;
   viewerIsOwner: boolean;
 }): ProfileActivityAgent | null {
@@ -37,7 +41,9 @@ export function resolveProfileActivityAgent({
 
   return {
     avatarUrl: profile?.avatarUrl ?? null,
-    name: relayAgent?.name ?? profile?.displayName?.trim() ?? "Agent",
+    name:
+      relayAgent?.name ??
+      (profile?.displayName?.trim() || profile?.name?.trim() || "Agent"),
     pubkey: effectivePubkey,
     status: relayAgent?.status === "offline" ? "stopped" : "deployed",
   };
