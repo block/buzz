@@ -6,6 +6,16 @@ use std::{collections::BTreeMap, path::PathBuf, process::Child};
 pub enum BackendKind {
     #[default]
     Local,
+    /// The user runs `buzz-acp` themselves — typically in their own container on
+    /// their own host. Buzz mints the agent identity and publishes its kind:0
+    /// profile, then hands over an env block (see
+    /// [`crate::managed_agents::external_env`]); it never spawns, deploys,
+    /// stops, or reads logs for this agent. Liveness comes from relay presence
+    /// (kind:20001) alone.
+    ///
+    /// Distinct from [`BackendKind::Provider`]: there is no provider binary and
+    /// no deploy step, so `backend_agent_id` is always `None`.
+    External,
     Provider {
         id: String,
         config: serde_json::Value,

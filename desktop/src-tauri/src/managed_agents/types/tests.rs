@@ -694,3 +694,40 @@ fn mint_rejects_out_of_range_input_parallelism() {
         "input-branch error must not blame the definition: {err}"
     );
 }
+
+#[test]
+fn backend_kind_external_round_trips_through_serde() {
+    use super::BackendKind;
+
+    let parsed: BackendKind =
+        serde_json::from_str(r#"{"type":"external"}"#).expect("external backend must deserialize");
+    assert_eq!(parsed, BackendKind::External);
+    assert_eq!(
+        serde_json::to_string(&BackendKind::External).unwrap(),
+        r#"{"type":"external"}"#
+    );
+}
+
+#[test]
+fn agent_record_without_backend_field_still_defaults_to_local() {
+    // Adding the External variant must not disturb the `#[serde(default)]`
+    // path every pre-backend record on disk relies on.
+    let record: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#,
+    )
+    .expect("record without backend should deserialize");
+    assert_eq!(record.backend, super::BackendKind::Local);
+}

@@ -802,6 +802,7 @@ pub fn run() {
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
+            get_external_agent_env,
             list_personas,
             create_persona,
             update_persona,

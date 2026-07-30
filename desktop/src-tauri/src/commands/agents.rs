@@ -999,7 +999,9 @@ pub async fn create_managed_agent(
         .err();
 
     // ── Phase 5: provider deploy (async, outside lock) ───────────────────────
-    let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
+    let spawn_error = if input.spawn_after_create
+        && matches!(input.backend, BackendKind::Provider { .. })
+    {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
             // Read the saved record to build the deploy payload (record has the
             // canonical field values after Phase 3 normalization).
@@ -1027,31 +1029,34 @@ pub async fn create_managed_agent(
     };
 
     // Rebuild summary if provider deploy may have updated backend_agent_id.
-    let final_agent = if input.backend != BackendKind::Local && spawn_error.is_none() {
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let records = load_managed_agents(&app)?;
-        let runtimes = state
-            .managed_agent_processes
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let record = records
-            .iter()
-            .find(|r| r.pubkey == pubkey)
-            .ok_or_else(|| "agent disappeared".to_string())?;
-        let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(
-            &app,
-            record,
-            &runtimes,
-            &personas,
-            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-        )?
-    } else {
-        agent
-    };
+    // Only the provider path writes that field, so External skips the extra
+    // store lock and three disk reads.
+    let final_agent =
+        if matches!(input.backend, BackendKind::Provider { .. }) && spawn_error.is_none() {
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let records = load_managed_agents(&app)?;
+            let runtimes = state
+                .managed_agent_processes
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let record = records
+                .iter()
+                .find(|r| r.pubkey == pubkey)
+                .ok_or_else(|| "agent disappeared".to_string())?;
+            let personas = load_personas(&app).unwrap_or_default();
+            build_managed_agent_summary(
+                &app,
+                record,
+                &runtimes,
+                &personas,
+                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
+            )?
+        } else {
+            agent
+        };
 
     Ok(CreateManagedAgentResponse {
         agent: final_agent,
@@ -1122,14 +1127,24 @@ pub async fn start_managed_agent(
             persona_id: record.persona_id.clone(),
         };
 
-        let target = if record.backend == BackendKind::Local {
-            StartTarget::Local
-        } else {
-            StartTarget::Provider {
+        // Exhaustive on purpose: a new BackendKind must fail to compile here
+        // rather than fall through into the provider deploy path.
+        let target = match record.backend {
+            BackendKind::Local => StartTarget::Local,
+            // Buzz does not run external agents — the user does. Refuse before
+            // build_deploy_payload, which would otherwise hit the keyring and
+            // report a misleading key error for a start that was never valid.
+            BackendKind::External => {
+                return Err(format!(
+                    "agent {pubkey} runs outside Buzz — start it where it lives, \
+                     then copy its env block from the agent's settings if needed"
+                ));
+            }
+            BackendKind::Provider { .. } => StartTarget::Provider {
                 backend: record.backend.clone(),
                 cached_binary_path: record.provider_binary_path.clone(),
                 agent_json: build_deploy_payload(&app, &state, record)?,
-            }
+            },
         };
 
         (target, reconcile)

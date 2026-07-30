@@ -130,24 +130,25 @@ pub(crate) fn resolve_workspace_pair_key(
     ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
 }
 
-pub fn build_managed_agent_summary(
-    app: &AppHandle,
-    record: &ManagedAgentRecord,
-    runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-    global_config: &crate::managed_agents::GlobalAgentConfig,
-) -> Result<ManagedAgentSummary, String> {
+/// The control-plane status string for a backend Buzz does not run in-process.
+///
+/// Returns `None` for [`BackendKind::Local`], whose status is derived from live
+/// process state by the caller. Split out of `build_managed_agent_summary` so the
+/// per-backend mapping is testable without an `AppHandle`.
+pub(crate) fn remote_backend_status(
+    backend: &crate::managed_agents::BackendKind,
+    backend_agent_id: Option<&str>,
+) -> Option<&'static str> {
     use crate::managed_agents::BackendKind;
-
-    // Community-scoped truth: this summary describes the pair for the active
-    // workspace relay. An agent running only in another community must read
-    // as stopped here — matching by pubkey alone would show every community a
-    // green light as long as any pair anywhere is alive.
-    let pair_key = workspace_pair_key(app, record);
-    let pair_runtime = pair_key.as_ref().and_then(|key| runtimes.get(key));
-
-    let (status, pid, log_path) = if record.backend != BackendKind::Local {
-        // Two-axis status model for remote agents:
+    match backend {
+        BackendKind::Local => None,
+        // External agents have no control-plane axis at all: Buzz never deploys
+        // them, so `backend_agent_id` is always None and the provider-style
+        // "deployed"/"not_deployed" pair would read "not_deployed" forever. The
+        // only real signal is the live axis — relay presence (kind:20001),
+        // polled by the frontend and shown as a PresenceDot.
+        BackendKind::External => Some("external"),
+        // Two-axis status model for provider-deployed agents:
         //
         //   Control-plane (this field): "deployed" = provider has been invoked and
         //   returned a backend_agent_id. "not_deployed" = no deploy call yet (or it
@@ -162,12 +163,34 @@ pub fn build_managed_agent_summary(
         // (infrastructure still exists). This is intentional — the provider may
         // have allocated a VM/container that persists across process restarts.
         // A future provider `undeploy` operation (v2) will handle teardown.
-        let status = if record.backend_agent_id.is_some() {
-            "deployed".to_string()
+        BackendKind::Provider { .. } => Some(if backend_agent_id.is_some() {
+            "deployed"
         } else {
-            "not_deployed".to_string()
-        };
-        (status, None, String::new())
+            "not_deployed"
+        }),
+    }
+}
+
+pub fn build_managed_agent_summary(
+    app: &AppHandle,
+    record: &ManagedAgentRecord,
+    runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    personas: &[crate::managed_agents::types::AgentDefinition],
+    global_config: &crate::managed_agents::GlobalAgentConfig,
+) -> Result<ManagedAgentSummary, String> {
+    // Community-scoped truth: this summary describes the pair for the active
+    // workspace relay. An agent running only in another community must read
+    // as stopped here — matching by pubkey alone would show every community a
+    // green light as long as any pair anywhere is alive.
+    let pair_key = workspace_pair_key(app, record);
+    let pair_runtime = pair_key.as_ref().and_then(|key| runtimes.get(key));
+
+    // Backends Buzz does not run in-process have no pid and no log file; their
+    // liveness comes from relay presence, polled by the frontend.
+    let (status, pid, log_path) = if let Some(remote_status) =
+        remote_backend_status(&record.backend, record.backend_agent_id.as_deref())
+    {
+        (remote_status.to_string(), None, String::new())
     } else {
         let persisted_pid = record.runtime_pid.filter(|pid| process_is_running(*pid));
         if let Some(runtime) = pair_runtime {

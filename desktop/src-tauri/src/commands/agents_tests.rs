@@ -247,6 +247,13 @@ fn normalize_relay_mesh_rejects_non_local_backend() {
         normalize_relay_mesh(Some(&config), &backend).unwrap_err(),
         "Buzz shared compute agents must use the local backend"
     );
+
+    // External agents run on hardware Buzz cannot schedule mesh inference on,
+    // so they are rejected for the same reason provider agents are.
+    assert_eq!(
+        normalize_relay_mesh(Some(&config), &BackendKind::External).unwrap_err(),
+        "Buzz shared compute agents must use the local backend"
+    );
 }
 
 #[test]
