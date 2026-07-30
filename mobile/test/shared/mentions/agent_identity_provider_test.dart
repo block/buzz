@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -15,6 +16,12 @@ void main() {
       overrides: [relaySessionProvider.overrideWith(() => relaySession)],
     );
     addTearDown(container.dispose);
+    final keepAlive = container.listen(
+      channelBotPubkeysProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(keepAlive.close);
 
     expect(await container.read(channelBotPubkeysProvider(_channelId).future), {
       _agentPubkey,
@@ -30,6 +37,63 @@ void main() {
       await container.read(channelBotPubkeysProvider(_channelId).future),
       isEmpty,
     );
+  });
+
+  test('refreshes channel members from live membership updates', () async {
+    final relaySession = _MembershipRelaySessionNotifier([
+      _membershipEvent(role: 'bot'),
+      _membershipEvent(role: 'member'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    addTearDown(container.dispose);
+    final keepAlive = container.listen(
+      channelMembersProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(keepAlive.close);
+
+    expect(
+      (await container.read(
+        channelMembersProvider(_channelId).future,
+      )).single.role,
+      'bot',
+    );
+    await relaySession.subscribed;
+
+    relaySession.emit(_membershipEvent(role: 'member'));
+    await _pumpEventQueue();
+
+    expect(
+      (await container.read(
+        channelMembersProvider(_channelId).future,
+      )).single.role,
+      'member',
+    );
+  });
+
+  test('disposes the live role subscription without consumers', () async {
+    final relaySession = _MembershipRelaySessionNotifier([
+      _membershipEvent(role: 'bot'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    addTearDown(container.dispose);
+    final keepAlive = container.listen(
+      channelBotPubkeysProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+
+    await container.read(channelBotPubkeysProvider(_channelId).future);
+    await relaySession.subscribed;
+    keepAlive.close();
+    await container.pump();
+
+    expect(relaySession.unsubscribeCount, 1);
   });
 }
 
@@ -60,6 +124,7 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> liveFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
   final Completer<void> _subscribed = Completer<void>();
+  var unsubscribeCount = 0;
   var _membershipIndex = 0;
 
   _MembershipRelaySessionNotifier(this._memberships);
@@ -86,7 +151,10 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
     liveFilters.add(filter);
     _listeners.add(onEvent);
     if (!_subscribed.isCompleted) _subscribed.complete();
-    return () => _listeners.remove(onEvent);
+    return () {
+      unsubscribeCount++;
+      _listeners.remove(onEvent);
+    };
   }
 
   void emit(NostrEvent event) {

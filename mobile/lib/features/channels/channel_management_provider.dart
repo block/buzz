@@ -393,8 +393,9 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
 });
 
 /// Channel members from kind:39002 NIP-29 members event.
-final channelMembersProvider =
-    FutureProvider.family<List<ChannelMember>, String>((ref, channelId) async {
+final channelMembersProvider = FutureProvider.autoDispose
+    .family<List<ChannelMember>, String>((ref, channelId) async {
+      ref.watch(channelMembershipUpdateProvider(channelId));
       final session = ref.watch(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilters.channelMembers(channelId),

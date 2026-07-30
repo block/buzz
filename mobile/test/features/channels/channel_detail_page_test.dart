@@ -26,6 +26,7 @@ import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
@@ -188,6 +189,9 @@ Widget _buildTestable({
       channelMembersProvider(_channelId).overrideWith(
         (ref) async => loadMembers != null ? loadMembers() : members,
       ),
+      channelBotPubkeysProvider(
+        _channelId,
+      ).overrideWith((ref) async => const <String>{}),
       if (createChannelActions != null)
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)

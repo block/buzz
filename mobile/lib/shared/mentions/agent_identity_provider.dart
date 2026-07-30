@@ -224,43 +224,42 @@ class _ChannelBotRoleSubscription extends Notifier<int> {
   }
 }
 
-final _channelBotRoleSubscriptionProvider =
-    NotifierProvider.family<_ChannelBotRoleSubscription, int, String>(
+/// Monotonically increments when the channel's kind:39002 membership snapshot
+/// changes. Channel-member and agent-role views share this source so remote
+/// membership updates refresh both snapshots together.
+final channelMembershipUpdateProvider = NotifierProvider.autoDispose
+    .family<_ChannelBotRoleSubscription, int, String>(
       _ChannelBotRoleSubscription.new,
     );
 
 /// Bot pubkeys currently assigned a channel bot role.
-final channelBotPubkeysProvider = FutureProvider.family<Set<String>, String>((
-  ref,
-  channelId,
-) async {
-  ref.watch(_channelBotRoleSubscriptionProvider(channelId));
-  final sessionState = ref.watch(relaySessionProvider);
-  if (sessionState.status != SessionStatus.connected) return const {};
-  final session = ref.read(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(
-    NostrFilters.channelMembers(channelId),
-  );
-  if (events.isEmpty) return const {};
-  return _AgentPubkeySet({
-    for (final member in membersFromEvent(events.first))
-      if (member.role == 'bot') member.pubkey.toLowerCase(),
-  });
-});
+final channelBotPubkeysProvider = FutureProvider.autoDispose
+    .family<Set<String>, String>((ref, channelId) async {
+      ref.watch(channelMembershipUpdateProvider(channelId));
+      final sessionState = ref.watch(relaySessionProvider);
+      if (sessionState.status != SessionStatus.connected) return const {};
+      final session = ref.read(relaySessionProvider.notifier);
+      final events = await session.fetchHistory(
+        NostrFilters.channelMembers(channelId),
+      );
+      if (events.isEmpty) return const {};
+      return _AgentPubkeySet({
+        for (final member in membersFromEvent(events.first))
+          if (member.role == 'bot') member.pubkey.toLowerCase(),
+      });
+    });
 
 /// Pubkeys currently known to represent agents in a channel.
-final agentMentionPubkeysProvider = Provider.family<Set<String>, String>((
-  ref,
-  channelId,
-) {
-  final channelBotPubkeys =
-      ref.watch(channelBotPubkeysProvider(channelId)).asData?.value ??
-      const <String>{};
-  return agentPubkeysWithChannelBots(
-    knownAgentPubkeys: ref.watch(knownAgentPubkeysProvider),
-    channelBotPubkeys: channelBotPubkeys,
-  );
-});
+final agentMentionPubkeysProvider = Provider.autoDispose
+    .family<Set<String>, String>((ref, channelId) {
+      final channelBotPubkeys =
+          ref.watch(channelBotPubkeysProvider(channelId)).asData?.value ??
+          const <String>{};
+      return agentPubkeysWithChannelBots(
+        knownAgentPubkeys: ref.watch(knownAgentPubkeysProvider),
+        channelBotPubkeys: channelBotPubkeys,
+      );
+    });
 
 class _AgentPubkeySet extends UnmodifiableSetView<String> {
   _AgentPubkeySet(Iterable<String> pubkeys) : super(Set.unmodifiable(pubkeys));
