@@ -277,6 +277,22 @@ function PersonaCatalogChooser({
   );
 }
 
+/**
+ * Derives the "Added by" label for a catalog entry from a resolved profile
+ * summary. Prefers `displayName`, falls back to `name`, then to the default
+ * "Community member" string when both are absent, null, or whitespace-only.
+ */
+export function resolveCatalogOwnerLabel(
+  summary:
+    | { displayName?: string | null; name?: string | null }
+    | null
+    | undefined,
+): string {
+  return (
+    summary?.displayName?.trim() || summary?.name?.trim() || "Community member"
+  );
+}
+
 function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
   const isCommunityEntry =
     isCatalogPersona(persona) && !persona.catalogSource.isOwn;
@@ -294,7 +310,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
     const summary = ownerPubkey
       ? ownerBatchQuery.data?.profiles[ownerPubkey.toLowerCase()]
       : undefined;
-    addedByLabel = summary?.displayName ?? summary?.name ?? "Community member";
+    addedByLabel = resolveCatalogOwnerLabel(summary);
   }
 
   return (
