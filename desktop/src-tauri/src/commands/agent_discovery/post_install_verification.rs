@@ -1,13 +1,19 @@
 use crate::managed_agents::{AcpAvailabilityStatus, InstallStepResult};
 
-pub(super) fn run(runtime_id: &str, steps: &mut Vec<InstallStepResult>) {
+use super::install_report::InstallReporter;
+
+pub(super) fn run(
+    runtime_id: &str,
+    steps: &mut Vec<InstallStepResult>,
+    reporter: &InstallReporter,
+) {
     // Observe PATH changes and binaries added after Buzz launched.
     crate::managed_agents::refresh_login_shell_path();
     crate::managed_agents::clear_resolve_cache();
 
     let availability = crate::managed_agents::discover_acp_runtime_availability(runtime_id);
     if let Some(failure) = failure(runtime_id, availability) {
-        steps.push(failure);
+        reporter.record_step(steps, failure);
     }
 }
 

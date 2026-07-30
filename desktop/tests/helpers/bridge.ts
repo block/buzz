@@ -131,6 +131,22 @@ export type MockAgentMemoryListing = {
   fetchedAt: number;
 };
 
+/** Result returned by the `install_acp_runtime` mock command. */
+type MockInstallRuntimeResult = {
+  success: boolean;
+  steps: {
+    step: string;
+    command: string;
+    success: boolean;
+    stdout: string;
+    stderr: string;
+    exit_code: number | null;
+    hint?: string;
+  }[];
+  /** Install log the failure message points at. Omitted = no log was written. */
+  log_path?: string | null;
+};
+
 type MockBridgeOptions = {
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
@@ -171,35 +187,17 @@ type MockBridgeOptions = {
   connectAcpRuntimeDelayMs?: number;
   connectAcpRuntimeError?: string;
   installAcpRuntimeDelayMs?: number;
+  /** Live output lines the mocked install emits before it settles, in order.
+   *  Each arrives as an `acp-install-output` event, preceded by the clear
+   *  signal the backend sends at the start of an attempt. */
+  installAcpRuntimeOutputLines?: string[];
   /** Override the result returned by the `install_acp_runtime` mock command.
    *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
-  installAcpRuntimeResult?: {
-    success: boolean;
-    steps: {
-      step: string;
-      command: string;
-      success: boolean;
-      stdout: string;
-      stderr: string;
-      exit_code: number | null;
-      hint?: string;
-    }[];
-  };
+  installAcpRuntimeResult?: MockInstallRuntimeResult;
   /** Sequence of results for successive `install_acp_runtime` calls. Call N
    *  returns results[N]; when exhausted the last entry repeats. Takes precedence
    *  over `installAcpRuntimeResult`. Use for fail-then-succeed Retry tests. */
-  installAcpRuntimeResults?: Array<{
-    success: boolean;
-    steps: {
-      step: string;
-      command: string;
-      success: boolean;
-      stdout: string;
-      stderr: string;
-      exit_code: number | null;
-      hint?: string;
-    }[];
-  }>;
+  installAcpRuntimeResults?: MockInstallRuntimeResult[];
   activePersonaIds?: string[];
   /**
    * Listing returned by the mocked `get_agent_memory` command. Pass a single
