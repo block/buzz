@@ -797,7 +797,7 @@ Docker Compose provides the full local development stack. All services include h
 | Pattern | Type | TTL | Purpose |
 |---------|------|-----|---------|
 | `buzz:channel:{uuid}` | Pub/Sub channel | — | Event fan-out (single-community form; shared multi-community Redis must use `buzz:{community}:channel:{uuid}` or equivalent) |
-| `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
+| `buzz:presence:{pubkey_hex}` | String | 180s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
 | `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window; shared multi-community Redis must scope by community) |
 
 ### Full-Text Search (Postgres FTS)

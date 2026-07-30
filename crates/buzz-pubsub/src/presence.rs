@@ -110,6 +110,12 @@ mod tests {
     }
 
     #[test]
+    fn presence_ttl_is_three_one_minute_heartbeat_windows() {
+        assert_eq!(PRESENCE_TTL_SECS, 180);
+        assert_eq!(PRESENCE_TTL_SECS, 3 * 60);
+    }
+
+    #[test]
     fn test_presence_key_format() {
         let pubkey = make_pubkey();
         let ctx = ctx(0xaaaa, "a.example");
