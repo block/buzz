@@ -111,6 +111,34 @@ test("palette searches open channels the user hasn't joined and joins on enter",
   );
 });
 
+test("create channel action makes a named channel and opens it", async ({
+  page,
+}) => {
+  await openDevModeChannel(page, "general");
+
+  await page.keyboard.press("Meta+k");
+  const palette = page.getByTestId("dev-mode-palette");
+  await expect(palette).toBeVisible();
+  await page
+    .getByTestId("dev-mode-palette-input")
+    .pressSequentially("create channel");
+  const entries = page.getByTestId("dev-mode-palette-entry");
+  await expect(entries.first()).toContainText("create channel");
+  await page.keyboard.press("Enter");
+
+  // Now in create mode: the typed text becomes the channel name.
+  await page
+    .getByTestId("dev-mode-palette-input")
+    .pressSequentially("Launch Plans!");
+  await expect(entries.first()).toContainText("create # launch-plans");
+  await page.keyboard.press("Enter");
+
+  await expect(palette).not.toBeVisible();
+  await expect(page.getByTestId("dev-mode-topbar-channel")).toContainText(
+    "launch-plans",
+  );
+});
+
 test("archiving a chat lands on the most recent non-pinned chat", async ({
   page,
 }) => {

@@ -10,6 +10,7 @@ import {
   useAddChannelMembersMutation,
   useArchiveChannelMutation,
   useChannelMembersQuery,
+  useCreateChannelMutation,
   useJoinChannelMutation,
   useLeaveChannelMutation,
   useUpdateChannelMutation,
@@ -56,7 +57,13 @@ type PaletteEntry = {
   run: () => void;
 };
 
-type PaletteMode = "root" | "color" | "add-member" | "members" | "rename";
+type PaletteMode =
+  | "root"
+  | "color"
+  | "add-member"
+  | "members"
+  | "rename"
+  | "create";
 
 /**
  * Channels can have 1000+ members; the browser renders at most this many
@@ -139,6 +146,7 @@ export function DevCommandPalette({
   const addMembersMutation = useAddChannelMembersMutation(activeChannelId);
   const leaveMutation = useLeaveChannelMutation(activeChannelId);
   const joinMutation = useJoinChannelMutation(null);
+  const createChannelMutation = useCreateChannelMutation();
   const archiveMutation = useArchiveChannelMutation(activeChannelId);
   const updateChannelMutation = useUpdateChannelMutation(activeChannelId);
   const membersQuery = useChannelMembersQuery(activeChannelId);
@@ -288,6 +296,39 @@ export function DevCommandPalette({
     ],
   );
 
+  // Manual channel creation: the typed name is used as-is (sanitized),
+  // unlike sessions whose placeholder is replaced by an LLM-generated title.
+  const createNamedChannel = React.useCallback(
+    async (rawName: string) => {
+      const slug = sanitizeChannelName(rawName);
+      if (!slug) return;
+      const takenNames = new Set(
+        [...channels, ...discoverableChannels].map((channel) => channel.name),
+      );
+      setActionError(null);
+      try {
+        const channel = await createChannelMutation.mutateAsync({
+          name: uniqueChannelName(slug, takenNames),
+          channelType: "stream",
+          visibility: "open",
+        });
+        onOpenChannel(channel.id);
+        onClose();
+      } catch (error) {
+        setActionError(
+          error instanceof Error ? error.message : "Failed to create channel.",
+        );
+      }
+    },
+    [
+      channels,
+      createChannelMutation,
+      discoverableChannels,
+      onClose,
+      onOpenChannel,
+    ],
+  );
+
   const joinAndOpenChannel = React.useCallback(
     (channelId: string) => {
       setActionError(null);
@@ -371,6 +412,31 @@ export function DevCommandPalette({
           label: `rename to # ${preview}`,
           detail: `was # ${activeChannel.name}`,
           run: () => void renameChannel(needle),
+        },
+      ];
+    }
+
+    if (mode === "create") {
+      const slug = sanitizeChannelName(needle);
+      if (!slug) {
+        return [
+          {
+            id: "create-hint",
+            label: "type a channel name…",
+            detail: "creates an open channel",
+            run: () => {},
+          },
+        ];
+      }
+      const takenNames = new Set(
+        [...channels, ...discoverableChannels].map((channel) => channel.name),
+      );
+      return [
+        {
+          id: "create-apply",
+          label: `create # ${uniqueChannelName(slug, takenNames)}`,
+          detail: "open channel",
+          run: () => void createNamedChannel(needle),
         },
       ];
     }
@@ -544,6 +610,16 @@ export function DevCommandPalette({
         },
       },
       {
+        id: "create-channel",
+        label: "create channel",
+        detail: "name it yourself",
+        run: () => {
+          setMode("create");
+          setQuery("");
+          setSelectedIndex(0);
+        },
+      },
+      {
         id: "standard-ui",
         label: "switch to standard ui",
         detail: "⌘⇧D",
@@ -631,6 +707,7 @@ export function DevCommandPalette({
     addUserToChannel,
     archiveChannel,
     channels,
+    createNamedChannel,
     discoverableChannels,
     isLastHumanMember,
     joinAndOpenChannel,
@@ -719,7 +796,9 @@ export function DevCommandPalette({
                   ? `search members of # ${activeChannel?.name ?? ""}…`
                   : mode === "rename"
                     ? `new name for # ${activeChannel?.name ?? ""}…`
-                    : "search channels and commands…"
+                    : mode === "create"
+                      ? "name the new channel…"
+                      : "search channels and commands…"
           }
           spellCheck={false}
           value={query}
