@@ -1002,6 +1002,10 @@ pub async fn cmd_remove_channel_member(
 }
 
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
+///
+/// `kind:10100` is replaceable. Publishing only `{channel_add_policy}` would wipe
+/// every other field (`respond_to`, `name`, `channel_ids`, …) and hide the agent
+/// from Desktop mention autocomplete (#3663). Read-merge-write the current record.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
         "anyone" | "owner_only" | "nobody" => {}
@@ -1032,7 +1036,8 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
+    let current = fetch_current_agent_profile(client).await?;
+    let content = merge_channel_add_policy(current, policy).to_string();
     use nostr::{EventBuilder, Kind};
     let builder = EventBuilder::new(
         Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
@@ -1044,6 +1049,47 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
+}
+
+/// Fetch the current user's agent directory record (kind:10100).
+/// Returns an empty object if no record exists yet.
+async fn fetch_current_agent_profile(
+    client: &BuzzClient,
+) -> Result<serde_json::Map<String, serde_json::Value>, CliError> {
+    let my_pk = client.keys().public_key().to_hex();
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "authors": [my_pk],
+        "limit": 1
+    });
+    let raw = client.query(&filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse agent profile query: {e}")))?;
+
+    let Some(arr) = events.as_array() else {
+        return Ok(serde_json::Map::new());
+    };
+    let Some(event) = arr.first() else {
+        return Ok(serde_json::Map::new());
+    };
+    let content_str = event
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("{}");
+    let content: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
+    Ok(content.as_object().cloned().unwrap_or_default())
+}
+
+/// Merge `channel_add_policy` into an existing agent-profile content object.
+fn merge_channel_add_policy(
+    mut current: serde_json::Map<String, serde_json::Value>,
+    policy: &str,
+) -> serde_json::Value {
+    current.insert(
+        "channel_add_policy".to_string(),
+        serde_json::Value::String(policy.to_string()),
+    );
+    serde_json::Value::Object(current)
 }
 
 pub async fn cmd_set_canvas(
@@ -1177,9 +1223,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        finalize_roster_resolution, merge_channel_add_policy, name_matches,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, ArchivedExclusion,
+        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1339,6 +1385,48 @@ mod tests {
         assert!(
             result.is_ok(),
             "empty allowed list should permit any policy: {result:?}"
+        );
+    }
+
+    #[test]
+    fn merge_channel_add_policy_preserves_existing_fields() {
+        // Regression for #3663: single-field replace wiped respond_to / name /
+        // channel_ids and hid the agent from Desktop mention autocomplete.
+        let current = serde_json::json!({
+            "name": "triage-bot",
+            "agent_type": "claude-agent-acp",
+            "respond_to": "allowlist",
+            "respond_to_allowlist": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+            "channel_ids": ["123e4567-e89b-42d3-a456-426614174000"],
+            "status": "online",
+            "channel_add_policy": "anyone"
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+
+        let merged = merge_channel_add_policy(current, "owner_only");
+        assert_eq!(merged["channel_add_policy"], "owner_only");
+        assert_eq!(merged["name"], "triage-bot");
+        assert_eq!(merged["respond_to"], "allowlist");
+        assert_eq!(
+            merged["respond_to_allowlist"][0],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            merged["channel_ids"][0],
+            "123e4567-e89b-42d3-a456-426614174000"
+        );
+        assert_eq!(merged["agent_type"], "claude-agent-acp");
+        assert_eq!(merged["status"], "online");
+    }
+
+    #[test]
+    fn merge_channel_add_policy_works_from_empty_record() {
+        let merged = merge_channel_add_policy(serde_json::Map::new(), "nobody");
+        assert_eq!(
+            merged,
+            serde_json::json!({ "channel_add_policy": "nobody" })
         );
     }
 
