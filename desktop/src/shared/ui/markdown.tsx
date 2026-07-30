@@ -24,15 +24,11 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
-import {
-  extractSupportedLinkPreviews,
-  parseSupportedLinkPreview,
-} from "@/shared/lib/linkPreview";
-import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
+import { parseSupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
-import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
+import { MessageLinkPreviews } from "@/shared/ui/link-preview-attachment";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import {
   computeConfigNudge,
@@ -1868,10 +1864,6 @@ function MarkdownInner({
     },
     [goChannel],
   );
-  const linkPreviews = React.useMemo(
-    () => (interactive ? extractSupportedLinkPreviews(content) : []),
-    [content, interactive],
-  );
   const configNudge = React.useMemo(
     () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
     [content, interactive, configNudgeAuthorPubkey],
@@ -1921,8 +1913,6 @@ function MarkdownInner({
     processedContent = `${processedContent}\u200B`;
   }
 
-  const resolvedLinkPreviews = useResolvedLinkPreviews(linkPreviews);
-
   // When a config-nudge suppresses the prose (selectProseOrNudge returns
   // null), skip the parse entirely — it would be thrown away unrendered.
   const componentSet = getMarkdownComponents(interactive, mediaInset);
@@ -1971,16 +1961,7 @@ function MarkdownInner({
               <ConfigNudgeCard nudge={configNudge} />
             </AttachmentGroup>
           ) : null}
-          {resolvedLinkPreviews.length > 0 ? (
-            <AttachmentGroup
-              className="max-w-full flex-wrap overflow-visible pb-0"
-              data-link-preview-list=""
-            >
-              {resolvedLinkPreviews.map((preview) => (
-                <LinkPreviewAttachment key={preview.href} preview={preview} />
-              ))}
-            </AttachmentGroup>
-          ) : null}
+          {interactive ? <MessageLinkPreviews content={content} /> : null}
         </VideoReviewMarkdownContext.Provider>
       </MarkdownRuntimeContext.Provider>
     </div>

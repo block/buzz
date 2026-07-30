@@ -344,6 +344,21 @@ type E2eConfig = {
      * message — lets specs prove malformed/hash/size-mismatch error paths.
      */
     snapshotFetchError?: string;
+    /**
+     * Deterministic responses for `fetch_link_preview_metadata`, keyed by
+     * href, so rich link preview cards render without network access.
+     */
+    linkPreviewMetadata?: Record<
+      string,
+      {
+        href: string;
+        siteName: string | null;
+        title: string | null;
+        description: string | null;
+        imageUrl: string | null;
+        faviconUrl: string | null;
+      } | null
+    >;
     uploadDescriptors?: RawBlobDescriptor[];
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
@@ -11201,6 +11216,13 @@ export function maybeInstallE2eTauriMocks() {
           payload as { data: number[]; filename?: string | null },
           activeConfig,
         );
+      case "fetch_link_preview_metadata": {
+        // The real command fetches OpenGraph metadata through Rust reqwest.
+        // In E2E, return deterministic metadata from mock config (keyed by
+        // href) so rich preview cards render without network access.
+        const { href } = payload as { href: string };
+        return activeConfig?.mock?.linkPreviewMetadata?.[href] ?? null;
+      }
       case "fetch_media_bytes": {
         // The real command fetches relay media through Rust reqwest and
         // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In

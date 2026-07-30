@@ -21,6 +21,8 @@
 //   --viewport <WxH>           Viewport dimensions (default: 1280x720)
 //   --outdir <path>            Output directory (default: test-results/screenshots)
 //   --messages <path>          JSON file with messages to inject before capture
+//   --mock-config <path>       JSON file merged into the bridge mock config
+//                              (e.g. { "linkPreviewMetadata": { ... } })
 //   --update-ready             Mock an available update so the sidebar update card renders
 
 import { parseArgs } from "node:util";
@@ -41,6 +43,7 @@ const { values: args } = parseArgs({
     viewport: { type: "string", default: "1280x720" },
     outdir: { type: "string", default: "test-results/screenshots" },
     messages: { type: "string" },
+    "mock-config": { type: "string" },
     "local-storage": { type: "string", multiple: true, default: [] },
     "update-ready": { type: "boolean", default: false },
   },
@@ -140,8 +143,18 @@ if (localStorageSeeds.length > 0) {
 }
 
 // Install E2E mock bridge config + MockNotification (mirrors installBridge in bridge.ts)
+let extraMockConfig = null;
+if (args["mock-config"]) {
+  try {
+    extraMockConfig = JSON.parse(
+      readFileSync(resolve(args["mock-config"]), "utf8"),
+    );
+  } catch (err) {
+    bail(`Failed to read mock-config file: ${err.message}`);
+  }
+}
 await page.addInitScript(
-  ({ updateReady }) => {
+  ({ updateReady, extraMock }) => {
     class MockNotification extends EventTarget {
       static permission = "granted";
       static async requestPermission() {
@@ -165,11 +178,18 @@ await page.addInitScript(
 
     window.__BUZZ_E2E__ = {
       mode: "mock",
-      ...(updateReady ? { mock: { updateAvailable: true } } : {}),
+      ...(updateReady || extraMock
+        ? {
+            mock: {
+              ...(updateReady ? { updateAvailable: true } : {}),
+              ...(extraMock ?? {}),
+            },
+          }
+        : {}),
     };
     window.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
   },
-  { updateReady: args["update-ready"] },
+  { updateReady: args["update-ready"], extraMock: extraMockConfig },
 );
 
 try {

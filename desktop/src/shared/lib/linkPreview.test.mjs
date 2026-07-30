@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  extractGenericLinkPreviewUrls,
   extractSupportedLinkPreviews,
   isSupportedLinkAutolinkLabel,
   parseSupportedLinkPreview,
@@ -251,4 +252,62 @@ test("isSupportedLinkAutolinkLabel matches normalized bare URL labels", () => {
     true,
   );
   assert.equal(isSupportedLinkAutolinkLabel("review this", preview), false);
+});
+
+test("extractGenericLinkPreviewUrls extracts non-provider https URLs", () => {
+  assert.deepEqual(
+    extractGenericLinkPreviewUrls(
+      "Check https://example.com/article and https://blog.rust-lang.org/2024/post/",
+    ),
+    ["https://example.com/article", "https://blog.rust-lang.org/2024/post/"],
+  );
+});
+
+test("extractGenericLinkPreviewUrls skips provider URLs covered by compact cards", () => {
+  assert.deepEqual(
+    extractGenericLinkPreviewUrls(
+      "See https://github.com/block/sprout/pull/1 and https://example.com/x",
+    ),
+    ["https://example.com/x"],
+  );
+});
+
+test("extractGenericLinkPreviewUrls skips media URLs", () => {
+  assert.deepEqual(
+    extractGenericLinkPreviewUrls(
+      "https://example.com/pic.png https://example.com/clip.mp4?t=1 https://example.com/page",
+    ),
+    ["https://example.com/page"],
+  );
+});
+
+test("extractGenericLinkPreviewUrls skips code blocks and dedupes", () => {
+  assert.deepEqual(
+    extractGenericLinkPreviewUrls(
+      [
+        "`https://example.com/inline-code`",
+        "```",
+        "https://example.com/fenced",
+        "```",
+        "https://example.com/page https://example.com/page",
+      ].join("\n"),
+    ),
+    ["https://example.com/page"],
+  );
+});
+
+test("extractGenericLinkPreviewUrls trims trailing punctuation and caps at three", () => {
+  assert.deepEqual(
+    extractGenericLinkPreviewUrls(
+      "https://a.example/1. https://b.example/2, https://c.example/3! https://d.example/4",
+    ),
+    ["https://a.example/1", "https://b.example/2", "https://c.example/3"],
+  );
+});
+
+test("extractGenericLinkPreviewUrls extracts markdown link targets", () => {
+  assert.deepEqual(
+    extractGenericLinkPreviewUrls("[the docs](https://example.com/docs)"),
+    ["https://example.com/docs"],
+  );
 });

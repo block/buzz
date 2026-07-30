@@ -1,15 +1,22 @@
+import * as React from "react";
 import { ExternalLink } from "lucide-react";
 
-import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
+import {
+  extractSupportedLinkPreviews,
+  type SupportedLinkPreview,
+} from "@/shared/lib/linkPreview";
+import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
 import { cn } from "@/shared/lib/cn";
 import {
   Attachment,
   AttachmentActions,
   AttachmentContent,
+  AttachmentGroup,
   AttachmentMedia,
   AttachmentTitle,
   AttachmentTrigger,
 } from "@/shared/ui/attachment";
+import { RichLinkPreviews } from "@/shared/ui/rich-link-preview-card";
 
 function LinearLogo({ className }: { className?: string }) {
   return (
@@ -154,5 +161,33 @@ export function LinkPreviewAttachment({
         </a>
       </AttachmentTrigger>
     </Attachment>
+  );
+}
+
+/**
+ * All link preview cards for a message body: compact provider cards
+ * (GitHub/Linear/Google) followed by rich OpenGraph cards for generic URLs.
+ */
+export function MessageLinkPreviews({ content }: { content: string }) {
+  const linkPreviews = React.useMemo(
+    () => extractSupportedLinkPreviews(content),
+    [content],
+  );
+  const resolvedLinkPreviews = useResolvedLinkPreviews(linkPreviews);
+
+  return (
+    <>
+      {resolvedLinkPreviews.length > 0 ? (
+        <AttachmentGroup
+          className="max-w-full flex-wrap overflow-visible pb-0"
+          data-link-preview-list=""
+        >
+          {resolvedLinkPreviews.map((preview) => (
+            <LinkPreviewAttachment key={preview.href} preview={preview} />
+          ))}
+        </AttachmentGroup>
+      ) : null}
+      <RichLinkPreviews content={content} />
+    </>
   );
 }

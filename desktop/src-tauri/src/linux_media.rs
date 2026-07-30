@@ -22,17 +22,19 @@
 //! which is the backend WebKitGTK media capture is reliable on.
 
 /// The origin Tauri serves the packaged app from on Linux.
+#[cfg(any(target_os = "linux", test))]
 const PROD_ORIGIN: &str = "tauri://localhost";
 
 /// The Vite dev-server origin (`devUrl` in `tauri.conf.json`, `strictPort`
 /// 1420 in `vite.config.ts`). Only trusted in debug builds.
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, any(target_os = "linux", test)))]
 const DEV_ORIGIN: &str = "http://localhost:1420";
 
 /// Whether `uri` (the webview's current document URI) is a trusted app origin
 /// allowed to use mic/camera. Matches the origin exactly or as a path prefix so
 /// `tauri://localhost.evil.com` and `http://localhost:14200` do not slip
 /// through. Pure and platform-independent so it can be unit-tested everywhere.
+#[cfg(any(target_os = "linux", test))]
 fn is_trusted_media_origin(uri: &str) -> bool {
     fn matches(uri: &str, origin: &str) -> bool {
         uri == origin

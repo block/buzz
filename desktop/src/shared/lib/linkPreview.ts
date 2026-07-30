@@ -37,6 +37,13 @@ const MARKDOWN_SUPPORTED_LINK_RE =
   /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
 
+const GENERIC_URL_RE = /(^|[\s([{<>"'])(https?:\/\/[^\s<>"'\]]+)/gi;
+const MARKDOWN_GENERIC_LINK_RE = /!?\[[^\]\n]*\]\((https?:\/\/[^)\s<>"']+)\)/gi;
+// Image/video URLs render inline as media, never as preview cards.
+const MEDIA_URL_RE =
+  /\.(?:png|jpe?g|gif|webp|avif|svg|mp4|webm|mov)(?:[?#]\S*)?$/i;
+const MAX_GENERIC_PREVIEWS = 3;
+
 type HiddenRange = {
   start: number;
   end: number;
@@ -523,4 +530,80 @@ export function extractSupportedLinkPreviews(
   }
 
   return previews;
+}
+
+/** Rich OpenGraph-style metadata for an arbitrary external URL. */
+export type RichLinkPreviewMetadata = {
+  href: string;
+  siteName: string | null;
+  title: string | null;
+  description: string | null;
+  imageUrl: string | null;
+  faviconUrl: string | null;
+};
+
+function normalizeGenericHref(href: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(trimUrlCandidate(href));
+  } catch {
+    return null;
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return null;
+  }
+  if (MEDIA_URL_RE.test(parsed.pathname)) {
+    return null;
+  }
+  // Provider-specific compact cards already cover these hosts.
+  if (parseSupportedLinkPreview(parsed.href)) {
+    return null;
+  }
+
+  return parsed.href;
+}
+
+/**
+ * Extract generic (non-provider) http(s) URLs eligible for a rich preview
+ * card, preserving first-seen order. Media URLs and URLs already covered by
+ * `extractSupportedLinkPreviews` are excluded.
+ */
+export function extractGenericLinkPreviewUrls(content: string): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const searchable = stripHiddenLinkPreviewContent(content);
+  const candidates: LinkPreviewCandidate[] = [];
+  let order = 0;
+
+  for (const match of searchable.matchAll(MARKDOWN_GENERIC_LINK_RE)) {
+    if (match[0]?.startsWith("!")) continue;
+    candidates.push({ href: match[1], index: match.index ?? 0, order });
+    order += 1;
+  }
+
+  for (const match of searchable.matchAll(GENERIC_URL_RE)) {
+    const prefix = match[1] ?? "";
+    const href = match[2];
+    if (!href) continue;
+    candidates.push({
+      href,
+      index: (match.index ?? 0) + prefix.length,
+      order,
+    });
+    order += 1;
+  }
+
+  candidates.sort((a, b) => a.index - b.index || a.order - b.order);
+
+  for (const candidate of candidates) {
+    const href = normalizeGenericHref(candidate.href);
+    if (!href || seen.has(href)) continue;
+
+    seen.add(href);
+    urls.push(href);
+    if (urls.length >= MAX_GENERIC_PREVIEWS) break;
+  }
+
+  return urls;
 }
