@@ -67,7 +67,12 @@ pub async fn update_profile(
             about: about.as_deref(),
             nip05: nip05_handle.as_deref(),
         },
-    )?;
+    )?
+    .custom_created_at(monotonic_created_at(
+        prior_events
+            .first()
+            .map(|event| event.created_at.as_secs() as i64),
+    ));
     submit_event(builder, &state).await?;
 
     // Re-fetch to return canonical profile.

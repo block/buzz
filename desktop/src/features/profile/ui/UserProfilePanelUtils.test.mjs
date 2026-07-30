@@ -196,7 +196,7 @@ test("profile labels fall back to the independent Nostr name field", () => {
   const profile = {
     pubkey: "deadbeef".repeat(8),
     name: "legacy-name",
-    displayName: null,
+    displayName: "   ",
     avatarUrl: null,
     about: null,
     nip05Handle: null,

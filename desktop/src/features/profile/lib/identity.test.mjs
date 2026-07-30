@@ -101,7 +101,7 @@ test("resolveUserLabel uses a legacy kind-0 name when display_name is absent", (
   );
 });
 
-test("mergeCurrentProfileIntoLookup keeps the raw name available to label resolution", () => {
+test("mergeCurrentProfileIntoLookup uses a nonblank name as its presentation label", () => {
   const profiles = mergeCurrentProfileIntoLookup(
     {
       [OWNER_PUBKEY]: summary({
@@ -112,6 +112,31 @@ test("mergeCurrentProfileIntoLookup keeps the raw name available to label resolu
     {
       pubkey: OWNER_PUBKEY,
       name: "legacy-name",
+      displayName: "   ",
+      avatarUrl: null,
+      nip05Handle: null,
+    },
+  );
+
+  assert.equal(profiles?.[OWNER_PUBKEY]?.displayName, "legacy-name");
+  assert.equal(profiles?.[OWNER_PUBKEY]?.name, "legacy-name");
+  assert.equal(
+    resolveUserLabel({ pubkey: OWNER_PUBKEY, profiles }),
+    "legacy-name",
+  );
+});
+
+test("mergeCurrentProfileIntoLookup does not restore a cleared name from stale lookup data", () => {
+  const profiles = mergeCurrentProfileIntoLookup(
+    {
+      [OWNER_PUBKEY]: summary({
+        displayName: "legacy-name",
+        name: "legacy-name",
+      }),
+    },
+    {
+      pubkey: OWNER_PUBKEY,
+      name: null,
       displayName: null,
       avatarUrl: null,
       nip05Handle: null,
@@ -119,8 +144,8 @@ test("mergeCurrentProfileIntoLookup keeps the raw name available to label resolu
   );
 
   assert.equal(profiles?.[OWNER_PUBKEY]?.displayName, null);
-  assert.equal(profiles?.[OWNER_PUBKEY]?.name, "legacy-name");
-  assert.equal(
+  assert.equal(profiles?.[OWNER_PUBKEY]?.name, null);
+  assert.notEqual(
     resolveUserLabel({ pubkey: OWNER_PUBKEY, profiles }),
     "legacy-name",
   );

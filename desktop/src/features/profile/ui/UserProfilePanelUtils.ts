@@ -230,9 +230,9 @@ export function resolveProfileDisplayName({
   pubkey: string | null;
 }) {
   return (
-    profile?.displayName ??
-    profile?.name ??
-    persona?.displayName ??
+    profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
+    persona?.displayName?.trim() ||
     (pubkey ? truncatePubkey(pubkey) : "Agent")
   );
 }

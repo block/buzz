@@ -386,6 +386,7 @@ export function formatTimelineMessages(
       currentPubkeyLower && actorPubkey === currentPubkeyLower
         ? "You"
         : profile?.displayName?.trim() ||
+          profile?.name?.trim() ||
           profile?.nip05Handle?.trim() ||
           truncatePubkey(actorPubkey);
     existing.users.push({

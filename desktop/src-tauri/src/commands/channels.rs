@@ -435,7 +435,18 @@ pub async fn get_channel_members(
                 profile_map.insert(
                     pk,
                     (
-                        profile.display_name.or(profile.name),
+                        profile
+                            .display_name
+                            .and_then(|value| {
+                                let value = value.trim();
+                                (!value.is_empty()).then(|| value.to_string())
+                            })
+                            .or_else(|| {
+                                profile.name.and_then(|value| {
+                                    let value = value.trim();
+                                    (!value.is_empty()).then(|| value.to_string())
+                                })
+                            }),
                         nostr_convert::profile_has_valid_oa_owner(ev),
                     ),
                 );
