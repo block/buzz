@@ -5,6 +5,7 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 
+import { matchBackForwardChord } from "@/app/navigation/backForwardChords";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 
@@ -13,19 +14,6 @@ type RouterHistoryState = {
   __TSR_key?: string;
   key?: string;
 };
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
-    return false;
-  }
-
-  return (
-    target.isContentEditable ||
-    target.closest(
-      'input, textarea, select, [contenteditable=""], [contenteditable="true"]',
-    ) !== null
-  );
-}
 
 export function useBackForwardControls() {
   const router = useRouter();
@@ -81,41 +69,22 @@ export function useBackForwardControls() {
   }, [canGoForward, router.history]);
 
   const handleKeyDown = React.useEffectEvent((event: KeyboardEvent) => {
-    if (isEditableTarget(event.target)) {
-      return;
-    }
+    // Note: the chords deliberately fire even when focus is inside an
+    // editable element. The composer autofocuses on every channel switch
+    // (`useComposerAutofocus`), so in steady state focus almost always
+    // lives in a contenteditable — an editable-target guard here made the
+    // shortcuts effectively dead (#3775). Safe because neither ⌘[ / ⌘]
+    // (macOS) nor Alt+←/→ (Windows/Linux) carry text-editing semantics,
+    // and the TipTap editor binds no conflicting shortcuts.
+    const direction = matchBackForwardChord(event, isMacPlatform());
 
-    const isMac = isMacPlatform();
-    const isBackShortcut = isMac
-      ? event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        !event.shiftKey &&
-        (event.key === "[" || event.code === "BracketLeft")
-      : event.altKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.shiftKey &&
-        event.key === "ArrowLeft";
-    const isForwardShortcut = isMac
-      ? event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        !event.shiftKey &&
-        (event.key === "]" || event.code === "BracketRight")
-      : event.altKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.shiftKey &&
-        event.key === "ArrowRight";
-
-    if (isBackShortcut) {
+    if (direction === "back") {
       event.preventDefault();
       goBack();
       return;
     }
 
-    if (isForwardShortcut) {
+    if (direction === "forward") {
       event.preventDefault();
       goForward();
     }
