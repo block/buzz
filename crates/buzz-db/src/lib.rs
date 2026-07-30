@@ -706,6 +706,22 @@ impl Db {
     /// the reason names the mechanism rather than a diagnosis).
     const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
 
+    /// Bound for individual statements on reader connections after acquire.
+    /// Acquire is already capped at [`Db::READER_ACQUIRE_TIMEOUT`]; without a
+    /// statement timeout, a replica that goes dark mid-transaction (LB
+    /// failover, security-group flip, standby promotion) hangs the request
+    /// indefinitely because writer-fallback only runs after acquire/proof
+    /// errors — not after an unbounded `query` (#3651).
+    ///
+    /// Comfortably above any healthy routed read; far below a hung request.
+    const READER_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// Bound for idle-in-transaction on reader connections. Snapshot-held
+    /// routed reads do work between page and aux statements; this only
+    /// catches the "session open but stuck idle" shape after a mid-flight
+    /// blackhole that leaves no statement running.
+    const READER_IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5);
+
     /// Connect the read-replica pool **lazily** — no connection is
     /// attempted at construction, so a reader that is down at boot cannot
     /// crash the relay (it starts all-writer with the fence closed and
@@ -719,14 +735,37 @@ impl Db {
     /// the pool back up, which is fine — routed reads re-fill it on demand.
     ///
     /// No floor guard: replica sessions are read-only, the trigger never
-    /// fires there (see [`Db::connect_pool`]).
+    /// fires there (see [`Db::connect_pool`]). Reader sessions do arm
+    /// `statement_timeout` + `idle_in_transaction_session_timeout` so a
+    /// blackholed path after acquire fails closed to the writer (#3651).
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
+        let statement_timeout_ms = Self::READER_STATEMENT_TIMEOUT.as_millis();
+        let idle_in_tx_timeout_ms = Self::READER_IDLE_IN_TRANSACTION_TIMEOUT.as_millis();
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(0)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .after_connect(move |conn, _meta| {
+                Box::pin(async move {
+                    // `SET` cannot take bind parameters; `set_config` can.
+                    // Session-level (is_local=false) so the bound covers the
+                    // whole pooled connection, including proved_reader BEGIN
+                    // and every page/aux statement on the held snapshot.
+                    sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                        .bind(format!("{statement_timeout_ms}ms"))
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query(
+                        "SELECT set_config('idle_in_transaction_session_timeout', $1, false)",
+                    )
+                    .bind(format!("{idle_in_tx_timeout_ms}ms"))
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok(())
+                })
+            })
             .connect_lazy(url)?)
     }
 
