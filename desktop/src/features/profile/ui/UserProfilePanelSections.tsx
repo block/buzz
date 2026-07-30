@@ -366,7 +366,7 @@ export function ProfileSummaryView({
             isOwner === true &&
             managedAgent &&
             canBuzzControlManagedAgent(managedAgent)
-              ? getManagedAgentPrimaryActionLabel(managedAgent)
+              ? (getManagedAgentPrimaryActionLabel(managedAgent) ?? undefined)
               : undefined
           }
           agentActionLive={

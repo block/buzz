@@ -49,7 +49,22 @@ export function canBuzzControlManagedAgent(
   return agent.backend.type !== "external";
 }
 
-export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+/**
+ * Label for the agent's start/stop control, or `null` when there is no valid
+ * action.
+ *
+ * `null` for `external` agents: Buzz does not run them, so every label would be
+ * a lie and the backend refuses the corresponding command. Returning `null`
+ * rather than a string makes callers handle it at the type level instead of
+ * relying on remembering to gate on [`canBuzzControlManagedAgent`] first.
+ */
+export function getManagedAgentPrimaryActionLabel(
+  agent: ManagedAgent,
+): string | null {
+  if (!canBuzzControlManagedAgent(agent)) {
+    return null;
+  }
+
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
   }

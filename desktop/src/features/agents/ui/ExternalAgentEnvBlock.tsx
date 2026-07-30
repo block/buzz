@@ -41,9 +41,16 @@ export function ExternalAgentEnvBlock({
 
   async function handleToggle() {
     if (isOpen) {
-      // Cancel any in-flight fetch before clearing state.
+      // Cancel any in-flight fetch and reset every piece of its state. The
+      // `finally` below is gated on this same ref, so it will not run for the
+      // cancelled fetch — without clearing here, `isLoading` would stay true
+      // forever. Not reachable through the toggle today (it is disabled while
+      // loading), but that makes correctness depend on a button's disabled
+      // state, which is not an invariant worth relying on.
       fetchCancelledRef.current = true;
       setEnvFile(null);
+      setIsLoading(false);
+      setLoadError(null);
       setIsOpen(false);
       return;
     }

@@ -1,7 +1,11 @@
 /**
  * Agent backend surface: where an agent's harness runs, and the API for the
- * backends Buzz does not run in-process. Split from `tauri.ts`/`types.ts`
- * (file-size guard); re-exported from both so import sites are unchanged.
+ * backends Buzz does not run in-process. Split out of `tauri.ts`/`types.ts`
+ * (file-size guard).
+ *
+ * Import sites point here directly rather than at a re-export from `tauri.ts`:
+ * this module imports `invokeTauri` from `tauri.ts`, so re-exporting would make
+ * the two modules cyclic. That matches how the other `tauri*.ts` siblings work.
  */
 import { invokeTauri } from "@/shared/api/tauri";
 

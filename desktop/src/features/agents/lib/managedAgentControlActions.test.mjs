@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canBuzzControlManagedAgent,
+  getManagedAgentPrimaryActionLabel,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -164,5 +166,34 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     events,
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
+  );
+});
+
+// ── external backend has no primary action ─────────────────────────────────
+
+test("external agents have no primary action label", () => {
+  const external = agent({ backend: { type: "external" }, status: "external" });
+
+  assert.equal(canBuzzControlManagedAgent(external), false);
+  // null, not a string: every label would be a lie, and the backend refuses the
+  // command. Callers must handle the absence at the type level rather than
+  // remembering to gate on canBuzzControlManagedAgent first.
+  assert.equal(getManagedAgentPrimaryActionLabel(external), null);
+});
+
+test("other backends keep their existing primary action labels", () => {
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(agent({ status: "stopped" })),
+    "Respawn",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(agent({ status: "running" })),
+    "Stop",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(
+      agent({ backend: { type: "provider", id: "blox", config: {} } }),
+    ),
+    "Deploy",
   );
 });
