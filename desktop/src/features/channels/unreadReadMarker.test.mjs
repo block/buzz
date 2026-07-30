@@ -18,6 +18,7 @@ import {
 } from "./useUnreadChannels.ts";
 import {
   isChannelUnreadTriggerKind,
+  trackSeenEvent,
   withChannelTagFallback,
 } from "./useLiveChannelUpdates.ts";
 import {
@@ -88,6 +89,16 @@ test("live event with h tag is preserved", () => {
   };
 
   assert.equal(withChannelTagFallback(message, "other-channel"), message);
+});
+
+test("notification event guard suppresses reconnect replay and stays bounded", () => {
+  const seen = new Set();
+
+  assert.equal(trackSeenEvent(seen, "event-a", 2), true);
+  assert.equal(trackSeenEvent(seen, "event-a", 2), false);
+  assert.equal(trackSeenEvent(seen, "event-b", 2), true);
+  assert.equal(trackSeenEvent(seen, "event-c", 2), true);
+  assert.deepEqual([...seen], ["event-b", "event-c"]);
 });
 
 test("dmHuddleStart_isDmOnlyUnreadTrigger", () => {

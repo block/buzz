@@ -49,3 +49,52 @@ export async function persistCurrentIdentity(): Promise<Identity> {
 export async function signOut(): Promise<void> {
   await invokeTauri("sign_out");
 }
+
+export type GeneratePassphraseOptions = {
+  /** Word count; Rust clamps to its allowed range (currently 3–10). */
+  words?: number;
+  /** Separator joined between words. Defaults to a space in Rust. */
+  separator?: string;
+};
+
+/** Generate a word passphrase (EFF short wordlist, OS entropy) in Rust. */
+export async function generateBackupPassphrase(
+  options?: GeneratePassphraseOptions,
+): Promise<string> {
+  return invokeTauri<string>("generate_backup_passphrase", {
+    words: options?.words,
+    separator: options?.separator,
+  });
+}
+
+/** Encrypt the current identity as an in-memory NIP-49 backup for native save. */
+export async function createNcryptsecBackup(password: string): Promise<string> {
+  return invokeTauri<string>("create_ncryptsec_backup", { password });
+}
+
+/** Save a portable backup copy. Returns null when the native dialog is cancelled. */
+export async function saveNcryptsecCopy(
+  ncryptsec: string,
+): Promise<string | null> {
+  return (
+    (await invokeTauri<string | null>("save_ncryptsec_copy", { ncryptsec })) ??
+    null
+  );
+}
+
+export type BackupVerification = {
+  pubkey: string;
+  npub: string;
+  matchesCurrentIdentity: boolean;
+};
+
+/** Decrypt locally and return only the backup's public identity and match state. */
+export async function verifyNcryptsecBackup(
+  ncryptsec: string,
+  password: string,
+): Promise<BackupVerification> {
+  return invokeTauri<BackupVerification>("verify_ncryptsec_backup", {
+    ncryptsec,
+    password,
+  });
+}

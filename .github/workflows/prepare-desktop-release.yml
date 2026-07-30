@@ -1,0 +1,38 @@
+name: Prepare Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semver to prepare (for example 0.5.1)
+        required: true
+
+env:
+  RELEASE_AUTOMATION_NAME: Carl
+  RELEASE_AUTOMATION_EMAIL: c7ebe626f000404285d3686e1dc74cc07cc60a9754a150041ba132e14bd3e2ec@buzz.block.builderlab.xyz
+
+jobs:
+  prepare:
+    if: github.repository == 'block/buzz'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Create short-lived release preparer token
+        id: preparer
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.BUZZ_RELEASE_TAGGER_CLIENT_ID }}
+          private-key: ${{ secrets.BUZZ_RELEASE_TAGGER_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ steps.preparer.outputs.token }}
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Prepare immutable candidate and open or update PR
+        env:
+          GH_TOKEN: ${{ steps.preparer.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: scripts/prepare-desktop-release.sh "$VERSION"

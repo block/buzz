@@ -85,7 +85,21 @@ pub(crate) struct UsageUpdatePayload {
     pub context_limit: u64,
     pub accumulated_input_tokens: u64,
     pub accumulated_output_tokens: u64,
+    /// The cache-served subset of `accumulated_input_tokens`. Optional — goose
+    /// does not send it, and buzz-agent only reports a non-zero value when the
+    /// provider returned a cache split, so `0` legitimately means either "no
+    /// cache hits" or "provider reported none".
+    #[serde(default)]
+    pub accumulated_cached_input_tokens: u64,
     pub accumulated_cost: Option<f64>,
+    /// Session-cumulative genuine provider total tokens. Optional — only
+    /// emitted by buzz-agent when every turn in the session so far supplied a
+    /// provider-reported total. Absent for goose (field ignore-if-absent for
+    /// backward compat), for Anthropic-backed turns, and for sessions where any
+    /// turn lacked a provider total. NIP-AM forbids deriving this by summing
+    /// categories, so the UI must approximate when this field is absent.
+    #[serde(default)]
+    pub accumulated_total_tokens: Option<u64>,
     /// Effective model id for this turn. Optional — goose payloads that
     /// predate this field deserialize cleanly as `None`.
     #[serde(default)]
@@ -107,6 +121,10 @@ struct SessionState {
     last_output: u64,
     /// Cumulative cost at the end of the LAST PUBLISHED turn.
     last_cost: Option<f64>,
+    /// Cumulative total tokens at the end of the LAST PUBLISHED turn.
+    /// `None` when the session has never emitted a provider total (Unseen) or
+    /// when any prior turn lacked one (poisoned).
+    last_total: Option<u64>,
 }
 
 /// Per-turn usage record exposed to `TurnCompletionGuard` for NIP-AM publishing.
@@ -125,6 +143,11 @@ pub struct TurnUsage {
     pub turn_input_tokens: Option<u64>,
     /// Per-turn output token delta; `None` when unreliable.
     pub turn_output_tokens: Option<u64>,
+    /// Per-turn total token delta; `None` when the cumulative total is
+    /// unavailable (no baseline, non-monotonic, or either snapshot was absent).
+    /// Field-local: a missing total never flips `delta_reliable` or invalidates
+    /// `turn_input_tokens`/`turn_output_tokens`.
+    pub turn_total_tokens: Option<u64>,
     /// Per-turn cost delta (`current − previous`); `None` when unreliable or
     /// either snapshot is missing.
     pub turn_cost_usd: Option<f64>,
@@ -132,6 +155,9 @@ pub struct TurnUsage {
     pub cumulative_input_tokens: u64,
     /// Session-cumulative output tokens as reported by goose at end of turn.
     pub cumulative_output_tokens: u64,
+    /// Session-cumulative genuine provider total tokens as reported by buzz-agent;
+    /// `None` when the session has never emitted one or any turn lacked one.
+    pub cumulative_total_tokens: Option<u64>,
     /// Session-cumulative estimated cost in USD; `None` if goose did not report it.
     pub cumulative_cost_usd: Option<f64>,
     /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
@@ -212,6 +238,7 @@ impl UsageTracker {
         let current_input = payload.accumulated_input_tokens;
         let current_output = payload.accumulated_output_tokens;
         let current_cost = payload.accumulated_cost;
+        let current_total = payload.accumulated_total_tokens;
 
         // Determine whether this session is currently in-flight so we know
         // whether to set `pending`. We compute the delta regardless so that
@@ -256,6 +283,17 @@ impl UsageTracker {
                 }
             };
 
+        // Total-token delta: field-local — never affects `delta_reliable` or
+        // the input/output deltas. Null when: no baseline exists, either
+        // snapshot is absent, or cumulative total decreased.
+        let turn_total = match self.sessions.get(session_id) {
+            Some(prev) => match (current_total, prev.last_total) {
+                (Some(cur), Some(p)) if cur >= p => Some(cur - p),
+                _ => None, // no baseline, absent on either side, or decrease
+            },
+            None => None, // no baseline yet
+        };
+
         if is_in_flight {
             // In-flight-match: update pending with the latest cumulative values.
             // Baseline is NOT advanced here — it advances only on take().
@@ -265,9 +303,11 @@ impl UsageTracker {
                 delta_reliable,
                 turn_input_tokens: turn_input,
                 turn_output_tokens: turn_output,
+                turn_total_tokens: turn_total,
                 turn_cost_usd: turn_cost,
                 cumulative_input_tokens: current_input,
                 cumulative_output_tokens: current_output,
+                cumulative_total_tokens: current_total,
                 cumulative_cost_usd: current_cost,
                 model: payload.model.clone(),
             });
@@ -286,6 +326,7 @@ impl UsageTracker {
                     last_input: current_input,
                     last_output: current_output,
                     last_cost: current_cost,
+                    last_total: current_total,
                 },
             );
         }
@@ -313,6 +354,7 @@ impl UsageTracker {
                 last_input: record.cumulative_input_tokens,
                 last_output: record.cumulative_output_tokens,
                 last_cost: record.cumulative_cost_usd,
+                last_total: record.cumulative_total_tokens,
             },
         );
         Some(record)
@@ -323,13 +365,46 @@ impl UsageTracker {
 mod tests {
     use super::*;
 
+    /// The camelCase key buzz-agent actually puts on the wire must land on the
+    /// field. A rename mismatch here would deserialize to the serde default of
+    /// 0, and every trial would price as if nothing had ever been cached — the
+    /// exact silent failure this field was added to remove.
+    #[test]
+    fn cached_input_tokens_deserialize_from_the_wire_key() {
+        let p: UsageUpdatePayload = serde_json::from_value(serde_json::json!({
+            "used": 15_247,
+            "contextLimit": 0,
+            "accumulatedInputTokens": 15_091,
+            "accumulatedOutputTokens": 156,
+            "accumulatedCachedInputTokens": 5_033,
+        }))
+        .expect("payload must deserialize");
+        assert_eq!(p.accumulated_cached_input_tokens, 5_033);
+        assert!(p.accumulated_cached_input_tokens <= p.accumulated_input_tokens);
+    }
+
+    /// goose does not send the field; its payloads must still deserialize.
+    #[test]
+    fn a_payload_without_the_cache_field_defaults_to_zero() {
+        let p: UsageUpdatePayload = serde_json::from_value(serde_json::json!({
+            "used": 500,
+            "contextLimit": 200_000,
+            "accumulatedInputTokens": 400,
+            "accumulatedOutputTokens": 100,
+        }))
+        .expect("payload must deserialize without the cache field");
+        assert_eq!(p.accumulated_cached_input_tokens, 0);
+    }
+
     fn payload(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
         UsageUpdatePayload {
             used: input + output,
             context_limit: 200_000,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: 0,
             accumulated_cost: cost,
+            accumulated_total_tokens: None,
             model: None,
         }
     }
@@ -340,7 +415,9 @@ mod tests {
             context_limit: 0,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: 0,
             accumulated_cost: cost,
+            accumulated_total_tokens: None,
             model: None,
         }
     }
@@ -836,7 +913,9 @@ mod tests {
             context_limit: 200_000,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: 0,
             accumulated_cost: cost,
+            accumulated_total_tokens: None,
             model: model.map(str::to_string),
         }
     }
@@ -888,5 +967,169 @@ mod tests {
             usage.model.is_none(),
             "TurnUsage.model must be None when payload omits the field"
         );
+    }
+
+    // ── accumulatedTotalTokens: field-local delta, session poisoning ───────
+
+    fn payload_with_total(input: u64, output: u64, total: Option<u64>) -> UsageUpdatePayload {
+        UsageUpdatePayload {
+            used: input + output,
+            context_limit: 200_000,
+            accumulated_input_tokens: input,
+            accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: 0,
+            accumulated_cost: None,
+            accumulated_total_tokens: total,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn first_update_without_baseline_turn_total_is_none() {
+        // No baseline exists → turn total null, but delta_reliable/input/output
+        // follow the normal first-turn rule (delta_reliable = false).
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-t1");
+        tracker.record("sess-t1", &payload_with_total(100, 20, Some(120)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(!usage.delta_reliable, "first turn: delta unreliable");
+        assert!(
+            usage.turn_total_tokens.is_none(),
+            "no baseline → turn total must be None"
+        );
+        assert_eq!(
+            usage.cumulative_total_tokens,
+            Some(120),
+            "cumulative total passes through even on first turn"
+        );
+    }
+
+    #[test]
+    fn second_turn_with_totals_produces_turn_delta() {
+        let mut tracker = UsageTracker::default();
+        // Turn 1 — establish baseline.
+        tracker.begin_turn("sess-t2");
+        tracker.record("sess-t2", &payload_with_total(100, 20, Some(120)));
+        let _ = tracker.take();
+
+        // Turn 2 — delta is computable.
+        tracker.begin_turn("sess-t2");
+        tracker.record("sess-t2", &payload_with_total(200, 50, Some(250)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_total_tokens, Some(130)); // 250 - 120
+        assert_eq!(usage.cumulative_total_tokens, Some(250));
+    }
+
+    #[test]
+    fn cumulative_total_decrease_leaves_turn_total_null_without_affecting_reliability() {
+        // Cumulative total decreases (e.g. counter reset) → turn total null,
+        // but delta_reliable and input/output are NOT affected (field-local).
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-t3");
+        tracker.record("sess-t3", &payload_with_total(500, 100, Some(600)));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-t3");
+        // Cumulative total decreased: 600 → 50.
+        tracker.record("sess-t3", &payload_with_total(600, 150, Some(50)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(
+            usage.delta_reliable,
+            "input/output decrease would flip reliability; total decrease must not"
+        );
+        assert_eq!(usage.turn_input_tokens, Some(100));
+        assert_eq!(usage.turn_output_tokens, Some(50));
+        assert!(
+            usage.turn_total_tokens.is_none(),
+            "cumulative total decrease → turn total null (field-local)"
+        );
+        assert_eq!(
+            usage.cumulative_total_tokens,
+            Some(50),
+            "cumulative total from payload still passes through"
+        );
+    }
+
+    #[test]
+    fn cumulative_total_absent_on_current_turn_leaves_turn_total_null() {
+        // Goose-shaped payload: no accumulatedTotalTokens field at all.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-t4");
+        tracker.record("sess-t4", &payload_with_total(100, 20, Some(120)));
+        let _ = tracker.take();
+
+        // Second turn: goose omits the total field entirely.
+        tracker.begin_turn("sess-t4");
+        tracker.record("sess-t4", &payload_with_total(200, 50, None));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable, "input/output delta unaffected");
+        assert_eq!(usage.turn_input_tokens, Some(100));
+        assert_eq!(usage.turn_output_tokens, Some(30));
+        assert!(
+            usage.turn_total_tokens.is_none(),
+            "absent field → null turn total"
+        );
+        assert!(
+            usage.cumulative_total_tokens.is_none(),
+            "absent cumulative total passes through as None"
+        );
+    }
+
+    #[test]
+    fn goose_shaped_payload_without_accumulated_total_deserializes_correctly() {
+        // goose payloads lack accumulatedTotalTokens; the field must default
+        // to None without a deserialization error (ignore-if-absent contract).
+        let json = r#"{
+            "sessionUpdate": "usage_update",
+            "accumulatedInputTokens": 1000,
+            "accumulatedOutputTokens": 200,
+            "accumulatedCost": 0.01
+        }"#;
+        let variant: GooseSessionUpdateVariant =
+            serde_json::from_str(json).expect("must deserialize without accumulatedTotalTokens");
+        let payload = match variant {
+            GooseSessionUpdateVariant::UsageUpdate(p) => p,
+            _ => panic!("expected UsageUpdate"),
+        };
+        assert!(
+            payload.accumulated_total_tokens.is_none(),
+            "absent accumulatedTotalTokens must default to None"
+        );
+
+        // And it must flow through the tracker correctly.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-goose-nototal");
+        tracker.record("sess-goose-nototal", &payload);
+        let usage = tracker.take().expect("pending");
+        assert!(
+            usage.cumulative_total_tokens.is_none(),
+            "goose-shaped payload must produce None cumulative_total_tokens"
+        );
+    }
+
+    #[test]
+    fn cumulative_total_absent_on_baseline_leaves_turn_total_null_on_second_turn() {
+        // Baseline was set without a total (e.g. first goose turn); second
+        // turn reports a total. No baseline to diff against → turn total None.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-t5");
+        tracker.record("sess-t5", &payload_with_total(100, 20, None)); // no total
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-t5");
+        tracker.record("sess-t5", &payload_with_total(200, 50, Some(250)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable, "input/output delta unaffected");
+        assert!(
+            usage.turn_total_tokens.is_none(),
+            "absent baseline total → turn total null even when current has a total"
+        );
+        assert_eq!(usage.cumulative_total_tokens, Some(250));
     }
 }

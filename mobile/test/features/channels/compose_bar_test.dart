@@ -17,11 +17,10 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/mentions/mention_candidates.dart';
-import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/photo_library.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -543,6 +542,104 @@ void main() {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
     });
+
+    testWidgets('opening the native attachment popover keeps composer focus', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            return null;
+        }
+        return null;
+      });
+
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'Hello');
+        await tester.pumpAndSettle();
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        expect(textField.focusNode?.hasFocus, isTrue);
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(presentCalls, 1);
+        expect(textField.focusNode?.hasFocus, isTrue);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets(
+      'unsupported iOS attachment popover unfocuses before fallback menu',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        _setMockNativeAttachmentPopoverHandler((call) async {
+          return switch (call.method) {
+            'isSupported' => false,
+            'dismiss' => null,
+            _ => null,
+          };
+        });
+
+        try {
+          await tester.pumpWidget(
+            _buildComposeBar(
+              uploadService: _testUploadService(nostr.Keys.generate().nsec),
+              onSend:
+                  (
+                    content,
+                    mentionPubkeys, {
+                    mediaTags = const <List<String>>[],
+                  }) async {},
+            ),
+          );
+
+          await _expandComposer(tester);
+          await tester.enterText(find.byType(TextField), 'Hello');
+          await tester.pumpAndSettle();
+
+          final textField = tester.widget<TextField>(find.byType(TextField));
+          expect(textField.focusNode?.hasFocus, isTrue);
+
+          await tester.tap(find.byTooltip('Add attachment').hitTestable());
+          await tester.pumpAndSettle();
+
+          expect(textField.focusNode?.hasFocus, isFalse);
+          expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          _setMockNativeAttachmentPopoverHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
 
     testWidgets('disposing a non-owner keeps native popover callbacks active', (
       tester,
@@ -1148,6 +1245,161 @@ void main() {
       );
       expect(find.text('Camera'), findsOneWidget);
       expect(find.text('Photos'), findsOneWidget);
+    });
+
+    testWidgets('attachment menu uses roomy rows and surrounding padding', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+
+      final menu = find.byKey(const ValueKey('attachment-menu'));
+      final rows = [
+        for (final label in ['camera', 'photos', 'video', 'files'])
+          find.byKey(ValueKey('attachment-menu-item-$label')),
+      ];
+      final menuRect = tester.getRect(menu);
+
+      expect(menuRect.size, const Size(216, 264));
+      for (final row in rows) {
+        expect(tester.getSize(row).height, 52);
+        expect(tester.getRect(row).left - menuRect.left, Grid.xs);
+        expect(menuRect.right - tester.getRect(row).right, Grid.xs);
+      }
+      for (final label in ['Camera', 'Photos', 'Video', 'Files']) {
+        final text = tester.widget<Text>(find.text(label));
+        expect(text.style?.fontSize, 20);
+      }
+      final icons = [
+        for (final label in ['camera', 'photos', 'video', 'files'])
+          find.byKey(ValueKey('attachment-menu-icon-$label')),
+      ];
+      final labels = [
+        for (final label in ['camera', 'photos', 'video', 'files'])
+          find.byKey(ValueKey('attachment-menu-label-$label')),
+      ];
+      for (final icon in icons) {
+        expect(tester.getSize(icon).width, 28);
+        expect(
+          tester
+              .widget<Icon>(
+                find.descendant(of: icon, matching: find.byType(Icon)),
+              )
+              .size,
+          24,
+        );
+      }
+      final labelLeft = tester.getRect(labels.first).left;
+      for (var index = 0; index < labels.length; index += 1) {
+        expect(tester.getRect(labels[index]).left, labelLeft);
+        expect(
+          tester.getRect(labels[index]).center.dy,
+          tester.getRect(rows[index]).center.dy,
+        );
+      }
+      expect(tester.getRect(rows.first).top - menuRect.top, Grid.xs);
+      expect(menuRect.bottom - tester.getRect(rows.last).bottom, Grid.xs);
+      for (var index = 1; index < rows.length; index += 1) {
+        expect(
+          tester.getRect(rows[index]).top -
+              tester.getRect(rows[index - 1]).bottom,
+          Grid.xxs,
+        );
+      }
+    });
+
+    testWidgets(
+      'attachment menu grows rows and scrolls for accessibility text',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            textScaler: const TextScaler.linear(4),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _openAttachmentMenu(tester);
+
+        final menu = find.byKey(const ValueKey('attachment-menu'));
+        final rows = [
+          for (final label in ['camera', 'photos', 'video', 'files'])
+            find.byKey(ValueKey('attachment-menu-item-$label')),
+        ];
+        final scrollView = tester.widget<ListView>(
+          find.byKey(const ValueKey('attachment-menu-scroll')),
+        );
+
+        expect(tester.getSize(menu), const Size(216, 372));
+        expect(tester.getSize(rows.first).height, greaterThan(52));
+        expect(scrollView.physics, isA<AlwaysScrollableScrollPhysics>());
+        await tester.drag(
+          find.byKey(const ValueKey('attachment-menu-scroll')),
+          const Offset(0, -300),
+        );
+        await tester.pump();
+        expect(tester.getSize(rows.last).height, greaterThan(52));
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('defers camera startup until the surface morph finishes', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Camera'));
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('camera-initialization-deferred')),
+          findsOneWidget,
+        );
+
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          find.byKey(const ValueKey('camera-initialization-deferred')),
+          findsOneWidget,
+        );
+
+        await tester.pump(const Duration(milliseconds: 20));
+        expect(
+          find.byKey(const ValueKey('camera-initialization-ready')),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('photo picker errors keep the action visible at large text', (
@@ -2016,6 +2268,11 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
+      expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('composer-agent-mention-chip')),
+        findsOneWidget,
+      );
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
@@ -2031,6 +2288,70 @@ void main() {
         ['role', 'bot'],
       ]);
     });
+
+    testWidgets(
+      'renders chips only for selected agents outside code and composition',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        final signer = nostr.Keys.generate();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            relayAgents: [_testAgent('f' * 64)],
+            channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@Helper Bot');
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNothing,
+        );
+
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel('Agent mention: Helper Bot'),
+          findsOneWidget,
+        );
+        expect(find.bySemanticsLabel('Helper Bot'), findsNothing);
+
+        await tester.enterText(find.byType(TextField), '`@Helper Bot`');
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNothing,
+        );
+
+        await tester.enterText(find.byType(TextField), '@Helper Bot typing');
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        textField.controller!.value = textField.controller!.value.copyWith(
+          composing: const TextRange(start: 12, end: 18),
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        semantics.dispose();
+      },
+    );
 
     testWidgets('does not mutate a DM when mentioning a non-member agent', (
       tester,

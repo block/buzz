@@ -6,6 +6,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -209,21 +210,27 @@ class _ThreadContent extends HookConsumerWidget {
     final post = thread.post;
     final replies = thread.replies;
 
-    // Preload profiles for all participants.
+    // Preload profiles for all participants and tagged mentions.
     final allPubkeys = useMemoized(() {
-      final pks = <String>{post.pubkey};
+      final pks = <String>{
+        post.pubkey.toLowerCase(),
+        ...post.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
+      };
       for (final reply in replies) {
-        pks.add(reply.pubkey);
+        pks
+          ..add(reply.pubkey.toLowerCase())
+          ..addAll(reply.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()));
       }
-      return pks.toList();
+      return pks.toList()..sort();
     }, [post, replies]);
+    final allPubkeysKey = allPubkeys.join('\u0000');
 
     useEffect(() {
       if (allPubkeys.isNotEmpty) {
         ref.read(userCacheProvider.notifier).preload(allPubkeys);
       }
       return null;
-    }, [allPubkeys]);
+    }, [allPubkeysKey]);
 
     return Column(
       children: [
@@ -322,7 +329,19 @@ class _OriginalPost extends ConsumerWidget {
     final displayName = profile?.label ?? _shortPubkey(post.pubkey);
 
     final userCache = ref.watch(userCacheProvider);
-    final mentionNames = _buildMentionNames(post.mentionPubkeys, userCache);
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(post.channelId)),
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: post.mentionPubkeys,
+      profileMentionNames: _buildMentionNames(post.mentionPubkeys, userCache),
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     return Padding(
       padding: const EdgeInsets.all(Grid.xs),
@@ -375,6 +394,7 @@ class _OriginalPost extends ConsumerWidget {
           MessageContent(
             content: post.content,
             mentionNames: mentionNames,
+            agentMentionPubkeys: agentMentionPubkeys,
             tags: post.tags,
             baseStyle: messageBodyTextStyle.copyWith(
               color: context.colors.onSurface,
@@ -409,7 +429,19 @@ class _ReplyRow extends ConsumerWidget {
     final displayName = profile?.label ?? _shortPubkey(reply.pubkey);
 
     final userCache = ref.watch(userCacheProvider);
-    final mentionNames = _buildMentionNames(reply.mentionPubkeys, userCache);
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: reply.mentionPubkeys,
+      profileMentionNames: _buildMentionNames(reply.mentionPubkeys, userCache),
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -481,6 +513,7 @@ class _ReplyRow extends ConsumerWidget {
             child: MessageContent(
               content: reply.content,
               mentionNames: mentionNames,
+              agentMentionPubkeys: agentMentionPubkeys,
               tags: reply.tags,
               baseStyle: messageBodyTextStyle.copyWith(
                 color: context.colors.onSurface,

@@ -36,7 +36,7 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // https://moonshotai.github.io/kimi-cli/en/
   kimi: "A terminal coding agent for software development and command-line tasks.",
   // Sources: https://ampcode.com, https://ampcode.com/manual
-  amp: "A coding agent from Sourcegraph.",
+  amp: "A coding agent for your terminal and editor.",
   // Sources: https://github.com/letta-ai/letta-acp,
   // https://docs.letta.com/overview
   letta: "A stateful agent with memory that learns and evolves.",

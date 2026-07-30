@@ -173,7 +173,7 @@ pub async fn handle_count(
                 && !needs_result_gated_filtering
                 && !needs_persona_filtering
             {
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
@@ -184,7 +184,11 @@ pub async fn handle_count(
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
                 super::req::apply_count_fallback_limit(&mut q);
-                match state.db.query_events(&q).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("count_req_fallback", &q)
+                    .await
+                {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -243,7 +247,7 @@ pub async fn handle_count(
                 && !needs_persona_filtering
             {
                 query.limit = None; // COUNT doesn't need a row limit
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
@@ -253,7 +257,11 @@ pub async fn handle_count(
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
                 super::req::apply_count_fallback_limit(&mut query);
-                match state.db.query_events(&query).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("count_req_fallback", &query)
+                    .await
+                {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);

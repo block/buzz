@@ -1,10 +1,15 @@
 part of '../compose_bar.dart';
 
 class _InlineCameraPreview extends HookConsumerWidget {
+  final bool initializeCamera;
   final Future<void> Function(XFile image) onCapture;
   final VoidCallback onClose;
 
-  const _InlineCameraPreview({required this.onCapture, required this.onClose});
+  const _InlineCameraPreview({
+    required this.initializeCamera,
+    required this.onCapture,
+    required this.onClose,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -15,6 +20,8 @@ class _InlineCameraPreview extends HookConsumerWidget {
     final error = useState<String?>(null);
 
     useEffect(() {
+      if (!initializeCamera) return null;
+
       var disposed = false;
       var generation = 0;
 
@@ -76,7 +83,9 @@ class _InlineCameraPreview extends HookConsumerWidget {
         onInactive: () => unawaited(disposeCurrent()),
         onResume: () => unawaited(initialize()),
       );
-      unawaited(initialize());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!disposed) unawaited(initialize());
+      });
 
       return () {
         disposed = true;
@@ -86,7 +95,7 @@ class _InlineCameraPreview extends HookConsumerWidget {
         controllerRef.value = null;
         unawaited(current?.dispose() ?? Future<void>.value());
       };
-    }, const []);
+    }, [initializeCamera]);
 
     Future<void> capture() async {
       final activeController = controller.value;

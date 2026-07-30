@@ -93,12 +93,33 @@ function isSafeHttpUrl(value: unknown): value is string {
 const INLINE_SVG_AVATAR_PREFIX = "data:image/svg+xml,";
 const MAX_INLINE_SVG_AVATAR_LENGTH = 8_192;
 
+/**
+ * Shared persona heads can carry an uploaded avatar as an inline raster. Keep
+ * those self-contained images renderable without accepting arbitrary `data:`
+ * URLs: only the raster MIME types browsers decode in `<img>`, strict base64
+ * shape, and a bound no larger than the relay's event-content ceiling.
+ */
+const MAX_INLINE_RASTER_AVATAR_LENGTH = 256 * 1_024;
+const INLINE_RASTER_AVATAR_RE =
+  /^data:image\/(?:png|jpeg|gif|webp);base64,([A-Za-z0-9+/]+={0,2})$/u;
+
 function isInlineSvgAvatar(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.startsWith(INLINE_SVG_AVATAR_PREFIX) &&
     value.length <= MAX_INLINE_SVG_AVATAR_LENGTH
   );
+}
+
+function isInlineRasterAvatar(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length > MAX_INLINE_RASTER_AVATAR_LENGTH
+  ) {
+    return false;
+  }
+  const match = INLINE_RASTER_AVATAR_RE.exec(value);
+  return match !== null && (match[1]?.length ?? 0) % 4 === 0;
 }
 
 function optionalString(value: unknown): string | null {
@@ -121,7 +142,9 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
   }
 
   const avatarUrl =
-    isSafeHttpUrl(parsed.avatar_url) || isInlineSvgAvatar(parsed.avatar_url)
+    isSafeHttpUrl(parsed.avatar_url) ||
+    isInlineSvgAvatar(parsed.avatar_url) ||
+    isInlineRasterAvatar(parsed.avatar_url)
       ? parsed.avatar_url
       : null;
   const namePool = Array.isArray(parsed.name_pool)
