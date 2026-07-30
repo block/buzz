@@ -1045,6 +1045,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "futures-util",
+ "getrandom 0.2.17",
  "hex",
  "image",
  "infer",

@@ -86,7 +86,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
-nostr = { version = "0.44", features = ["nip44"] }
+nostr = { version = "0.44", features = ["nip44", "nip49"] }
+# OS-entropy source for backup passphrase generation (already in the tree as a
+# transitive dependency; pinned here for direct use).
+getrandom = "0.2"
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }

@@ -441,6 +441,14 @@ type MockBridgeOptions = {
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;
+  /** Errors returned by successive backup verification attempts. Null succeeds. */
+  backupVerificationErrors?: (string | null)[];
+  /** Public identities returned by successive successful backup verifications. */
+  backupVerificationPubkeys?: string[];
+  /** Delay (ms) applied to backup encryption so specs can observe pending UI. */
+  backupEncryptionDelayMs?: number;
+  /** Native paths returned by successive backup saves. */
+  backupSavePaths?: Array<string | null>;
   /**
    * When set, `get_nsec` throws with this message. For a single always-fail
    * scenario. Use `nsecErrors` for sequenced fail/succeed.
