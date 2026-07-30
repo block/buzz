@@ -11,6 +11,7 @@ import {
 } from "@/features/community-members/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import type {
   RelayMember,
@@ -129,11 +130,17 @@ function RelayMemberRow({
       className="group/member flex min-h-14 items-center gap-3 px-1 py-2.5"
       data-testid={`relay-member-row-${member.pubkey}`}
     >
-      <ProfileAvatar
-        avatarUrl={profile?.avatarUrl ?? null}
-        className="h-9 w-9 text-xs shadow-none"
-        label={displayName}
-      />
+      <UserProfilePopover
+        pubkey={member.pubkey}
+        triggerAriaLabel={`Open profile for ${displayName}`}
+        triggerElement="span"
+      >
+        <ProfileAvatar
+          avatarUrl={profile?.avatarUrl ?? null}
+          className="h-9 w-9 text-xs shadow-none"
+          label={displayName}
+        />
+      </UserProfilePopover>
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
           <HoverMemberIdentity
