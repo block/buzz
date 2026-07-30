@@ -62,11 +62,6 @@ export type MessageComposerProps = {
    * return `false` to let the arrow key fall through normally.
    */
   onEditLastOwnMessage?: () => boolean;
-  /**
-   * Saves the edited message. Empty `content` with no media tags is the
-   * keyboard shorthand for "Delete message": the handler deletes the message
-   * instead of publishing an empty body (so an empty edit never ships).
-   */
   onEditSave?: (
     content: string,
     mediaTags?: string[][],

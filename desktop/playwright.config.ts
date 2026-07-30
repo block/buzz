@@ -95,6 +95,7 @@ export default defineConfig({
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
+        "**/empty-edit-delete.spec.ts",
         "**/reaction-order.spec.ts",
         "**/reaction-names.spec.ts",
         "**/inbox-reactions.spec.ts",
