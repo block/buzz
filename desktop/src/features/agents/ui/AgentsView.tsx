@@ -20,6 +20,7 @@ import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
+import { ExternalAgentsSection } from "./ExternalAgentsSection";
 import {
   AGENT_CARD_GRID_COLUMNS_CLASS,
   UnifiedAgentsSection,
@@ -206,6 +207,13 @@ export function AgentsView() {
               onDeletePersona={personas.openDelete}
               onImportSnapshotFile={(fileBytes, fileName) => {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
+              }}
+            />
+
+            <ExternalAgentsSection
+              managedAgentPubkeys={agents.managedPubkeys}
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
               }}
             />
 

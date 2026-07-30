@@ -5,7 +5,8 @@ import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
+  getVisibleExternalAgents,
+  isAgentIdentityAllowed,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -136,25 +137,68 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
-test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
+test("getVisibleExternalAgents: returns invocable relay agents that are not managed locally", () => {
+  const result = getVisibleExternalAgents({
+    managedAgentPubkeys: [PUB_A.toUpperCase()],
+    currentPubkey: CURRENT_PUBKEY,
+    relayAgents: [
+      {
+        pubkey: PUB_A,
+        name: "Managed",
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      {
+        pubkey: PUB_B,
+        name: "Zulu",
+        respondTo: "allowlist",
+        respondToAllowlist: [CURRENT_PUBKEY],
+        channelIds: ["other"],
+      },
+      {
+        pubkey: PUB_C,
+        name: "Alpha",
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      {
+        pubkey: PUB_D,
+        name: "Hidden",
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["other"],
+      },
+    ],
+    sharedChannelIds: new Set(["general"]),
+  });
+
+  assert.deepEqual(
+    result.map((agent) => agent.pubkey),
+    [PUB_C, PUB_B],
+  );
+});
+
+test("isAgentIdentityAllowed: keeps people and only explicitly allowed agent identities", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
 
   assert.equal(
-    isAgentIdentityInManagedList(
+    isAgentIdentityAllowed(
       { isAgent: false, pubkey: PUB_B },
       managedAgentPubkeys,
     ),
     true,
   );
   assert.equal(
-    isAgentIdentityInManagedList(
+    isAgentIdentityAllowed(
       { isAgent: true, pubkey: PUB_A.toUpperCase() },
       managedAgentPubkeys,
     ),
     true,
   );
   assert.equal(
-    isAgentIdentityInManagedList(
+    isAgentIdentityAllowed(
       { isAgent: true, pubkey: PUB_B },
       managedAgentPubkeys,
     ),

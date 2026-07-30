@@ -54,13 +54,37 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
-export function isAgentIdentityInManagedList(
+export function getVisibleExternalAgents({
+  currentPubkey,
+  managedAgentPubkeys,
+  relayAgents,
+  sharedChannelIds,
+}: {
+  currentPubkey?: string | null;
+  managedAgentPubkeys: Iterable<string>;
+  relayAgents: readonly RelayAgent[] | undefined;
+  sharedChannelIds: ReadonlySet<string>;
+}) {
+  const managed = new Set(
+    [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
+  );
+
+  return (relayAgents ?? [])
+    .filter(
+      (agent) =>
+        !managed.has(normalizePubkey(agent.pubkey)) &&
+        relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey),
+    )
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function isAgentIdentityAllowed(
   candidate: { isAgent?: boolean; pubkey: string },
-  managedAgentPubkeys: ReadonlySet<string>,
+  allowedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
     candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    allowedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
 }
 

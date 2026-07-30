@@ -3323,6 +3323,57 @@ test("members sidebar can invite and remove managed agents", async ({
   await expectMembersTriggerCount(page, initialMemberCount);
 });
 
+test("members sidebar can invite an authorized external relay agent", async ({
+  page,
+}) => {
+  const externalAgent = {
+    pubkey: TEST_IDENTITIES.outsider.pubkey,
+    name: "Herminho Hermes",
+    agentType: "hermes",
+    respondTo: "allowlist" as const,
+    respondToAllowlist: [MOCK_IDENTITY_PUBKEY],
+  };
+  await installMockBridge(page, {
+    managedAgents: [],
+    relayAgents: [externalAgent],
+    searchProfiles: [
+      {
+        pubkey: externalAgent.pubkey,
+        displayName: externalAgent.name,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  const initialMemberCount = await readMembersTriggerCount(page);
+
+  await page.getByTestId("channel-management-search-users").fill("Herminho");
+  const result = page.getByTestId(
+    `channel-user-search-result-${externalAgent.pubkey}`,
+  );
+  await expect(result).toBeVisible();
+  await expect(result).toContainText("Herminho Hermes");
+  await expect(result).toContainText("agent");
+
+  await result.click();
+
+  await expect(
+    page.getByTestId(`sidebar-member-${externalAgent.pubkey}`),
+  ).toContainText("Herminho Hermes");
+  await expectMembersTriggerCount(page, initialMemberCount + 1);
+  await expect
+    .poll(async () => {
+      const calls = await readCommandPayloadLog(page);
+      return calls.some(
+        (entry) =>
+          entry.command === "add_channel_members" &&
+          entry.payload?.pubkeys?.includes(externalAgent.pubkey),
+      );
+    })
+    .toBe(true);
+});
+
 test("members sidebar pages add-member search beyond the first 50 people", async ({
   page,
 }) => {

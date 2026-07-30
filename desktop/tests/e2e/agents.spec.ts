@@ -42,6 +42,49 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("shows invocable relay-native agents separately from local runtimes", async ({
+  page,
+}) => {
+  const externalPubkey = "9".repeat(64);
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: externalPubkey,
+        name: "Hermes Native",
+        agentType: "hermes",
+        respondTo: "allowlist",
+        respondToAllowlist: ["deadbeef".repeat(8)],
+        status: "online",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const section = page.getByTestId("external-agents-section");
+  await expect(section).toContainText("Connected agents");
+  await expect(section).toContainText("Hermes Native");
+  await expect(section).toContainText("hermes · managed externally");
+  await expect(
+    page.getByTestId(`external-agent-${externalPubkey}`),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Link Hermes Native identity" })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "stored in the macOS Keychain",
+  );
+  await page.getByLabel("Private key (nsec)").fill("nsec1test-only");
+  await page.getByRole("button", { name: "Link securely" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Edit Hermes Native");
+  await dialog.getByLabel("Name").fill("Hermes Linked");
+  await dialog.getByLabel("Description").fill("External Hermes profile");
+  await dialog.getByRole("button", { name: "Save profile" }).click();
+  await expect(section).toContainText("Hermes Linked");
+});
+
 async function gotoApp(page: import("@playwright/test").Page) {
   let lastError: unknown = null;
 
