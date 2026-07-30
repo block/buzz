@@ -2080,6 +2080,32 @@ pub async fn run_prompt_task(
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
 
+            let (fallback_reply, secure_message_called) = agent.acp.take_turn_delivery();
+            if !secure_message_called
+                && !fallback_reply.trim().is_empty()
+                && matches!(source, PromptSource::Channel(_))
+            {
+                if let Some(batch) = batch.as_ref() {
+                    let thread_tags = batch
+                        .events
+                        .last()
+                        .map(|event| crate::queue::parse_thread_tags(&event.event))
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        target: "pool::delivery",
+                        channel = %batch.channel_id,
+                        "agent returned text without secure send_message call; publishing harness fallback"
+                    );
+                    post_failure_notice(
+                        &ctx.rest_client,
+                        batch.channel_id,
+                        &thread_tags,
+                        fallback_reply.trim(),
+                    )
+                    .await;
+                }
+            }
+
             let should_rotate = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests

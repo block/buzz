@@ -115,6 +115,18 @@ fn unknown_command_returns_none() {
     assert!(known_acp_runtime("custom-agent").is_none());
 }
 
+#[test]
+fn explicit_record_mcp_command_overrides_runtime_metadata() {
+    let mut record = fixture(RespondTo::Anyone, vec![], None);
+    record.agent_command = "hermes-acp".into();
+    record.mcp_command = "/opt/buzz-message-mcp".into();
+
+    assert_eq!(
+        super::effective_mcp_command(&record, "hermes-acp"),
+        "/opt/buzz-message-mcp"
+    );
+}
+
 // ── build_respond_to_env tests ───────────────────────────────────────
 
 use super::build_respond_to_env;

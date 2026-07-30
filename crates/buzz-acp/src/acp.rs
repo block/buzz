@@ -211,6 +211,22 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Final assistant text streamed during the current prompt. The harness
+    /// uses this as a delivery fallback when an adapter returns text without
+    /// calling the credential-isolated Buzz messaging tool.
+    turn_agent_message: String,
+    /// Whether the current prompt called the credential-isolated sender.
+    turn_secure_message_called: bool,
+    /// Secure sender calls awaiting a terminal ACP status update.
+    turn_secure_message_tool_ids: std::collections::HashSet<String>,
+    /// Tool output may be followed by a replacement final answer. Clear any
+    /// pre-tool narration when the next assistant chunk arrives.
+    turn_reset_message_on_next_chunk: bool,
+}
+
+fn is_secure_message_tool_title(title: &str) -> bool {
+    title == "mcp__buzz_message_mcp__send_message"
+        || (title.contains("buzz-message-mcp") && title.ends_with("send_message"))
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -513,6 +529,13 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // Signing authority belongs to the harness and the restricted MCP
+        // descriptor, never the general-purpose agent process. `env_remove`
+        // also wins over inherited and persona-provided values.
+        for key in ["BUZZ_PRIVATE_KEY", "BUZZ_AUTH_TAG", "NOSTR_PRIVATE_KEY"] {
+            cmd.env_remove(key);
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -550,6 +573,10 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_agent_message: String::new(),
+            turn_secure_message_called: false,
+            turn_secure_message_tool_ids: std::collections::HashSet::new(),
+            turn_reset_message_on_next_chunk: false,
         })
     }
 
@@ -572,6 +599,14 @@ impl AcpClient {
     /// Return the pool slot index for this agent process.
     pub(crate) fn observer_agent_index(&self) -> Option<usize> {
         self.observer_agent_index
+    }
+
+    /// Consume delivery state for a completed turn.
+    pub(crate) fn take_turn_delivery(&mut self) -> (String, bool) {
+        (
+            std::mem::take(&mut self.turn_agent_message),
+            std::mem::take(&mut self.turn_secure_message_called),
+        )
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
@@ -759,6 +794,10 @@ impl AcpClient {
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
+        self.turn_agent_message.clear();
+        self.turn_secure_message_called = false;
+        self.turn_secure_message_tool_ids.clear();
+        self.turn_reset_message_on_next_chunk = false;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -1714,6 +1753,11 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    if self.turn_reset_message_on_next_chunk {
+                        self.turn_agent_message.clear();
+                        self.turn_reset_message_on_next_chunk = false;
+                    }
+                    self.turn_agent_message.push_str(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -1727,6 +1771,13 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+                self.turn_reset_message_on_next_chunk = true;
+                if is_secure_message_tool_title(title) {
+                    if let Some(tool_id) = update.get("toolCallId").and_then(|v| v.as_str()) {
+                        self.turn_secure_message_tool_ids
+                            .insert(tool_id.to_string());
+                    }
+                }
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
                 true
             }
@@ -1736,6 +1787,18 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                if self.turn_secure_message_tool_ids.contains(tool_id) {
+                    match status {
+                        "completed" => {
+                            self.turn_secure_message_called = true;
+                            self.turn_secure_message_tool_ids.remove(tool_id);
+                        }
+                        "failed" => {
+                            self.turn_secure_message_tool_ids.remove(tool_id);
+                        }
+                        _ => {}
+                    }
+                }
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
                 false
             }
@@ -2846,6 +2909,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn secure_message_tool_title_is_exactly_scoped() {
+        assert!(is_secure_message_tool_title(
+            "mcp__buzz_message_mcp__send_message"
+        ));
+        assert!(is_secure_message_tool_title(
+            "buzz-message-mcp__send_message"
+        ));
+        assert!(!is_secure_message_tool_title("send_message"));
+        assert!(!is_secure_message_tool_title(
+            "mcp__unrelated__send_message"
+        ));
+    }
+
     async fn spawn_script(script: &str) -> AcpClient {
         AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
             .await
@@ -2921,6 +2998,20 @@ mod tests {
             spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_strips_signing_credentials_from_agent_child() {
+        assert_eq!(
+            spawn_named_and_read_child_env(
+                "other-agent",
+                "BUZZ_PRIVATE_KEY",
+                &[("BUZZ_PRIVATE_KEY".into(), "must-not-leak".into())],
+            )
+            .await,
+            "<unset>"
         );
     }
 
