@@ -1051,3 +1051,23 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('push_gateway_endpoint_quotas', 'public gateway endpoint abuse ceilings span relay communities'),
     ('push_gateway_delivery_auth_replays', 'public gateway signed-event replay admission spans relay communities'),
     ('push_gateway_delivery_request_replays', 'public gateway stable request-id admission spans relay communities');
+
+-- ── Replica heartbeat (read-replica freshness fence) ─────────────────────────
+-- Portable read-side freshness observation for the replica fence (see
+-- crates/buzz-db/src/replica_fence.rs and migrations/0026). Exactly one row;
+-- the single-row token UPDATE is the serialization point that makes tokens
+-- globally commit-ordered across relay pods. `epoch` detects token resets
+-- (restore/re-seed) so a stale retained token can never masquerade as fresh
+-- coverage. Deployment-global by design: describes replication topology,
+-- never tenant data.
+
+CREATE TABLE replica_heartbeat (
+    id    smallint PRIMARY KEY CHECK (id = 1),
+    epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
+    token bigint   NOT NULL DEFAULT 0
+);
+
+INSERT INTO replica_heartbeat (id) VALUES (1);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data');

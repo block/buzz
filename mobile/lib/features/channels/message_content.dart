@@ -19,6 +19,8 @@ import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
+import '../../shared/emoji/emoji_only.dart';
 import 'media_viewer_page.dart';
 import 'message_media.dart';
 
@@ -105,6 +107,12 @@ class MessageContent extends HookConsumerWidget {
 
   final int? maxLines;
 
+  /// Render a body that is nothing but emoji at [kEmojiOnlyFontSize], the way
+  /// desktop's `MessageRow` does. Off by default: previews, search hits, and
+  /// notification rows want a message to occupy its usual line height whatever
+  /// it contains.
+  final bool scaleEmojiOnly;
+
   /// Allows a multi-image carousel to reclaim leading space reserved by the
   /// surrounding message layout, while keeping its image count aligned with
   /// the message body.
@@ -127,13 +135,14 @@ class MessageContent extends HookConsumerWidget {
     this.onMediaMore,
     this.baseStyle,
     this.maxLines,
+    this.scaleEmojiOnly = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final style =
+    final baseTextStyle =
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
     final imetaByUrl = parseImetaTags(tags);
@@ -145,6 +154,26 @@ class MessageContent extends HookConsumerWidget {
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
     );
+
+    // Decided here rather than by the caller: this is where the event's own
+    // emoji tags and the community palette have already been merged, and a
+    // `:shortcode:` only counts as emoji if it resolves against that palette.
+    final emojiOnly =
+        scaleEmojiOnly &&
+        isEmojiOnlyMessage(
+          markdownContent,
+          nativeEmoji: ref.watch(nativeEmojiGlyphsProvider),
+          customEmoji: customEmoji,
+        );
+    final style = emojiOnly
+        ? baseTextStyle?.copyWith(
+            fontSize: kEmojiOnlyFontSize,
+            height: kEmojiOnlyHeight,
+          )
+        : baseTextStyle;
+    final inlineCustomEmojiSize = emojiOnly
+        ? kEmojiOnlyCustomEmojiSize
+        : kCustomEmojiInlineSize;
 
     final finalContent = useMemoized(() {
       // Convert autolinks and bare URLs to standard markdown links,
@@ -231,7 +260,7 @@ class MessageContent extends HookConsumerWidget {
           agentMentionPubkeys: agentMentionPubkeys,
           onMentionTap: onMentionTap,
         ),
-        CustomEmojiMd(customEmoji),
+        CustomEmojiMd(customEmoji, size: inlineCustomEmojiSize),
         _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
         ...MarkdownComponent.inlineComponents,
       ],

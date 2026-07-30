@@ -85,7 +85,10 @@ function PullRequestGridCard({
   });
 
   return (
-    <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
+    <Card
+      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent p-4 shadow-none transition-colors duration-150 hover:bg-muted/20"
+      data-projects-grid-card
+    >
       <button
         className="absolute inset-0"
         onClick={() => onOpen(project, pullRequest)}
@@ -305,7 +308,10 @@ export function ProjectsPullRequestsList({
   return (
     <div className="space-y-3">
       {loadNotice}
-      <div className={PROJECT_LIST_CONTAINER_CLASS}>
+      <div
+        className={PROJECT_LIST_CONTAINER_CLASS}
+        data-testid="projects-list-container"
+      >
         {pullRequests.map(({ project, pullRequest }) => (
           <PullRequestListRow
             key={pullRequest.id}
