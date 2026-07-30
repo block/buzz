@@ -99,8 +99,37 @@ fn test_an_appimage_launch_disables_the_dmabuf_renderer() {
 }
 
 #[test]
-fn test_a_plain_non_nvidia_launch_changes_nothing() {
+fn test_amd_gpu_disables_the_dmabuf_renderer() {
+    // Radeon (0x1002) triggers the same blank-screen as NVIDIA on some
+    // compositors (reported in #3656 with Hyprland on CachyOS).
+    let drm = drm(&["0x1002"]);
+    let plan = plan(NO_ARGS, &env_from(&[]), drm.path());
+
+    assert_eq!(
+        applied(&plan),
+        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+    );
+    let Plan::Apply { why, .. } = &plan else {
+        unreachable!()
+    };
+    assert!(why.contains("AMD"), "{why}");
+}
+
+#[test]
+fn test_an_amd_gpu_alongside_another_vendor_still_counts() {
+    // AMD integrated + discrete or AMD integrated only, both should match.
     let drm = drm(&["0x8086", "0x1002"]);
+
+    assert_eq!(
+        applied(&plan(NO_ARGS, &env_from(&[]), drm.path())),
+        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+    );
+}
+
+#[test]
+fn test_a_plain_non_nvidia_non_amd_launch_changes_nothing() {
+    // Intel-only machine with no NVIDIA and no AMD card leaves rendering alone.
+    let drm = drm(&["0x8086"]);
 
     assert!(matches!(
         plan(NO_ARGS, &env_from(&[]), drm.path()),
