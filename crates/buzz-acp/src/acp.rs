@@ -229,6 +229,15 @@ fn is_secure_message_tool_title(title: &str) -> bool {
         || (title.contains("buzz-message-mcp") && title.ends_with("send_message"))
 }
 
+fn secure_message_tool_completed_successfully(update: &serde_json::Value) -> bool {
+    update.get("status").and_then(|value| value.as_str()) == Some("completed")
+        && update
+            .get("rawOutput")
+            .and_then(|value| value.get("isError"))
+            .and_then(|value| value.as_bool())
+            != Some(true)
+}
+
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
 /// collisions.  When both sides have an object for the same key, the merge recurses so
 /// unrelated nested keys from `base` are preserved.
@@ -1790,7 +1799,8 @@ impl AcpClient {
                 if self.turn_secure_message_tool_ids.contains(tool_id) {
                     match status {
                         "completed" => {
-                            self.turn_secure_message_called = true;
+                            self.turn_secure_message_called =
+                                secure_message_tool_completed_successfully(update);
                             self.turn_secure_message_tool_ids.remove(tool_id);
                         }
                         "failed" => {
@@ -2920,6 +2930,28 @@ mod tests {
         assert!(!is_secure_message_tool_title("send_message"));
         assert!(!is_secure_message_tool_title(
             "mcp__unrelated__send_message"
+        ));
+    }
+
+    #[test]
+    fn secure_message_completion_rejects_mcp_application_errors() {
+        assert!(secure_message_tool_completed_successfully(
+            &serde_json::json!({"status": "completed"})
+        ));
+        assert!(secure_message_tool_completed_successfully(
+            &serde_json::json!({
+                "status": "completed",
+                "rawOutput": {"isError": false}
+            })
+        ));
+        assert!(!secure_message_tool_completed_successfully(
+            &serde_json::json!({
+                "status": "completed",
+                "rawOutput": {"isError": true}
+            })
+        ));
+        assert!(!secure_message_tool_completed_successfully(
+            &serde_json::json!({"status": "failed"})
         ));
     }
 

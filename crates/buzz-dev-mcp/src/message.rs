@@ -82,20 +82,27 @@ pub async fn send_message(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command
-        .spawn()
-        .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| ErrorData::internal_error("failed to open buzz stdin", None))?;
-    stdin
-        .write_all(p.content.as_bytes())
-        .await
-        .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-    drop(stdin);
-    let output = match tokio::time::timeout(SEND_TIMEOUT, child.wait_with_output()).await {
-        Ok(result) => result.map_err(|error| ErrorData::internal_error(error.to_string(), None))?,
+    let output = match tokio::time::timeout(SEND_TIMEOUT, async {
+        let mut child = command
+            .spawn()
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ErrorData::internal_error("failed to open buzz stdin", None))?;
+        stdin
+            .write_all(p.content.as_bytes())
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        drop(stdin);
+        child
+            .wait_with_output()
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))
+    })
+    .await
+    {
+        Ok(result) => result?,
         Err(_) => {
             return Ok(CallToolResult::error(vec![Content::text(
                 "buzz messages send timed out after 20 seconds",
