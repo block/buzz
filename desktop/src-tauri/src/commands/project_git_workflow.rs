@@ -8,7 +8,7 @@ use super::project_git_exec::{
 };
 use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
-    find_local_repo_dir, local_repo_candidates,
+    find_local_repo_dir, local_repo_candidates, strip_extended_path_prefix,
 };
 use crate::app_state::AppState;
 use crate::managed_agents::{load_managed_agents, spawn_key_refusal};
@@ -425,7 +425,7 @@ pub(crate) fn clone_project_repository_blocking(
         .into_iter()
         .next()
         .ok_or_else(|| "Could not derive a directory name for the repository.".to_string())?;
-    let repo_dir = repos_root.join(repo_name);
+    let repo_dir = strip_extended_path_prefix(&repos_root.join(repo_name));
     if repo_dir.exists() {
         return Err(format!(
             "{} already exists but is not a git checkout.",

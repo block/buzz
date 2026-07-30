@@ -1026,6 +1026,7 @@ dependencies = [
  "chrono",
  "ctrlc",
  "dirs",
+ "dunce",
  "earshot",
  "ed25519-dalek",
  "flate2",

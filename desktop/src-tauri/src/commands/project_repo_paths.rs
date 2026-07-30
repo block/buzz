@@ -137,7 +137,7 @@ pub(crate) fn find_local_repo_dir(
                     .map(|url| checkout_origin_matches(&candidate_path, &repos_root, url))
                     .unwrap_or(true)
             {
-                return Ok(Some(candidate_path));
+                return Ok(Some(strip_extended_path_prefix(&candidate_path)));
             }
         }
     }
@@ -170,6 +170,16 @@ pub(crate) fn canonicalize_repos_root(
     Ok(repos_root)
 }
 
+/// Strip the Windows extended-length path prefix (`\\?\`) that
+/// `PathBuf::canonicalize()` adds on Windows. Git for Windows rejects
+/// `\\?\`-prefixed destinations, so canonical paths must be cleaned before
+/// being passed to the git CLI.
+pub(crate) fn strip_extended_path_prefix(
+    path: &std::path::Path,
+) -> std::path::PathBuf {
+    dunce::simplified(path).to_path_buf()
+}
+
 pub(crate) fn canonical_repos_roots(
     repos_dir: Option<&str>,
 ) -> Result<Vec<std::path::PathBuf>, String> {
@@ -189,4 +199,16 @@ pub(crate) fn canonical_repos_roots(
         return Err("reposDir is not accessible".to_string());
     }
     Ok(roots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_extended_path_prefix;
+    use std::path::PathBuf;
+
+    #[test]
+    fn strip_extended_path_prefix_leaves_normal_path_untouched() {
+        let path = PathBuf::from("/home/james/.buzz/REPOS/owner--repo");
+        assert_eq!(strip_extended_path_prefix(&path), path);
+    }
 }
