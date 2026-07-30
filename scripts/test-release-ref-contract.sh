@@ -64,6 +64,36 @@ grep -Fq 'git/refs' "$auto_tag"
 grep -Fq 'TAG_PREFIX="desktop-v"' "$auto_tag"
 grep -Fq 'target_sha=${{ github.event.pull_request.head.sha }}' "$auto_tag"
 grep -Fq 'scripts/verify-desktop-release-merge.sh' "$auto_tag"
+required_check_filter="$repo_root/scripts/required-check-succeeded.jq"
+check_fixture() {
+  local expected="$1" conclusion="$2" status="${3:-completed}"
+  local payload
+  payload=$(jq -n --arg status "$status" --arg conclusion "$conclusion" '{check_runs: [{name: "Web", status: $status, conclusion: $conclusion, started_at: "2026-01-01T00:00:00Z"}]}')
+  if jq -e --arg name Web -f "$required_check_filter" <<<"[$payload]" >/dev/null; then
+    actual=pass
+  else
+    actual=fail
+  fi
+  [[ "$actual" == "$expected" ]] || {
+    echo "required-check filter: expected $conclusion/$status to $expected" >&2
+    exit 1
+  }
+}
+check_fixture pass success
+check_fixture pass skipped
+check_fixture pass neutral
+check_fixture fail failure
+check_fixture fail success in_progress
+# A newer failure must not be hidden by an older successful run of the same check.
+jq -e --arg name Web -f "$required_check_filter" >/dev/null <<'JSON' && {
+[{"check_runs":[
+  {"name":"Web","status":"completed","conclusion":"success","started_at":"2026-01-01T00:00:00Z"},
+  {"name":"Web","status":"completed","conclusion":"failure","started_at":"2026-01-02T00:00:00Z"}
+]}]
+JSON
+  echo "required-check filter accepted a stale pass over a newer failure" >&2
+  exit 1
+}
 release_workflow="$repo_root/.github/workflows/release.yml"
 [[ "$(grep -c 'contents: write' "$release_workflow")" -eq 1 ]] || {
   echo "desktop release must have exactly one GitHub contents writer" >&2; exit 1;

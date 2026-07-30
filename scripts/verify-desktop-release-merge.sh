@@ -47,7 +47,7 @@ valid_approvals="$(jq --arg sha "$PR_HEAD_SHA" '[.[] | select(.state == "APPROVE
 
 checks="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$PR_HEAD_SHA/check-runs?per_page=100")"
 for required in "${required_checks[@]}"; do
-  jq -e --arg name "$required" '[.[].check_runs[] | select(.name == $name and .status == "completed" and .conclusion == "success")] | length > 0' <<<"$checks" >/dev/null || {
+  jq -e --arg name "$required" -f scripts/required-check-succeeded.jq <<<"$checks" >/dev/null || {
     echo "required check is missing or unsuccessful: $required" >&2
     exit 1
   }
