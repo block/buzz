@@ -447,7 +447,7 @@ The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
-**Presence:** `SET buzz:presence:{pubkey_hex} {status} EX 90` — 90-second TTL (3× the 30-second heartbeat interval). Single missed heartbeat does not cause presence flap.
+**Presence:** `SET buzz:presence:{pubkey_hex} {status} EX 180` — 180-second TTL (3× the 60-second heartbeat interval). Single missed heartbeat does not cause presence flap.
 
 **Typing indicators:**
 ```
