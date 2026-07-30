@@ -238,6 +238,10 @@ fn secure_message_tool_completed_successfully(update: &serde_json::Value) -> boo
             != Some(true)
 }
 
+fn record_secure_message_delivery(delivered: &mut bool, update: &serde_json::Value) {
+    *delivered |= secure_message_tool_completed_successfully(update);
+}
+
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
 /// collisions.  When both sides have an object for the same key, the merge recurses so
 /// unrelated nested keys from `base` are preserved.
@@ -1799,8 +1803,10 @@ impl AcpClient {
                 if self.turn_secure_message_tool_ids.contains(tool_id) {
                     match status {
                         "completed" => {
-                            self.turn_secure_message_called =
-                                secure_message_tool_completed_successfully(update);
+                            record_secure_message_delivery(
+                                &mut self.turn_secure_message_called,
+                                update,
+                            );
                             self.turn_secure_message_tool_ids.remove(tool_id);
                         }
                         "failed" => {
@@ -2953,6 +2959,20 @@ mod tests {
         assert!(!secure_message_tool_completed_successfully(
             &serde_json::json!({"status": "failed"})
         ));
+    }
+
+    #[test]
+    fn secure_message_delivery_is_monotonic_across_attempts() {
+        let mut delivered = false;
+        record_secure_message_delivery(
+            &mut delivered,
+            &serde_json::json!({"status": "completed", "rawOutput": {"isError": false}}),
+        );
+        record_secure_message_delivery(
+            &mut delivered,
+            &serde_json::json!({"status": "completed", "rawOutput": {"isError": true}}),
+        );
+        assert!(delivered);
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
