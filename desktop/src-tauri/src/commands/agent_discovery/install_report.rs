@@ -583,5 +583,13 @@ fn url_userinfo(value: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
+#[path = "install_report_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
 #[path = "install_report_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "install_report_redaction_tests.rs"]
+mod redaction_tests;
