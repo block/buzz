@@ -566,8 +566,8 @@ export class RelayClient {
         this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
       }, BACKOFF_RESET_STABLE_MS);
 
-      await this.replayLiveSubscriptions();
       this.connectionStateEmitter.set("connected");
+      await this.replayLiveSubscriptions();
       this.stallWatchdog.start();
       this.emitReconnectIfNeeded();
     } catch (error) {

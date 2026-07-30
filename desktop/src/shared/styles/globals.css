@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+
 @import "./globals/scrollbars.css";
 @import "./globals/motion.css";
 @import "./globals/animations.css";
@@ -17,3 +18,15 @@
 @import "./globals/progress.css";
 
 @config "../../../tailwind.config.js";
+
+/* Tailwind v4 gates `hover:` behind `@media (hover: hover)`. Some Windows
+   hosts answer that query `false` even with a mouse attached — WebView2 here
+   reports `hover: none`, `any-pointer: fine: false`, `maxTouchPoints: 10` —
+   which leaves every hover-revealed control permanently `visibility: hidden`:
+   member row action menus, sidebar row actions, attachment controls. A bare
+   `&:hover` trusts the actual hover event instead of the capability query;
+   Chromium only fires :hover when a real pointer is present.
+
+   Must stay below every `@import`: CSS requires `@import` to precede other
+   at-rules, so placing this above them silently drops the rest of the sheet. */
+@custom-variant hover (&:hover);

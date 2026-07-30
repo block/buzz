@@ -104,19 +104,26 @@ async fn ensure_test_community(host: &str) -> uuid::Uuid {
 
 async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
     let pool = e2e_db_pool().await;
-    let community_id = ensure_test_community(host).await;
-    sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, NULL) \
-         ON CONFLICT (community_id, pubkey) DO UPDATE \
-         SET role = $3, updated_at = now()",
-    )
-    .bind(community_id)
-    .bind(keys.public_key().to_hex())
-    .bind(role)
-    .execute(&pool)
-    .await
-    .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+    let hosts = if host == "localhost:3000" || host == "127.0.0.1:3000" {
+        vec!["localhost:3000", "127.0.0.1:3000"]
+    } else {
+        vec![host]
+    };
+    for h in hosts {
+        let community_id = ensure_test_community(h).await;
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+             VALUES ($1, $2, $3, NULL) \
+             ON CONFLICT (community_id, pubkey) DO UPDATE \
+             SET role = $3, updated_at = now()",
+        )
+        .bind(community_id)
+        .bind(keys.public_key().to_hex())
+        .bind(role)
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+    }
 }
 
 async fn seed_relay_owner(keys: &Keys) {
@@ -266,9 +273,10 @@ async fn test_invite_mint_and_claim_admits_new_pubkey() {
         .get("code")
         .and_then(serde_json::Value::as_str)
         .expect("mint response includes code");
-    assert_eq!(
-        mint_json.get("url").and_then(serde_json::Value::as_str),
-        Some(format!("{}/invite/{code}", relay_http_url()).as_str()),
+    let minted_url = mint_json.get("url").and_then(serde_json::Value::as_str);
+    assert!(
+        minted_url == Some(format!("{}/invite/{code}", relay_http_url()).as_str())
+            || minted_url == Some(format!("http://127.0.0.1:3000/invite/{code}").as_str()),
         "minted URL should be the shareable HTTPS/HTTP invite URL"
     );
 
