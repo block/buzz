@@ -1321,6 +1321,41 @@ fn send_prompt_result(
     });
 }
 
+async fn publish_harness_fallback(
+    agent: &mut OwnedAgent,
+    batch: Option<&FlushBatch>,
+    source: &PromptSource,
+    ctx: &PromptContext,
+) {
+    let (fallback_reply, secure_message_called) = agent.acp.take_turn_delivery();
+    if secure_message_called
+        || fallback_reply.trim().is_empty()
+        || !matches!(source, PromptSource::Channel(_))
+    {
+        return;
+    }
+    let Some(batch) = batch else {
+        return;
+    };
+    let thread_tags = batch
+        .events
+        .last()
+        .map(|event| crate::queue::parse_thread_tags(&event.event))
+        .unwrap_or_default();
+    tracing::warn!(
+        target: "pool::delivery",
+        channel = %batch.channel_id,
+        "agent returned text without secure send_message call; publishing harness fallback"
+    );
+    post_failure_notice(
+        &ctx.rest_client,
+        batch.channel_id,
+        &thread_tags,
+        fallback_reply.trim(),
+    )
+    .await;
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -2051,6 +2086,13 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        publish_harness_fallback(
+                            &mut agent,
+                            batch.as_ref(),
+                            &source,
+                            &ctx,
+                        )
+                        .await;
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2080,31 +2122,7 @@ pub async fn run_prompt_task(
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
 
-            let (fallback_reply, secure_message_called) = agent.acp.take_turn_delivery();
-            if !secure_message_called
-                && !fallback_reply.trim().is_empty()
-                && matches!(source, PromptSource::Channel(_))
-            {
-                if let Some(batch) = batch.as_ref() {
-                    let thread_tags = batch
-                        .events
-                        .last()
-                        .map(|event| crate::queue::parse_thread_tags(&event.event))
-                        .unwrap_or_default();
-                    tracing::warn!(
-                        target: "pool::delivery",
-                        channel = %batch.channel_id,
-                        "agent returned text without secure send_message call; publishing harness fallback"
-                    );
-                    post_failure_notice(
-                        &ctx.rest_client,
-                        batch.channel_id,
-                        &thread_tags,
-                        fallback_reply.trim(),
-                    )
-                    .await;
-                }
-            }
+            publish_harness_fallback(&mut agent, batch.as_ref(), &source, &ctx).await;
 
             let should_rotate = matches!(
                 stop_reason,
