@@ -1,9 +1,10 @@
 import type { Channel } from "@/shared/api/types";
+import { createClockFormatter } from "@/shared/lib/timeFormat";
 
 const relativeTimeFormatter = new Intl.RelativeTimeFormat("en-US", {
   numeric: "auto",
 });
-const absoluteTimeFormatter = new Intl.DateTimeFormat("en-US", {
+const formatAbsoluteTime = createClockFormatter("en-US", {
   month: "short",
   day: "numeric",
   hour: "numeric",
@@ -138,7 +139,7 @@ export function getEphemeralChannelDisplay(
   const remainingSeconds = resolveRemainingSeconds(channel.ttlDeadline, nowMs);
   const absoluteDeadlineLabel =
     channel.ttlDeadline && !Number.isNaN(Date.parse(channel.ttlDeadline))
-      ? absoluteTimeFormatter.format(new Date(channel.ttlDeadline))
+      ? formatAbsoluteTime(new Date(channel.ttlDeadline))
       : null;
   if (remainingSeconds === null) {
     return {

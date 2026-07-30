@@ -28,6 +28,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { createClockFormatter } from "@/shared/lib/timeFormat";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -65,7 +66,7 @@ const UNKNOWN_DRAFT_SOURCE: DraftSource = {
   label: UNKNOWN_CHANNEL_LABEL,
 };
 
-const draftTimeFormatter = new Intl.DateTimeFormat("en-US", {
+const formatDraftTime = createClockFormatter("en-US", {
   month: "short",
   day: "numeric",
   hour: "numeric",
@@ -79,9 +80,7 @@ function parseDraftTime(value: string): number {
 
 export function formatDraftCreatedAt(draft: DraftState): string {
   const time = parseDraftTime(draft.createdAt);
-  return time === 0
-    ? "Unknown time"
-    : draftTimeFormatter.format(new Date(time));
+  return time === 0 ? "Unknown time" : formatDraftTime(new Date(time));
 }
 
 function getOriginalDraftKey(draftKey: string): string {

@@ -9,6 +9,7 @@ import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMe
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
+import { useTimeFormatPreference } from "@/shared/lib/timeFormat";
 
 type UseHomeInboxContextMessagesOptions = {
   channelMessages?: RelayEvent[];
@@ -35,6 +36,12 @@ export function useHomeInboxContextMessages({
   selectedEventId,
   selectedItem,
 }: UseHomeInboxContextMessagesOptions): InboxContextMessage[] {
+  // Clock preference is not read inside the callback — `formatTimelineMessages`
+  // and `toInboxContextMessage` bake the formatted strings from the module-level
+  // preference — so it rides along purely to invalidate those labels.
+  const timeFormatPreference = useTimeFormatPreference();
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: timeFormatPreference invalidates the baked `timeLabel`/`fullTimestampLabel` strings
   return React.useMemo(() => {
     if (!selectedItem) return [];
 
@@ -83,5 +90,6 @@ export function useHomeInboxContextMessages({
     selectedChannel,
     selectedEventId,
     selectedItem,
+    timeFormatPreference,
   ]);
 }

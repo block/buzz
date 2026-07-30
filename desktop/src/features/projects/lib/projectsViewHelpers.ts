@@ -4,6 +4,7 @@ import type {
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { withClockOptions } from "@/shared/lib/timeFormat";
 
 export type ProjectsViewMode = "grid" | "list";
 export type ProjectsRepositoryScope = "all" | "mine" | "local";
@@ -226,14 +227,17 @@ export function relativeTime(
 }
 
 export function formatExactTimestamp(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return new Date(createdAt * 1_000).toLocaleString(
+    undefined,
+    withClockOptions({
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    }),
+  );
 }
 
 export function projectPeople(

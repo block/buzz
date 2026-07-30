@@ -73,6 +73,7 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useTimeFormatPreference } from "@/shared/lib/timeFormat";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
@@ -385,6 +386,11 @@ export function ChannelScreen({
     }
     return { personaLookup: pLookup, respondToLookup: rLookup };
   }, [managedAgentsQuery.data, personasQuery.data]);
+  // Not read inside the memo — `formatTimelineMessages` bakes each row's `time`
+  // from the module-level clock preference, so this only invalidates the cache
+  // when the user flips 12h/24h in Settings.
+  const timeFormatPreference = useTimeFormatPreference();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: timeFormatPreference invalidates the row `time` strings baked in by formatTimelineMessages
   const timelineMessages = React.useMemo(
     () =>
       formatTimelineMessages(
@@ -410,6 +416,7 @@ export function ChannelScreen({
       relaySelfPubkey,
       respondToLookup,
       resolvedMessages,
+      timeFormatPreference,
     ],
   );
   const threadSummaries: ReadonlyMap<string, ChannelWindowThreadSummary> =

@@ -17,6 +17,7 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
+import { createClockFormatter } from "@/shared/lib/timeFormat";
 import { Badge } from "@/shared/ui/badge";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -189,6 +190,13 @@ function truncateContent(content: string) {
   return `${trimmed.slice(0, 177)}...`;
 }
 
+const formatAbsoluteHit = createClockFormatter("en-US", {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function formatRelativeTime(unixSeconds: number) {
   const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
 
@@ -204,12 +212,7 @@ function formatRelativeTime(unixSeconds: number) {
     return `${Math.floor(diff / (60 * 60))}h ago`;
   }
 
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(unixSeconds * 1_000));
+  return formatAbsoluteHit(new Date(unixSeconds * 1_000));
 }
 
 export function MessageResultBody({

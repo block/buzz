@@ -64,6 +64,7 @@ import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useTimeFormatPreference } from "@/shared/lib/timeFormat";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
@@ -352,7 +353,11 @@ export function HomeView({
 
     return pubkeys;
   }, [feedProfiles, communityAgentPubkeys]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates the stable getChannelReadAt callback
+  // `buildInboxItems` formats its timestamp labels from the module-level clock
+  // preference, so this value only exists to invalidate the memo below (and to
+  // repaint the inline labels this view formats during render).
+  const timeFormatPreference = useTimeFormatPreference();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates the stable getChannelReadAt callback; timeFormatPreference invalidates the baked timestamp labels
   const inboxItems = React.useMemo(() => {
     const items = buildInboxItems({
       channels,
@@ -373,6 +378,7 @@ export function HomeView({
     getMessageReadAt,
     getThreadReadAt,
     readStateVersion,
+    timeFormatPreference,
   ]);
   const { effectiveDoneSet, markItemRead, markItemUnread } =
     useHomeInboxReadState({

@@ -1,4 +1,5 @@
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { createClockFormatter } from "@/shared/lib/timeFormat";
 
 export function getToolString(
   record: Record<string, unknown>,
@@ -236,13 +237,12 @@ export function shortenMiddle(value: string, maxLength: number) {
   return `${value.slice(0, edgeLength)}...${value.slice(-edgeLength)}`;
 }
 
-const transcriptTimeFormat = new Intl.DateTimeFormat("en-US", {
+const formatTranscriptClockTime = createClockFormatter("en-US", {
   hour: "numeric",
-  hour12: true,
   minute: "2-digit",
 });
 
-const transcriptTitleTimeFormat = new Intl.DateTimeFormat(undefined, {
+const formatTranscriptTitleClockTime = createClockFormatter(undefined, {
   weekday: "long",
   year: "numeric",
   month: "long",
@@ -255,7 +255,7 @@ const transcriptTitleTimeFormat = new Intl.DateTimeFormat(undefined, {
 export function formatTranscriptTime(isoTimestamp: string): string | null {
   const date = new Date(isoTimestamp);
   if (Number.isNaN(date.getTime())) return null;
-  return transcriptTimeFormat.format(date);
+  return formatTranscriptClockTime(date);
 }
 
 export function formatTranscriptTimestampTitle(
@@ -263,7 +263,7 @@ export function formatTranscriptTimestampTitle(
 ): string | undefined {
   const date = new Date(isoTimestamp);
   if (Number.isNaN(date.getTime())) return isoTimestamp || undefined;
-  return transcriptTitleTimeFormat.format(date);
+  return formatTranscriptTitleClockTime(date);
 }
 
 export function formatDuration(

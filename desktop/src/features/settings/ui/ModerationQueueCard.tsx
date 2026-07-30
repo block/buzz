@@ -32,6 +32,7 @@ import {
 } from "@/features/settings/lib/moderationQueue";
 import { cn } from "@/shared/lib/cn";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { withClockOptions } from "@/shared/lib/timeFormat";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -177,12 +178,15 @@ const RESOLUTION_OPTIONS: {
 function formatTimestamp(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return date.toLocaleString(
+    undefined,
+    withClockOptions({
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+  );
 }
 
 const SEVERITY_BADGE: Record<SeverityTier, string> = {
