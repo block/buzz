@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -24,7 +25,6 @@ import 'day_divider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
-import 'mentions/mention_candidates_provider.dart';
 import 'reaction_row.dart';
 import 'read_state/read_state_format.dart';
 import 'read_state/read_state_provider.dart';
@@ -607,7 +607,13 @@ class _ThreadMessage extends ConsumerWidget {
             profile?.ownerPubkey == currentPubkey?.toLowerCase());
 
     final userCache = ref.watch(userCacheProvider);
-    final knownAgentPubkeys = ref.watch(mentionAgentPubkeysProvider(channelId));
+    final knownAgentPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
     final mentionNames = <String, String>{};
     final agentMentionPubkeys = <String>{};
     for (final mpk in message.mentionPubkeys) {
@@ -620,6 +626,12 @@ class _ThreadMessage extends ConsumerWidget {
         agentMentionPubkeys.add(normalizedPubkey);
       }
     }
+    final resolvedMentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: message.mentionPubkeys,
+      profileMentionNames: mentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     return Padding(
       padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
@@ -725,7 +737,7 @@ class _ThreadMessage extends ConsumerWidget {
                             ),
                           MessageContent(
                             content: message.content,
-                            mentionNames: mentionNames,
+                            mentionNames: resolvedMentionNames,
                             agentMentionPubkeys: agentMentionPubkeys,
                             channelNames: channelNames,
                             tags: message.tags,
