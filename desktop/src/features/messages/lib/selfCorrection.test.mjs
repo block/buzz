@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applySelfCorrection, parseSelfCorrection } from "./selfCorrection.ts";
+import {
+  applySelfCorrection,
+  buildSelfCorrectionEdit,
+  parseSelfCorrection,
+} from "./selfCorrection.ts";
 
 // ── parseSelfCorrection ────────────────────────────────────────────────────
 
@@ -219,4 +223,41 @@ test("end-to-end: escaped delimiters — s/\\//\\/\\//g doubles every slash", ()
     ignoreCase: false,
   });
   assert.equal(applySelfCorrection("a/b/c", command), "a//b//c");
+});
+
+// ── buildSelfCorrectionEdit ─────────────────────────────────────────────────
+
+const target = (overrides) => ({ body: "", tags: [], ...overrides });
+
+test("buildSelfCorrectionEdit: rebuilds the corrected body as an edit", () => {
+  const edit = buildSelfCorrectionEdit(
+    target({ body: "hullo there" }),
+    parseSelfCorrection("s/hullo/hello/"),
+    [],
+  );
+  assert.deepEqual(edit, { content: "hello there", tags: [] });
+});
+
+test("buildSelfCorrectionEdit: null when the pattern is absent from the target", () => {
+  assert.equal(
+    buildSelfCorrectionEdit(
+      target({ body: "hello" }),
+      parseSelfCorrection("s/xyz/q/"),
+      [],
+    ),
+    null,
+  );
+});
+
+test("buildSelfCorrectionEdit: re-attaches NIP-30 emoji tags for shortcodes in the corrected body", () => {
+  const edit = buildSelfCorrectionEdit(
+    target({ body: "hi :bee:" }),
+    parseSelfCorrection("s/hi/yo/"),
+    [{ shortcode: "bee", url: "https://cdn/bee.png" }],
+  );
+  assert.equal(edit?.content, "yo :bee:");
+  assert.ok(
+    edit?.tags.some((tag) => tag[0] === "emoji" && tag[1] === "bee"),
+    "expected an emoji tag for :bee:",
+  );
 });

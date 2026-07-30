@@ -26,7 +26,25 @@
  *
  * Anything that does not parse cleanly returns `null`, so the caller falls back
  * to sending the text literally — a mistyped command is never silently eaten.
+ *
+ * `buildSelfCorrectionEdit` (bottom of file) bridges a parsed command and the
+ * existing kind-40003 edit path: it applies the substitution to a target
+ * message's visible body and rebuilds the outgoing edit, preserving imeta
+ * attachments and NIP-30 custom emoji exactly like the manual edit-save path.
+ * Finding the target message is the caller's job — it reuses ChannelPane's
+ * existing `findLastOwnEditable`, so the "what is editable" rule has one home.
  */
+
+import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+import {
+  buildOutgoingMessage,
+  findSpoileredImetaMediaUrls,
+  imetaMediaFromTags,
+  mergeOutgoingTags,
+  restoreImetaMediaDisplayLabels,
+  stripImetaMediaLines,
+} from "@/features/messages/lib/imetaMediaMarkdown";
 
 export type SelfCorrectionCommand = {
   /** Literal text to search for. Guaranteed non-empty. */
@@ -186,4 +204,49 @@ export function applySelfCorrection(
   }
   result += text.slice(copiedUpTo);
   return result;
+}
+
+/** An edit derived from applying a self-correction to a target message. */
+export type SelfCorrectionEdit = {
+  /** Rebuilt outgoing body (imeta markdown lines re-appended). */
+  content: string;
+  /** Merged outgoing tags (imeta + NIP-30 emoji), ready for the edit path. */
+  tags: string[][];
+};
+
+/**
+ * Apply `command` to `target`'s human-visible body and assemble the outgoing
+ * edit the same way the manual edit-save path does — stripping imeta markdown
+ * before substituting, then rebuilding content + media tags + custom-emoji
+ * tags. Returns `null` when the pattern is not present (nothing to correct, so
+ * the caller sends literally). The caller supplies `target` (its most recent
+ * editable message) and pre-checks that `text` parsed to a command.
+ */
+export function buildSelfCorrectionEdit(
+  target: { body: string; tags?: string[][] },
+  command: SelfCorrectionCommand,
+  customEmoji: ReadonlyArray<CustomEmoji>,
+): SelfCorrectionEdit | null {
+  // Rebuild the editable body (imeta markdown stripped) so the substitution
+  // runs over what the author actually sees.
+  const editableImeta = restoreImetaMediaDisplayLabels(
+    target.body,
+    imetaMediaFromTags(target.tags ?? []),
+  );
+  const editableBody = stripImetaMediaLines(target.body, editableImeta);
+  const correctedBody = applySelfCorrection(editableBody, command);
+  if (correctedBody === null || correctedBody === editableBody) {
+    return null;
+  }
+
+  const { content, mediaTags } = buildOutgoingMessage(
+    correctedBody,
+    editableImeta,
+    findSpoileredImetaMediaUrls(target.body, editableImeta),
+  );
+  const tags =
+    mergeOutgoingTags(mediaTags, buildCustomEmojiTags(content, customEmoji)) ??
+    [];
+
+  return { content, tags };
 }

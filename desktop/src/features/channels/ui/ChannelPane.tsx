@@ -114,7 +114,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   onDelete,
   onEdit,
   onEditSave,
-  onEditSaveById,
   onFollowThread,
   onMarkUnread,
   onMarkRead,
@@ -362,10 +361,11 @@ export const ChannelPane = React.memo(function ChannelPane({
     clearWelcomeComposerDismissTimer,
     isActiveWelcomeChannel,
   ]);
-  const trySelfCorrectingSend = useSelfCorrectingSend({
+  // `s/old/new/` self-correction — reuses findLastOwnEditable + onEditSave.
+  const maybeSelfCorrect = useSelfCorrectingSend({
     messages,
-    onEditSaveById,
-    currentPubkey,
+    findLastOwnEditable,
+    onEditSave,
   });
   const handleSendMessage = React.useCallback(
     async (
@@ -380,7 +380,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
 
       // `s/old/new/` self-correction edits your last message, not a new send.
-      if (await trySelfCorrectingSend(content, mediaTags)) return;
+      if (await maybeSelfCorrect(content, mediaTags)) return;
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
       await onSendMessage(content, mentionPubkeys, mediaTags, channelId);
 
@@ -403,8 +403,8 @@ export const ChannelPane = React.memo(function ChannelPane({
       goChannel,
       isActiveWelcomeChannel,
       knownAgentPubkeys,
+      maybeSelfCorrect,
       onSendMessage,
-      trySelfCorrectingSend,
     ],
   );
   const canDropInMainColumn =
