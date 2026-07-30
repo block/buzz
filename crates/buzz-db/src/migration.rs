@@ -919,7 +919,6 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
-
         // Channel-id lookup index (0027): serves the tenant-independent
         // `channels` lookups that carry no community_id predicate, which no
         // community_id-leading index can satisfy. Covering + partial so the
@@ -940,6 +939,13 @@ mod tests {
             desired_schema.contains("idx_channels_id_live"),
             "desired-state schema must carry the channel-id lookup index",
         );
+
+        assert_eq!(migrations[27].version, 28);
+        let long_reactions = migrations[27].sql.as_str();
+        assert!(
+            long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
+        );
+        assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
     }
 
     #[test]
