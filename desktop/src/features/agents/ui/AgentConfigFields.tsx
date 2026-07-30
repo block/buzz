@@ -42,7 +42,6 @@ import {
   AgentDropdownSelect,
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
-import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
@@ -55,6 +54,7 @@ import {
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
+import { usePersonaProviderStructuredEnv } from "./PersonaProviderStructuredEnvFields";
 
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
@@ -351,12 +351,43 @@ export function AgentConfigFields({
     runtimeFileConfig,
     runtimeId: credentialRuntimeId,
   });
+  const blockClassName = unstyled ? "" : "p-3";
+  const structuredEnv = usePersonaProviderStructuredEnv({
+    apiKey: apiKeyEnvVar
+      ? {
+          advancedRequiredEnvKeys,
+          inheritedLabel: apiKeyFileSatisfied
+            ? "Set in runtime config"
+            : "Provided by this build",
+          isInherited: apiKeyInherited,
+          isRequired: !apiKeyInherited && apiKeyValue.length === 0,
+          secretEnvVar: apiKeyEnvVar,
+          value: apiKeyValue,
+        }
+      : null,
+    apiKeyLabel:
+      effectiveProvider === "anthropic"
+        ? "Anthropic API Key"
+        : "OpenAI API Key",
+    bakedEnvKeys,
+    disabled: false,
+    effectiveEnvVars: config.env_vars,
+    envVars: config.env_vars,
+    fileSatisfiedEnvKeys: runtimeFileConfig?.satisfiedEnvKeys ?? [],
+    globalEnvVars: {},
+    onEnvVarsChange: (envVars) =>
+      onConfigChange({ ...config, env_vars: envVars }),
+    provider: credentialProvider,
+    wrapperClassName: blockClassName,
+  });
   const configIsValid =
-    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
+    selectedRuntimeId.length > 0 &&
+    modelIsValid &&
+    credentialsValid &&
+    structuredEnv.isValid;
   React.useEffect(() => {
     onValidityChange?.(configIsValid);
   }, [configIsValid, onValidityChange]);
-
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
@@ -382,7 +413,6 @@ export function AgentConfigFields({
     modelIsOptional,
     showCustomModelOption,
   });
-
   // Mount-time healing policy: onboarding page 4 edits the root config during
   // first-run (no higher layers to inherit from), so acting on open is safe
   // and intentional there — it heals stale state and picks a valid model.
@@ -400,7 +430,6 @@ export function AgentConfigFields({
   const mayMutateDependentFieldsRef = React.useRef(false);
   mayMutateDependentFieldsRef.current =
     healOnMount || userEditedProviderRef.current;
-
   const autoSelectedModelScopeRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!autoSelectModelOnProviderChange) return;
@@ -646,7 +675,6 @@ export function AgentConfigFields({
       ? "space-y-1.5"
       : "space-y-4"
     : "space-y-1.5 p-3";
-  const blockClassName = unstyled ? "" : "p-3";
   const fieldLabelClassName =
     unstyled && !progressiveDefaults ? "pl-3" : undefined;
   const providerDropdownOptions = [
@@ -743,32 +771,7 @@ export function AgentConfigFields({
 
   const dependentContent = (
     <>
-      {providerFieldVisible && apiKeyEnvVar ? (
-        <div className={blockClassName}>
-          <PersonaProviderApiKeyField
-            disabled={false}
-            inheritedLabel={
-              apiKeyFileSatisfied
-                ? "Set in runtime config"
-                : "Provided by this build"
-            }
-            isInherited={apiKeyInherited}
-            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={
-              effectiveProvider === "anthropic"
-                ? "Anthropic API Key"
-                : "OpenAI API Key"
-            }
-            onValueChange={(value) =>
-              onConfigChange({
-                ...config,
-                env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
-              })
-            }
-            value={apiKeyValue}
-          />
-        </div>
-      ) : null}
+      {providerFieldVisible ? structuredEnv.fields : null}
 
       {/* Model field — omitted only after confirmed successful empty discovery */}
       {modelControlVisible ? (
@@ -909,7 +912,7 @@ export function AgentConfigFields({
                 >
                   <EnvVarsEditor
                     fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
-                    hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
+                    hiddenKeys={structuredEnv.hiddenEnvKeys}
                     inheritedRows={bakedGenericRows}
                     inheritedRowsLabel="build"
                     label="Environment variables"
@@ -927,7 +930,7 @@ export function AgentConfigFields({
           ) : advancedOpen ? (
             <EnvVarsEditor
               fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
-              hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
+              hiddenKeys={structuredEnv.hiddenEnvKeys}
               inheritedRows={bakedGenericRows}
               inheritedRowsLabel="build"
               label="Environment variables"

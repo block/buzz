@@ -18,7 +18,6 @@ import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
 import { runtimeAvailabilityWarning } from "./runtimeAvailabilityWarning";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   canSubmitPersonaDialog,
   formatPersonaNamePoolText,
@@ -81,6 +80,7 @@ import {
   initialAgentAiConfigurationMode,
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
+import { usePersonaProviderStructuredEnv } from "./PersonaProviderStructuredEnvFields";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
@@ -470,14 +470,22 @@ export function AgentDefinitionDialog({
     provider: effectiveProvider,
     requiredEnvKeys,
   });
-  const {
-    advancedRequiredEnvKeys,
-    inheritedLabel: apiKeyInheritedLabel,
-    isInherited: apiKeyIsInherited,
-    isRequired: apiKeyIsRequired,
-    secretEnvVar: topLevelSecretEnvVar,
-    value: apiKeyValue,
-  } = apiKeyFieldState;
+  const { advancedRequiredEnvKeys } = apiKeyFieldState;
+  const structuredEnv = usePersonaProviderStructuredEnv({
+    apiKey: apiKeyFieldState,
+    apiKeyLabel:
+      effectiveProvider === "anthropic"
+        ? "Anthropic API key"
+        : "OpenAI API key",
+    bakedEnvKeys,
+    disabled: isPending,
+    effectiveEnvVars: envVars,
+    envVars,
+    fileSatisfiedEnvKeys: localModeGate.fileSatisfiedEnvKeys,
+    globalEnvVars: globalConfig.env_vars,
+    onEnvVarsChange: setEnvVars,
+    provider: effectiveProvider,
+  });
   const providerIsRequired =
     aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
   const modelFieldVisible =
@@ -511,6 +519,7 @@ export function AgentDefinitionDialog({
     // missingEnvKeys — credential env keys now block submit, not just display.
     localModeSatisfied &&
     customAiPairSatisfied &&
+    structuredEnv.isValid &&
     !isAvatarUploadPending;
 
   // Merge global env as the base layer so credential keys satisfied via global
@@ -902,28 +911,9 @@ export function AgentDefinitionDialog({
                 </div>
               ) : null}
 
-              {llmProviderFieldVisible &&
-              aiConfigurationMode === "custom" &&
-              topLevelSecretEnvVar ? (
-                <PersonaProviderApiKeyField
-                  disabled={isPending}
-                  isInherited={apiKeyIsInherited}
-                  inheritedLabel={apiKeyInheritedLabel}
-                  isRequired={apiKeyIsRequired}
-                  label={
-                    effectiveProvider === "anthropic"
-                      ? "Anthropic API key"
-                      : "OpenAI API key"
-                  }
-                  onValueChange={(next) => {
-                    setEnvVars((prev) => ({
-                      ...prev,
-                      [topLevelSecretEnvVar]: next,
-                    }));
-                  }}
-                  value={apiKeyValue}
-                />
-              ) : null}
+              {llmProviderFieldVisible && aiConfigurationMode === "custom"
+                ? structuredEnv.fields
+                : null}
 
               <AnimatePresence initial={false}>
                 {modelFieldVisible && aiConfigurationMode === "custom" ? (
@@ -1015,9 +1005,7 @@ export function AgentDefinitionDialog({
                       disabled={isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
-                      hiddenEnvKeys={
-                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                      }
+                      hiddenEnvKeys={structuredEnv.hiddenEnvKeys}
                       inheritedEnvVars={inheritedEnvVarsForAdvanced}
                       model={model}
                       modelTuningRuntimeId={runtime}

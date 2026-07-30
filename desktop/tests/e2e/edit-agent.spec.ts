@@ -278,6 +278,73 @@ test.describe("edit agent dialog", () => {
     ).toBeVisible();
   });
 
+  test("openai-compatible base URL field persists and is hidden from Advanced", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    await pickDropdownOption(
+      page,
+      "edit-agent-llm-provider",
+      "OpenAI-compatible",
+    );
+    const baseUrl = page.getByTestId("persona-provider-base-url");
+    await expect(baseUrl).toBeVisible();
+    await expect(page.getByTestId("persona-provider-api-key")).toBeVisible();
+
+    await page.getByTestId("persona-provider-api-key").fill("sk-test-compat");
+    await baseUrl.fill("not-a-url");
+    await expect(
+      page.getByTestId("persona-provider-base-url-error"),
+    ).toBeVisible();
+    await expect(page.getByTestId("edit-agent-dialog-submit")).toBeDisabled();
+
+    await baseUrl.fill("http://127.0.0.1:9337/v1");
+    await expect(
+      page.getByTestId("persona-provider-base-url-error"),
+    ).not.toBeVisible();
+    await pickDropdownOption(page, "edit-agent-model", "Custom model...");
+    await page.locator("#edit-agent-custom-model").fill("local-model");
+
+    const advanced = page.getByRole("button", {
+      name: "Advanced",
+      exact: true,
+    });
+    await advanced.click();
+    // Structured fields own the API key + base URL; Advanced must not mirror them.
+    await expect(
+      page.locator('input[value="OPENAI_COMPAT_BASE_URL"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('input[value="OPENAI_COMPAT_API_KEY"]'),
+    ).toHaveCount(0);
+
+    const submit = page.getByTestId("edit-agent-dialog-submit");
+    await expect(submit).toBeEnabled({ timeout: 10_000 });
+    await submit.click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("persona-provider-base-url")).toHaveValue(
+      "http://127.0.0.1:9337/v1",
+      { timeout: 10_000 },
+    );
+  });
+
   test("profile Edit routes persona-linked agents to the definition editor", async ({
     page,
   }) => {

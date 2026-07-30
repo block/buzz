@@ -70,7 +70,6 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
@@ -80,6 +79,10 @@ import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
+import {
+  OPENAI_COMPAT_BASE_URL_ENV_KEY,
+  usePersonaProviderStructuredEnv,
+} from "./PersonaProviderStructuredEnvFields";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
@@ -443,14 +446,26 @@ export function AgentInstanceEditDialog({
     provider: effectiveProvider,
     requiredEnvKeys,
   });
-  const {
-    advancedRequiredEnvKeys,
-    inheritedLabel: apiKeyInheritedLabel,
-    isInherited: apiKeyIsInherited,
-    isRequired: apiKeyIsRequired,
-    secretEnvVar: topLevelSecretEnvVar,
-    value: apiKeyValue,
-  } = apiKeyFieldState;
+  const { advancedRequiredEnvKeys } = apiKeyFieldState;
+  const baseUrlPersonaSatisfied =
+    !(OPENAI_COMPAT_BASE_URL_ENV_KEY in envVars) &&
+    (inheritedEnvVars[OPENAI_COMPAT_BASE_URL_ENV_KEY] ?? "").length > 0;
+  const structuredEnv = usePersonaProviderStructuredEnv({
+    apiKey: apiKeyFieldState,
+    apiKeyLabel:
+      effectiveProvider === "anthropic"
+        ? "Anthropic API Key"
+        : "OpenAI API Key",
+    bakedEnvKeys,
+    disabled: updateMutation.isPending,
+    effectiveEnvVars: inheritedSubmission.envVars,
+    envVars,
+    fileSatisfiedEnvKeys,
+    globalEnvVars: globalConfig.env_vars,
+    onEnvVarsChange: setEnvVars,
+    personaSatisfied: baseUrlPersonaSatisfied,
+    provider: effectiveProvider,
+  });
   // Clear model when provider scope changes and current model is no longer valid.
   React.useEffect(() => {
     if (
@@ -611,6 +626,7 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    structuredEnv.isValid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -1058,26 +1074,7 @@ export function AgentInstanceEditDialog({
               </div>
             ) : null}
 
-            {llmProviderFieldVisible && topLevelSecretEnvVar ? (
-              <PersonaProviderApiKeyField
-                disabled={updateMutation.isPending}
-                isInherited={apiKeyIsInherited}
-                inheritedLabel={apiKeyInheritedLabel}
-                isRequired={apiKeyIsRequired}
-                label={
-                  effectiveProvider === "anthropic"
-                    ? "Anthropic API Key"
-                    : "OpenAI API Key"
-                }
-                onValueChange={(next) => {
-                  setEnvVars((prev) => ({
-                    ...prev,
-                    [topLevelSecretEnvVar]: next,
-                  }));
-                }}
-                value={apiKeyValue}
-              />
-            ) : null}
+            {llmProviderFieldVisible ? structuredEnv.fields : null}
 
             {/* Model */}
             <div className="space-y-1.5">
@@ -1184,9 +1181,7 @@ export function AgentInstanceEditDialog({
                       disabled={updateMutation.isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
-                      hiddenEnvKeys={
-                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                      }
+                      hiddenEnvKeys={structuredEnv.hiddenEnvKeys}
                       focusKey={
                         initialFocus?.type === "env_key"
                           ? initialFocus.key
