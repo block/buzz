@@ -776,9 +776,8 @@ export class RelayClient {
       return;
     }
 
-    if (handleRelayNoticeFrame(data)) return;
-
     const [type, ...rest] = data;
+    if (type === "NOTICE" && handleRelayNoticeFrame(data)) return;
     if (type === "AUTH" && typeof rest[0] === "string") {
       await this.handleAuthChallenge(rest[0], generation);
       return;
@@ -821,9 +820,8 @@ export class RelayClient {
     }
 
     if (type === "NOTICE" && typeof rest[0] === "string") {
-      const notice: string = rest[0];
-      // Relay back-pressure signal — activate the gate so pending operations
-      // back off until the window expires.
+      const notice = rest[0];
+      // Relay back-pressure signal — activate the gate while operations back off.
       if (notice.startsWith("rate-limited:")) {
         activateRateLimit(parseRateLimitHint(notice));
       }

@@ -465,15 +465,11 @@ export function useSendMessageMutation(
         mentionPubkeys,
       );
 
-      // Messages carrying media, custom-emoji, or explicit mention reference
-      // tags MUST go through REST so the Rust tag guards validate each channel.
-      // The WebSocket path emits only structural send tags.
-      if (
-        parentEventId ||
-        imetaTags.length > 0 ||
-        emojiTags.length > 0 ||
-        mentionTags.length > 0
-      ) {
+      // Messages carrying media or custom-emoji tags MUST go through REST so
+      // the relay's tag validation runs. Explicit mention reference tags are
+      // supported by the WebSocket path and should stay there so DM expansion
+      // and its test bridge observe the normal send flow.
+      if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
