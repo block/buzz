@@ -750,3 +750,18 @@ export function computeLocalModeGate({
       missingNormalizedFields.length === 0 && missingEnvKeys.length === 0,
   };
 }
+
+/**
+ * Submit-gate view of the local-mode gate. A server-managed (spawner-hosted)
+ * agent authenticates on the server (e.g. OAuth), so missing LOCAL credential
+ * env keys must not block Save — only the normalized provider/model fields
+ * remain required. Local agents use the full gate unchanged.
+ */
+export function localModeGateSatisfiedForSubmit(
+  gate: { missingNormalizedFields: string[]; satisfied: boolean },
+  serverManaged: boolean,
+): boolean {
+  return serverManaged
+    ? gate.missingNormalizedFields.length === 0
+    : gate.satisfied;
+}

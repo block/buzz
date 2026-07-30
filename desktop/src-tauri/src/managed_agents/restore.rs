@@ -165,7 +165,13 @@ pub async fn restore_managed_agents_on_launch(
 
         let candidates: Vec<String> = records
             .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| {
+                record.start_on_app_launch
+                    && record.backend == BackendKind::Local
+                    // A relocated identity runs on its spawner; resurrecting it
+                    // here would answer every mention twice.
+                    && record.relocated_to_spawner.is_none()
+            })
             .map(|record| record.pubkey.clone())
             .collect();
 

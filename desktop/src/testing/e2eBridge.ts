@@ -43,6 +43,8 @@ import {
   KIND_PERSONA,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
+  KIND_SPAWNER_AGENT_STATUS,
+  KIND_SPAWNER_ANNOUNCEMENT,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
@@ -88,6 +90,36 @@ type MockManagedAgentSeed = {
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
+  /** Spawner pubkey this agent's identity was relocated to, if any. */
+  relocatedToSpawner?: string | null;
+};
+
+/**
+ * A kind:10180 spawner announcement served to the live directory subscription.
+ *
+ * `content` is the raw announcement body (snake_case, exactly as a real spawner
+ * publishes it) so specs can seed a catalog, or omit `ai` to drive the
+ * no-catalog fallback.
+ */
+type MockSpawnerAnnouncementSeed = {
+  pubkey: string;
+  content: Record<string, unknown>;
+  createdAt?: number;
+};
+
+/**
+ * A kind:30179 agent status served to the live status subscription.
+ *
+ * `content` is the raw snake_case status body a real spawner publishes (e.g.
+ * `{ phase: "stopped", needs_credential: true }`), authored by
+ * `spawnerPubkey` with the `d` tag set to `slug` — matching how the status
+ * store keys entries by `(event.pubkey, slug)`.
+ */
+type MockSpawnerStatusSeed = {
+  spawnerPubkey: string;
+  slug: string;
+  content: Record<string, unknown>;
+  createdAt?: number;
 };
 
 type MockManagedAgentRuntimeSeed = {
@@ -228,6 +260,10 @@ type E2eConfig = {
     /** Per agent+relay runtime rows for the pair-scoped lifecycle commands
      *  (`list/start/stop/restart_managed_agent_runtime`). */
     managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
+    /** kind:10180 announcements replayed to the spawner-directory subscription. */
+    spawnerAnnouncements?: MockSpawnerAnnouncementSeed[];
+    /** kind:30179 statuses replayed to the spawner-status subscription. */
+    spawnerStatuses?: MockSpawnerStatusSeed[];
     personas?: MockPersonaSeed[];
     /** Community catalog replaceable-event heads returned by relay queries. */
     personaCatalogEvents?: RelayEvent[];
@@ -767,6 +803,8 @@ type RawManagedAgent = {
   backend_agent_id: string | null;
   respond_to: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist: string[];
+  /** Spawner this agent's identity was relocated to; null when local. */
+  relocated_to_spawner?: string | null;
 };
 
 type RawCreateManagedAgentResponse = {
@@ -903,6 +941,45 @@ function createMockRelayMembershipEvent(): RelayEvent {
     "",
     mockRelayMembers.map((member) => ["member", member.pubkey, member.role]),
     "f".repeat(64),
+  );
+}
+
+/**
+ * kind:10180 announcements for the spawner directory, from
+ * `mock.spawnerAnnouncements`. Identity comes from the seeded pubkey — the
+ * store reads it off the envelope, never the content — so a spec can seed one
+ * spawner with an `ai` catalog and another without.
+ */
+function createMockSpawnerAnnouncementEvents(): RelayEvent[] {
+  return (getConfig()?.mock?.spawnerAnnouncements ?? []).map((seed) =>
+    createMockEvent(
+      KIND_SPAWNER_ANNOUNCEMENT,
+      JSON.stringify(seed.content),
+      [],
+      seed.pubkey,
+      seed.createdAt ?? Math.floor(Date.now() / 1000),
+    ),
+  );
+}
+
+/**
+ * kind:30179 statuses for this owner's server agents, from
+ * `mock.spawnerStatuses`. Authored by the seeded spawner pubkey — the status
+ * store keys entries by `(event.pubkey, d tag)` — with the owner `p`-tagged the
+ * way a real spawner addresses status to the spec author.
+ */
+function createMockSpawnerStatusEvents(): RelayEvent[] {
+  return (getConfig()?.mock?.spawnerStatuses ?? []).map((seed) =>
+    createMockEvent(
+      KIND_SPAWNER_AGENT_STATUS,
+      JSON.stringify(seed.content),
+      [
+        ["d", seed.slug],
+        ["p", getMockMemberPubkey(getConfig())],
+      ],
+      seed.spawnerPubkey,
+      seed.createdAt ?? Math.floor(Date.now() / 1000),
+    ),
   );
 }
 
@@ -1518,6 +1595,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
+    relocated_to_spawner: agent.relocated_to_spawner ?? null,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
     respond_to: agent.respond_to ?? "owner-only",
@@ -2057,6 +2135,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
     respond_to_allowlist: seed.respondToAllowlist ?? [],
+    relocated_to_spawner: seed.relocatedToSpawner ?? null,
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
@@ -9073,6 +9152,19 @@ function sendToMockSocket(args: {
         kinds: kinds.size > 0 ? [...kinds] : null,
         ownerPubkeys: [...ownerPubkeys],
       });
+      // The spawner directory is a live REQ with no channel scope, so its
+      // stored replay has to happen here rather than in emitMockHistory.
+      if (kinds.has(KIND_SPAWNER_ANNOUNCEMENT)) {
+        for (const event of createMockSpawnerAnnouncementEvents()) {
+          sendWsText(socket.handler, ["EVENT", subId, event]);
+        }
+      }
+      // Same reasoning for agent status: a live REQ with no channel scope.
+      if (kinds.has(KIND_SPAWNER_AGENT_STATUS)) {
+        for (const event of createMockSpawnerStatusEvents()) {
+          sendWsText(socket.handler, ["EVENT", subId, event]);
+        }
+      }
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
     }

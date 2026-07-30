@@ -23,6 +23,8 @@ import {
   type BackendIntent,
 } from "./lib/instanceInputForDefinition";
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
+import { LOCAL, type AgentLocation } from "./agentLocation";
+import { useDeployPersonaToSpawner } from "./ui/useDeployPersonaToSpawner";
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
@@ -71,6 +73,7 @@ export function useAgentManagement() {
   );
   const [error, setError] = React.useState<string | null>(null);
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
+  const deployToSpawner = useDeployPersonaToSpawner();
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
@@ -179,6 +182,7 @@ export function useAgentManagement() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    location?: AgentLocation,
   ): Promise<boolean> {
     if (request?.action !== "create" || "id" in input) {
       return false;
@@ -204,7 +208,20 @@ export function useAgentManagement() {
         avatarUrl,
       });
 
-      if (intent === "definition_start") {
+      const runLocation = location ?? LOCAL;
+      if (runLocation.kind === "spawner") {
+        // The spawner owns the process and mints the agent's key, so there is
+        // no local instance to create and no pubkey to add to the channel yet.
+        // A failed publish must not read as success: the hook has already
+        // surfaced the reason, so stop here rather than reporting a deployment
+        // that never happened.
+        if (!(await deployToSpawner(persona, runLocation.spawnerPubkey))) {
+          // The definition was created and is kept — only the deploy failed,
+          // so the user can retry from the Agents screen without re-entering
+          // everything. Returning false keeps the dialog open to say so.
+          return false;
+        }
+      } else if (intent === "definition_start") {
         const created = await createAgentMutation.mutateAsync(
           await buildInstanceInputForDefinition(
             persona,

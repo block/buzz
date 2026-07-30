@@ -54,6 +54,11 @@ struct ConnEntry {
     backpressure_count: Arc<AtomicU8>,
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    /// NIP-OA attesting owner for this connection, when it authenticated with an
+    /// `auth` tag. Mirrors `AuthContext::agent_owner_pubkey`, kept here so the
+    /// synchronous fan-out path can consult it without awaiting the per-socket
+    /// `auth_state` lock.
+    agent_owner_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
     grace_limit: u8,
 }
 
@@ -225,6 +230,7 @@ impl ConnectionManager {
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
+                agent_owner_pubkey: Arc::new(std::sync::RwLock::new(None)),
                 grace_limit,
             },
         );
@@ -250,6 +256,26 @@ impl ConnectionManager {
                 *slot = Some(pubkey_bytes);
             }
         }
+    }
+
+    /// Record the NIP-OA attesting owner for a connection after NIP-42 succeeds.
+    ///
+    /// Pass `None` for a connection that authenticated without an `auth` tag, so
+    /// a re-auth on the same socket clears a previously attested owner rather
+    /// than leaving a stale delegation in place.
+    pub fn set_agent_owner_pubkey(&self, conn_id: Uuid, owner_bytes: Option<Vec<u8>>) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            if let Ok(mut slot) = entry.agent_owner_pubkey.write() {
+                *slot = owner_bytes;
+            }
+        }
+    }
+
+    /// Return the NIP-OA attesting owner recorded for a connection, if any.
+    pub fn agent_owner_for_conn(&self, conn_id: Uuid) -> Option<Vec<u8>> {
+        self.connections
+            .get(&conn_id)
+            .and_then(|entry| entry.agent_owner_pubkey.read().ok()?.clone())
     }
 
     /// Return live connection IDs authenticated as `pubkey_bytes` in one community.

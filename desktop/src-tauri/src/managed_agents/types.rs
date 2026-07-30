@@ -122,6 +122,7 @@ impl AgentDefinition {
             env_vars: self.env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
+            relocated_to_spawner: None,
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
@@ -314,6 +315,13 @@ pub struct ManagedAgentRecord {
     /// frontend only fires when the agent is idle, connected, and local.
     #[serde(default = "default_auto_restart_on_config_change")]
     pub auto_restart_on_config_change: bool,
+    /// Set (to the spawner's pubkey) when this agent's secret key was handed
+    /// to a `buzz-spawner` over the attestation handshake — the identity now
+    /// runs on that server. A relocated record is retained for provenance and
+    /// a possible move-back, but every local spawn path must refuse it: two
+    /// runners holding one key both answer every mention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relocated_to_spawner: Option<String>,
     #[serde(default)]
     pub runtime_pid: Option<u32>,
     #[serde(default)]
@@ -563,6 +571,10 @@ pub struct ManagedAgentSummary {
     pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
     pub auto_restart_on_config_change: bool,
+    /// Mirrors `ManagedAgentRecord.relocated_to_spawner`: `Some(spawner
+    /// pubkey)` when this identity was handed to a server. The UI shows
+    /// "runs on server" instead of Start, and the auto-restart policy holds.
+    pub relocated_to_spawner: Option<String>,
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,

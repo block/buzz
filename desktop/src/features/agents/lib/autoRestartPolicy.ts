@@ -37,6 +37,9 @@ export type AutoRestartInputs = {
   connected: boolean;
   /** Only local agents can be restarted by this loop. */
   isLocalBackend: boolean;
+  /** Identity handed to a spawner (`relocatedToSpawner` set). Restarting the
+   * local copy would run one identity in two places — never fire. */
+  isRelocated: boolean;
   /** Agent process status from the summary ("running" required). */
   isRunning: boolean;
   /** Edge-trigger state: true when this needsRestart rising edge has
@@ -62,6 +65,7 @@ export function decideAutoRestart(
     workingSource,
     connected,
     isLocalBackend,
+    isRelocated,
     isRunning,
     edgeConsumed,
     quiescentForMs,
@@ -71,6 +75,7 @@ export function decideAutoRestart(
   if (!autoRestartEnabled) return "hold";
   if (!needsRestart) return "hold";
   if (!isLocalBackend) return "hold";
+  if (isRelocated) return "hold";
   if (!isRunning) return "hold";
   if (!connected) return "hold";
   // Any working signal — observer OR typing — defers. `working` and
