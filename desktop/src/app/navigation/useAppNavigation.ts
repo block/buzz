@@ -68,6 +68,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goFleet = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/fleet",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -297,6 +308,7 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goFleet,
     goForumPost,
     goHome,
     goNewMessage,

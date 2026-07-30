@@ -1,4 +1,4 @@
-import { Activity, Bell, Bot, FolderGit2, Zap } from "lucide-react";
+import { Activity, Bell, Bot, FolderGit2, LayoutGrid, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -17,6 +17,7 @@ type SidebarSelectedView =
   | "channel"
   | "messages"
   | "agents"
+  | "fleet"
   | "workflows"
   | "pulse"
   | "projects";
@@ -38,6 +39,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectFleet: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -83,6 +85,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectFleet,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -155,6 +158,20 @@ export function AppSidebarPrimaryMenu({
             <SidebarMenuLabel>Agents</SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        <FeatureGate feature="fleet">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-fleet-view"
+              isActive={selectedView === "fleet"}
+              onClick={onSelectFleet}
+              tooltip="Fleet"
+              type="button"
+            >
+              <LayoutGrid className="h-4 w-4" />
+              <SidebarMenuLabel>Fleet</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
         <FeatureGate feature="workflows">
           <SidebarMenuItem>
             <SidebarMenuButton

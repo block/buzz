@@ -495,6 +495,7 @@ reconnects preserve pending avatar verification work):
 - `resetAgentObserverStore()` — agent observer relay store
 - `resetActiveAgentTurnsStore()` — active agent turn timers
 - `resetAgentWorkingSignal()` — agent working indicator signal
+- `resetFleetTurnMetricsStore()` — fleet turn-metric usage store (kind 44200)
 - `resetAvatarProfileSync()` — pending verified-avatar profile writes
 - `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
 - `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
