@@ -19,6 +19,7 @@ import {
   injectObserverEventsForE2E,
   syncAgentObserverEvents,
 } from "@/features/agents/observerRelayStore";
+import { injectFleetTurnMetricsForE2E } from "@/features/fleet/turnMetricsStore";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -1126,6 +1127,30 @@ declare global {
         sessionId: string | null;
         turnId: string | null;
         payload: unknown;
+      }>;
+    }) => void;
+    /** Seed decoded NIP-AM turn-metric payloads (kind 44200) into the fleet
+     *  usage store, bypassing the archive/relay/decrypt pipeline — mirrors
+     *  `__BUZZ_E2E_SEED_OBSERVER_EVENTS__`. */
+    __BUZZ_E2E_SEED_TURN_METRICS__?: (input: {
+      agentPubkey: string;
+      payloads: Array<{
+        harness: string;
+        timestamp: string;
+        sessionId?: string | null;
+        turnSeq?: number | null;
+        turn?: {
+          inputTokens?: number | null;
+          outputTokens?: number | null;
+          totalTokens?: number | null;
+          costUsd?: number | null;
+        } | null;
+        cumulative?: {
+          inputTokens?: number | null;
+          outputTokens?: number | null;
+          totalTokens?: number | null;
+          costUsd?: number | null;
+        } | null;
       }>;
     }) => void;
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
@@ -9395,6 +9420,9 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
+  };
+  window.__BUZZ_E2E_SEED_TURN_METRICS__ = ({ agentPubkey, payloads }) => {
+    injectFleetTurnMetricsForE2E(agentPubkey, payloads);
   };
   const meshNodeStatus = (
     state: "off" | "running",
