@@ -161,8 +161,24 @@ export function SectionActionsMenu({
   onSortModeChange?: (mode: ChannelSortMode) => void;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const showSectionManagement = Boolean(onRenameSection || onDeleteSection);
+  // Gate on the items this block actually renders. Including `onDeleteSection`
+  // here would open the wrapper for a delete-only section and emit nothing.
+  const showSectionManagement = Boolean(
+    onRenameSection || onMoveSectionUp || onMoveSectionDown,
+  );
   const showSort = Boolean(sortMode && onSortModeChange);
+  // Separators are only meaningful with an item above them. The built-in
+  // Channels header supplies just `onMarkAllRead` (itself gated on unread) and
+  // a sort preference, so with everything read the menu would otherwise open
+  // on a divider with nothing before it.
+  const hasItemsBeforeSort = Boolean(
+    (hasUnread && onMarkAllRead) ||
+      onNewMessage ||
+      onBrowse ||
+      onCreate ||
+      showSectionManagement,
+  );
+  const hasItemsBeforeDelete = hasItemsBeforeSort || showSort;
 
   return (
     <DropdownMenu onOpenChange={onOpenChange}>
@@ -245,7 +261,7 @@ export function SectionActionsMenu({
         ) : null}
         {showSort ? (
           <>
-            <DropdownMenuSeparator />
+            {hasItemsBeforeSort ? <DropdownMenuSeparator /> : null}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <ArrowUpDown className="h-4 w-4" />
@@ -273,7 +289,7 @@ export function SectionActionsMenu({
         ) : null}
         {onDeleteSection ? (
           <>
-            <DropdownMenuSeparator />
+            {hasItemsBeforeDelete ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
               className="text-destructive focus:text-destructive"
               onSelect={() => deferMenuAction(onDeleteSection)}
