@@ -68,6 +68,21 @@ test("shows invocable relay-native agents separately from local runtimes", async
   await expect(
     page.getByTestId(`external-agent-${externalPubkey}`),
   ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Link Hermes Native identity" })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "stored in the macOS Keychain",
+  );
+  await page.getByLabel("Private key (nsec)").fill("nsec1test-only");
+  await page.getByRole("button", { name: "Link securely" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Edit Hermes Native");
+  await dialog.getByLabel("Name").fill("Hermes Linked");
+  await dialog.getByLabel("Description").fill("External Hermes profile");
+  await dialog.getByRole("button", { name: "Save profile" }).click();
+  await expect(section).toContainText("Hermes Linked");
 });
 
 async function gotoApp(page: import("@playwright/test").Page) {

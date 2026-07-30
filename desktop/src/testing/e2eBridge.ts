@@ -3219,6 +3219,7 @@ const mockProfiles = new Map<string, RawProfile>([
     },
   ],
 ]);
+const mockLinkedExternalAgentIdentities = new Set<string>();
 const mockPresence = new Map<string, PresenceStatus>([
   [MOCK_IDENTITY_PUBKEY, "offline"],
   [DEFAULT_REAL_IDENTITY.pubkey, "offline"],
@@ -9389,6 +9390,7 @@ export function maybeInstallE2eTauriMocks() {
     ? { ...config.mock.globalAgentConfig }
     : null;
   resetMockRelayMembers(config);
+  mockLinkedExternalAgentIdentities.clear();
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
   resetMockPersonas(config);
@@ -9880,6 +9882,51 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
+      case "get_external_agent_identity_status":
+        return {
+          linked: mockLinkedExternalAgentIdentities.has(
+            (payload as { pubkey: string }).pubkey.toLowerCase(),
+          ),
+        };
+      case "link_external_agent_identity": {
+        const { nsec, pubkey } = payload as {
+          nsec: string;
+          pubkey: string;
+        };
+        if (!nsec.trim().startsWith("nsec1")) {
+          throw new Error("invalid private key");
+        }
+        mockLinkedExternalAgentIdentities.add(pubkey.toLowerCase());
+        return { linked: true };
+      }
+      case "update_external_agent_profile": {
+        const input = payload as {
+          pubkey: string;
+          displayName?: string;
+          avatarUrl?: string;
+          about?: string;
+        };
+        const pubkey = input.pubkey.toLowerCase();
+        if (!mockLinkedExternalAgentIdentities.has(pubkey)) {
+          throw new Error(
+            "link this external agent before editing its profile",
+          );
+        }
+        const current = getMockProfileByPubkey(pubkey);
+        const profile: RawProfile = {
+          pubkey,
+          display_name:
+            input.displayName?.trim() || current?.display_name || null,
+          avatar_url: input.avatarUrl?.trim() || null,
+          about: input.about?.trim() || null,
+          nip05_handle: current?.nip05_handle ?? null,
+          owner_pubkey: MOCK_IDENTITY_PUBKEY,
+          is_agent: true,
+          has_profile_event: true,
+        };
+        mockProfiles.set(pubkey, profile);
+        return cloneProfile(profile);
+      }
       case "get_user_profile":
         return handleGetUserProfile(
           (payload as Parameters<typeof handleGetUserProfile>[0]) ?? {},

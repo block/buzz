@@ -1,4 +1,5 @@
 import * as React from "react";
+import { KeyRound, Pencil } from "lucide-react";
 
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
 import {
@@ -11,7 +12,12 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import type { RelayAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { AgentIdentityCard } from "./AgentIdentityCard";
+import {
+  ExternalAgentIdentityDialog,
+  useExternalAgentIdentityStatus,
+} from "./ExternalAgentIdentityDialog";
 import { AGENT_CARD_GRID_COLUMNS_CLASS } from "./UnifiedAgentsSection";
+import { Button } from "@/shared/ui/button";
 
 type ExternalAgentsSectionProps = {
   managedAgentPubkeys: ReadonlySet<string>;
@@ -81,6 +87,8 @@ function ExternalAgentCard({
   onOpenAgentProfile: (pubkey: string) => void;
 }) {
   const profileQuery = useUserProfileQuery(agent.pubkey);
+  const identityStatusQuery = useExternalAgentIdentityStatus(agent.pubkey);
+  const [identityDialogOpen, setIdentityDialogOpen] = React.useState(false);
   const title = profileQuery.data?.displayName?.trim() || agent.name;
   const agentType = agent.agentType.trim();
   const modelLabel = agentType
@@ -88,13 +96,41 @@ function ExternalAgentCard({
     : "Managed externally";
 
   return (
-    <AgentIdentityCard
-      ariaLabel={`${title} connected agent profile`}
-      avatarUrl={profileQuery.data?.avatarUrl}
-      dataTestId={`external-agent-${agent.pubkey}`}
-      label={title}
-      modelLabel={modelLabel}
-      onClick={() => onOpenAgentProfile(agent.pubkey)}
-    />
+    <>
+      <AgentIdentityCard
+        actions={
+          <Button
+            aria-label={
+              identityStatusQuery.data?.linked
+                ? `Edit ${title} profile`
+                : `Link ${title} identity`
+            }
+            onClick={() => setIdentityDialogOpen(true)}
+            size="icon"
+            type="button"
+            variant="ghost"
+          >
+            {identityStatusQuery.data?.linked ? (
+              <Pencil className="h-4 w-4" />
+            ) : (
+              <KeyRound className="h-4 w-4" />
+            )}
+          </Button>
+        }
+        ariaLabel={`${title} connected agent profile`}
+        avatarUrl={profileQuery.data?.avatarUrl}
+        dataTestId={`external-agent-${agent.pubkey}`}
+        label={title}
+        modelLabel={modelLabel}
+        onClick={() => onOpenAgentProfile(agent.pubkey)}
+      />
+      <ExternalAgentIdentityDialog
+        name={title}
+        onOpenChange={setIdentityDialogOpen}
+        open={identityDialogOpen}
+        profile={profileQuery.data}
+        pubkey={agent.pubkey}
+      />
+    </>
   );
 }
