@@ -1,38 +1,34 @@
 //! NIP-49 encrypted local key backup.
 //!
 //! Creates a password-encrypted `ncryptsec` backup of the user's identity key
-//! and persists it locally. The blob is **local-only by contract**: it must
+//! for a user-selected local file. The blob is **local-only by contract**: it must
 //! never be transmitted to a relay on any path. That contract is enforced at
 //! runtime by [`crate::egress_guard`] (wired into every relay event-body
 //! constructor and the native websocket send loop) and structurally by the
 //! source-allowlist scan in this module's tests.
 //!
-//! Design (PLANS/NIP49_LOCAL_BACKUP_PLAN.md Rev 3, reviewed by Wren):
-//!
-//! - **One artifact per action.** [`create_backup_blob`] encrypts once, then
-//!   decrypt-verifies the fresh blob against the live identity pubkey before
-//!   anything is persisted or returned. Two sequential scrypt invocations
-//!   (encrypt + integrity check), one artifact, ~256 MiB peak.
-//! - **Canonical file is trusted-path only.** The app-managed backup at
-//!   `{app_data_dir}/identity.ncryptsec` is written only by
-//!   `create_ncryptsec_backup` (commands/identity.rs), which derives the blob
-//!   from the live identity under `identity_mutation`. The webview can never
-//!   supply canonical blob bytes — the trust boundary is the password.
-//! - **Portable copies are user-owned.** `save_ncryptsec_copy` writes a
-//!   user-selected file with secret-file semantics (atomic + 0o600) and never
-//!   mutates canonical app state.
+//! Creation decrypt-verifies the fresh blob against the live identity before
+//! returning it. Portable copies use atomic, owner-only file writes.
 
 use nostr::nips::nip49::{EncryptedSecretKey, KeySecurity};
 use nostr::{FromBech32, Keys, ToBech32};
 
-/// Bech32 HRP of NIP-49 encrypted secret keys (used by `import_identity` to
-/// route encrypted backups to the decrypt path).
+/// Bech32 prefix of NIP-49 encrypted secret keys. Import routing is
+/// case-insensitive because bech32 permits all-uppercase encodings.
 pub const NCRYPTSEC_HRP: &str = "ncryptsec1";
 
 /// scrypt cost for new backups (2^18 — Gossip's desktop default, ~256 MiB).
 /// The blob self-describes its cost, so this can be raised later without
 /// breaking existing backups.
 pub const BACKUP_LOG_N: u8 = 18;
+
+/// Highest scrypt cost accepted when decrypting an untrusted backup.
+///
+/// NIP-49 intentionally leaves `log_n` client-selected. Capping it at the tier
+/// Buzz itself emits keeps generated and upstream-compatible lower-cost backups
+/// readable without allowing a crafted payload to request unbounded memory
+/// before password authentication.
+pub const MAX_VERIFY_LOG_N: u8 = BACKUP_LOG_N;
 
 /// Filename of the app-managed canonical backup inside the app data dir.
 pub const BACKUP_FILE_NAME: &str = "identity.ncryptsec";
@@ -104,27 +100,27 @@ pub fn parse_ncryptsec(input: &str) -> Result<EncryptedSecretKey, String> {
 /// Decrypt an `ncryptsec1…` string with `password` into identity keys.
 pub fn decrypt_ncryptsec(input: &str, password: &str) -> Result<Keys, String> {
     let encrypted = parse_ncryptsec(input)?;
+    let log_n = encrypted.log_n();
+    if log_n > MAX_VERIFY_LOG_N {
+        return Err(format!(
+            "unsupported backup KDF cost: log_n {log_n} exceeds maximum {MAX_VERIFY_LOG_N}"
+        ));
+    }
     let secret_key = encrypted
         .decrypt(password)
         .map_err(|_| "wrong backup password or damaged key backup".to_string())?;
     Ok(Keys::new(secret_key))
 }
 
-/// Recover identity keys from an import input: `ncryptsec1…` (requires the
-/// passphrase, decrypted in Rust) or anything `Keys::parse` accepts (raw
-/// `nsec1…`/hex — byte-for-byte the pre-NIP-49 path).
-///
-/// Classification is case-insensitive on the HRP: bech32 permits an
-/// ALL-UPPERCASE encoding, so `NCRYPTSEC1…` routes to the encrypted path
-/// (where the bech32 decoder accepts it); mixed case routes there too and
-/// fails parsing with the accurate "invalid ncryptsec" error rather than
-/// falling through to the raw-key parser.
+/// Recover identity keys from either an encrypted NIP-49 backup or the raw
+/// nsec/hex formats accepted before encrypted imports were added.
 pub fn recover_keys_from_input(input: &str, password: Option<&str>) -> Result<Keys, String> {
     let trimmed = input.trim();
-    let hrp_match = trimmed
+    let is_ncryptsec = trimmed
         .get(..NCRYPTSEC_HRP.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(NCRYPTSEC_HRP));
-    if hrp_match {
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(NCRYPTSEC_HRP));
+
+    if is_ncryptsec {
         let password = password.ok_or_else(|| "key backup requires a password".to_string())?;
         decrypt_ncryptsec(trimmed, password)
     } else {
@@ -169,21 +165,17 @@ pub fn write_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), 
     Ok(())
 }
 
-/// Delete the canonical app-managed backup if present. Used when a different
-/// identity is imported — the old blob backs the previous key and must not
-/// linger mislabeled. Missing file is not an error.
+/// Delete the app-managed backup if present. Missing files are already clean.
 pub fn delete_backup_file(data_dir: &std::path::Path) -> Result<(), String> {
     let path = backup_file_path(data_dir);
-    match std::fs::remove_file(&path) {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("delete stale backup file: {e}")),
     }
 }
 
-/// Remove the app-managed backup when the identity changes: the existing blob
-/// encrypts `previous` and must not linger mislabeled once `new` is live.
-/// No-op when the identity is unchanged.
+/// Remove the app-managed backup only when an import changes identities.
 pub fn cleanup_stale_backup(
     previous: &nostr::PublicKey,
     new: &nostr::PublicKey,

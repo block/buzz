@@ -30,6 +30,11 @@ const ALLOWLIST = [
   "features/onboarding/ui/EncryptedBackupCreator.tsx",
   "features/onboarding/ui/NostrKeyImportForm.tsx",
   "features/onboarding/ui/NsecMaskedDisplay.tsx",
+  "features/settings/EncryptedBackupProvider.tsx",
+  "features/settings/lib/encryptedBackup.ts",
+  "features/settings/lib/encryptedBackup.test.mjs",
+  "features/settings/ui/BackupTestFlow.tsx",
+  "features/settings/ui/EncryptedBackupCreator.tsx",
   "features/settings/ui/ProfileSettingsCard.tsx",
   // e2e-only mock bridge (never in the production bundle):
   "testing/e2eBridge.ts",

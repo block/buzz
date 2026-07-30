@@ -63,35 +63,3 @@ test("reveal shows error when get_nsec fails", async ({ page }) => {
     "Keychain locked",
   );
 });
-
-test("settings separates backup creation from general NIP-49 testing", async ({
-  page,
-}) => {
-  await installMockBridge(page);
-  await page.goto("/");
-  await openSettings(page, "profile");
-  await expandIdentity(page);
-  const createRow = page.getByTestId("profile-encrypted-backup-row");
-  const testRow = page.getByTestId("profile-backup-test-row");
-  await expect(createRow).toContainText("Create a key backup");
-  await expect(testRow).toContainText("Test a key backup");
-  await page.getByTestId("profile-backup-test-row-toggle").click();
-  await page.getByTestId("backup-test-file-input").setInputFiles({
-    name: "identity.ncryptsec",
-    mimeType: "text/plain",
-    buffer: Buffer.from(
-      "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p",
-    ),
-  });
-  await page
-    .getByTestId("backup-test-password")
-    .fill("mock horse battery staple lake orbit");
-  await page.getByTestId("backup-test-verify").click();
-  await expect(page.getByTestId("backup-test-success")).toContainText(
-    "This backup works",
-  );
-  await expect(page.getByTestId("backup-test-success")).toContainText(
-    "It restores your current Buzz identity",
-  );
-  await expect(page.getByTestId("backup-test-npub")).toBeVisible();
-});

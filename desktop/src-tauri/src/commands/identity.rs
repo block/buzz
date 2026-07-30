@@ -211,9 +211,8 @@ pub fn generate_backup_passphrase(
 
 /// Core of [`create_ncryptsec_backup`], factored so tests can drive it with a
 /// bare `AppState` + temp dir (and a fast scrypt tier) without an `AppHandle`.
-pub(crate) fn create_and_persist_backup_with_log_n(
+pub(crate) fn create_backup_with_log_n(
     state: &AppState,
-    data_dir: &std::path::Path,
     password: &str,
     log_n: u8,
 ) -> Result<String, String> {
@@ -232,24 +231,14 @@ pub(crate) fn create_and_persist_backup_with_log_n(
     // Recovery mode (lost/locked) → Err, same gate as signing.
     let keys = state.signing_keys()?;
 
-    let ncryptsec = crate::key_backup::create_backup_blob(&keys, password, log_n)?;
-
-    std::fs::create_dir_all(data_dir).map_err(|e| format!("create app data dir: {e}"))?;
-    let path = crate::key_backup::backup_file_path(data_dir);
-    crate::key_backup::write_backup_file(&path, &ncryptsec)?;
-
-    Ok(ncryptsec)
+    crate::key_backup::create_backup_blob(&keys, password, log_n)
 }
 
-/// Create the canonical app-managed NIP-49 backup.
+/// Create a NIP-49 backup of the live identity in memory.
 ///
-/// Encrypts the live identity under `password`, decrypt-verifies the fresh
-/// blob against the live pubkey, atomically persists it to
-/// `{app_data_dir}/identity.ncryptsec` (0o600), rereads and byte-compares,
-/// and returns the exact persisted `ncryptsec1…` string. The entire body runs
-/// under `identity_mutation`, so it serializes against imports and caps KDF
-/// concurrency at one. The webview can never supply canonical blob bytes —
-/// the trust boundary is the password.
+/// Encrypts under `password`, decrypt-verifies the fresh blob against the live
+/// pubkey, and returns the `ncryptsec1…` string for the native save flow. The
+/// body runs under `identity_mutation`, so identity changes cannot race the KDF.
 #[tauri::command]
 pub async fn create_ncryptsec_backup(
     password: String,
@@ -258,16 +247,7 @@ pub async fn create_ncryptsec_backup(
     tokio::task::spawn_blocking(move || {
         let password = zeroize::Zeroizing::new(password);
         let state = app_handle.state::<AppState>();
-        let data_dir = app_handle
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("app data dir: {e}"))?;
-        create_and_persist_backup_with_log_n(
-            &state,
-            &data_dir,
-            &password,
-            crate::key_backup::BACKUP_LOG_N,
-        )
+        create_backup_with_log_n(&state, &password, crate::key_backup::BACKUP_LOG_N)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -359,13 +339,12 @@ pub async fn import_identity(
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
     tokio::task::spawn_blocking(move || {
-        // `ncryptsec1…` = NIP-49 encrypted backup: requires the passphrase and
-        // decrypts in Rust. Everything after key recovery is byte-for-byte the
-        // raw-nsec path.
+        // NIP-49 backups require a passphrase and decrypt entirely in Rust.
+        // Raw nsec/hex input follows the existing parser path unchanged.
         let password = password.map(zeroize::Zeroizing::new);
         let keys = crate::key_backup::recover_keys_from_input(
             &nsec,
-            password.as_ref().map(|p| p.as_str()),
+            password.as_ref().map(|value| value.as_str()),
         )?;
 
         // Serialize against persist_current_identity: hold this guard for the
@@ -807,4 +786,4 @@ mod nostr_identity_binding_tests {
 
 #[cfg(test)]
 #[path = "identity_key_backup_tests.rs"]
-mod key_backup_command_tests;
+mod identity_key_backup_tests;

@@ -21,7 +21,7 @@ fn spec_vector_decrypts_at_our_call_site() {
 fn round_trip_fast_tier() {
     let keys = Keys::generate();
     let blob = create_backup_blob(&keys, "correct horse battery", FAST_LOG_N).unwrap();
-    assert!(blob.starts_with(NCRYPTSEC_HRP));
+    assert!(blob.starts_with("ncryptsec1"));
     let recovered = decrypt_ncryptsec(&blob, "correct horse battery").unwrap();
     assert_eq!(recovered.public_key(), keys.public_key());
 }
@@ -99,22 +99,16 @@ fn recover_keys_ncryptsec_wrong_password() {
     assert_eq!(err, "wrong backup password or damaged key backup");
 }
 
-/// Bech32 permits an all-uppercase encoding: `NCRYPTSEC1…` must classify as
-/// an encrypted backup (matching the egress guard's blocking scope), never
-/// fall through to the raw-key parser. Mixed case classifies encrypted too
-/// and fails with the accurate ncryptsec error, not "Invalid private key".
 #[test]
 fn recover_keys_uppercase_ncryptsec_classifies_as_encrypted() {
     let upper = SPEC_NCRYPTSEC.to_ascii_uppercase();
-    // Routing proof: encrypted path demands a passphrase.
-    let err = recover_keys_from_input(&upper, None).unwrap_err();
-    assert_eq!(err, "key backup requires a password");
-    // With the passphrase, the bech32 decoder accepts the uppercase form.
+    assert_eq!(
+        recover_keys_from_input(&upper, None).unwrap_err(),
+        "key backup requires a password"
+    );
     let keys = recover_keys_from_input(&upper, Some("nostr")).unwrap();
     assert_eq!(keys.secret_key().to_secret_hex(), SPEC_SECRET_HEX);
 
-    // Mixed case: still routed to the encrypted path, rejected as invalid
-    // ncryptsec (mixed-case bech32 cannot decode).
     let mut mixed = SPEC_NCRYPTSEC.to_string();
     mixed.replace_range(0..1, "N");
     let err = recover_keys_from_input(&mixed, Some("nostr")).unwrap_err();
@@ -125,7 +119,6 @@ fn recover_keys_uppercase_ncryptsec_classifies_as_encrypted() {
 fn recover_keys_raw_nsec_path_unchanged() {
     let keys = Keys::generate();
     let nsec = keys.secret_key().to_bech32().unwrap();
-    // Password is ignored on the raw path — exactly today's behavior.
     let recovered = recover_keys_from_input(&nsec, Some("ignored")).unwrap();
     assert_eq!(recovered.public_key(), keys.public_key());
     let recovered = recover_keys_from_input(&nsec, None).unwrap();
@@ -170,7 +163,7 @@ fn write_backup_file_overwrites_atomically() {
 #[test]
 fn delete_backup_file_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
-    delete_backup_file(dir.path()).unwrap(); // missing → Ok
+    delete_backup_file(dir.path()).unwrap();
     let path = backup_file_path(dir.path());
     write_backup_file(&path, SPEC_NCRYPTSEC).unwrap();
     delete_backup_file(dir.path()).unwrap();
@@ -189,13 +182,8 @@ fn cleanup_stale_backup_removes_only_on_identity_change() {
     assert!(path.exists(), "same identity must keep the backup");
 
     cleanup_stale_backup(&a, &b, dir.path()).unwrap();
-    assert!(
-        !path.exists(),
-        "identity change must remove the stale backup"
-    );
+    assert!(!path.exists(), "identity change must remove the stale backup");
 }
-
-// ── Passphrase generation ─────────────────────────────────────────────────────
 
 #[test]
 fn generated_passphrase_respects_word_count_and_separator() {

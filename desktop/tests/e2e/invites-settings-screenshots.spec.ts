@@ -5,11 +5,21 @@ import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
 const OUTDIR = "test-results/invites-settings";
+const DIRECT_ADD_HEX =
+  "ea9b4d7a7a78a3e3729e5568b14d764d4962be0e1f20f749bcf8d9dbbf9a9328";
+const DIRECT_ADD_NPUB =
+  "npub1a2d567n60z37xu57245tzntkf4yk90swrus0wjdulrvah0u6jv5qusyp60";
+const SECOND_DIRECT_ADD_HEX =
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SECOND_DIRECT_ADD_NPUB =
+  "npub1424242424242424242424242424242424242424242424242424qamrcaj";
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, testInfo) => {
   await installMockBridge(page, {
     relayRequiresMembership: true,
-    relayRole: "owner",
+    relayRole: testInfo.title.includes("admin can add members")
+      ? "admin"
+      : "owner",
   });
   await page.route("**/api/invites", async (route) => {
     await route.fulfill({
@@ -78,33 +88,133 @@ test("capture: share-style community invite dialog", async ({ page }) => {
   await expect(page.getByTestId("community-invite-email-field")).toHaveCount(0);
   await expect(page.getByPlaceholder("Type an email address")).toHaveCount(0);
   await expect(
-    dialog.getByText("Anyone with this link can join this community."),
+    dialog.getByText(
+      "Add someone directly or share a link they can use to join.",
+    ),
   ).toBeVisible();
-  await expect(dialog.getByText("Expires after")).toBeVisible();
-  await expect(dialog.getByText("Limit number of uses")).toBeVisible();
-  await expect(page.getByTestId("invite-link-max-uses-trigger")).toHaveText(
-    "No limit",
-  );
+  await expect(
+    dialog.getByRole("heading", { name: "Add someone", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByText("Or share a link", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByText("Link settings", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("member-pubkey-input")).toBeVisible();
+  await expect(page.getByTestId("member-role")).toHaveCount(0);
+  await expect(page.getByTestId("confirm-add-member")).toHaveCount(0);
   await expect(page.getByTestId("copy-invite-link")).toHaveText("Copy link");
-  await expect(page.getByTestId("invite-link-qr-code")).toHaveCount(0);
-  await expect(page.getByTestId("invite-link-url")).toHaveCount(0);
+  await expect(page.getByTestId("invite-link-ttl-trigger")).toHaveText(
+    "3 days",
+  );
 
-  const expiryTrigger = page.getByTestId("invite-link-ttl-trigger");
-  await expect(expiryTrigger).toHaveText("3 days");
-  await expect(expiryTrigger).toHaveCSS("font-size", "14px");
+  await page.getByTestId("member-pubkey-input").fill(DIRECT_ADD_NPUB);
+  await expect(page.getByTestId("member-search-popover")).toBeVisible();
+  await page.getByTestId(`member-search-result-${DIRECT_ADD_HEX}`).click();
+  const memberRole = page.getByTestId("member-role");
+  const selectedChip = page.getByTestId(
+    `member-search-selection-remove-${DIRECT_ADD_HEX}`,
+  );
+  await expect(memberRole).toHaveText("Member");
+  const inviteButton = page.getByTestId("confirm-add-member");
+  await expect(inviteButton).toHaveText("Invite");
+  await waitForAnimations(page);
+  await expect(inviteButton).toHaveCSS("height", "44px");
+  await expect(inviteButton).toHaveJSProperty(
+    "offsetHeight",
+    await page
+      .getByTestId("member-recipient-field")
+      .evaluate((field) => Math.round(field.getBoundingClientRect().height)),
+  );
+  const selectedChipRemoveIcon = selectedChip.locator("span.absolute");
+  await expect(selectedChipRemoveIcon).toHaveCSS("opacity", "0");
+  await selectedChip.hover();
+  await expect(selectedChipRemoveIcon).toHaveCSS("opacity", "1");
+  const memberSearch = page.getByTestId("member-pubkey-input");
+  await expect(memberSearch).toBeFocused();
+  await memberSearch.fill(SECOND_DIRECT_ADD_NPUB);
+  await expect(page.getByTestId("member-search-popover")).toBeVisible();
+  await page
+    .getByTestId(`member-search-result-${SECOND_DIRECT_ADD_HEX}`)
+    .click();
   await expect(
-    dialog.getByText("Limit number of uses", { exact: true }),
-  ).toHaveCSS("font-size", "14px");
-  await expiryTrigger.click();
-  await expect(page.getByRole("menu")).not.toContainText("Expires after");
-  await expect(
-    page.getByRole("menuitemradio", { name: "1 day" }),
+    page.getByTestId(`member-search-selection-remove-${SECOND_DIRECT_ADD_HEX}`),
   ).toBeVisible();
+  await expect(memberSearch).toBeFocused();
+  await memberRole.click();
   await expect(
-    page.getByRole("menuitemradio", { name: "30 days" }),
+    page.getByRole("menuitemradio", { name: "Admin" }),
   ).toBeVisible();
   await page.keyboard.press("Escape");
-
+  await expect(page.getByTestId("confirm-add-member")).toBeEnabled();
   await waitForAnimations(page);
+  await page.mouse.move(0, 0);
   await dialog.screenshot({ path: `${OUTDIR}/02-invite-dialog.png` });
+});
+
+test("admin can add members but cannot assign the admin role", async ({
+  page,
+}) => {
+  await page.getByTestId("community-invite-dialog-trigger").click();
+
+  await page.getByTestId("member-pubkey-input").fill(DIRECT_ADD_NPUB);
+  await page.getByTestId(`member-search-result-${DIRECT_ADD_HEX}`).click();
+  const memberRole = page.getByTestId("member-role");
+  await expect(memberRole).toHaveText("Member");
+  await memberRole.click();
+  await expect(page.getByRole("menuitemradio", { name: "Admin" })).toHaveCount(
+    0,
+  );
+  await page.keyboard.press("Escape");
+});
+
+test("owner can add multiple admins directly by npub from live Invites UI", async ({
+  page,
+}) => {
+  await page.getByTestId("community-invite-dialog-trigger").click();
+  await page.getByTestId("member-pubkey-input").fill(DIRECT_ADD_NPUB);
+  await page.getByTestId(`member-search-result-${DIRECT_ADD_HEX}`).click();
+  await page.getByTestId("member-pubkey-input").fill(SECOND_DIRECT_ADD_NPUB);
+  await page
+    .getByTestId(`member-search-result-${SECOND_DIRECT_ADD_HEX}`)
+    .click();
+  await page.getByTestId("member-role").click();
+  await page.getByRole("menuitemradio", { name: "Admin" }).click();
+  await page.getByTestId("confirm-add-member").click();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        ({ targetPubkeys, role }) =>
+          targetPubkeys.every((targetPubkey) =>
+            (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).some((entry) => {
+              if (entry.command !== "plugin:websocket|send") return false;
+              const wireMessage = (
+                entry.payload as {
+                  message?: { data?: unknown };
+                }
+              )?.message?.data;
+              if (typeof wireMessage !== "string") return false;
+              const message = JSON.parse(wireMessage) as unknown[];
+              if (message[0] !== "EVENT") return false;
+              const event = message[1] as
+                | { kind?: number; tags?: string[][] }
+                | undefined;
+              return (
+                event?.kind === 9030 &&
+                event.tags?.some(
+                  (tag) => tag[0] === "p" && tag[1] === targetPubkey,
+                ) &&
+                event.tags.some((tag) => tag[0] === "role" && tag[1] === role)
+              );
+            }),
+          ),
+        {
+          targetPubkeys: [DIRECT_ADD_HEX, SECOND_DIRECT_ADD_HEX],
+          role: "admin",
+        },
+      ),
+    )
+    .toBe(true);
 });

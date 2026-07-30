@@ -29,55 +29,12 @@ export async function getNsec(): Promise<string> {
   return invokeTauri<string>("get_nsec");
 }
 
-/**
- * Import an identity from a raw `nsec1…` key or an encrypted `ncryptsec1…`
- * backup. Encrypted backups require `password`; decryption happens in Rust.
- */
 export async function importIdentity(
   nsec: string,
   password?: string,
 ): Promise<Identity> {
   return fromRawIdentity(
     await invokeTauri<RawIdentity>("import_identity", { nsec, password }),
-  );
-}
-
-export type GeneratePassphraseOptions = {
-  /** Word count; Rust clamps to its allowed range (currently 4–10). */
-  words?: number;
-  /** Separator joined between words. Defaults to a space in Rust. */
-  separator?: string;
-};
-
-/** Generate a word passphrase (EFF short wordlist, OS entropy) in Rust. */
-export async function generateBackupPassphrase(
-  options?: GeneratePassphraseOptions,
-): Promise<string> {
-  return invokeTauri<string>("generate_backup_passphrase", {
-    words: options?.words,
-    separator: options?.separator,
-  });
-}
-
-/**
- * Create the canonical app-managed NIP-49 backup: encrypts the live identity
- * under `password`, persists `identity.ncryptsec` (atomic, 0o600), and
- * returns the exact persisted `ncryptsec1…` string. Takes ~2s (scrypt).
- */
-export async function createNcryptsecBackup(password: string): Promise<string> {
-  return invokeTauri<string>("create_ncryptsec_backup", { password });
-}
-
-/**
- * Save a portable copy of an `ncryptsec1…` backup to a user-chosen path.
- * Returns the chosen path, or `null` when the user cancelled.
- */
-export async function saveNcryptsecCopy(
-  ncryptsec: string,
-): Promise<string | null> {
-  return (
-    (await invokeTauri<string | null>("save_ncryptsec_copy", { ncryptsec })) ??
-    null
   );
 }
 
@@ -98,13 +55,45 @@ export async function signOut(): Promise<void> {
   await invokeTauri("sign_out");
 }
 
+export type GeneratePassphraseOptions = {
+  /** Word count; Rust clamps to its allowed range (currently 3–10). */
+  words?: number;
+  /** Separator joined between words. Defaults to a space in Rust. */
+  separator?: string;
+};
+
+/** Generate a word passphrase (EFF short wordlist, OS entropy) in Rust. */
+export async function generateBackupPassphrase(
+  options?: GeneratePassphraseOptions,
+): Promise<string> {
+  return invokeTauri<string>("generate_backup_passphrase", {
+    words: options?.words,
+    separator: options?.separator,
+  });
+}
+
+/** Encrypt the current identity as an in-memory NIP-49 backup for native save. */
+export async function createNcryptsecBackup(password: string): Promise<string> {
+  return invokeTauri<string>("create_ncryptsec_backup", { password });
+}
+
+/** Save a portable backup copy. Returns null when the native dialog is cancelled. */
+export async function saveNcryptsecCopy(
+  ncryptsec: string,
+): Promise<string | null> {
+  return (
+    (await invokeTauri<string | null>("save_ncryptsec_copy", { ncryptsec })) ??
+    null
+  );
+}
+
 export type BackupVerification = {
   pubkey: string;
   npub: string;
   matchesCurrentIdentity: boolean;
 };
 
-/** Decrypt a NIP-49 backup in Rust and return only its public identity. */
+/** Decrypt locally and return only the backup's public identity and match state. */
 export async function verifyNcryptsecBackup(
   ncryptsec: string,
   password: string,

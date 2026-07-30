@@ -128,6 +128,17 @@ final threadRepliesWithLocalProvider =
       );
     });
 
+/// Union two event lists by id, newest-wins, in timeline order.
+///
+/// The thread view needs this to fold the channel's live socket events into its
+/// own one-shot query result: the query asks for content kinds only, so
+/// reactions, edits, and deletions that land while a thread is open never reach
+/// it on their own.
+List<NostrEvent> mergeThreadEvents(
+  Iterable<NostrEvent> first,
+  Iterable<NostrEvent> second,
+) => _mergeReplies(first, second);
+
 List<NostrEvent> _mergeReplies(
   Iterable<NostrEvent> first,
   Iterable<NostrEvent> second,

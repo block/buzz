@@ -76,6 +76,8 @@ jobs:
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
+      - name: Desktop release candidate contract
+        run: scripts/test-desktop-release-candidate.sh
       - name: Mobile release contract
         run: |
           scripts/test-mobile-release-contract.sh
