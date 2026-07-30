@@ -36,6 +36,36 @@ function isHarnessDefaultModelEntry(model: { id: string }) {
   return model.id.trim().toLowerCase() === "default";
 }
 
+/**
+ * Build picker labels, qualifying any label shared by more than one model id
+ * with that id.
+ *
+ * Catalogs legitimately reuse a display name across variants that differ only
+ * in a dimension the name omits — Letta lists six `GPT-5.6 Sol` reasoning tiers
+ * (`-none` … `-max`), all with the same label. Rendering the bare name would
+ * put six indistinguishable rows in the dropdown, so the id is appended for
+ * exactly the labels that collide; unique labels are left clean.
+ */
+function labelModelOptions(
+  models: readonly { id: string; name?: string | null }[],
+): readonly PersonaModelOption[] {
+  const counts = new Map<string, number>();
+  for (const model of models) {
+    const label = model.name?.trim() || model.id;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return models.map((model) => {
+    const label = model.name?.trim() || model.id;
+    return {
+      id: model.id,
+      label:
+        (counts.get(label) ?? 0) > 1 && label !== model.id
+          ? `${label} (${model.id})`
+          : label,
+    };
+  });
+}
+
 export function getDiscoveredPersonaModelOptions(
   response: AgentModelsResponse | null,
   provider: string,
@@ -73,13 +103,7 @@ export function getDiscoveredPersonaModelOptions(
     return null;
   }
 
-  return [
-    ...defaultModelOption,
-    ...explicitModels.map((model) => ({
-      id: model.id,
-      label: model.name?.trim() || model.id,
-    })),
-  ];
+  return [...defaultModelOption, ...labelModelOptions(explicitModels)];
 }
 
 /**
@@ -95,7 +119,13 @@ export function synthesizeEmptyDiscoveryStatus(
   if (getDiscoveredPersonaModelOptions(response, provider) !== null) {
     return null;
   }
-  const agentLabel = response.agentName.trim() || "This agent";
+  // `unknown` is the CLI's placeholder for an adapter that sends no
+  // `agentInfo`/`serverInfo` in `initialize` (both are optional in ACP, and
+  // letta-acp omits them). Treat it like an empty name rather than telling the
+  // user that "unknown reported no models".
+  const rawAgentName = response.agentName.trim();
+  const agentLabel =
+    rawAgentName && rawAgentName !== "unknown" ? rawAgentName : "This agent";
   return {
     message: `${agentLabel} reported no models. Check that the CLI is installed and signed in, then reopen this screen.`,
     tone: "warning",

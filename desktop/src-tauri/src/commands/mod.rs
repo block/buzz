@@ -1,3 +1,4 @@
+mod acp_config_options;
 mod agent_auth;
 mod agent_config;
 mod agent_discovery;

@@ -4,6 +4,7 @@ use nostr::Keys;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
+use super::acp_config_options::option_label;
 use super::agent_model_process::run_agent_models_command;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
@@ -1099,10 +1100,7 @@ pub(super) fn normalize_agent_models(
                         if seen_ids.insert(value.to_string()) {
                             models.push(AgentModelInfo {
                                 id: value.to_string(),
-                                name: o
-                                    .get("displayName")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string),
+                                name: option_label(o).map(str::to_string),
                                 description: None,
                             });
                         }

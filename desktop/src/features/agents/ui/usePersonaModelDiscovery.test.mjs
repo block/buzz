@@ -106,6 +106,43 @@ test("relay-mesh keeps its automatic routing default row", () => {
   assert.equal(options[0].label, "Default (auto)");
 });
 
+test("qualifies labels shared by several model ids, leaving unique ones clean", () => {
+  // Letta lists six `GPT-5.6 Sol` reasoning tiers under one display name; bare
+  // labels would render six indistinguishable rows in the picker.
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "gpt-5.6-sol-none", name: "GPT-5.6 Sol", description: null },
+        { id: "gpt-5.6-sol-max", name: "GPT-5.6 Sol", description: null },
+        { id: "glm", name: "Letta GLM", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(
+    options.slice(1).map((option) => option.label),
+    ["GPT-5.6 Sol (gpt-5.6-sol-none)", "GPT-5.6 Sol (gpt-5.6-sol-max)", "Letta GLM"],
+  );
+});
+
+test("does not double up the id when a colliding label already is the id", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "shared", name: null, description: null },
+        { id: "shared", name: null, description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(
+    options.slice(1).map((option) => option.label),
+    ["shared", "shared"],
+  );
+});
+
 test("returns null when discovery is unsupported or empty", () => {
   assert.equal(
     getDiscoveredPersonaModelOptions(
@@ -127,6 +164,18 @@ test("synthesizeEmptyDiscoveryStatus_emptyModels_producesWarningStatus", () => {
   assert.equal(status?.tone, "warning");
   assert.match(status?.message ?? "", /Claude Code/);
   assert.match(status?.message ?? "", /reported no models/);
+});
+
+test("synthesizeEmptyDiscoveryStatus_unknownAgentName_fallsBackToGenericLabel", () => {
+  // "unknown" is the CLI placeholder for an adapter that sends no agentInfo
+  // (letta-acp omits it) — it must not reach the user as a name.
+  const status = synthesizeEmptyDiscoveryStatus(
+    response({ models: [], agentName: "unknown" }),
+    "",
+  );
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /^This agent reported no models/);
+  assert.doesNotMatch(status?.message ?? "", /unknown/);
 });
 
 test("synthesizeEmptyDiscoveryStatus_supportsSwitchingFalse_producesWarningStatus", () => {

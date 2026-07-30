@@ -59,8 +59,22 @@ fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
-/// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
+/// Timeout for lightweight helper subcommands (spawn + initialize probes).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for `buzz-acp models`, which opens a session on top of `initialize`.
+///
+/// Stateful adapters do real work inside `session/new`: letta-acp creates or
+/// resumes a Letta agent, bootstraps its runtime, and fetches a live model
+/// catalog before it can answer, measured at ~9s against Letta Cloud. That does
+/// not fit the 10s probe budget once process spawn is counted, and the resulting
+/// timeout surfaces in Desktop as "<agent> reported no models" — indistinguishable
+/// from an adapter that genuinely has no model switching.
+///
+/// Sized at ~2.7x the measured worst case: enough headroom for a cold adapter on
+/// a loaded machine, while bounding how long Desktop shows a model-discovery
+/// spinner before reporting a failure the user can act on.
+const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
@@ -4046,7 +4060,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
-    let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
+    let protocol_result = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, async {
         let init = client.initialize().await?;
         let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, acp::AcpError>((init, session))
@@ -4062,7 +4076,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({MODEL_CATALOG_TIMEOUT:?})");
             std::process::exit(1);
         }
     };
@@ -4111,16 +4125,30 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         if !config_options.is_empty() {
             println!("Models (stable configOptions):");
             for opt in &config_options {
-                let config_id = opt.get("configId").and_then(|v| v.as_str()).unwrap_or("?");
+                // Adapters disagree on the spelling: the current ACP spec says
+                // `id`/`name`, older ones (claude-agent-acp) say
+                // `configId`/`displayName`. Accept both, as
+                // `resolve_model_switch_method` does — otherwise a spec-current
+                // adapter like letta-acp renders as "? (configId: ?)".
+                let config_id = opt
+                    .get("configId")
+                    .or_else(|| opt.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let display = opt
                     .get("displayName")
+                    .or_else(|| opt.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or(config_id);
                 println!("  {display} (configId: {config_id})");
                 if let Some(options) = opt.get("options").and_then(|v| v.as_array()) {
                     for o in options {
                         let val = o.get("value").and_then(|v| v.as_str()).unwrap_or("?");
-                        let name = o.get("displayName").and_then(|v| v.as_str()).unwrap_or(val);
+                        let name = o
+                            .get("displayName")
+                            .or_else(|| o.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(val);
                         println!("    - {name} (value: {val})");
                     }
                 }

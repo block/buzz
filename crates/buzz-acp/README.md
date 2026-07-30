@@ -135,9 +135,14 @@ the `BUZZ_*` environment have to be wherever the tools run:
 `local` and `cloud-oauth` need nothing beyond the harness environment they
 already inherit; `cloud-oauth` is the way to run a cloud-hosted agent whose
 tools still execute here. Plain `cloud` puts tool execution in Letta's
-sandbox, out of reach of the `buzz` CLI, and MCP servers passed through
-`BUZZ_ACP_MCP_COMMAND` do not close the gap: the sandbox has no executor for
-adapter-side tools.
+sandbox, out of reach of the `buzz` CLI.
+
+MCP servers configured in Buzz are forwarded to the adapter in `session/new`
+and run in the adapter process (letta-acp 0.1.6+ declares
+`mcpCapabilities: { http: true, sse: true }` and supports stdio as well). They
+do not close the `cloud` gap: adapter-hosted MCP tools reach the agent over
+Letta's external-tool protocol, and the `cloud` sandbox has no executor for
+those, so it rejects them the same way it rejects the editor fs tools.
 
 ## Configuration
 
@@ -310,7 +315,7 @@ Buzz Desktop supports registering any ACP-speaking agent tool as a selectable ru
 
 **Tier-1 — compiled-in runtimes** (Goose, Claude Code, Codex, Buzz Agent): have auto-installers, auth probes, and first-class onboarding. Their IDs (`goose`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden.
 
-**Tier-2 — preset catalog** (Cursor, Oh My Pi, Grok Build, OpenCode, Kimi Code, Amp, Letta, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
+**Tier-2 — preset catalog** (Cursor, Oh My Pi, Grok Build, OpenCode, Kimi Code, Amp, Letta, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery/presets.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
 
 > **Note — OpenClaw:** `openclaw acp` is a Gateway-backed bridge; PATH availability shows "Available" even when the OpenClaw Gateway daemon is not running. This is expected tier-2 semantics (same class as a preset with unconfigured auth). The Gateway URL is configured via `OPENCLAW_GATEWAY_URL` (or the equivalent env var from OpenClaw's docs) — set it in the agent's **env vars** in Edit Agent, not in the definition env (the preset definition carries no env entries). Note that `openclaw acp` executes tools inside the Gateway daemon, not the Desktop process, so Desktop-injected `BUZZ_*` env vars do NOT reach the execution locus unless you also set them on the Gateway's own environment.
 
@@ -354,7 +359,7 @@ Invalid files (bad JSON, unknown id, empty command) are skipped with a warning a
 To add a new runtime to the tier-2 gallery:
 
 1. **Verify the ACP entrypoint** from the vendor's own documentation — do not rely on a PR description alone. Test with the actual binary.
-2. **Add a `HarnessDefinition` entry** to the `PRESET_HARNESSES` slice in `desktop/src-tauri/src/managed_agents/discovery.rs`. Fill `id`, `label`, `command`, `args`, `install_instructions_url`, `install_hint`. Leave `env` empty unless the harness requires a specific env var to enable ACP mode.
+2. **Add a `HarnessDefinition` entry** to the `PRESET_HARNESSES` slice in `desktop/src-tauri/src/managed_agents/discovery/presets.rs`. Fill `id`, `label`, `command`, `args`, `install_instructions_url`, `install_hint`. Leave `env` empty unless the harness requires a specific env var to enable ACP mode.
 3. **Add the preset id to `BUILTIN_IDS`** in `desktop/src-tauri/src/managed_agents/custom_harnesses.rs` so custom JSON files cannot shadow it.
 4. **Add a bundled logo** (64×64 PNG or optimised SVG) to `desktop/public/harness-logos/<id>.png` and add a corresponding entry to `PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`. Record the source and license in `desktop/public/harness-logos/CREDITS.md`. Only bundle a mark whose upstream license permits redistribution; skipping this step is caught by `presetLogos.test.mjs`, which asserts every `PRESET_HARNESSES` id has a mapped logo that exists on disk.
 5. Run `cargo test --lib` and `just desktop-typecheck` to verify everything compiles.

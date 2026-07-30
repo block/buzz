@@ -1,6 +1,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+use super::acp_config_options::{option_id, option_label};
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -466,21 +467,13 @@ fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionE
     };
     arr.iter()
         .filter_map(|opt| {
-            let config_id = opt
-                .get("id")
-                .or_else(|| opt.get("configId"))?
-                .as_str()?
-                .to_string();
             Some(AcpConfigOptionEntry {
-                config_id,
+                config_id: option_id(opt)?.to_string(),
                 category: opt
                     .get("category")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
-                display_name: opt
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                display_name: option_label(opt).map(str::to_string),
                 current_value: opt
                     .get("value")
                     .or_else(|| opt.get("currentValue"))
@@ -502,10 +495,7 @@ fn parse_option_values(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionVa
             let value = o.get("value").and_then(|v| v.as_str())?.to_string();
             Some(AcpConfigOptionValue {
                 value,
-                display_name: o
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                display_name: option_label(o).map(str::to_string),
             })
         })
         .collect()
