@@ -1280,6 +1280,66 @@ test("first-community direct join reaches profile", async ({ page }) => {
     .toEqual({ communityCount: 1, transactionMatchesOnlyCommunity: true });
 });
 
+test("community onboarding reuses an existing relay profile", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript(
+    ({ pubkey, transactionStorageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        transactionStorageKey,
+        JSON.stringify({
+          id: "txn-existing-profile",
+          source: "add-community",
+          stage: "profile",
+          relayUrl: "wss://onboarding.communities.buzz.xyz",
+          communityName: "Onboarding",
+          communityId: "e2e-default-community",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: BLANK_TYLER_IDENTITY.pubkey,
+      transactionStorageKey: COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY,
+    },
+  );
+  await installMockBridge(
+    page,
+    { profileHasEvent: true },
+    {
+      relayWsUrl: "wss://onboarding.communities.buzz.xyz",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & { __BUZZ_E2E_COMMANDS__?: string[] }
+          ).__BUZZ_E2E_COMMANDS__?.filter(
+            (command) => command === "get_profile",
+          ).length ?? 0,
+      ),
+    )
+    .toBeGreaterThan(0);
+  await expect(
+    page.getByRole("heading", { name: "Meet your starter team" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toHaveCount(0);
+});
+
 test("first-community direct join cancel returns to request access", async ({
   page,
 }) => {
