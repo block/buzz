@@ -16,12 +16,8 @@ export async function seedActiveIdentity(
   );
 }
 
-/** Navigate through the backup steps (fresh-key path). */
+/** Continue past the created-key page without opening optional backup options. */
 export async function passThroughBackupStep(page: Page) {
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
-  // Next always leads into the "Backup your key" step; backing up is
-  // recommended, never required — "Skip for now" there advances to setup.
   await page.getByTestId("onboarding-next").click();
-  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
-  await page.getByTestId("onboarding-skip").click();
 }
