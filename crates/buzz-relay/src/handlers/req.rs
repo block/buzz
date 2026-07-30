@@ -415,17 +415,23 @@ pub async fn handle_req(
     );
 }
 
-/// FTS candidate hits fetched per page. Pages are always full regardless of the
-/// requested limit — post-filtering may discard many hits, so the scan needs
-/// headroom to fill the limit.
+/// FTS candidate hits fetched per page. Pages are always full regardless of
+/// the requested limit — post-filtering discards an unpredictable share of
+/// hits, so the scan fetches candidates in full pages rather than sizing
+/// pages to the request.
 const SEARCH_PAGE_SIZE: u32 = 100;
 
 /// Maximum FTS pages to fetch per filter (prevents unbounded loops).
 ///
-/// Derived from the advertised page ceiling rather than fixed, so the search
-/// path can always reach the limit NIP-11 promises. A bare page count would let
-/// a future ceiling change leave search silently emitting fewer events than the
-/// relay advertises — the same class of lie this ceiling exists to prevent.
+/// Derived from the advertised page ceiling rather than fixed: the scan
+/// budget is a resource policy — at most one advertised page ceiling's worth
+/// of candidates per filter — and deriving it keeps the budget tracking the
+/// ceiling if the ceiling ever moves. This bounds candidates *scanned*, not
+/// events *emitted*: post-filtering (NIP-01 match, channel access, reader
+/// visibility, dedup) can discard any number of candidates, so a result
+/// smaller than the requested limit remains possible and is not a NIP-11
+/// violation — `max_limit` promises a clamp on the request, not a count in
+/// the response.
 const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(SEARCH_PAGE_SIZE);
 
 /// Resolve request-local channel access, repairing a stale cache-negative.
@@ -592,9 +598,10 @@ async fn handle_search_req(
         let since = filter.since.map(|s| s.as_secs() as i64);
         let until = filter.until.map(|u| u.as_secs() as i64);
 
-        // Paginate: keep fetching pages until we've emitted `limit` results
-        // or exhausted the search result set. This ensures post-filtering
-        // doesn't silently reduce the result count below the requested limit.
+        // Paginate: keep fetching pages until we've emitted `limit` results or
+        // exhausted the search result set. Post-filtering discards an unpredictable
+        // share of each page, so continuing past short yields gives the scan a
+        // chance — not a guarantee — of filling the requested limit.
         let mut emitted: u32 = 0;
 
         for page in 1..=MAX_SEARCH_PAGES {
@@ -1470,12 +1477,14 @@ mod tests {
     }
 
     /// The NIP-50 search path clamps its emission target to the advertised
-    /// ceiling like every other REQ, but its ability to *reach* that target is
-    /// bounded a second time by how many FTS pages it will scan. If that scan
-    /// budget falls below the ceiling, search under-delivers against NIP-11
-    /// while the clamp above still looks correct — so the budget is asserted
-    /// against the advertised value, not just against the DB constant it is
-    /// derived from.
+    /// ceiling like every other REQ, but the number of candidates it will scan
+    /// is bounded a second time by the page budget. This pins the resource
+    /// policy: the budget covers exactly one advertised page ceiling's worth of
+    /// candidates — no less (a ceiling raise must not silently shrink the scan
+    /// relative to what clients may request) and no hand-tuned spare (the budget
+    /// must stay derived, not drift back into a magic number). It deliberately
+    /// does NOT claim search fills the emitted limit — post-filtering can
+    /// discard any number of candidates.
     #[test]
     fn search_scan_capacity_covers_advertised_nip11_max_limit() {
         let advertised = advertised_max_limit();
@@ -1483,9 +1492,9 @@ mod tests {
 
         assert!(
             capacity >= advertised,
-            "NIP-50 scans at most {capacity} hits ({MAX_SEARCH_PAGES} pages of \
-             {SEARCH_PAGE_SIZE}) but NIP-11 advertises {advertised} — search \
-             would silently emit a short page"
+            "NIP-50 scans at most {capacity} candidates ({MAX_SEARCH_PAGES} pages of \
+             {SEARCH_PAGE_SIZE}) but NIP-11 advertises {advertised} — the scan budget \
+             no longer covers the advertised ceiling"
         );
 
         // The budget is derived, not hand-tuned: one page under the derived
