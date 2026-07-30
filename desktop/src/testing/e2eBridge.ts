@@ -10875,6 +10875,13 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "authorize_external_agent":
+        return JSON.stringify([
+          "auth",
+          getMockMemberPubkey(activeConfig),
+          "",
+          "a".repeat(128),
+        ]);
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},

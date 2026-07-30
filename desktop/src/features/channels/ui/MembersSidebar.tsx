@@ -56,6 +56,8 @@ import {
   managedAgentPairAction,
 } from "@/features/agents/managedAgentRuntimeStatus";
 import { EditRespondToDialog } from "./EditRespondToDialog";
+import { ExternalAgentAuthorizationDialog } from "./ExternalAgentAuthorizationDialog";
+import { useExternalAgentAuthorization } from "./useExternalAgentAuthorization";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
@@ -520,6 +522,7 @@ export function MembersSidebar({
 
   const [editRespondToAgent, setEditRespondToAgent] =
     React.useState<ManagedAgent | null>(null);
+  const externalAgentAuthorization = useExternalAgentAuthorization(channelId);
 
   React.useEffect(() => {
     if (!open) {
@@ -598,6 +601,13 @@ export function MembersSidebar({
     const managedAgent = memberIsBot
       ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
       : undefined;
+    const canAuthorizeExternalAgent =
+      selfMember?.role === "owner" &&
+      memberIsBot &&
+      !managedAgent &&
+      memberProfilesQuery.isSuccess &&
+      !memberProfile?.ownerPubkey &&
+      member.pubkey !== currentPubkey;
     const managedAgentRuntime =
       memberIsBot && relayUrl
         ? findManagedAgentRuntime(
@@ -616,13 +626,15 @@ export function MembersSidebar({
     return (
       <div className="content-visibility-auto" key={member.pubkey}>
         <MembersSidebarMemberCard
+          canAuthorizeExternalAgent={canAuthorizeExternalAgent}
           canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
           canModerate={canModerate && member.pubkey !== currentPubkey}
           canRemoveMember={canRemoveMember(member)}
           isActionPending={
             isActionPending ||
             changeRoleMutation.isPending ||
-            isModerationPending
+            isModerationPending ||
+            externalAgentAuthorization.isPending
           }
           isArchived={isArchived}
           managedAgent={managedAgent}
@@ -636,6 +648,12 @@ export function MembersSidebar({
           moderationState={moderationStateByPubkey.get(
             normalizePubkey(member.pubkey),
           )}
+          onAuthorizeExternalAgent={(targetMember) => {
+            externalAgentAuthorization.open({
+              label: formatMemberName(targetMember, currentPubkey),
+              member: targetMember,
+            });
+          }}
           onBan={onBan}
           onChangeRole={(m, role) => {
             void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
@@ -870,6 +888,14 @@ export function MembersSidebar({
           if (!dialogOpen) setEditRespondToAgent(null);
         }}
         open={editRespondToAgent !== null}
+      />
+      <ExternalAgentAuthorizationDialog
+        agentLabel={externalAgentAuthorization.target?.label ?? "this agent"}
+        error={externalAgentAuthorization.error}
+        isPending={externalAgentAuthorization.isPending}
+        onConfirm={externalAgentAuthorization.onConfirm}
+        onOpenChange={externalAgentAuthorization.onOpenChange}
+        open={externalAgentAuthorization.target !== null}
       />
     </>
   );

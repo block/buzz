@@ -5,6 +5,7 @@ import {
   CircleSlash,
   Clock,
   Ellipsis,
+  KeyRound,
   Pencil,
   Play,
   RotateCcw,
@@ -46,6 +47,7 @@ import {
 } from "@/shared/ui/dropdown-menu";
 
 type MembersSidebarMemberCardProps = {
+  canAuthorizeExternalAgent: boolean;
   canChangeRole: boolean;
   canModerate: boolean;
   canRemoveMember: boolean;
@@ -61,6 +63,7 @@ type MembersSidebarMemberCardProps = {
   memberIsBot: boolean;
   memberLabel: string;
   moderationState?: MemberModerationState;
+  onAuthorizeExternalAgent: (member: ChannelMember) => void;
   onBan: (member: ChannelMember) => void;
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
@@ -116,6 +119,7 @@ function formatRespondToLabel(agent: ManagedAgent) {
 }
 
 export function MembersSidebarMemberCard({
+  canAuthorizeExternalAgent,
   canChangeRole,
   canModerate,
   canRemoveMember,
@@ -129,6 +133,7 @@ export function MembersSidebarMemberCard({
   memberIsBot,
   memberLabel,
   moderationState,
+  onAuthorizeExternalAgent,
   onBan,
   onChangeRole,
   onEditRespondTo,
@@ -154,7 +159,10 @@ export function MembersSidebarMemberCard({
   const canModerateMember =
     canModerate && !memberIsBot && member.role !== "owner";
   const hasActions = memberIsBot
-    ? Boolean(managedAgent) || canRemoveMember || canViewActivity
+    ? Boolean(managedAgent) ||
+      canAuthorizeExternalAgent ||
+      canRemoveMember ||
+      canViewActivity
     : canRemoveMember || canChangeRole || canModerateMember;
 
   const memberIdentity = (
@@ -260,6 +268,7 @@ export function MembersSidebarMemberCard({
       {memberIdentity}
       {hasActions ? (
         <MemberActionsMenu
+          canAuthorizeExternalAgent={canAuthorizeExternalAgent}
           canChangeRole={canChangeRole}
           canModerateMember={canModerateMember}
           canRemoveMember={canRemoveMember}
@@ -269,6 +278,7 @@ export function MembersSidebarMemberCard({
           member={member}
           memberIsBot={memberIsBot}
           moderationState={moderationState}
+          onAuthorizeExternalAgent={onAuthorizeExternalAgent}
           onBan={onBan}
           onChangeRole={onChangeRole}
           onEditRespondTo={onEditRespondTo}
@@ -288,6 +298,7 @@ export function MembersSidebarMemberCard({
 const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
 
 function MemberActionsMenu({
+  canAuthorizeExternalAgent,
   canChangeRole,
   canModerateMember,
   canRemoveMember,
@@ -297,6 +308,7 @@ function MemberActionsMenu({
   member,
   memberIsBot,
   moderationState,
+  onAuthorizeExternalAgent,
   onBan,
   onChangeRole,
   onEditRespondTo,
@@ -308,6 +320,7 @@ function MemberActionsMenu({
   onViewActivity,
   pairAction,
 }: {
+  canAuthorizeExternalAgent: boolean;
   canChangeRole: boolean;
   canModerateMember: boolean;
   canRemoveMember: boolean;
@@ -317,6 +330,7 @@ function MemberActionsMenu({
   member: ChannelMember;
   memberIsBot: boolean;
   moderationState?: MemberModerationState;
+  onAuthorizeExternalAgent: (member: ChannelMember) => void;
   onBan: (member: ChannelMember) => void;
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
@@ -387,6 +401,16 @@ function MemberActionsMenu({
             ) : null}
           </>
         ) : null}
+        {canAuthorizeExternalAgent ? (
+          <DropdownMenuItem
+            data-testid={`sidebar-authorize-agent-${member.pubkey}`}
+            disabled={disabled}
+            onClick={() => onAuthorizeExternalAgent(member)}
+          >
+            <KeyRound className="h-4 w-4" />
+            Authorize external agent...
+          </DropdownMenuItem>
+        ) : null}
         {showChangeRole ? (
           <DropdownMenuSub>
             <DropdownMenuSubTrigger
@@ -414,7 +438,9 @@ function MemberActionsMenu({
         ) : null}
         {canRemoveMember ? (
           <>
-            {showChangeRole ? <DropdownMenuSeparator /> : null}
+            {showChangeRole || canAuthorizeExternalAgent ? (
+              <DropdownMenuSeparator />
+            ) : null}
             <DropdownMenuItem
               className="text-destructive focus:text-destructive"
               data-testid={`sidebar-remove-member-${member.pubkey}`}
