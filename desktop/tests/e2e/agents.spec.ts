@@ -1736,8 +1736,10 @@ test("a community member can discover and add another member's catalog agent", a
   );
   await expect(remoteEntry).toContainText("Alice’s Reviewer");
   await remoteEntry.click();
+  // The detail pane resolves the publisher's display name; 'Community member'
+  // is only the fallback for an unresolvable pubkey.
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Added by Community member",
+    "Added by alice",
   );
 
   await page
@@ -1788,6 +1790,38 @@ test("a community member can discover and add another member's catalog agent", a
   await expect(addedTarget).toBeDisabled();
   await expect(addedTarget).toHaveText("Added to My Agents");
   expect(await countCommandInvocations(page, "create_persona")).toBe(1);
+});
+
+test("catalog detail shows Community member when the publisher profile cannot be resolved", async ({
+  page,
+}) => {
+  // A pubkey that is not in the mock profile registry — profile resolution
+  // will fail and the detail pane must fall back gracefully.
+  const unknownPubkey =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const personaId = "unresolvable-reviewer";
+  await installMockBridge(page, {
+    personaCatalogEvents: [
+      createCatalogEvent({
+        ownerPubkey: unknownPubkey,
+        sourcePersonaId: personaId,
+        displayName: "Mystery Agent",
+        systemPrompt: "Published by someone whose profile cannot be fetched.",
+      }),
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await openPersonaCatalog(page);
+
+  await page
+    .getByTestId(
+      `persona-catalog-list-item-catalog:${unknownPubkey}:${personaId}`,
+    )
+    .click();
+  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+    "Added by Community member",
+  );
 });
 
 test("one share level selector drives both the link and send paths", async ({
