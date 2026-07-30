@@ -71,8 +71,7 @@ pub(super) fn run_install_command_with_retry(
             // new attempt happens to print something.
             reporter.start_attempt();
             let outcome = run_install_command(step, command, reporter.line_observer());
-            reporter.record_attempt(attempt, &outcome);
-            outcome.step
+            reporter.record_attempt(attempt, outcome)
         },
         std::thread::sleep,
     )

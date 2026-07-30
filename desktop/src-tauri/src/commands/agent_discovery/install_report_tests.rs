@@ -21,6 +21,16 @@ fn harness() -> Harness {
 /// A harness whose log lives in `dir`, or in a fresh temp dir when `dir` is
 /// `None`. Passing a directory lets a test seed a previous run's file first.
 fn harness_at(dir: Option<tempfile::TempDir>) -> Harness {
+    harness_inner(dir, None)
+}
+
+/// A harness whose reporter scrubs exactly `secrets`, so a proxy or PAT
+/// credential can be asserted without exporting it into the process.
+fn harness_with_secrets(secrets: Vec<String>) -> Harness {
+    harness_inner(None, Some(secrets))
+}
+
+fn harness_inner(dir: Option<tempfile::TempDir>, secrets: Option<Vec<String>>) -> Harness {
     let dir = dir.unwrap_or_else(|| tempfile::tempdir().expect("tempdir"));
     let log = dir.path().join("install-goose.log");
     let events: Arc<Mutex<Vec<InstallOutputEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -28,12 +38,12 @@ fn harness_at(dir: Option<tempfile::TempDir>) -> Harness {
         let events = Arc::clone(&events);
         Arc::new(move |event| events.lock().unwrap().push(event))
     };
+    let started = InstallLog::start(&log, "goose", TEST_APP_VERSION);
     Harness {
-        reporter: InstallReporter::new(
-            "goose",
-            InstallLog::start(&log, "goose", TEST_APP_VERSION),
-            Some(emit),
-        ),
+        reporter: match secrets {
+            Some(secrets) => InstallReporter::with_secrets("goose", started, Some(emit), secrets),
+            None => InstallReporter::new("goose", started, Some(emit)),
+        },
         _dir: dir,
         log,
         events,
@@ -96,9 +106,9 @@ fn test_log_records_every_attempt_not_only_the_last() {
     let h = harness();
 
     h.reporter
-        .record_attempt(1, &outcome("cli", false, "attempt-one-output"));
+        .record_attempt(1, outcome("cli", false, "attempt-one-output"));
     h.reporter
-        .record_attempt(2, &outcome("cli", false, "attempt-two-output"));
+        .record_attempt(2, outcome("cli", false, "attempt-two-output"));
 
     let log = h.log_contents();
     assert!(log.contains("attempt-one-output"), "got: {log}");
@@ -125,9 +135,9 @@ fn test_first_attempt_overflow_does_not_erase_later_records() {
     drain_into(vec![b'F'; 4 * 1024 * 1024].as_slice(), &capture, None);
 
     h.reporter
-        .record_attempt(1, &outcome("cli", false, &capture.log()));
+        .record_attempt(1, outcome("cli", false, &capture.log()));
     h.reporter
-        .record_attempt(2, &outcome("cli", false, "second-attempt-detail"));
+        .record_attempt(2, outcome("cli", false, "second-attempt-detail"));
     h.reporter.record_step(
         &mut Vec::new(),
         step("verify", false, "verification-detail"),
@@ -198,7 +208,7 @@ fn test_a_new_run_starts_a_fresh_file_and_keeps_the_previous_as_dot_one() {
     let first = harness();
     first
         .reporter
-        .record_attempt(1, &outcome("cli", false, "previous-run-output"));
+        .record_attempt(1, outcome("cli", false, "previous-run-output"));
     let previous = first.log.clone();
     let dir = first._dir;
     drop(first.reporter);
@@ -206,7 +216,7 @@ fn test_a_new_run_starts_a_fresh_file_and_keeps_the_previous_as_dot_one() {
     let second = harness_at(Some(dir));
     second
         .reporter
-        .record_attempt(1, &outcome("cli", false, "current-run-output"));
+        .record_attempt(1, outcome("cli", false, "current-run-output"));
 
     let log = second.log_contents();
     assert!(log.contains("current-run-output"), "got: {log}");
@@ -228,7 +238,7 @@ fn test_an_executed_attempt_records_its_own_duration() {
     let h = harness();
 
     h.reporter.start_attempt();
-    h.reporter.record_attempt(1, &outcome("cli", true, "done"));
+    h.reporter.record_attempt(1, outcome("cli", true, "done"));
     h.reporter
         .record_step(&mut Vec::new(), step("verify", true, ""));
 
@@ -252,7 +262,7 @@ fn test_log_redacts_secrets_before_writing() {
     let h = harness();
     let leak = "npm ERR! token nsec1qqqqqqqqqqsecretvalue failed";
 
-    h.reporter.record_attempt(1, &outcome("cli", false, leak));
+    h.reporter.record_attempt(1, outcome("cli", false, leak));
 
     let log = h.log_contents();
     assert!(!log.contains("nsec1qqqqqqqqqqsecretvalue"), "got: {log}");
@@ -273,7 +283,7 @@ fn test_log_redacts_an_environment_secret_with_no_recognizable_prefix() {
 
     h.reporter.record_attempt(
         1,
-        &outcome("cli", false, &format!("npm ERR! _authToken={secret}")),
+        outcome("cli", false, &format!("npm ERR! _authToken={secret}")),
     );
 
     let log = h.log_contents();
@@ -297,6 +307,179 @@ fn test_a_live_line_is_redacted_before_it_is_emitted() {
     assert!(line.contains("[REDACTED]"), "got: {line}");
 }
 
+// ── proxy and PAT credentials ────────────────────────────────────────────────
+
+/// A proxy URL's password is a credential, but the proxy itself is diagnostic
+/// information: an install that fails behind a proxy is only debuggable if the
+/// record still says which proxy it went through. So the userinfo is scrubbed
+/// and the host is kept.
+#[test]
+fn test_proxy_userinfo_is_secret_but_the_proxy_host_is_not() {
+    let secrets = secret_values_from([(
+        "HTTPS_PROXY".to_string(),
+        "http://corpuser:hunter2pass@proxy.example:8080".to_string(),
+    )]);
+
+    assert_eq!(secrets, vec!["corpuser:hunter2pass"]);
+}
+
+/// A proxy with no credential contributes nothing — scrubbing a bare host would
+/// erase the proxy's name from every record while protecting nothing. A bare
+/// username is not a credential either, and scrubbing it would delete every
+/// occurrence of that word from the log.
+#[test]
+fn test_a_proxy_without_credentials_contributes_no_secret() {
+    let secrets = secret_values_from([
+        (
+            "HTTP_PROXY".to_string(),
+            "http://proxy.example:8080".to_string(),
+        ),
+        (
+            "ALL_PROXY".to_string(),
+            "socks5://10.0.0.1:1080".to_string(),
+        ),
+        (
+            "HTTPS_PROXY".to_string(),
+            "http://user@proxy.example:8080".to_string(),
+        ),
+    ]);
+
+    assert!(secrets.is_empty(), "got: {secrets:?}");
+}
+
+/// `*_PATH` variables must not be mistaken for personal access tokens. A
+/// `contains("_PAT")` rule would match `PATH` itself and scrub every directory
+/// name out of the log, which is why the rule matches `_PAT` as a suffix.
+#[test]
+fn test_a_path_variable_is_not_treated_as_a_personal_access_token() {
+    let secrets = secret_values_from([
+        ("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string()),
+        ("GOPATH".to_string(), "/home/user/go".to_string()),
+        (
+            "CARGO_HOME_PATH".to_string(),
+            "/home/user/.cargo".to_string(),
+        ),
+    ]);
+
+    assert!(secrets.is_empty(), "got: {secrets:?}");
+}
+
+/// Variables named as personal access tokens are secret by name, whatever shape
+/// their value has.
+#[test]
+fn test_pat_named_variables_are_secret() {
+    let secrets = secret_values_from([
+        (
+            "GITHUB_PAT".to_string(),
+            "ghp_abcdefghij0123456789".to_string(),
+        ),
+        (
+            "GH_PAT".to_string(),
+            "github_pat_abcdefghij0123".to_string(),
+        ),
+    ]);
+
+    assert_eq!(secrets.len(), 2, "got: {secrets:?}");
+}
+
+/// The whole point of the widening: a proxy password and a PAT that the
+/// installer echoed reach neither the log nor the live line.
+///
+/// Both are checked through the real reporter rather than the classifier, so
+/// this covers the wiring — a classifier that recognises a secret the reporter
+/// never consults would still leak.
+#[test]
+fn test_proxy_and_pat_credentials_are_redacted_from_the_log_and_the_live_line() {
+    let proxy_password = "hunter2pass";
+    let pat = "ghp_abcdefghij0123456789";
+    // The classifier's own tests cover recognising these under their real
+    // variable names; injecting the resulting secrets here keeps a live
+    // `HTTPS_PROXY` out of the process the rest of the suite shares.
+    let h = harness_with_secrets(vec![format!("corpuser:{proxy_password}"), pat.to_string()]);
+
+    h.reporter.record_attempt(
+        1,
+        outcome(
+            "cli",
+            false,
+            &format!(
+                "npm ERR! proxy=http://corpuser:{proxy_password}@proxy.example authToken={pat}"
+            ),
+        ),
+    );
+    let observer = h.reporter.line_observer().expect("an observer");
+    observer(&format!("cloning https://{pat}@github.com/org/repo"));
+
+    let log = h.log_contents();
+    assert!(
+        !log.contains(proxy_password),
+        "log leaked the proxy password: {log}"
+    );
+    assert!(!log.contains(pat), "log leaked the PAT: {log}");
+    assert!(
+        log.contains("proxy.example"),
+        "the proxy host is diagnostic and must survive: {log}"
+    );
+
+    let line = h.lines().into_iter().flatten().next().expect("a live line");
+    assert!(!line.contains(pat), "live line leaked the PAT: {line}");
+    assert!(line.contains("[REDACTED]"), "got: {line}");
+}
+
+/// The third surface: the step returned to the frontend. `getInstallErrorMessage`
+/// renders the failing step's stderr verbatim, so a secret that the log and the
+/// live line both scrub would still reach the user through the error dialog.
+#[test]
+fn test_a_returned_step_is_redacted_before_the_frontend_renders_it() {
+    let pat = "ghp_abcdefghij0123456789";
+    let h = harness_with_secrets(vec![pat.to_string()]);
+
+    let returned = h.reporter.record_attempt(
+        1,
+        InstallOutcome {
+            step: InstallStepResult {
+                stdout: format!("configuring remote with {pat}"),
+                stderr: format!("fatal: authentication failed for token {pat}"),
+                hint: Some(format!("check that {pat} has the repo scope")),
+                ..step("cli", false, "")
+            },
+            log_stdout: String::new(),
+            log_stderr: String::new(),
+        },
+    );
+
+    assert!(!returned.stdout.contains(pat), "got: {}", returned.stdout);
+    assert!(!returned.stderr.contains(pat), "got: {}", returned.stderr);
+    let hint = returned.hint.expect("a hint");
+    assert!(!hint.contains(pat), "got: {hint}");
+}
+
+/// A synthesized step reaches the frontend through the other funnel, and needs
+/// the same scrubbing — the managed-node prerequisite failures are built this
+/// way and carry whatever the underlying command printed.
+#[test]
+fn test_a_synthesized_step_is_redacted_before_it_reaches_the_caller() {
+    let pat = "ghp_abcdefghij0123456789";
+    let h = harness_with_secrets(vec![pat.to_string()]);
+    let mut steps = Vec::new();
+
+    h.reporter.record_step(
+        &mut steps,
+        InstallStepResult {
+            stderr: format!("npm ERR! 401 with {pat}"),
+            ..step("adapter", false, "")
+        },
+    );
+
+    assert_eq!(steps.len(), 1);
+    assert!(!steps[0].stderr.contains(pat), "got: {}", steps[0].stderr);
+    assert!(
+        steps[0].stderr.contains("[REDACTED]"),
+        "got: {}",
+        steps[0].stderr
+    );
+}
+
 // ── the log pointer ──────────────────────────────────────────────────────────
 
 /// The path is available as soon as the run's session opens, because the file
@@ -317,7 +500,7 @@ fn test_reporter_without_a_log_records_nothing_and_reports_no_path() {
     let mut steps = Vec::new();
 
     reporter.start_attempt();
-    reporter.record_attempt(1, &outcome("cli", false, "output"));
+    reporter.record_attempt(1, outcome("cli", false, "output"));
     reporter.record_step(&mut steps, step("verify", false, "detail"));
 
     assert_eq!(reporter.log_path(), None);
@@ -411,7 +594,7 @@ fn test_a_burst_coalesces_to_the_newest_line_not_the_first() {
     observer("two");
     observer("three");
     // Ends the attempt, which is when a held line is known to be the last.
-    h.reporter.record_attempt(1, &outcome("cli", true, "done"));
+    h.reporter.record_attempt(1, outcome("cli", true, "done"));
 
     assert_eq!(
         h.lines(),
@@ -431,7 +614,7 @@ fn test_both_streams_of_one_attempt_share_the_rate_window() {
 
     stdout("progress");
     stderr("warning");
-    h.reporter.record_attempt(1, &outcome("cli", true, "done"));
+    h.reporter.record_attempt(1, outcome("cli", true, "done"));
 
     assert_eq!(
         h.lines(),
@@ -608,7 +791,7 @@ fn test_run2_output_replaces_stale_run1_state_through_shared_consumer() {
     reporter1.start_attempt();
     let obs1 = reporter1.line_observer().expect("observer");
     obs1("run-one-output");
-    reporter1.record_attempt(1, &outcome("cli", true, "done"));
+    reporter1.record_attempt(1, outcome("cli", true, "done"));
 
     // Drop reporter1 — deactivates obs1 via the exclusive lifecycle write lock,
     // which blocks until any in-flight read guard (publication) has released.
@@ -650,7 +833,7 @@ fn test_run2_output_replaces_stale_run1_state_through_shared_consumer() {
     reporter2.start_attempt();
     let obs2 = reporter2.line_observer().expect("observer");
     obs2("run-two-first-line");
-    reporter2.record_attempt(1, &outcome("cli", true, "done"));
+    reporter2.record_attempt(1, outcome("cli", true, "done"));
 
     // ── Shared-consumer fold ────────────────────────────────────────────────
     // Fold all emitted events through the nextInstallOutputLine reducer logic.

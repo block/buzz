@@ -141,7 +141,20 @@ impl InstallReporter {
     fn new(runtime_id: &str, log: Option<InstallLog>, emit: Option<EmitEvent>) -> Self {
         // Snapshot the environment's secrets once, at construction: the install
         // inherits this environment, so anything it echoes came from here.
-        let secrets: Secrets = Arc::new(env_secret_values());
+        Self::with_secrets(runtime_id, log, emit, env_secret_values())
+    }
+
+    /// The reporter over an explicit secret set, which is what makes the
+    /// scrubbing assertable: a test can name a proxy credential without
+    /// exporting a real `HTTPS_PROXY` into the process every HTTP client in the
+    /// suite would then read.
+    fn with_secrets(
+        runtime_id: &str,
+        log: Option<InstallLog>,
+        emit: Option<EmitEvent>,
+        secrets: Vec<String>,
+    ) -> Self {
+        let secrets: Secrets = Arc::new(secrets);
         let live = emit.map(|emit| Live {
             runtime_id: Arc::from(runtime_id),
             emit,
@@ -197,14 +210,25 @@ impl InstallReporter {
         Some(Arc::new(move |line: &str| live.offer(line)))
     }
 
-    /// Record one executed attempt of a step.
-    pub(super) fn record_attempt(&self, attempt: u32, outcome: &InstallOutcome) {
+    /// Record one executed attempt of a step, returning the step with secrets
+    /// scrubbed out of the output the UI will render.
+    ///
+    /// The scrub happens here rather than at the construction sites because
+    /// every executed step reaches the caller through this function — the
+    /// timeout path, the status-check failure, and the ordinary exit all build
+    /// their `InstallStepResult` straight from the captures.
+    pub(super) fn record_attempt(
+        &self,
+        attempt: u32,
+        outcome: InstallOutcome,
+    ) -> InstallStepResult {
         // The drains are finished, so a line the throttle is still holding is
         // this attempt's last and nothing is coming to replace it.
         if let Some(live) = &self.live {
             live.flush_pending();
         }
-        self.write_record(Some(attempt), outcome);
+        self.write_record(Some(attempt), &outcome);
+        self.redacted_step(outcome.step)
     }
 
     /// Push a synthesized step onto `steps` and record it. Routing every step
@@ -212,7 +236,19 @@ impl InstallReporter {
     /// without passing this function is invisible in the file.
     pub(super) fn record_step(&self, steps: &mut Vec<InstallStepResult>, step: InstallStepResult) {
         self.write_record(None, &InstallOutcome::synthesized(step.clone()));
-        steps.push(step);
+        steps.push(self.redacted_step(step));
+    }
+
+    /// Scrub the frontend-visible fields of a step. The failure message the UI
+    /// builds renders `stderr`/`stdout` and the hint verbatim, so they need the
+    /// same scrubbing as the log record and the live line — the log is not the
+    /// only place an install's output is read.
+    fn redacted_step(&self, mut step: InstallStepResult) -> InstallStepResult {
+        step.command = redact(&step.command, &self.secrets);
+        step.stdout = redact(&step.stdout, &self.secrets);
+        step.stderr = redact(&step.stderr, &self.secrets);
+        step.hint = step.hint.map(|hint| redact(&hint, &self.secrets));
+        step
     }
 
     /// Append one record. Best-effort by contract: a full disk or a revoked
@@ -419,16 +455,55 @@ fn redact(text: &str, secrets: &Secrets) -> String {
 ///
 /// An install inherits Buzz's environment and installers echo it back — npm
 /// prints the resolved registry config on an auth failure, and a shell that
-/// traces its commands prints every expansion. Without this, only the two
+/// traces its commands prints every expansion. Without this, only the
 /// hard-coded key shapes would be scrubbed, so a plain `NPM_TOKEN` or
 /// `ANTHROPIC_API_KEY` would land in the file in clear text.
-///
-/// Keyed on the name because a secret's *value* has no reliable shape. Two
-/// filters keep ordinary output readable: a value under 8 bytes is skipped
-/// (more likely a flag like `true` or a version than a credential), and the
-/// markers avoid substrings that occur in non-secret names — `AUTH` is left out
-/// because it matches `GIT_AUTHOR_NAME`, whose value is a person's name.
 fn env_secret_values() -> Vec<String> {
+    secret_values_from(std::env::vars())
+}
+
+/// The secret-bearing part of each variable that carries one.
+///
+/// Split from [`env_secret_values`] so the classification is assertable without
+/// mutating the process environment — setting a real `HTTPS_PROXY` in a test
+/// would be read by every HTTP client the rest of the suite builds.
+///
+/// Two kinds of variable are recognised, because they need opposite treatment:
+///
+/// * **name-marked secrets**, whose whole value is the credential; and
+/// * **proxy URLs**, where only the userinfo is the credential.
+fn secret_values_from(vars: impl IntoIterator<Item = (String, String)>) -> Vec<String> {
+    vars.into_iter()
+        .filter_map(|(name, value)| {
+            let name = name.to_ascii_uppercase();
+            if PROXY_VAR_NAMES.contains(&name.as_str()) {
+                // Only the userinfo, so the proxy itself stays named in the
+                // record: an install that fails behind a proxy is diagnosable
+                // only if the log still says which proxy it went through, and
+                // the host and port are not the secret. Redacting the whole
+                // value would erase that while protecting nothing more.
+                return proxy_userinfo(&value).map(str::to_string);
+            }
+            // A value under 8 bytes is more likely a flag like `true` or a
+            // version than a credential, and scrubbing those makes ordinary
+            // output unreadable.
+            (value.len() >= 8 && name_marks_secret(&name)).then_some(value)
+        })
+        .collect()
+}
+
+/// Proxy variables whose value embeds a credential in its userinfo.
+const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
+
+/// Whether an environment variable's name marks its value as a credential.
+///
+/// Keyed on the name because a secret's *value* has no reliable shape. The
+/// markers avoid substrings that occur in non-secret names: `AUTH` is left out
+/// because it matches `GIT_AUTHOR_NAME`, whose value is a person's name, and
+/// personal access tokens match on `_PAT` as a *suffix* rather than a substring
+/// — `contains("_PAT")` would match every `*_PATH` variable on the system and
+/// scrub directory names out of the whole log.
+fn name_marks_secret(name: &str) -> bool {
     const SECRET_NAME_MARKERS: &[&str] = &[
         "TOKEN",
         "SECRET",
@@ -440,17 +515,31 @@ fn env_secret_values() -> Vec<String> {
         "ACCESS_KEY",
         "CREDENTIAL",
     ];
-    std::env::vars()
-        .filter(|(name, value)| {
-            value.len() >= 8 && {
-                let name = name.to_ascii_uppercase();
-                SECRET_NAME_MARKERS
-                    .iter()
-                    .any(|marker| name.contains(marker))
-            }
-        })
-        .map(|(_, value)| value)
-        .collect()
+    name.ends_with("_PAT")
+        || SECRET_NAME_MARKERS
+            .iter()
+            .any(|marker| name.contains(marker))
+}
+
+/// The `user:password` credential embedded in a proxy URL, if it has one.
+///
+/// Parsed rather than pattern-matched so a proxy URL with no credential —
+/// the common case — contributes nothing to scrub. The last `@` in the
+/// authority separates userinfo from host, so a password containing an
+/// encoded `@` still splits correctly.
+///
+/// A bare username with no password is not treated as a credential: it is not
+/// secret on its own, and scrubbing it would erase every occurrence of a word
+/// like `user` from the whole record.
+fn proxy_userinfo(value: &str) -> Option<&str> {
+    let authority = value
+        .split_once("://")?
+        .1
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let userinfo = authority.rsplit_once('@')?.0;
+    userinfo.contains(':').then_some(userinfo)
 }
 
 #[cfg(test)]
