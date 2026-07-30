@@ -21,6 +21,7 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod mouse_nav;
 mod native_websocket;
 mod nostr_bind;
 pub mod nostr_convert;
@@ -372,6 +373,9 @@ pub fn run() {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
             tray_menu::init(&app_handle)?;
+
+            // Native mouse back/forward buttons (X1/X2) — see mouse_nav.rs.
+            mouse_nav::init(&app_handle);
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe

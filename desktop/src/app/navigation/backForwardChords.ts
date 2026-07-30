@@ -10,6 +10,27 @@
 
 export type BackForwardDirection = "back" | "forward";
 
+export type BackForwardMouseEvent = Pick<MouseEvent, "button">;
+
+/**
+ * Mouse back/forward buttons (X1/X2 — `button` 3 and 4), matching browser
+ * behavior. Modifiers are deliberately ignored: browsers navigate on these
+ * buttons regardless of held modifier keys.
+ */
+export function matchBackForwardMouseButton(
+  event: BackForwardMouseEvent,
+): BackForwardDirection | null {
+  if (event.button === 3) {
+    return "back";
+  }
+
+  if (event.button === 4) {
+    return "forward";
+  }
+
+  return null;
+}
+
 export type BackForwardChordEvent = Pick<
   KeyboardEvent,
   "altKey" | "code" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
