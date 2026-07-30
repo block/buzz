@@ -320,6 +320,8 @@ export type ManagedAgentRuntimeStatus = {
 
 export type ManagedAgentBackend =
   | { type: "local" }
+  /** User-run harness; see `tauriAgentBackends.getExternalAgentEnv`. */
+  | { type: "external" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
 export type ManagedAgent = {
@@ -377,7 +379,8 @@ export type ManagedAgent = {
   needsRestart: boolean;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
-  status: "running" | "stopped" | "deployed" | "not_deployed";
+  /** `external` has no control-plane axis; the PresenceDot is the live signal. */
+  status: "running" | "stopped" | "deployed" | "not_deployed" | "external";
   pid: number | null;
   createdAt: string;
   updatedAt: string;
@@ -406,19 +409,6 @@ export type ManagedAgent = {
  * it's a heartbeat-only mode without a meaningful GUI use case.
  */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
-
-export type BackendProviderCandidate = {
-  id: string;
-  binaryPath: string;
-};
-
-export type BackendProviderProbeResult = {
-  ok: boolean;
-  name?: string;
-  version?: string;
-  description?: string;
-  config_schema?: Record<string, unknown>;
-};
 
 export type RelayMeshConfig = {
   modelRef: string;

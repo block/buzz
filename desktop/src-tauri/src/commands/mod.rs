@@ -10,6 +10,7 @@ mod agent_providers;
 mod agent_settings;
 mod agent_update_rollback;
 mod agents;
+mod agents_archive;
 mod agents_external;
 mod canvas;
 mod channel_templates;

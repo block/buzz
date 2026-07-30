@@ -98,8 +98,11 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
 
     let owner = nostr::Keys::generate();
     let agent = nostr::Keys::generate();
-    let event = build_agent_archive_request(&owner, &agent.public_key().to_hex())
-        .expect("build archive request");
+    let event = crate::commands::agents_archive::build_agent_archive_request(
+        &owner,
+        &agent.public_key().to_hex(),
+    )
+    .expect("build archive request");
     let json: serde_json::Value = serde_json::from_str(&event.as_json()).unwrap();
     let tags = json["tags"].as_array().unwrap();
 

@@ -81,12 +81,19 @@ export function resolveStartRuntimeForDefinition(
  *   per-instance runtime state, never definition env). `harnessOverride`
  *   is true because the preset commands deliberately override the
  *   definition's runtime preference.
+ * - `external`: the user runs `buzz-acp` themselves. Like `provider`, nothing
+ *   is spawned locally and `startOnAppLaunch` is false — but unlike `provider`,
+ *   the harness commands ARE set, because the exported env block resolves them
+ *   back off the record (`resolve_effective_harness_descriptor`). An external
+ *   agent with no `agentCommand` would export `BUZZ_ACP_AGENT_COMMAND=""`.
  */
-export type BackendIntent = {
-  type: "provider";
-  id: string;
-  config: Record<string, unknown>;
-};
+export type BackendIntent =
+  | {
+      type: "provider";
+      id: string;
+      config: Record<string, unknown>;
+    }
+  | { type: "external" };
 
 /**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
@@ -124,6 +131,27 @@ export async function buildInstanceInputForDefinition(
     systemPrompt: persona.systemPrompt,
     avatarUrl,
   };
+
+  if (backendIntent?.type === "external") {
+    return {
+      ...base,
+      // Commands are set (unlike provider): the exported env block reads them
+      // back off the record via resolve_effective_harness_descriptor.
+      acpCommand: "buzz-acp",
+      agentCommand: runtime.command,
+      // Same reasoning as the local path: leave empty so args resolve live from
+      // the definition, which the env export re-reads on every reveal.
+      agentArgs: [],
+      mcpCommand: runtime.mcpCommand ?? "",
+      harnessOverride: !persona.runtime || persona.runtime === runtime.id,
+      model: persona.model ?? undefined,
+      provider: persona.provider ?? undefined,
+      // Nothing to spawn or restore — the user starts the harness themselves.
+      spawnAfterCreate: false,
+      startOnAppLaunch: false,
+      backend: { type: "external" },
+    };
+  }
 
   if (backendIntent?.type === "provider") {
     return {

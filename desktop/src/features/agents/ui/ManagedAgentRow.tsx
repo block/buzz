@@ -22,6 +22,7 @@ import type {
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { ExternalAgentEnvBlock } from "./ExternalAgentEnvBlock";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
@@ -56,8 +57,16 @@ export function ManagedAgentRow({
   onSelectLogAgent: (pubkey: string | null) => void;
 }) {
   const isLocal = agent.backend.type === "local";
+  const isExternal = agent.backend.type === "external";
+  // Local rows expand to logs; external rows expand to the container env block.
+  // Provider rows have neither, so they stay flat.
+  const isRowExpandable = isLocal || isExternal;
   const runtimeSource =
-    agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
+    agent.backend.type === "provider"
+      ? `Remote (${agent.backend.id})`
+      : agent.backend.type === "external"
+        ? "Self-hosted"
+        : null;
   const personaLabel = agent.personaId
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
@@ -82,7 +91,9 @@ export function ManagedAgentRow({
         ? `Exit ${agent.lastExitCode}`
         : isLocal
           ? "Ready to launch"
-          : "Managed remotely";
+          : agent.backend.type === "external"
+            ? "Started by you"
+            : "Managed remotely";
   // When the harness recovered a meaningful error string from the agent's
   // log tail (Max's seam in `managed_agents/storage.rs`), promote it to
   // user-visible copy below the process detail. Specifically renders the
@@ -103,7 +114,7 @@ export function ManagedAgentRow({
       data-testid={`managed-agent-${agent.pubkey}`}
     >
       <div className="flex items-start gap-3 px-4 py-3">
-        {isLocal ? (
+        {isRowExpandable ? (
           <button
             aria-expanded={isLogSelected}
             className="-m-1 min-w-0 flex-1 rounded-lg p-1 text-left transition-colors hover:bg-background/40"
@@ -169,6 +180,15 @@ export function ManagedAgentRow({
           </Button>
         </div>
       </div>
+
+      {isExternal && isLogSelected ? (
+        <div
+          className="border-t border-border/60 bg-background/60 px-4 py-4"
+          data-testid="managed-agent-external-env-row"
+        >
+          <ExternalAgentEnvBlock agentName={agent.name} pubkey={agent.pubkey} />
+        </div>
+      ) : null}
 
       {isLocal && isLogSelected ? (
         <div
@@ -262,6 +282,8 @@ function AgentSummary({
               <span>
                 {agent.startOnAppLaunch ? "Auto-start" : "Manual start"}
               </span>
+            ) : agent.backend.type === "external" ? (
+              <span>Runs outside Buzz</span>
             ) : (
               <span>Remote deployment</span>
             )}
@@ -420,7 +442,11 @@ function RuntimeBlock({
 function AgentOriginBadge({ agent }: { agent: ManagedAgent }) {
   return (
     <Badge variant="outline">
-      {agent.backend.type === "local" ? "Local" : "Remote"}
+      {agent.backend.type === "local"
+        ? "Local"
+        : agent.backend.type === "external"
+          ? "External"
+          : "Remote"}
     </Badge>
   );
 }

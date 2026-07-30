@@ -23,7 +23,6 @@ import {
   deleteManagedAgent,
   deleteCustomHarness,
   discoverAcpRuntimes,
-  discoverBackendProviders,
   discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
@@ -38,6 +37,7 @@ import {
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { discoverBackendProviders } from "@/shared/api/tauriAgentBackends";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import {
   setManagedAgentAutoRestart,

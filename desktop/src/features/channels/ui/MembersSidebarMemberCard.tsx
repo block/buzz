@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import {
+  canBuzzControlManagedAgent,
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -360,18 +361,23 @@ function MemberActionsMenu({
         {memberIsBot && managedAgent ? (
           <>
             {canViewActivity ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuItem
-              data-testid={`sidebar-agent-action-${member.pubkey}`}
-              disabled={disabled}
-              onClick={() => onManagedAgentAction(managedAgent)}
-            >
-              {pairAction
-                ? getPairActionIcon(pairAction)
-                : getManagedAgentActionIcon(managedAgent)}
-              {pairAction
-                ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
-                : getManagedAgentPrimaryActionLabel(managedAgent)}
-            </DropdownMenuItem>
+            {/* External agents are started by the user, so there is no
+                start/stop for Buzz to offer — but respond-to and the rest of
+                this menu still apply. */}
+            {canBuzzControlManagedAgent(managedAgent) ? (
+              <DropdownMenuItem
+                data-testid={`sidebar-agent-action-${member.pubkey}`}
+                disabled={disabled}
+                onClick={() => onManagedAgentAction(managedAgent)}
+              >
+                {pairAction
+                  ? getPairActionIcon(pairAction)
+                  : getManagedAgentActionIcon(managedAgent)}
+                {pairAction
+                  ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
+                  : getManagedAgentPrimaryActionLabel(managedAgent)}
+              </DropdownMenuItem>
+            ) : null}
             {onEditRespondTo ? (
               <DropdownMenuItem
                 data-testid={`sidebar-edit-respond-to-${member.pubkey}`}

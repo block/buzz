@@ -2,7 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
 import { useBackendProvidersQuery } from "@/features/agents/hooks";
-import { probeBackendProvider } from "@/shared/api/tauri";
+import { probeBackendProvider } from "@/shared/api/tauriAgentBackends";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
 import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
@@ -19,7 +19,9 @@ export function WhereToRunSection({
 }) {
   const backendProviders = useBackendProvidersQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
-  const isProviderMode = draft.runOn !== "local";
+  const isExternalMode = draft.runOn === "external";
+  // External has no provider binary, so it must not trigger the probe below.
+  const isProviderMode = draft.runOn !== "local" && !isExternalMode;
   const selectedBackendProvider = React.useMemo(
     () =>
       backendProviders.find((provider) => provider.id === draft.runOn) ?? null,
@@ -63,8 +65,8 @@ export function WhereToRunSection({
     };
   }, [draft, isProviderMode, onDraftChange, selectedBackendProvider]);
 
-  if (backendProviders.length === 0) return null;
-
+  // No early return on an empty provider list: "Run it myself" needs no
+  // provider binary, so the picker is always meaningful.
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
@@ -84,6 +86,9 @@ export function WhereToRunSection({
           value={draft.runOn}
         >
           <option value="local">This computer</option>
+          <option value="external">
+            Somewhere I run myself (Docker, VPS, …)
+          </option>
           {backendProviders.map((provider) => (
             <option key={provider.id} value={provider.id}>
               {provider.id}
@@ -91,6 +96,16 @@ export function WhereToRunSection({
           ))}
         </select>
       </div>
+
+      {isExternalMode ? (
+        <p className="text-sm text-muted-foreground">
+          Buzz creates the agent&apos;s identity and adds it to your community,
+          but won&apos;t start or stop it. After creating it you&apos;ll get an
+          env block to run <span className="font-mono">buzz-acp</span> wherever
+          the agent lives — available again later from the agent&apos;s
+          settings.
+        </p>
+      ) : null}
 
       {isProviderMode && selectedBackendProvider ? (
         <div className="space-y-4">

@@ -59,3 +59,25 @@ test("provider draft resolves with coerced config values", () => {
     config: { region: "us", size: 3 },
   });
 });
+
+// ── external backend: the user runs buzz-acp themselves ─────────────────────
+
+test("external selection needs no probe to submit", () => {
+  const draft = { ...emptyWhereToRunDraft, runOn: "external" };
+  // There is no provider binary to probe and no config schema, so gating on
+  // probedProvider (as the provider path does) would disable submit forever.
+  assert.equal(draft.probedProvider, null);
+  assert.equal(providerConfigComplete(draft), true);
+  assert.equal(canSubmitWhereToRun(draft), true);
+});
+
+test("external selection resolves to the external intent", () => {
+  assert.deepEqual(
+    resolveBackendIntent({ ...emptyWhereToRunDraft, runOn: "external" }),
+    { type: "external" },
+  );
+});
+
+test("local still resolves to no intent, distinct from external", () => {
+  assert.equal(resolveBackendIntent(emptyWhereToRunDraft), null);
+});

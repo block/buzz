@@ -748,7 +748,7 @@ type RawManagedAgent = {
   model: string | null;
   provider?: string | null;
   env_vars?: Record<string, string>;
-  status: "running" | "stopped" | "deployed" | "not_deployed";
+  status: "running" | "stopped" | "deployed" | "not_deployed" | "external";
   pid: number | null;
   created_at: string;
   updated_at: string;
@@ -763,6 +763,7 @@ type RawManagedAgent = {
   auto_restart_on_config_change?: boolean;
   backend:
     | { type: "local" }
+    | { type: "external" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   backend_agent_id: string | null;
   respond_to: "owner-only" | "allowlist" | "anyone";
@@ -7821,6 +7822,7 @@ async function handleCreateManagedAgent(
       startOnAppLaunch?: boolean;
       backend?:
         | { type: "local" }
+        | { type: "external" }
         | { type: "provider"; id: string; config: Record<string, unknown> };
       respondTo?: "owner-only" | "allowlist" | "anyone";
       respondToAllowlist?: string[];
@@ -10447,6 +10449,22 @@ export function maybeInstallE2eTauriMocks() {
         return [];
       case "probe_backend_provider":
         return { ok: false, error: "mock: no providers available" };
+      case "get_external_agent_env": {
+        const env: Record<string, string> = {
+          BUZZ_ACP_AGENT_COMMAND: "hermes-acp",
+          BUZZ_ACP_RESPOND_TO: "owner-only",
+          BUZZ_AUTH_TAG: '["auth","mock-owner","","mock-sig"]',
+          BUZZ_PRIVATE_KEY: "nsec1mockexternalagentkey",
+          BUZZ_RELAY_URL: "ws://localhost:3000",
+          NOSTR_PRIVATE_KEY: "nsec1mockexternalagentkey",
+        };
+        return {
+          env,
+          envFile: Object.entries(env)
+            .map(([key, value]) => `${key}=${value}`)
+            .join("\n"),
+        };
+      }
       case "discover_managed_agent_prereqs":
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],

@@ -35,6 +35,20 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
+/**
+ * Whether Buzz can start/stop this agent's process at all.
+ *
+ * False for `external` agents: the user runs the harness themselves, so Buzz has
+ * nothing to act on. The backend refuses these starts too
+ * (`commands/agents.rs`); this keeps the UI from offering a button whose only
+ * outcome is that error.
+ */
+export function canBuzzControlManagedAgent(
+  agent: Pick<ManagedAgent, "backend">,
+) {
+  return agent.backend.type !== "external";
+}
+
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";

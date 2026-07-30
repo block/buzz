@@ -334,3 +334,62 @@ test("item-13: no runtimes available — refuses with actionable error", () => {
     "empty runtime list must throw, not silently return null",
   );
 });
+
+// ── external backend: Buzz mints identity, the user runs the harness ────────
+
+test("external intent carries the harness commands, unlike provider", async () => {
+  const external = await buildInstanceInputForDefinition(
+    persona({ runtime: "goose" }),
+    gooseRuntime,
+    undefined,
+    { type: "external" },
+  );
+  // The exported env block resolves the harness back off the record via
+  // resolve_effective_harness_descriptor, so an external agent without these
+  // would export BUZZ_ACP_AGENT_COMMAND="" and never start.
+  assert.equal(external.acpCommand, "buzz-acp");
+  assert.equal(external.agentCommand, "goose-cmd");
+  assert.equal(external.mcpCommand, "goose-mcp");
+  assert.deepEqual(external.agentArgs, []);
+  assert.equal(external.harnessOverride, true);
+
+  const provider = await buildInstanceInputForDefinition(
+    persona({ runtime: "goose" }),
+    gooseRuntime,
+    undefined,
+    { type: "provider", id: "blox", config: {} },
+  );
+  assert.equal(
+    "agentCommand" in provider,
+    false,
+    "provider deploy hands the command to the provider binary, not the record",
+  );
+});
+
+test("external intent never spawns or auto-starts", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "external" },
+  );
+  assert.deepEqual(input.backend, { type: "external" });
+  // spawnAfterCreate false is what makes create skip BOTH the local spawn and
+  // the provider deploy without needing a backend guard at either site.
+  assert.equal(input.spawnAfterCreate, false);
+  assert.equal(input.startOnAppLaunch, false);
+});
+
+test("external intent still omits definition env vars", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "external" },
+  );
+  assert.equal(
+    "envVars" in input,
+    false,
+    "row 4 holds for external too — spawn/export merges live definition env",
+  );
+});

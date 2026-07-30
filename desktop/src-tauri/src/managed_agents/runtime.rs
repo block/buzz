@@ -22,8 +22,8 @@ pub(crate) use path::should_use_inherited;
 
 mod metadata;
 pub(crate) use metadata::{
-    resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
-    SESSION_TITLE_ENV_VAR,
+    remote_backend_status, resolve_effective_prompt_model_provider, resolve_session_title,
+    runtime_metadata_env_vars, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -128,47 +128,6 @@ pub(crate) fn resolve_workspace_pair_key(
     let effective_relay =
         crate::relay::effective_agent_relay_url(record_relay_url, workspace_relay_url);
     ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
-}
-
-/// The control-plane status string for a backend Buzz does not run in-process.
-///
-/// Returns `None` for [`BackendKind::Local`], whose status is derived from live
-/// process state by the caller. Split out of `build_managed_agent_summary` so the
-/// per-backend mapping is testable without an `AppHandle`.
-pub(crate) fn remote_backend_status(
-    backend: &crate::managed_agents::BackendKind,
-    backend_agent_id: Option<&str>,
-) -> Option<&'static str> {
-    use crate::managed_agents::BackendKind;
-    match backend {
-        BackendKind::Local => None,
-        // External agents have no control-plane axis at all: Buzz never deploys
-        // them, so `backend_agent_id` is always None and the provider-style
-        // "deployed"/"not_deployed" pair would read "not_deployed" forever. The
-        // only real signal is the live axis — relay presence (kind:20001),
-        // polled by the frontend and shown as a PresenceDot.
-        BackendKind::External => Some("external"),
-        // Two-axis status model for provider-deployed agents:
-        //
-        //   Control-plane (this field): "deployed" = provider has been invoked and
-        //   returned a backend_agent_id. "not_deployed" = no deploy call yet (or it
-        //   failed). This axis tracks whether infrastructure *exists*, not whether
-        //   the process is currently running.
-        //
-        //   Live axis (relay presence, polled by frontend): online/away/offline.
-        //   Shown as a PresenceDot next to the agent name. This is the real-time
-        //   signal for whether the harness is connected.
-        //
-        // After !shutdown the agent goes offline (presence) but stays "deployed"
-        // (infrastructure still exists). This is intentional — the provider may
-        // have allocated a VM/container that persists across process restarts.
-        // A future provider `undeploy` operation (v2) will handle teardown.
-        BackendKind::Provider { .. } => Some(if backend_agent_id.is_some() {
-            "deployed"
-        } else {
-            "not_deployed"
-        }),
-    }
 }
 
 pub fn build_managed_agent_summary(
