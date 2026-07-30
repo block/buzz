@@ -37,7 +37,7 @@ export const SIGNOUT_CONFIRM_PHRASE = "wipe all my data";
  * 2. Typed confirmation — the user must type the exact phrase
  *    "wipe all my data".
  *
- * Only when both gates pass does "Delete My Data" become clickable.
+ * Only when both gates pass does "Delete my data" become clickable.
  */
 export function SignOutSection() {
   const [isOpen, setIsOpen] = React.useState(false);
@@ -144,7 +144,7 @@ export function SignOutSection() {
           {isPending ? (
             <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
           ) : null}
-          {isPending ? "Signing out…" : "Sign Out"}
+          {isPending ? "Signing out…" : "Delete my data"}
         </Button>
       </div>
       <AlertDialog
@@ -243,7 +243,7 @@ export function SignOutSection() {
                   className="h-4 w-4 border-2"
                 />
               ) : null}
-              {isPending ? "Signing out…" : "Delete My Data"}
+              {isPending ? "Signing out…" : "Delete my data"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
