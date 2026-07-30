@@ -2888,9 +2888,7 @@ const mockMeshState: {
   servingUsage: MockServingUsage;
 } = {
   admitted: true,
-  models: [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ],
+  models: [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }],
   denyReason: "not a relay member",
   nodeState: "off",
   nodeMode: null,
@@ -2899,9 +2897,7 @@ const mockMeshState: {
 
 function resetMockMesh() {
   mockMeshState.admitted = true;
-  mockMeshState.models = [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ];
+  mockMeshState.models = [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }];
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
@@ -9737,6 +9733,25 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "mesh_model_catalog":
+        return {
+          gpuName: "Mock Apple GPU",
+          vramDisplay: "32 GB",
+          vramGb: 32,
+          recommended: "Gemma-4-E4B-it-Q4_K_M",
+          entries: [
+            {
+              name: "Gemma-4-E4B-it-Q4_K_M",
+              size: "3.5GB",
+              sizeGb: 3.5,
+              description: "Buzz-curated local agent model",
+              fit: "comfortable",
+              installed: true,
+              recommended: true,
+              curated: true,
+            },
+          ],
+        };
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_serving_usage":

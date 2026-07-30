@@ -44,13 +44,42 @@ pub fn apply_relay_mesh_env(
     );
     // Keep the requested response inside smaller local-model context windows,
     // and spend that budget on an answer/tool call instead of hidden reasoning.
-    // Without both settings Qwen3 either fails the router's fit check at the
-    // agent default (32K) or can consume a tight cap before serializing a tool.
-    env.insert(
-        "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
-        "4096".to_string(),
-    );
-    env.insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "none".to_string());
+    // These are defaults, not policy: the effective agent/persona/global env
+    // may deliberately choose a smaller cap or enable thinking. This function
+    // runs after those layers during readiness, so never clobber their values.
+    insert_default_if_unset(env, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096");
+    insert_default_if_unset(env, "BUZZ_AGENT_THINKING_EFFORT", "none");
+}
+
+#[cfg(feature = "mesh-llm")]
+fn insert_default_if_unset(
+    env: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) {
+    if env.get(key).is_none_or(|current| current.trim().is_empty()) {
+        env.insert(key.to_string(), value.to_string());
+    }
+}
+
+/// Build the final Mesh-specific process overrides from the already-resolved
+/// harness environment. Only user-owned generation controls are seeded: the
+/// derived provider/base URL/model values remain authoritative, and unrelated
+/// credentials (notably `OPENAI_API_KEY`) must not be copied back after the
+/// spawn path removes them.
+#[cfg(feature = "mesh-llm")]
+pub fn relay_mesh_process_env(
+    effective_env: &std::collections::BTreeMap<String, String>,
+    model: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    for key in ["BUZZ_AGENT_MAX_OUTPUT_TOKENS", "BUZZ_AGENT_THINKING_EFFORT"] {
+        if let Some(value) = effective_env.get(key) {
+            env.insert(key.to_string(), value.clone());
+        }
+    }
+    apply_relay_mesh_env(&mut env, Some(RELAY_MESH_PROVIDER_ID), Some(model));
+    env
 }
 
 #[cfg(all(test, feature = "mesh-llm"))]
@@ -81,5 +110,53 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+    }
+
+    #[test]
+    fn native_provider_preserves_explicit_generation_controls() {
+        let mut env = BTreeMap::from([
+            (
+                "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+                "2048".to_string(),
+            ),
+            ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "low".to_string()),
+        ]);
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
+            Some("2048")
+        );
+        assert_eq!(
+            env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn process_env_seeds_controls_without_restoring_unrelated_credentials() {
+        let effective_env = BTreeMap::from([
+            (
+                "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+                "1024".to_string(),
+            ),
+            ("OPENAI_API_KEY".to_string(), "must-not-leak".to_string()),
+        ]);
+
+        let env = relay_mesh_process_env(&effective_env, "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
+            Some("1024")
+        );
+        assert_eq!(
+            env.get("OPENAI_COMPAT_MODEL").map(String::as_str),
+            Some("Gemma-4")
+        );
+        assert!(!env.contains_key("OPENAI_API_KEY"));
     }
 }
