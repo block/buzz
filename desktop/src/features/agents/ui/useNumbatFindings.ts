@@ -11,9 +11,15 @@ const MAX_FINDINGS = 100;
 export function useNumbatFindings(
   agentPubkey: string,
   channelId: string | null,
+  sessionId: string | null,
+  turnId: string | null,
 ) {
   const [findings, setFindings] = React.useState<NumbatFinding[]>([]);
   const [error, setError] = React.useState<string | null>(null);
+  const [health, setHealth] = React.useState<{
+    state: "configured" | "disconnected" | "unsupported" | "stale";
+    detail: string;
+  } | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -21,13 +27,21 @@ export function useNumbatFindings(
     let timeoutId: number | null = null;
     setFindings([]);
     setError(null);
+    setHealth(null);
 
     async function poll() {
       try {
-        const batch = await readNumbatFindings(agentPubkey, offset);
+        const batch = await readNumbatFindings(
+          agentPubkey,
+          offset,
+          sessionId,
+          channelId,
+          turnId,
+        );
         if (cancelled) return;
 
         offset = batch.nextOffset;
+        setHealth(batch.health);
         setError(null);
         setFindings((current) => {
           const base = batch.reset ? [] : current;
@@ -45,6 +59,10 @@ export function useNumbatFindings(
         });
       } catch (cause) {
         if (!cancelled) {
+          setHealth({
+            state: "stale",
+            detail: "Guardian telemetry is temporarily unavailable.",
+          });
           setError(
             cause instanceof Error
               ? cause.message
@@ -63,7 +81,7 @@ export function useNumbatFindings(
       cancelled = true;
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [agentPubkey]);
+  }, [agentPubkey, channelId, sessionId, turnId]);
 
   const scopedFindings = React.useMemo(
     () =>
@@ -75,5 +93,5 @@ export function useNumbatFindings(
     [channelId, findings],
   );
 
-  return { error, findings: scopedFindings };
+  return { error, findings: scopedFindings, health };
 }

@@ -14,6 +14,7 @@ import {
   mergeObserverEventWindows,
   observerEventScrollId,
   scopeByChannel,
+  deriveLatestSessionId,
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
@@ -106,7 +107,6 @@ export function AgentSessionThreadPanel({
     sessionChannelId,
   );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
-  const numbatFindings = useNumbatFindings(agent.pubkey, sessionChannelId);
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -137,6 +137,16 @@ export function AgentSessionThreadPanel({
     }
     return null;
   }, [combinedHeaderEvents, isWorking]);
+  const activeSessionId = React.useMemo(
+    () => deriveLatestSessionId(combinedHeaderEvents),
+    [combinedHeaderEvents],
+  );
+  const numbatFindings = useNumbatFindings(
+    agent.pubkey,
+    sessionChannelId,
+    activeSessionId,
+    activeTurnId,
+  );
   const latestActivityAt = React.useMemo(
     () => getLatestActivityTimestamp(combinedHeaderEvents),
     [combinedHeaderEvents],
@@ -473,11 +483,9 @@ export function AgentSessionThreadPanel({
         <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef}>
           <NumbatSecurityFindings
-            activeTurnId={activeTurnId}
-            canCancelTurn={canStopCurrentTurn}
             error={numbatFindings.error}
             findings={numbatFindings.findings}
-            onCancelTurn={() => void handleInterruptTurn()}
+            health={numbatFindings.health}
           />
           <ManagedAgentSessionPanel
             agent={agent}

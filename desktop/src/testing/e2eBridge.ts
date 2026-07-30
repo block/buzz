@@ -11521,6 +11521,10 @@ export function maybeInstallE2eTauriMocks() {
           nextOffset: 0,
           reset: false,
           rejectedRecords: 0,
+          health: {
+            state: "disconnected",
+            detail: "Guardian has not been attached to this runtime yet.",
+          },
           findings: [],
         };
       case "set_prevent_sleep_active":

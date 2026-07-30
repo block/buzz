@@ -34,7 +34,7 @@ mod media_transcode;
 pub(crate) mod mesh_llm;
 mod messages;
 mod notifications;
-mod numbat_findings;
+pub(crate) mod numbat_findings;
 mod observer_archive;
 mod os_idle;
 pub mod pairing;

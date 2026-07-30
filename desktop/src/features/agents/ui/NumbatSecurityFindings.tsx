@@ -1,24 +1,22 @@
-import { Octagon, ShieldAlert } from "lucide-react";
+import { ShieldAlert } from "lucide-react";
 
 import type { NumbatFinding } from "@/shared/api/tauriNumbat";
 import { Badge } from "@/shared/ui/badge";
-import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 
 export function NumbatSecurityFindings({
-  activeTurnId,
-  canCancelTurn,
   error,
   findings,
-  onCancelTurn,
+  health,
 }: {
-  activeTurnId: string | null;
-  canCancelTurn: boolean;
   error: string | null;
   findings: NumbatFinding[];
-  onCancelTurn: () => void;
+  health: {
+    state: "configured" | "disconnected" | "unsupported" | "stale";
+    detail: string;
+  } | null;
 }) {
-  if (findings.length === 0 && !error) return null;
+  if (findings.length === 0 && !error && !health) return null;
 
   return (
     <section
@@ -26,15 +24,16 @@ export function NumbatSecurityFindings({
       className="mb-3 space-y-2"
       data-testid="guardian-security-findings"
     >
+      {health ? (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Badge variant="outline">{health.state}</Badge>
+          <span>{health.detail}</span>
+        </div>
+      ) : null}
       {findings
         .slice()
         .reverse()
         .map((finding) => {
-          const canAct =
-            canCancelTurn &&
-            finding.turnId !== null &&
-            finding.turnId === activeTurnId &&
-            (finding.severity === "high" || finding.severity === "critical");
           return (
             <article
               className={cn(
@@ -73,17 +72,6 @@ export function NumbatSecurityFindings({
                     {finding.ruleId}
                   </p>
                 </div>
-                {canAct ? (
-                  <Button
-                    onClick={onCancelTurn}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    <Octagon aria-hidden="true" className="h-3.5 w-3.5" />
-                    Cancel turn
-                  </Button>
-                ) : null}
               </div>
             </article>
           );

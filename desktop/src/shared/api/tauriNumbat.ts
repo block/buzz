@@ -19,15 +19,25 @@ export type NumbatFindingBatch = {
   nextOffset: number;
   reset: boolean;
   rejectedRecords: number;
+  health: {
+    state: "configured" | "disconnected" | "unsupported" | "stale";
+    detail: string;
+  };
   findings: NumbatFinding[];
 };
 
 export function readNumbatFindings(
   agentPubkey: string,
   offset: number,
+  sessionId: string | null,
+  channelId: string | null,
+  turnId: string | null,
 ): Promise<NumbatFindingBatch> {
   return invokeTauri<NumbatFindingBatch>("read_numbat_findings", {
     agentPubkey,
     offset,
+    sessionId,
+    channelId,
+    turnId,
   });
 }
