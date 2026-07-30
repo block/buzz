@@ -479,7 +479,8 @@ export function AppSidebar({
       directMessages,
       enabled: shouldLoadDmMetadata,
       fallbackDisplayName,
-      profileDisplayName: profile?.displayName ?? profile?.name,
+      profileDisplayName:
+        profile?.displayName?.trim() || profile?.name?.trim() || null,
     });
   const sortedDirectMessages = React.useMemo(
     () =>

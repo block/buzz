@@ -78,11 +78,11 @@ export function mergeCurrentProfileIntoLookup(
   return {
     ...(profiles ?? {}),
     [normalizePubkey(currentProfile.pubkey)]: {
-      displayName: currentProfile.displayName,
-      name:
-        currentProfile.name ??
-        profiles?.[normalizePubkey(currentProfile.pubkey)]?.name ??
+      displayName:
+        currentProfile.displayName?.trim() ||
+        currentProfile.name?.trim() ||
         null,
+      name: currentProfile.name,
       avatarUrl: currentProfile.avatarUrl,
       nip05Handle: currentProfile.nip05Handle,
       isAgent: profiles?.[normalizePubkey(currentProfile.pubkey)]?.isAgent,
@@ -163,9 +163,10 @@ export function resolveUserSecondaryLabel(input: {
 }) {
   const profile = getResolvedProfile(input.pubkey, input.profiles);
   const displayName = profile?.displayName?.trim();
+  const name = profile?.name?.trim();
   const nip05Handle = profile?.nip05Handle?.trim();
 
-  if (displayName && nip05Handle) {
+  if ((displayName || name) && nip05Handle) {
     return nip05Handle;
   }
 
@@ -196,6 +197,7 @@ export function formatOwnerLabel(
   const owner = ownerProfiles?.[normalizedOwnerPubkey];
   return (
     owner?.displayName?.trim() ||
+    owner?.name?.trim() ||
     owner?.nip05Handle?.trim() ||
     truncatePubkey(ownerPubkey)
   );

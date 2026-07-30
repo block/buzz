@@ -235,7 +235,9 @@ export function UserProfilePopover({
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
   const displayName =
-    profile?.displayName ?? profile?.name ?? truncatePubkey(pubkey);
+    profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
+    truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows

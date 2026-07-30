@@ -397,9 +397,9 @@ export function ProfileSettingsCard({
 
   const resolvedName =
     nextDisplayName ||
-    profile?.displayName ||
-    profile?.name ||
-    fallbackDisplayName ||
+    profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
+    fallbackDisplayName?.trim() ||
     "Your profile";
   const resolvedPubkey = profile?.pubkey ?? currentPubkey ?? "Unavailable";
   const nip05Handle = profile?.nip05Handle ?? "Not set";
