@@ -6,6 +6,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
+  relayAgentAllowlistsUser,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -101,6 +102,43 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
       },
       sharedChannelIds,
       CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("relayAgentAllowlistsUser: accepts only explicit allowlist matches", () => {
+  assert.equal(
+    relayAgentAllowlistsUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [OTHER_OWNER_PUBKEY, CURRENT_PUBKEY.toUpperCase()],
+      },
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  // Allowlist naming someone else — e.g. a stale announcement from an
+  // abandoned identity that allowlists a pubkey the user no longer holds.
+  assert.equal(
+    relayAgentAllowlistsUser(
+      { respondTo: "allowlist", respondToAllowlist: [OTHER_OWNER_PUBKEY] },
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  // "anyone" agents never qualify here, unlike relayAgentIsSharedWithUser.
+  assert.equal(
+    relayAgentAllowlistsUser(
+      { respondTo: "anyone", respondToAllowlist: [] },
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  assert.equal(
+    relayAgentAllowlistsUser(
+      { respondTo: "allowlist", respondToAllowlist: [CURRENT_PUBKEY] },
+      null,
     ),
     false,
   );

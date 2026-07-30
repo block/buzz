@@ -1,14 +1,10 @@
 import * as React from "react";
 
-import {
-  getSharedChannelIds,
-  relayAgentIsSharedWithUser,
-} from "@/features/agents/lib/agentAutocompleteEligibility";
+import { relayAgentAllowlistsUser } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
-import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -36,17 +32,19 @@ export function devComposerModeLabel(mode: DevComposerMode): string {
 /**
  * Global (channel-independent) list of composer modes. Managed agents are
  * always available — attaching one to a fresh channel is part of the send
- * flow. Relay agents qualify under the same rules as mention autocomplete,
- * minus the channel-membership requirement.
+ * flow. Relay agents qualify only when their announcement explicitly
+ * allowlists the current identity: the shared relay is littered with stale
+ * kind:10100 announcements from abandoned identities (welcome-team spawns,
+ * wiped data dirs, other users' desktops), and the broader "responds to
+ * anyone + shares a channel" rule used by mention autocomplete would surface
+ * every one of them here.
  */
 export function useDevComposerModes(): DevComposerMode[] {
   const identityQuery = useIdentityQuery();
-  const channelsQuery = useChannelsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
 
   const currentPubkey = identityQuery.data?.pubkey ?? null;
-  const channels = channelsQuery.data;
   const managedAgents = managedAgentsQuery.data;
   const relayAgents = relayAgentsQuery.data;
 
@@ -63,13 +61,10 @@ export function useDevComposerModes(): DevComposerMode[] {
       });
     }
 
-    const sharedChannelIds = getSharedChannelIds(channels);
     for (const agent of relayAgents ?? []) {
       const pubkey = normalizePubkey(agent.pubkey);
       if (targets.has(pubkey)) continue;
-      if (!relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)) {
-        continue;
-      }
+      if (!relayAgentAllowlistsUser(agent, currentPubkey)) continue;
       targets.set(pubkey, {
         pubkey: agent.pubkey,
         name: agent.name,
@@ -87,5 +82,5 @@ export function useDevComposerModes(): DevComposerMode[] {
       );
 
     return [{ kind: "chat" } satisfies DevComposerMode, ...agentModes];
-  }, [channels, currentPubkey, managedAgents, relayAgents]);
+  }, [currentPubkey, managedAgents, relayAgents]);
 }
