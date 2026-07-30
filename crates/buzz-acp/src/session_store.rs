@@ -130,6 +130,36 @@ impl SessionStore {
         }
     }
 
+    /// Remove the current binding for a channel, regardless of session id.
+    ///
+    /// This is reserved for explicit discard semantics such as owner-requested
+    /// rotation. Failed loads must use [`Self::remove_if_equals`] so they cannot
+    /// delete a newer binding written by another process.
+    ///
+    /// Returns `true` when a binding was removed.
+    pub fn remove(&self, agent_command: &str, agent_args: &[String], channel_id: &Uuid) -> bool {
+        let key = binding_key(agent_command, agent_args, channel_id);
+        let Some(_lock) = self.acquire_lock(true) else {
+            return false;
+        };
+        match load_store(&self.path) {
+            Ok(mut data) => {
+                if data.sessions.remove(&key).is_none() {
+                    return false;
+                }
+                if let Err(e) = save_store(&self.path, &data) {
+                    self.warn_io("failed to persist ACP session binding removal", &e);
+                    return false;
+                }
+                true
+            }
+            Err(e) => {
+                self.warn_io("failed to read ACP session bindings before removal", &e);
+                false
+            }
+        }
+    }
+
     /// Remove a binding only if it still points at `expected_session_id`.
     ///
     /// Used after a failed `session/load`: another process may have already
@@ -438,5 +468,20 @@ mod tests {
         assert!(store.get("hermes", &args, &channel).is_none());
         // No-op when already gone.
         assert!(!store.remove_if_equals("hermes", &args, &channel, "session-x"));
+    }
+
+    #[test]
+    fn remove_clears_whichever_binding_is_current() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let args = ["acp".into()];
+        let channel = Uuid::new_v4();
+        let store = SessionStore::open(path);
+        store.put("hermes", &args, &channel, "session-x");
+        store.put("hermes", &args, &channel, "session-y");
+
+        assert!(store.remove("hermes", &args, &channel));
+        assert!(store.get("hermes", &args, &channel).is_none());
+        assert!(!store.remove("hermes", &args, &channel));
     }
 }

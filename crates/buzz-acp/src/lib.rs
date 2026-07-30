@@ -2421,6 +2421,11 @@ async fn tokio_main() -> Result<()> {
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
+                                        let durable_cleared =
+                                            pool::clear_durable_channel_binding(
+                                                &ctx,
+                                                &buzz_event.channel_id,
+                                            );
                                         let fired = signal_in_flight_task(
                                             &mut pool,
                                             buzz_event.channel_id,
@@ -2429,6 +2434,7 @@ async fn tokio_main() -> Result<()> {
                                         if fired {
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
+                                                durable_cleared,
                                                 "!rotate received — cancelling in-flight turn and rotating session"
                                             );
                                         } else {
@@ -2436,6 +2442,7 @@ async fn tokio_main() -> Result<()> {
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
+                                                durable_cleared,
                                                 "!rotate received — invalidated idle channel session(s)"
                                             );
                                         }
