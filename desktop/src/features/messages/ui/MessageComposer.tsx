@@ -30,6 +30,7 @@ import {
   hasMentionClipboardHtml,
   normalizeMentionClipboardHtml,
 } from "@/features/messages/lib/normalizeMentionClipboard";
+import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
   type AutocompleteEdit,
   type LinkSelectionInfo,
@@ -53,7 +54,6 @@ import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
-import { useComposerInsertEmoji } from "./useComposerInsertEmoji";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
 import type { MessageComposerProps } from "./MessageComposer.types";
@@ -438,14 +438,41 @@ function MessageComposerImpl({
   );
 
   // ── Emoji insertion ─────────────────────────────────────────────────
-  const insertEmoji = useComposerInsertEmoji({
-    editor: richText.editor,
-    customEmoji,
-    onAfterInsert: () => {
+  const insertEmoji = React.useCallback(
+    (emoji: string) => {
+      if (!richText.editor) return;
+      // A `:shortcode:` for a known custom emoji becomes a selectable atom
+      // node (same as the input rule / autocomplete), so it can be selected,
+      // copied, and deleted as one unit. Everything else (native unicode)
+      // inserts as plain content.
+      const match = /^:([^:\s]+):$/.exec(emoji);
+      const shortcode = match?.[1]?.toLowerCase();
+      const known =
+        shortcode &&
+        customEmoji.some((e) => e.shortcode.toLowerCase() === shortcode);
+      if (known && shortcode) {
+        richText.editor
+          .chain()
+          .focus()
+          .insertContent({
+            type: CUSTOM_EMOJI_NODE_NAME,
+            attrs: {
+              shortcode,
+              src:
+                customEmoji.find((e) => e.shortcode.toLowerCase() === shortcode)
+                  ?.url ?? "",
+            },
+          })
+          .insertContent(" ")
+          .run();
+      } else {
+        richText.editor.chain().focus().insertContent(emoji).run();
+      }
       setIsEmojiPickerOpen(false);
       mentions.clearMentions();
     },
-  });
+    [richText.editor, mentions.clearMentions, customEmoji],
+  );
 
   // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
@@ -486,17 +513,9 @@ function MessageComposerImpl({
     if (editTargetRef.current && onEditSaveRef.current) {
       if (isSendingRef.current || isUploadingRef.current) return;
       const currentPendingImeta = media.pendingImetaRef.current;
-      const hasMedia = currentPendingImeta.length > 0;
-      // Empty text + zero attachments: clearing an edit to nothing is the
-      // keyboard shorthand for "Delete message". Hand empty content to
-      // onEditSave, which deletes the message instead of publishing an empty
-      // body (see handleEditSave). Nothing to build, so short-circuit here.
-      if (!trimmed && !hasMedia) {
-        setComposerContent("");
-        richText.clearContent();
-        void onEditSaveRef.current("", [], []);
-        return;
-      }
+      // No empty-edit guard here: clearing an edit to empty (no text, no
+      // attachments) flows through to onEditSave as empty content, which
+      // deletes the message instead of publishing it (see handleEditSave).
 
       // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
       // because edit semantics use `[]` as the explicit "wipe all
