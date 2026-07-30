@@ -62,6 +62,19 @@ async function setMockWebsocketUnavailable(
   }, unavailable);
 }
 
+async function activateRelayRateLimit(
+  page: import("@playwright/test").Page,
+  seconds: number,
+) {
+  await page.evaluate((duration) => {
+    const activate = window.__BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__;
+    if (!activate) {
+      throw new Error("E2E relay rate-limit seam is not installed.");
+    }
+    activate(duration);
+  }, seconds);
+}
+
 async function getMockWebsocketConnectAttempts(
   page: import("@playwright/test").Page,
 ) {
@@ -193,6 +206,28 @@ test("routine traffic cannot bypass outage backoff and recovery stays automatic"
   await expect(page.getByTestId("message-timeline")).toContainText(
     afterRecovery,
   );
+});
+
+test("authenticated reconnect reports connected while replay is rate-limited", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+
+  await activateRelayRateLimit(page, 5);
+  await disconnectMockWebsockets(page);
+
+  // Replay remains intentionally blocked behind admission control, but socket
+  // open + successful AUTH is already a healthy connection. The UI must not
+  // claim the relay is unreachable for the rest of the gate window.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 3_000 },
+    )
+    .toBe("connected");
+  await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
 });
 
 test("service restart close resets accumulated backoff", async ({ page }) => {
