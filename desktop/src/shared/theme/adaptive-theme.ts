@@ -285,6 +285,19 @@ export function createThemeVars(
       // Warning
       "--ui-warning": accentOrange,
       "--ui-warning-bg": overlay(accentOrange, isDark ? 0.1 : 0.08),
+
+      // Agent working — the live elapsed badge. The surface is mixed rather
+      // than overlaid so the chip stays opaque: it sits on the active sidebar
+      // row as often as on the plain one, and a translucent green over the
+      // active accent would take the accent's hue with it. The mix stays light
+      // (the chip barely leaves the surface) because the label is 11px, and
+      // every step of green in the chip costs text contrast; the halo, not the
+      // fill, is what makes the badge read as live. On light themes the green
+      // is darkened for the same reason — a mid green on a near-white chip
+      // lands under 4.5:1.
+      "--agent-working": isDark ? accentGreen : adjust(accentGreen, -0.1),
+      "--agent-working-bg": mix(primaryBg, accentGreen, isDark ? 0.1 : 0.06),
+      "--agent-working-glow": overlay(accentGreen, isDark ? 0.5 : 0.38),
     },
   };
 }

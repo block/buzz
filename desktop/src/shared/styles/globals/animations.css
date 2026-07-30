@@ -916,3 +916,31 @@
     animation: none;
   }
 }
+
+/*
+ * Sidebar agent-working badge: a green halo that breathes while an agent holds
+ * the turn. The halo carries the live signal so the elapsed label itself keeps
+ * a steady opacity — pulsing the whole chip fades the running clock out from
+ * under whoever is reading it. The resting shadow keeps the chip glowing when
+ * the animation is suppressed.
+ */
+@keyframes buzz-agent-working-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 4px 0 var(--agent-working-glow);
+  }
+  50% {
+    box-shadow: 0 0 10px 2px var(--agent-working-glow);
+  }
+}
+
+.buzz-agent-working-glow {
+  box-shadow: 0 0 6px 1px var(--agent-working-glow);
+  animation: buzz-agent-working-glow 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-agent-working-glow {
+    animation: none;
+  }
+}

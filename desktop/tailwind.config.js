@@ -101,6 +101,10 @@ export default {
           DEFAULT: "var(--ui-warning)",
           bg: "var(--ui-warning-bg)",
         },
+        "agent-working": {
+          DEFAULT: "var(--agent-working)",
+          bg: "var(--agent-working-bg)",
+        },
       },
     },
   },

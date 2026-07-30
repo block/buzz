@@ -47,6 +47,12 @@
     --sidebar-accent-foreground: 234 16.02% 35.49%;
     --sidebar-border: 225 13.56% 76.86%;
     --sidebar-ring: 225 13.56% 76.86%;
+    /* Agent-working badge. ThemeProvider overwrites these per syntax theme;
+       these are the base so the badge is never colourless on the first paint
+       after an update, before the cached var map has been refreshed. */
+    --agent-working: #177232;
+    --agent-working-bg: #e2eaea;
+    --agent-working-glow: rgba(26, 127, 55, 0.38);
     /* Exact Buzz palette tokens; components consume these semantically. */
     --buzz-gradient-light-top: #e6e6b6;
     --buzz-gradient-light-bottom: #c4d0da;
@@ -113,6 +119,9 @@
     --sidebar-accent-foreground: 227 68.25% 87.65%;
     --sidebar-border: 231 15.61% 33.92%;
     --sidebar-ring: 231 15.61% 33.92%;
+    --agent-working: #3fb950;
+    --agent-working-bg: #27363c;
+    --agent-working-glow: rgba(63, 185, 80, 0.5);
   }
 
   * {

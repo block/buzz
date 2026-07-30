@@ -122,11 +122,9 @@ export function formatWorkingTooltip(
 
 function ChannelWorkingBadge({
   channelName,
-  isActive,
   summary,
 }: {
   channelName: string;
-  isActive: boolean;
   summary: ActiveChannelTurnSummary;
 }) {
   const now = useNow(1000);
@@ -137,12 +135,7 @@ function ChannelWorkingBadge({
 
   return (
     <span
-      className={cn(
-        "hidden max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden sm:inline-flex",
-        isActive
-          ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
-          : "bg-primary/10 text-primary",
-      )}
+      className="buzz-agent-working-glow hidden max-w-32 shrink-0 truncate rounded-full bg-agent-working-bg px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums text-agent-working group-data-[collapsible=icon]:hidden sm:inline-flex"
       data-testid={`channel-working-${channelName}`}
       title={title}
     >
@@ -307,7 +300,6 @@ export function ChannelMenuButton({
       {activeWorking ? (
         <ChannelWorkingBadge
           channelName={channel.name}
-          isActive={isActive}
           summary={activeWorking}
         />
       ) : null}
