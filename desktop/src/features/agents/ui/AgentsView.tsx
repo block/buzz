@@ -1,5 +1,5 @@
 import * as React from "react";
-import { OctagonX, Settings2 } from "lucide-react";
+import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
@@ -20,10 +20,7 @@ import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
-import {
-  AGENT_CARD_GRID_COLUMNS_CLASS,
-  UnifiedAgentsSection,
-} from "./UnifiedAgentsSection";
+import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -32,6 +29,12 @@ import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
@@ -44,6 +47,8 @@ export function AgentsView() {
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const compactActionsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
   // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
   // so the create-mode and definition-edit AgentDialog mounts never coexist.
@@ -53,6 +58,22 @@ export function AgentsView() {
     personas.prepareCreate();
     setIsCreateDialogOpen(true);
   }
+
+  function openAiDefaults(trigger: HTMLButtonElement | null) {
+    aiDefaultsTriggerRef.current = trigger;
+    setIsAiDefaultsOpen(true);
+  }
+
+  function setAiDefaultsDialogOpen(open: boolean) {
+    if (!open) {
+      aiDefaultsTriggerRef.current =
+        fullAiDefaultsTriggerRef.current?.offsetParent !== null
+          ? fullAiDefaultsTriggerRef.current
+          : compactActionsTriggerRef.current;
+    }
+    setIsAiDefaultsOpen(open);
+  }
+
   const teamActions = useTeamActions(
     {
       setActionNoticeMessage: agents.setActionNoticeMessage,
@@ -113,43 +134,84 @@ export function AgentsView() {
     <>
       <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
         <div
-          className={`mx-auto grid w-full max-w-6xl ${AGENT_CARD_GRID_COLUMNS_CLASS} justify-start gap-x-3 gap-y-8`}
+          className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]"
+          data-testid="agents-page-content"
         >
           <PageHeader
-            className="col-[1/-1]"
             action={
-              <div className="flex flex-wrap justify-end gap-2">
-                <Button
-                  data-testid="agent-defaults-button"
-                  ref={aiDefaultsTriggerRef}
-                  onClick={() => setIsAiDefaultsOpen(true)}
-                  size="sm"
-                  variant="outline"
-                >
-                  <Settings2 />
-                  {hasSavedAgentDefaults
-                    ? "Agent defaults"
-                    : "Set agent defaults"}
-                </Button>
-                {runningAgentCount > 0 ? (
+              <>
+                <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
                   <Button
-                    disabled={isActionPending}
-                    onClick={() => {
-                      void agents.handleBulkStopRunning();
-                    }}
+                    data-testid="agent-defaults-button"
+                    ref={fullAiDefaultsTriggerRef}
+                    onClick={(event) => openAiDefaults(event.currentTarget)}
                     size="sm"
                     variant="outline"
                   >
-                    <OctagonX />
-                    Stop running agents
+                    <Settings2 />
+                    {hasSavedAgentDefaults
+                      ? "Agent defaults"
+                      : "Set agent defaults"}
                   </Button>
-                ) : null}
-              </div>
+                  {runningAgentCount > 0 ? (
+                    <Button
+                      disabled={isActionPending}
+                      onClick={() => {
+                        void agents.handleBulkStopRunning();
+                      }}
+                      size="sm"
+                      variant="outline"
+                    >
+                      <OctagonX />
+                      Stop running agents
+                    </Button>
+                  ) : null}
+                </div>
+
+                <DropdownMenu modal={false}>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      aria-label="Agent actions"
+                      className="hidden [@container(max-width:40rem)]:inline-flex"
+                      data-testid="agent-actions-menu-trigger"
+                      ref={compactActionsTriggerRef}
+                      size="icon"
+                      type="button"
+                      variant="outline"
+                    >
+                      <EllipsisVertical />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        openAiDefaults(compactActionsTriggerRef.current);
+                      }}
+                    >
+                      <Settings2 />
+                      {hasSavedAgentDefaults
+                        ? "Agent defaults"
+                        : "Set agent defaults"}
+                    </DropdownMenuItem>
+                    {runningAgentCount > 0 ? (
+                      <DropdownMenuItem
+                        disabled={isActionPending}
+                        onSelect={() => {
+                          void agents.handleBulkStopRunning();
+                        }}
+                      >
+                        <OctagonX />
+                        Stop running agents
+                      </DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </>
             }
             description="Set up and manage your agents."
             title="Agents"
           />
-          <div className="col-[1/-1] flex flex-col gap-8">
+          <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               defaultModel={inheritedDefaults.model.value}
               actionErrorMessage={agents.actionErrorMessage}
@@ -238,7 +300,7 @@ export function AgentsView() {
       </div>
 
       <AgentDefaultsDialog
-        onOpenChange={setIsAiDefaultsOpen}
+        onOpenChange={setAiDefaultsDialogOpen}
         open={isAiDefaultsOpen}
         returnFocusRef={aiDefaultsTriggerRef}
       />

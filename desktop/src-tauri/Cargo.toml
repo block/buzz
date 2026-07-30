@@ -40,9 +40,15 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 # connection is dropped, which the plugin does immediately. Default features
 # keep the pure-Rust zbus backend, matching the plugin (no libdbus needed).
 notify-rust = "4"
+# Enable getUserMedia in the WebKitGTK webview (see src/linux_media.rs). Pinned
+# to the exact version wry links so both resolve to one webkit2gtk-sys and we
+# don't get duplicate symbols; bump in lockstep with wry.
+webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
+objc2 = { version = "0.6.4", default-features = false }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"
@@ -58,7 +64,7 @@ user-idle = { version = "0.6", default-features = false }
 atomic-write-file = "0.3"
 anyhow = "1"
 dirs = "6"
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
@@ -80,7 +86,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
-nostr = { version = "0.44", features = ["nip44"] }
+nostr = { version = "0.44", features = ["nip44", "nip49"] }
+# OS-entropy source for backup passphrase generation (already in the tree as a
+# transitive dependency; pinned here for direct use).
+getrandom = "0.2"
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
@@ -90,14 +99,14 @@ buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 iroh = { version = "1.0.2", optional = true }
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "f455d493a2ae82baf2a326e2d0fda351433b4b30", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "f455d493a2ae82baf2a326e2d0fda351433b4b30", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
 # Model catalog + hardware survey for the Share-compute model picker (same
 # diagnose pattern as mesh-console). Lib name of mesh-llm-client is mesh_client.
-mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "f455d493a2ae82baf2a326e2d0fda351433b4b30", package = "mesh-llm-client", optional = true }
-mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "f455d493a2ae82baf2a326e2d0fda351433b4b30", package = "mesh-llm-node", optional = true }
-mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "f455d493a2ae82baf2a326e2d0fda351433b4b30", package = "mesh-llm-system", optional = true }
-mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "f455d493a2ae82baf2a326e2d0fda351433b4b30", package = "mesh-llm-events", optional = true }
+mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-client", optional = true }
+mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-node", optional = true }
+mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-system", optional = true }
+mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-events", optional = true }
 base64 = "0.22"
 sha2 = "0.11"
 tar = "0.4"

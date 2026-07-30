@@ -370,6 +370,7 @@ export function CommunityMembersSettingsCard({
       </div>
 
       <CommunityInviteDialog
+        isOwner={currentRole === "owner"}
         onOpenChange={setInviteDialogOpen}
         open={inviteDialogOpen}
       />

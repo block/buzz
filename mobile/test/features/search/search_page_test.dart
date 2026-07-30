@@ -10,8 +10,10 @@ import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/search/search_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -593,6 +595,72 @@ void main() {
     await tester.pump();
     expect(recentSearches.searches, const ['design']);
   });
+
+  testWidgets('renders channel-role bots in message previews', (tester) async {
+    final channel = Channel(
+      id: 'channel-1',
+      name: 'general',
+      channelType: 'stream',
+      visibility: 'open',
+      description: '',
+      createdBy: 'test',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+    );
+    const agentPubkey = 'agent-pubkey';
+    const cachedProfile = UserProfile(pubkey: 'author-pubkey');
+    final state = SearchState(
+      query: 'helper',
+      messageResults: [
+        SearchHit(
+          eventId: 'message-1',
+          content: 'Ask @Helper Bot to investigate',
+          kind: 9,
+          pubkey: 'author-pubkey',
+          channelId: channel.id,
+          channelName: channel.name,
+          createdAt: 1,
+          score: 1,
+          tags: [
+            ['p', agentPubkey],
+          ],
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier([channel])),
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(cachedProfile),
+          ),
+          knownAgentPubkeysProvider.overrideWith((ref) => const {}),
+          channelBotPubkeysProvider(
+            channel.id,
+          ).overrideWith((ref) async => {agentPubkey}),
+          agentDirectoryDisplayNamesProvider.overrideWith(
+            (ref) => const {agentPubkey: 'Helper Bot'},
+          ),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final content = tester.widget<MessageContent>(
+      find.byKey(const ValueKey('search-message-body-message-1')),
+    );
+    expect(content.mentionNames, const {agentPubkey: 'Helper Bot'});
+    expect(content.agentMentionPubkeys, contains(agentPubkey));
+    expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+  });
 }
 
 class _FakeSearchNotifier extends SearchNotifier {
@@ -646,8 +714,12 @@ class _FakeProfileNotifier extends ProfileNotifier {
 }
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
+  _FakeChannelsNotifier([this.channels = const []]);
+
+  final List<Channel> channels;
+
   @override
-  Future<List<Channel>> build() async => const [];
+  Future<List<Channel>> build() async => channels;
 }
 
 class _FakeUserCacheNotifier extends UserCacheNotifier {

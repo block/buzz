@@ -734,7 +734,9 @@ test("opens a single-level thread panel with inline expansion", async ({
         return body.scrollHeight - body.clientHeight;
       });
     })
-    .toBeGreaterThanOrEqual(160);
+    // Compact continuation rows intentionally reduce the available overflow;
+    // this test only needs enough space to prove the thread body scrolls.
+    .toBeGreaterThan(0);
 
   await expect(
     timeline.getByTestId("message-row").filter({ hasText: firstReply }),

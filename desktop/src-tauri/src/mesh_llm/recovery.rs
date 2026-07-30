@@ -153,6 +153,13 @@ fn should_evict_after_probe(
         || consecutive >= DEAD_PROBE_EVICT_THRESHOLD
 }
 
+fn requires_process_restart(
+    mode: crate::mesh_llm::MeshNodeMode,
+    startup_in_progress: bool,
+) -> bool {
+    startup_in_progress || mode == crate::mesh_llm::MeshNodeMode::Serve
+}
+
 /// Probe and, when justified, remove one stale runtime. A closed port is
 /// decisive for a foreground agent start; watchdog and ambiguous/unhealthy
 /// ports require consecutive failures to avoid restarting on a transient load
@@ -161,22 +168,23 @@ pub(crate) async fn recover_stale_mesh_runtime(
     state: &AppState,
     urgency: MeshRecoveryUrgency,
 ) -> MeshRuntimeRecovery {
-    let (candidate_id, startup_in_progress) = match state.mesh_llm_runtime.lock().await.as_ref() {
-        Some(runtime) => (runtime.id(), runtime.is_starting().await),
-        None => {
-            state.mesh_recovery.reset_probe_streak();
-            // A cancelled SDK startup can outlive its Buzz-side task briefly
-            // because the embedded runtime runs on its own thread. Never start
-            // a replacement merely because the tracked handle is gone: first
-            // prove the old ingress is either still useful or has released the
-            // port. This closes the port-conflict loop in #2304.
-            return match probe_mesh_ingress().await {
-                MeshIngressProbe::Live => MeshRuntimeRecovery::Live,
-                MeshIngressProbe::PortClosed => MeshRuntimeRecovery::Absent,
-                MeshIngressProbe::Unhealthy => MeshRuntimeRecovery::ReleasePending,
-            };
-        }
-    };
+    let (candidate_id, startup_in_progress, candidate_mode) =
+        match state.mesh_llm_runtime.lock().await.as_ref() {
+            Some(runtime) => (runtime.id(), runtime.is_starting().await, runtime.mode()),
+            None => {
+                state.mesh_recovery.reset_probe_streak();
+                // A cancelled SDK startup can outlive its Buzz-side task briefly
+                // because the embedded runtime runs on its own thread. Never start
+                // a replacement merely because the tracked handle is gone: first
+                // prove the old ingress is either still useful or has released the
+                // port. This closes the port-conflict loop in #2304.
+                return match probe_mesh_ingress().await {
+                    MeshIngressProbe::Live => MeshRuntimeRecovery::Live,
+                    MeshIngressProbe::PortClosed => MeshRuntimeRecovery::Absent,
+                    MeshIngressProbe::Unhealthy => MeshRuntimeRecovery::ReleasePending,
+                };
+            }
+        };
     let probe = probe_mesh_ingress().await;
     if probe == MeshIngressProbe::Live {
         state.mesh_recovery.reset_probe_streak();
@@ -196,12 +204,13 @@ pub(crate) async fn recover_stale_mesh_runtime(
         return MeshRuntimeRecovery::Debouncing;
     }
 
-    // The pinned SDK does not yield its control handle until the management
-    // API is ready. Dropping its still-pending start future would detach the
-    // embedded runtime thread without sending a shutdown request, so Buzz must
-    // not evict it and race a replacement onto the same ports. A controlled
-    // app relaunch is the only process-owned cleanup boundary in this state.
-    if startup_in_progress {
+    // Never replace a serving runtime in-process. Its native listeners and
+    // model host are process-owned; stopping it here and then cold-starting a
+    // client silently disables Share Compute and can race ports 9337/3131.
+    // Pending client startups have the same ownership problem because the SDK
+    // has not yielded a shutdown handle yet. In both cases, process restart is
+    // the only boundary that preserves the configured role safely.
+    if requires_process_restart(candidate_mode, startup_in_progress) {
         state.mesh_recovery.reset_probe_streak();
         return MeshRuntimeRecovery::RestartRequired;
     }
@@ -241,6 +250,12 @@ pub(crate) async fn recover_stale_mesh_runtime(
 pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _rearm_guard = state.mesh_recovery.rearm_lock.lock().await;
+    let runtime_mode = state
+        .mesh_llm_runtime
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| runtime.mode());
     let recovery = recover_stale_mesh_runtime(&state, MeshRecoveryUrgency::Watchdog).await;
     let active_pubkeys = active_managed_agent_pubkeys(&state);
     // Mesh participation is resolved through the same definition-authoritative
@@ -254,6 +269,13 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
         | MeshRuntimeRecovery::Debouncing
         | MeshRuntimeRecovery::Replaced => return Ok(()),
         MeshRuntimeRecovery::RestartRequired => {
+            if runtime_mode == Some(crate::mesh_llm::MeshNodeMode::Serve) {
+                eprintln!(
+                    "buzz-mesh: serving ingress failed; restarting Buzz to restore Share Compute without changing roles"
+                );
+                app.request_restart();
+                return Ok(());
+            }
             let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
             if !records.iter().any(|record| {
                 running_relay_mesh_model_id(record, &active_pubkeys, &personas, &global).is_some()
@@ -410,6 +432,7 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
@@ -479,6 +502,22 @@ mod tests {
     fn explicit_stop_budget_accommodates_sdk_forced_shutdown() {
         assert!(STALE_STOP_TIMEOUT >= Duration::from_secs(10));
         assert!(STALE_STOP_TIMEOUT <= Duration::from_secs(15));
+    }
+
+    #[test]
+    fn failed_serving_runtime_requires_process_restart_instead_of_client_fallback() {
+        assert!(requires_process_restart(
+            crate::mesh_llm::MeshNodeMode::Serve,
+            false
+        ));
+        assert!(requires_process_restart(
+            crate::mesh_llm::MeshNodeMode::Client,
+            true
+        ));
+        assert!(!requires_process_restart(
+            crate::mesh_llm::MeshNodeMode::Client,
+            false
+        ));
     }
 
     #[test]

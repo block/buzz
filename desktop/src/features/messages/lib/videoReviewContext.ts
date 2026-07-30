@@ -148,3 +148,48 @@ export function buildVideoReviewContextForMessage({
     rootEventId: message.id,
   };
 }
+
+export function buildVideoReviewContextsByMessageId({
+  channelId,
+  channelName,
+  channelType,
+  isSendingVideoReviewComment = false,
+  messages,
+  onSendVideoReviewComment,
+  onToggleReaction,
+  profiles,
+}: {
+  channelId?: string | null;
+  channelName?: string;
+  channelType?: ChannelType | null;
+  isSendingVideoReviewComment?: boolean;
+  messages: TimelineMessage[];
+  onSendVideoReviewComment?: SendVideoReviewComment;
+  onToggleReaction?: ToggleMessageReaction;
+  profiles?: UserProfileLookup;
+}): ReadonlyMap<string, VideoReviewContext> {
+  const contexts = new Map<string, VideoReviewContext>();
+  if (!messages.some(hasVideoAttachment)) {
+    return contexts;
+  }
+
+  const commentsByRootId = buildVideoReviewCommentsByRootId(messages);
+  for (const message of messages) {
+    const context = buildVideoReviewContextForMessage({
+      channelId,
+      channelName,
+      channelType,
+      comments: commentsByRootId.get(message.id) ?? [],
+      isSendingVideoReviewComment,
+      message,
+      onSendVideoReviewComment,
+      onToggleReaction,
+      profiles,
+    });
+    if (context) {
+      contexts.set(message.id, context);
+    }
+  }
+
+  return contexts;
+}

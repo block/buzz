@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/shared/emoji/emoji_only.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
@@ -259,6 +260,93 @@ void main() {
 
         expect(find.byType(Image), findsNothing);
         expect(_allRichText(tester), contains(':shipit:'));
+      });
+    });
+
+    group('emoji-only bodies', () {
+      /// Font size the body text actually rendered at.
+      ///
+      /// gpt_markdown resolves the style onto the spans rather than the root
+      /// RichText, which keeps the ambient 14px — so read the span carrying the
+      /// text, not the root.
+      double bodyFontSize(WidgetTester tester, String text) {
+        final richText = tester.widget<RichText>(_findRich(text).first);
+        double? size;
+        richText.text.visitChildren((span) {
+          if (span is TextSpan && (span.text ?? '').contains(text)) {
+            size ??= span.style?.fontSize;
+          }
+          return size == null;
+        });
+        return size ?? richText.text.style!.fontSize!;
+      }
+
+      testWidgets('an all-emoji body renders larger, like desktop', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: '\u{1F389}', scaleEmojiOnly: true),
+          ),
+        );
+
+        expect(bodyFontSize(tester, '\u{1F389}'), kEmojiOnlyFontSize);
+      });
+
+      testWidgets('one word alongside the emoji keeps body size', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'ship it \u{1F389}',
+              scaleEmojiOnly: true,
+            ),
+          ),
+        );
+
+        expect(bodyFontSize(tester, 'ship it'), lessThan(kEmojiOnlyFontSize));
+      });
+
+      testWidgets('the scale is opt-in, so previews are unaffected', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '\u{1F389}')),
+        );
+
+        expect(bodyFontSize(tester, '\u{1F389}'), lessThan(kEmojiOnlyFontSize));
+      });
+
+      testWidgets('a tagged custom emoji alone scales its image too', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: ':shipit:',
+              scaleEmojiOnly: true,
+              tags: [
+                ['emoji', 'shipit', 'https://relay.example/shipit.png'],
+              ],
+            ),
+          ),
+        );
+
+        final image = tester.widget<Image>(find.byType(Image));
+        expect(image.height, kEmojiOnlyCustomEmojiSize);
+      });
+
+      testWidgets('an unresolvable shortcode stays body size', (tester) async {
+        // Without a matching emoji tag it renders as literal text, so scaling it
+        // would blow up a `:word:` that was never emoji at all.
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: ':shipit:', scaleEmojiOnly: true),
+          ),
+        );
+
+        expect(bodyFontSize(tester, ':shipit:'), lessThan(kEmojiOnlyFontSize));
       });
     });
 
@@ -1114,6 +1202,43 @@ Photos
         // separately so they can be aligned independently.
         expect(find.text('@'), findsOneWidget);
         expect(find.text('Alice'), findsOneWidget);
+      });
+
+      testWidgets('renders a known agent mention with the bot chip', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+              maxLines: 2,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('@'), findsNothing);
+        expect(find.text('Helper Bot'), findsOneWidget);
+      });
+
+      testWidgets('normalizes passed multi-word agent mentions', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('Helper Bot'), findsOneWidget);
+        expect(_allRichText(tester), isNot(contains('Bot Bot')));
       });
 
       testWidgets('highlights an entire multi-word display name', (
