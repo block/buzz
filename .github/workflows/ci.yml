@@ -738,11 +738,22 @@ jobs:
       - name: Relay E2E tests
         run: |
           cargo test -p buzz-test-client --test e2e_persona --test e2e_nostr_interop -- --ignored --nocapture
-          cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture --skip invite_guest_
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
+      - name: Restart relay with guest membership enforcement
+        run: |
+          kill "$(cat /tmp/buzz-relay.pid)"
+          BUZZ_REQUIRE_RELAY_MEMBERSHIP=true \
+          BUZZ_REAPER_INTERVAL_SECS=1 \
+            ./scripts/start-relay-for-tests.sh --no-build
+      - name: Guest invite relay E2E
+        run: |
+          cargo test -p buzz-test-client --test e2e_relay invite_guest_ -- --ignored --nocapture
+        env:
+          RELAY_URL: ws://localhost:3000
       - name: Upload relay logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

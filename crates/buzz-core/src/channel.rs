@@ -112,7 +112,7 @@ pub enum MemberRole {
     Admin,
     /// Standard participant.
     Member,
-    /// Read-only external participant.
+    /// External participant without channel-management authority.
     Guest,
     /// Automated agent or integration (not in the role hierarchy).
     Bot,

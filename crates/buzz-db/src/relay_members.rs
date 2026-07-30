@@ -17,7 +17,7 @@ use crate::CommunityId;
 pub struct RelayMember {
     /// 64-char lowercase hex pubkey.
     pub pubkey: String,
-    /// Role: `"owner"`, `"admin"`, or `"member"`.
+    /// Role: `"owner"`, `"admin"`, `"member"`, or `"guest"`.
     pub role: String,
     /// Hex pubkey of who added this member, or `None` for bootstrap entries.
     pub added_by: Option<String>,
@@ -65,6 +65,233 @@ pub async fn get_relay_member(
     .map_err(crate::error::DbError::from)
 }
 
+/// Return the active private, non-DM channels explicitly granted to a relay
+/// guest.
+///
+/// `relay_guest_channels` is the authority for guest scope. Channel membership
+/// alone is intentionally insufficient: a stale membership row must not restore
+/// access after a relay guest is removed and later re-invited.
+pub async fn get_guest_channel_ids(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Vec<uuid::Uuid>> {
+    let rows = sqlx::query(
+        "SELECT rgc.channel_id \
+         FROM relay_guest_channels rgc \
+         JOIN channels c \
+           ON c.community_id = rgc.community_id AND c.id = rgc.channel_id \
+         JOIN channel_members cm \
+           ON cm.community_id = rgc.community_id \
+          AND cm.channel_id = rgc.channel_id \
+          AND cm.pubkey = decode(rgc.guest_pubkey, 'hex') \
+         WHERE rgc.community_id = $1 AND rgc.guest_pubkey = $2 \
+           AND cm.removed_at IS NULL \
+           AND c.visibility = 'private' \
+           AND c.channel_type <> 'dm' \
+           AND c.archived_at IS NULL \
+           AND c.deleted_at IS NULL \
+         ORDER BY rgc.created_at, rgc.channel_id",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            row.try_get("channel_id")
+                .map_err(crate::error::DbError::from)
+        })
+        .collect()
+}
+
+/// Return relay-guest pubkeys with a durable grant for one channel.
+///
+/// This intentionally does not require the channel to remain private or
+/// unarchived: callers use it immediately after an eligibility transition to
+/// disconnect sessions authenticated under the old channel state.
+pub async fn get_channel_guest_pubkeys(
+    pool: &PgPool,
+    community: CommunityId,
+    channel_id: uuid::Uuid,
+) -> Result<Vec<Vec<u8>>> {
+    let rows = sqlx::query(
+        "SELECT decode(rgc.guest_pubkey, 'hex') AS pubkey \
+         FROM relay_guest_channels rgc \
+         JOIN relay_members rm \
+           ON rm.community_id = rgc.community_id \
+          AND rm.pubkey = rgc.guest_pubkey \
+          AND rm.role = 'guest' \
+         WHERE rgc.community_id = $1 AND rgc.channel_id = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(channel_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| row.try_get("pubkey").map_err(crate::error::DbError::from))
+        .collect()
+}
+
+/// Make a channel public and permanently revoke guest-only access in one
+/// transaction.
+///
+/// The shared channel-membership lock serializes this eligibility transition
+/// with guest claims. Returning the affected pubkeys lets the relay disconnect
+/// old scoped authentication contexts only after the durable change commits.
+pub async fn open_channel_and_revoke_guests(
+    pool: &PgPool,
+    community: CommunityId,
+    channel_id: uuid::Uuid,
+) -> Result<Vec<Vec<u8>>> {
+    let mut tx = pool.begin().await?;
+    crate::channel::acquire_channel_membership_lock(&mut tx, community, channel_id).await?;
+
+    let updated = sqlx::query(
+        "UPDATE channels SET visibility = 'open', \
+             guest_invite_generation = guest_invite_generation + 1, \
+             updated_at = now() \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(channel_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Err(crate::error::DbError::ChannelNotFound(channel_id));
+    }
+
+    let decoded_pubkeys = revoke_channel_guests_locked(&mut tx, community, channel_id).await?;
+    tx.commit().await?;
+    Ok(decoded_pubkeys)
+}
+
+/// Permanently revoke every relay guest grant for a channel.
+///
+/// The caller must hold the channel membership lock. The returned identities
+/// must be disconnected only after the surrounding transaction commits.
+pub(crate) async fn revoke_channel_guests_locked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    channel_id: uuid::Uuid,
+) -> Result<Vec<Vec<u8>>> {
+    let guest_pubkeys: Vec<String> = sqlx::query_scalar(
+        "SELECT rgc.guest_pubkey \
+         FROM relay_guest_channels rgc \
+         JOIN relay_members rm \
+           ON rm.community_id = rgc.community_id \
+          AND rm.pubkey = rgc.guest_pubkey \
+          AND rm.role = 'guest' \
+         WHERE rgc.community_id = $1 AND rgc.channel_id = $2 \
+         ORDER BY rgc.guest_pubkey \
+         FOR UPDATE OF rm",
+    )
+    .bind(community.as_uuid())
+    .bind(channel_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE channel_members cm \
+         SET removed_at = now(), removed_by = NULL \
+         FROM relay_guest_channels rgc \
+         JOIN relay_members rm \
+           ON rm.community_id = rgc.community_id \
+          AND rm.pubkey = rgc.guest_pubkey \
+          AND rm.role = 'guest' \
+         WHERE rgc.community_id = $1 AND rgc.channel_id = $2 \
+           AND cm.community_id = rgc.community_id \
+           AND cm.channel_id = rgc.channel_id \
+           AND cm.pubkey = decode(rgc.guest_pubkey, 'hex') \
+           AND cm.role = 'guest' AND cm.removed_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(channel_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM relay_guest_channels \
+         WHERE community_id = $1 AND channel_id = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(channel_id)
+    .execute(&mut **tx)
+    .await?;
+    if !guest_pubkeys.is_empty() {
+        sqlx::query(
+            "DELETE FROM relay_members rm \
+             WHERE rm.community_id = $1 AND rm.role = 'guest' \
+               AND rm.pubkey = ANY($2) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM relay_guest_channels remaining \
+                   WHERE remaining.community_id = rm.community_id \
+                     AND remaining.guest_pubkey = rm.pubkey \
+               )",
+        )
+        .bind(community.as_uuid())
+        .bind(&guest_pubkeys)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    let decoded_pubkeys = guest_pubkeys
+        .iter()
+        .map(|pubkey| {
+            let bytes = hex::decode(pubkey).map_err(|_| {
+                crate::error::DbError::InvalidData("member pubkey is not hex".to_owned())
+            })?;
+            if bytes.len() != 32 {
+                return Err(crate::error::DbError::InvalidData(format!(
+                    "member pubkey must be 32 bytes, got {}",
+                    bytes.len()
+                )));
+            }
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(decoded_pubkeys)
+}
+
+/// Return the active channel-member pubkeys visible to a scoped guest.
+///
+/// This powers exact kind:0 profile lookups without exposing the community-wide
+/// profile directory. Only active members of the already-authorized channels
+/// are returned.
+pub async fn get_guest_visible_pubkeys(
+    pool: &PgPool,
+    community: CommunityId,
+    channel_ids: &[uuid::Uuid],
+) -> Result<Vec<Vec<u8>>> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query(
+        "SELECT DISTINCT cm.pubkey \
+         FROM channel_members cm \
+         JOIN channels c \
+           ON c.community_id = cm.community_id AND c.id = cm.channel_id \
+         WHERE cm.community_id = $1 \
+           AND cm.channel_id = ANY($2) \
+           AND cm.removed_at IS NULL \
+           AND c.visibility = 'private' \
+           AND c.channel_type <> 'dm' \
+           AND c.archived_at IS NULL \
+           AND c.deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(channel_ids)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| row.try_get("pubkey").map_err(crate::error::DbError::from))
+        .collect()
+}
+
 /// Returns all relay members of `community` ordered by `created_at` ascending.
 pub async fn list_relay_members(pool: &PgPool, community: CommunityId) -> Result<Vec<RelayMember>> {
     let rows = sqlx::query(
@@ -101,6 +328,14 @@ pub async fn add_relay_member(
     role: &str,
     added_by: Option<&str>,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{pubkey}",
+            community.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
     let result = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, pubkey) DO NOTHING",
@@ -109,8 +344,17 @@ pub async fn add_relay_member(
     .bind(pubkey)
     .bind(role)
     .bind(added_by)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        "DELETE FROM relay_member_invite_blocks \
+         WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -127,6 +371,29 @@ pub async fn claim_relay_membership(
     policy_version: Option<&str>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{pubkey}",
+            community.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
+    let invite_blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(\
+            SELECT 1 FROM relay_member_invite_blocks \
+            WHERE community_id = $1 AND pubkey = $2\
+        )",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_one(&mut *tx)
+    .await?;
+    if invite_blocked {
+        tx.rollback().await?;
+        return Err(crate::error::DbError::AccessDenied(
+            "relay access was removed by an administrator".to_owned(),
+        ));
+    }
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, 'invite') \
@@ -198,32 +465,88 @@ pub async fn remove_relay_member(
     community: CommunityId,
     pubkey: &str,
 ) -> Result<RemoveResult> {
-    let result = sqlx::query(
-        "DELETE FROM relay_members \
-         WHERE community_id = $1 AND pubkey = $2 AND role <> 'owner'",
+    let mut tx = pool.begin().await?;
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
-    .execute(pool)
+    .fetch_optional(&mut *tx)
     .await?;
-
-    if result.rows_affected() > 0 {
-        return Ok(RemoveResult::Removed);
+    let Some(role) = role else {
+        tx.rollback().await?;
+        return Ok(RemoveResult::NotFound);
+    };
+    if role == "owner" {
+        tx.rollback().await?;
+        return Ok(RemoveResult::IsOwner);
     }
 
-    // rows_affected == 0: either not found or is owner.  One cheap read to
-    // distinguish the two cases so callers can return the right error message.
-    let exists = sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+    if role == "guest" {
+        remove_guest_channel_memberships(&mut tx, community, pubkey).await?;
+    }
+    sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
         .bind(pubkey)
-        .fetch_optional(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    Ok(RemoveResult::Removed)
+}
 
-    if exists.is_some() {
-        Ok(RemoveResult::IsOwner)
-    } else {
-        Ok(RemoveResult::NotFound)
+/// Administratively remove a relay member and block bearer-invite re-entry.
+///
+/// A later explicit [`add_relay_member`] call clears the block. Voluntary leave
+/// continues to use [`remove_relay_member`] and does not create one.
+pub async fn remove_relay_member_and_block_invites(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<RemoveResult> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{pubkey}",
+            community.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(role) = role else {
+        tx.rollback().await?;
+        return Ok(RemoveResult::NotFound);
+    };
+    if role == "owner" {
+        tx.rollback().await?;
+        return Ok(RemoveResult::IsOwner);
     }
+    if role == "guest" {
+        remove_guest_channel_memberships(&mut tx, community, pubkey).await?;
+    }
+    sqlx::query(
+        "INSERT INTO relay_member_invite_blocks (community_id, pubkey) \
+         VALUES ($1, $2) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET removed_at = now()",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(RemoveResult::Removed)
 }
 
 /// Removes a relay member only if their current role matches `expected_role`.
@@ -245,41 +568,244 @@ pub async fn remove_relay_member_if_role(
     pubkey: &str,
     expected_role: &str,
 ) -> Result<RemoveResult> {
-    let result = sqlx::query(
-        "DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2 AND role = $3",
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{pubkey}",
+            community.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
-    .bind(expected_role)
-    .execute(pool)
+    .fetch_optional(&mut *tx)
     .await?;
-
-    if result.rows_affected() > 0 {
-        return Ok(RemoveResult::Removed);
+    let Some(role) = role else {
+        tx.rollback().await?;
+        return Ok(RemoveResult::NotFound);
+    };
+    if role == "owner" {
+        tx.rollback().await?;
+        return Ok(RemoveResult::IsOwner);
+    }
+    if role != expected_role {
+        tx.rollback().await?;
+        return Ok(RemoveResult::RoleMismatch);
     }
 
-    // rows_affected == 0: either not found or role changed. One cheap read to
-    // distinguish the cases so callers can return the right error message.
-    let row = sqlx::query("SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+    if role == "guest" {
+        remove_guest_channel_memberships(&mut tx, community, pubkey).await?;
+    }
+    sqlx::query(
+        "INSERT INTO relay_member_invite_blocks (community_id, pubkey) \
+         VALUES ($1, $2) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET removed_at = now()",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
         .bind(pubkey)
-        .fetch_optional(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    Ok(RemoveResult::Removed)
+}
 
-    match row {
-        None => Ok(RemoveResult::NotFound),
-        Some(r) => {
-            let role: String = r.try_get("role")?;
-            if role == "owner" {
-                Ok(RemoveResult::IsOwner)
-            } else {
-                // Role changed between the caller's check and this delete
-                // (e.g., target was promoted to admin). Signal that the
-                // caller no longer has authority to remove this target.
-                Ok(RemoveResult::RoleMismatch)
-            }
-        }
+async fn remove_guest_channel_memberships(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<()> {
+    let pubkey_bytes = hex::decode(pubkey)
+        .map_err(|_| crate::error::DbError::InvalidData("member pubkey is not hex".to_owned()))?;
+    if pubkey_bytes.len() != 32 {
+        return Err(crate::error::DbError::InvalidData(format!(
+            "member pubkey must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        )));
     }
+
+    sqlx::query(
+        "UPDATE channel_members cm \
+         SET removed_at = now(), removed_by = NULL \
+         FROM relay_guest_channels rgc \
+         WHERE rgc.community_id = $1 AND rgc.guest_pubkey = $2 \
+           AND cm.community_id = rgc.community_id \
+           AND cm.channel_id = rgc.channel_id \
+           AND cm.pubkey = $3 AND cm.removed_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(pubkey_bytes)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Revoke one channel grant from an active relay guest.
+///
+/// The relay-member row is locked before the grant is removed so concurrent
+/// relay-level removal and channel-level removal cannot leave an orphaned
+/// authority row. When the revoked channel was the guest's last grant, the
+/// relay-member row is deleted as well; a guest without a channel must never
+/// retain community admission.
+///
+/// Returns `true` when a guest grant was removed and `false` when the target is
+/// not a guest or no matching grant exists.
+pub async fn revoke_guest_channel(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+    channel_id: uuid::Uuid,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if role.as_deref() != Some("guest") {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    let pubkey_bytes = hex::decode(pubkey)
+        .map_err(|_| crate::error::DbError::InvalidData("member pubkey is not hex".to_owned()))?;
+    if pubkey_bytes.len() != 32 {
+        return Err(crate::error::DbError::InvalidData(format!(
+            "member pubkey must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        )));
+    }
+    // The grant and channel roster entry form one guest capability. Remove
+    // both in this transaction so a later private-channel transition cannot
+    // reactivate a stale roster row.
+    sqlx::query(
+        "UPDATE channel_members \
+         SET removed_at = now(), removed_by = NULL \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+           AND role = 'guest' AND removed_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(channel_id)
+    .bind(&pubkey_bytes)
+    .execute(&mut *tx)
+    .await?;
+
+    let deleted = sqlx::query(
+        "DELETE FROM relay_guest_channels \
+         WHERE community_id = $1 AND guest_pubkey = $2 AND channel_id = $3",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(channel_id)
+    .execute(&mut *tx)
+    .await?;
+    if deleted.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    let has_remaining_grants: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+            SELECT 1 FROM relay_guest_channels \
+            WHERE community_id = $1 AND guest_pubkey = $2 \
+         )",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !has_remaining_grants {
+        sqlx::query(
+            "DELETE FROM relay_members \
+             WHERE community_id = $1 AND pubkey = $2 AND role = 'guest'",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Acquire every channel lock backing this guest's grants in stable UUID order.
+///
+/// Callers take these locks before the relay-member row lock. This matches the
+/// public-channel revocation path and prevents a channel-lock/member-row-lock
+/// inversion during a concurrent promotion.
+pub(crate) async fn lock_guest_grant_channels(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Vec<uuid::Uuid>> {
+    let channel_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT channel_id FROM relay_guest_channels \
+         WHERE community_id = $1 AND guest_pubkey = $2 \
+         ORDER BY channel_id",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_all(&mut **tx)
+    .await?;
+    for channel_id in &channel_ids {
+        crate::channel::acquire_channel_membership_lock(tx, community, *channel_id).await?;
+    }
+    Ok(channel_ids)
+}
+
+/// Convert active guest roster rows to normal members and remove guest grants.
+///
+/// The caller must hold the identity lock and all locks returned by
+/// [`lock_guest_grant_channels`].
+pub(crate) async fn promote_guest_channel_grants_locked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<()> {
+    let pubkey_bytes = hex::decode(pubkey)
+        .map_err(|_| crate::error::DbError::InvalidData("member pubkey is not hex".to_owned()))?;
+    if pubkey_bytes.len() != 32 {
+        return Err(crate::error::DbError::InvalidData(format!(
+            "member pubkey must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        )));
+    }
+    sqlx::query(
+        "UPDATE channel_members cm SET role = 'member' \
+         FROM relay_guest_channels rgc \
+         WHERE rgc.community_id = $1 AND rgc.guest_pubkey = $2 \
+           AND cm.community_id = rgc.community_id \
+           AND cm.channel_id = rgc.channel_id \
+           AND cm.pubkey = $3 AND cm.removed_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(&pubkey_bytes)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM relay_guest_channels \
+         WHERE community_id = $1 AND guest_pubkey = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
 }
 
 /// Updates the role of an existing relay member in `community`. Returns `true`
@@ -290,6 +816,54 @@ pub async fn update_relay_member_role(
     pubkey: &str,
     new_role: &str,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+
+    // Serialize with invite claims for this identity. A guest promotion must
+    // not race a second guest invite and recreate scoped grants after cleanup.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{pubkey}",
+            community.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
+
+    let preliminary_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if preliminary_role.as_deref() == Some("guest") && new_role != "guest" {
+        lock_guest_grant_channels(&mut tx, community, pubkey).await?;
+    }
+
+    let current_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(current_role) = current_role else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    if current_role == "owner" {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    if current_role == "guest" && new_role != "guest" {
+        // A relay-level promotion preserves access to the private channels the
+        // person already joined, but normalizes those roster rows to ordinary
+        // channel members before deleting guest-only authority.
+        promote_guest_channel_grants_locked(&mut tx, community, pubkey).await?;
+    }
+
     let result = sqlx::query(
         "UPDATE relay_members SET role = $1, updated_at = now() \
          WHERE community_id = $2 AND pubkey = $3 AND role <> 'owner'",
@@ -297,8 +871,9 @@ pub async fn update_relay_member_role(
     .bind(new_role)
     .bind(community.as_uuid())
     .bind(pubkey)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 

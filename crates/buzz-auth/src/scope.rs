@@ -110,6 +110,20 @@ impl Scope {
         ]
     }
 
+    /// Scopes granted to a channel-scoped relay guest.
+    ///
+    /// Channel IDs in the authentication context provide the resource
+    /// boundary; these scopes only enable messages, channel discovery, and
+    /// reading profiles already visible inside that channel.
+    pub fn channel_guest() -> Vec<Scope> {
+        vec![
+            Self::MessagesRead,
+            Self::MessagesWrite,
+            Self::ChannelsRead,
+            Self::UsersRead,
+        ]
+    }
+
     /// Return the canonical wire-format string for this scope (e.g. `"messages:read"`).
     pub fn as_str(&self) -> &str {
         match self {
@@ -229,6 +243,20 @@ mod tests {
             !scopes.contains(&Scope::AdminUsers),
             "all_non_admin() must not contain AdminUsers"
         );
+    }
+
+    #[test]
+    fn channel_guest_excludes_privileged_scopes() {
+        let scopes = Scope::channel_guest();
+        assert_eq!(scopes.len(), 4);
+        assert!(scopes.contains(&Scope::MessagesRead));
+        assert!(scopes.contains(&Scope::MessagesWrite));
+        assert!(scopes.contains(&Scope::ChannelsRead));
+        assert!(scopes.contains(&Scope::UsersRead));
+        assert!(!scopes.contains(&Scope::UsersWrite));
+        assert!(!scopes.contains(&Scope::ChannelsWrite));
+        assert!(!scopes.contains(&Scope::FilesRead));
+        assert!(!scopes.contains(&Scope::ReposRead));
     }
 
     #[test]

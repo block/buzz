@@ -32,8 +32,15 @@ export function useClaimInvite() {
       transaction.inviteCode ?? "",
       transaction.policyReceipt,
     )
-      .then(() => {
-        update({ stage: "connecting", error: undefined }, transaction.id);
+      .then((result) => {
+        update(
+          {
+            stage: "connecting",
+            guestChannelId: result.channelId ?? undefined,
+            error: undefined,
+          },
+          transaction.id,
+        );
       })
       .catch((error: unknown) =>
         update(

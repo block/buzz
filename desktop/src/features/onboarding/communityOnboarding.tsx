@@ -46,6 +46,8 @@ export type CommunityOnboardingTransaction = {
    * join policy admit the claim.
    */
   policyReceipt?: string;
+  /** Exact private channel granted by a channel-scoped guest invite. */
+  guestChannelId?: string;
   communityId?: string;
   previousCommunityId?: string;
   addedCommunity?: boolean;
@@ -66,6 +68,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
     | "previousCommunityId"
     | "addedCommunity"
     | "communityName"
+    | "guestChannelId"
     | "error"
     | "acknowledged"
   >
