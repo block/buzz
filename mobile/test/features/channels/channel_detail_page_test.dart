@@ -996,19 +996,26 @@ void main() {
           12,
           (index) => 'Newest message line $index',
         ).join('\n');
+        // Anchor timestamps to a local noon so every message (including the
+        // live update below) lands on the same local calendar day in any
+        // timezone. Raw epoch offsets straddle midnight in non-UTC zones,
+        // which inserts an extra date separator and shifts the layout this
+        // test depends on.
+        final dayAnchor =
+            DateTime(2026, 1, 15, 12).millisecondsSinceEpoch ~/ 1000;
         final initialMessages = [
           for (var i = 0; i < 12; i++)
             _textMsg(
               id: 'msg$i',
               pubkey: i.isEven ? 'alice' : 'bob',
               content: 'Message $i',
-              createdAt: 1000 + i * 1000,
+              createdAt: dayAnchor + i * 100,
             ),
           _textMsg(
             id: 'tall-newest',
             pubkey: 'alice',
             content: tallMessage,
-            createdAt: 20_000,
+            createdAt: dayAnchor + 2000,
           ),
         ];
         final messagesNotifier = _FakeMessagesNotifier(initialMessages);
@@ -1041,7 +1048,7 @@ void main() {
             id: 'newest-live',
             pubkey: 'alice',
             content: 'Newest live update',
-            createdAt: 30_000,
+            createdAt: dayAnchor + 3000,
           ),
         ]);
         await tester.pumpAndSettle();
