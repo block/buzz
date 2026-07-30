@@ -226,8 +226,9 @@ pub async fn start_huddle(
         //    complete EOSE before guidelines are stored if we post them after.
         //    Best-effort: don't fail the huddle if this fails.
         let guidelines = agents::voice_mode_guidelines(&parent_channel_id);
+        let guideline_p_tags: Vec<&str> = member_pubkeys.iter().map(String::as_str).collect();
         if let Ok(guidelines_builder) =
-            events::build_huddle_guidelines(&ephemeral_channel_id, &guidelines)
+            events::build_huddle_guidelines(&ephemeral_channel_id, &guidelines, &guideline_p_tags)
         {
             if let Err(e) = submit_event(guidelines_builder, &state).await {
                 eprintln!("buzz-desktop: huddle guidelines (kind:48106) failed: {e}");
@@ -971,8 +972,9 @@ pub async fn add_agent_to_huddle(
         }
     }
 
-    // No guidelines re-post needed — the agent sees the original kind:48106
-    // guidelines via EOSE replay when it subscribes to the ephemeral channel.
+    // Guidelines were re-posted for this agent inside `add_agent_to_huddle`:
+    // the huddle-start event only `p`-tags the agents enrolled then, and this
+    // agent's subscription replays from its own membership event.
 
     // Also add the agent to the visible participants list.
     {

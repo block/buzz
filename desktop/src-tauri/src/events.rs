@@ -553,13 +553,22 @@ pub fn build_huddle_ended(
 /// Posted to the **ephemeral** channel (not the parent) so agents see it
 /// via EOSE replay when they subscribe. Uses a dedicated kind so the TTS
 /// pipeline can filter it out without fragile content-prefix matching.
+///
+/// `agent_pubkeys` are added as `p` tags. The ACP harness subscribes to
+/// channels with `#p=[agent_pubkey]` when it runs in mention mode (the
+/// default), so a guidelines event with no `p` tag is never delivered —
+/// the agent then joins the huddle without voice-mode etiquette.
 pub fn build_huddle_guidelines(
     ephemeral_channel_id: &str,
     guidelines_text: &str,
+    agent_pubkeys: &[&str],
 ) -> Result<EventBuilder, String> {
     validate_channel_id(ephemeral_channel_id)?;
     check_content(guidelines_text)?;
-    let tags = vec![tag(vec!["h", ephemeral_channel_id])?];
+    let mut tags = vec![tag(vec!["h", ephemeral_channel_id])?];
+    for pk in agent_pubkeys {
+        tags.push(tag(vec!["p", pk])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(48106), guidelines_text).tags(tags))
 }
 
@@ -995,5 +1004,34 @@ mod tests {
         );
         assert_eq!(p_tags[0], &vec!["p".to_string(), ALICE_HEX.to_string()]);
         assert_eq!(p_tags[1], &vec!["p".to_string(), BOB_HEX.to_string()]);
+    }
+
+    /// The ACP harness subscribes with `#p=[agent_pubkey]` in its default
+    /// mention mode, so guidelines without a `p` tag for each enrolled agent
+    /// are never delivered.
+    #[test]
+    fn huddle_guidelines_p_tag_every_enrolled_agent() {
+        let channel_id = Uuid::new_v4().to_string();
+        let builder = build_huddle_guidelines(&channel_id, "be brief", &[ALICE_HEX, BOB_HEX])
+            .expect("build_huddle_guidelines");
+        let event = builder.sign_with_keys(&Keys::generate()).unwrap();
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+
+        assert!(
+            tags.contains(&vec!["h".to_string(), channel_id]),
+            "guidelines must stay channel-scoped, got {tags:?}"
+        );
+        let p_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|t| t.first().map(String::as_str) == Some("p"))
+            .collect();
+        assert_eq!(
+            p_tags,
+            vec![
+                &vec!["p".to_string(), ALICE_HEX.to_string()],
+                &vec!["p".to_string(), BOB_HEX.to_string()],
+            ],
+            "every enrolled agent needs a p tag, got {p_tags:?}"
+        );
     }
 }
