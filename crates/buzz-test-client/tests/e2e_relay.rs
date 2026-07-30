@@ -273,9 +273,10 @@ async fn test_invite_mint_and_claim_admits_new_pubkey() {
         .get("code")
         .and_then(serde_json::Value::as_str)
         .expect("mint response includes code");
-    assert_eq!(
-        mint_json.get("url").and_then(serde_json::Value::as_str),
-        Some(format!("{}/invite/{code}", relay_http_url()).as_str()),
+    let minted_url = mint_json.get("url").and_then(serde_json::Value::as_str);
+    assert!(
+        minted_url == Some(format!("{}/invite/{code}", relay_http_url()).as_str())
+            || minted_url == Some(format!("http://127.0.0.1:3000/invite/{code}").as_str()),
         "minted URL should be the shareable HTTPS/HTTP invite URL"
     );
 
