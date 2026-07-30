@@ -12,8 +12,9 @@
  * delete handler is wired. In the no-handler case an empty edit stays a no-op
  * rather than destroying anything, preserving the historical guard.
  *
- * Used at two moments with the same rule: deciding whether to surface the
- * confirmation on submit, and resolving the target when the user confirms.
+ * Called from the composer's submit path when an edit is cleared to empty: a
+ * non-null result is handed straight to the existing delete handler (the same
+ * one the "Delete message" button uses), with no separate confirmation UI.
  */
 export function resolveEmptyEditDelete(
   editTargetId: string | null | undefined,

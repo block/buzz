@@ -54,7 +54,7 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useComposerInsertEmoji } from "./useComposerInsertEmoji";
-import { useEmptyEditDelete } from "./useEmptyEditDelete";
+import { resolveEmptyEditDelete } from "./emptyEditDelete";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
 import type { MessageComposerProps } from "./MessageComposer.types";
@@ -449,18 +449,6 @@ function MessageComposerImpl({
     },
   });
 
-  // ── Empty-edit → delete ─────────────────────────────────────────────
-  // Clearing an edit to empty and submitting is the keyboard shorthand for
-  // "Delete message"; the hook owns the confirmation dialog + delete handoff.
-  const { requestEmptyEditDelete, emptyEditDeleteDialog } = useEmptyEditDelete({
-    editTargetRef,
-    onDeleteEditTarget,
-    clearComposerBody: () => {
-      setComposerContent("");
-      richText.clearContent();
-    },
-  });
-
   // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
     if (!richText.editor) return;
@@ -502,11 +490,22 @@ function MessageComposerImpl({
       const currentPendingImeta = media.pendingImetaRef.current;
       const hasMedia = currentPendingImeta.length > 0;
       // Empty text + zero attachments: clearing an edit to nothing is the
-      // keyboard shorthand for deleting the message (confirm-then-delete via
-      // the hook). No-ops when no delete handler is wired, so an empty edit
-      // never silently publishes an empty body.
+      // keyboard shorthand for "Delete message" — call the existing delete
+      // path directly (same handler the Delete button uses; it exits edit
+      // mode). No extra confirmation: clearing a message and hitting Enter is
+      // already deliberate. `resolveEmptyEditDelete` keeps the historical
+      // no-op when no delete handler is wired, so an empty edit never
+      // publishes an empty body.
       if (!trimmed && !hasMedia) {
-        requestEmptyEditDelete();
+        const deleteTargetId = resolveEmptyEditDelete(
+          editTargetRef.current?.id,
+          Boolean(onDeleteEditTarget),
+        );
+        if (deleteTargetId) {
+          setComposerContent("");
+          richText.clearContent();
+          void onDeleteEditTarget?.(deleteTargetId);
+        }
         return;
       }
 
@@ -620,7 +619,7 @@ function MessageComposerImpl({
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
-    requestEmptyEditDelete,
+    onDeleteEditTarget,
     richText.clearContent,
     richText.setContent,
     setComposerContent,
@@ -1000,8 +999,6 @@ function MessageComposerImpl({
           </form>
         </div>
       </footer>
-
-      {emptyEditDeleteDialog}
 
       <NonMemberMentionDialog
         error={mentionSendFlow.nonMemberPromptError}
