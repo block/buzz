@@ -49,7 +49,7 @@ impl AuditService {
     /// Serialized per-community via `pg_advisory_lock`. Postgres advisory locks
     /// are session-scoped, so we acquire before the transaction and release
     /// after commit (or on any error path).
-    #[instrument(skip(self, entry), fields(action = %entry.action))]
+    #[instrument(target = "buzz_datastore", name = "audit_log", skip_all, fields(otel.kind = "client", db.system.name = "postgresql"))]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
         let mut conn = self.pool.acquire().await?;
 
@@ -125,7 +125,7 @@ impl AuditService {
 
         audit_entry.hash = compute_hash(&audit_entry)?.to_vec();
 
-        debug!(seq, "writing audit entry");
+        debug!("writing audit entry");
 
         sqlx::query(
             r#"
@@ -156,7 +156,7 @@ impl AuditService {
     /// Reads exactly that community's chain — it can never observe another
     /// community's entries or head. Returns `Ok(false)` if the range is empty,
     /// `Ok(true)` if the segment is internally consistent.
-    #[instrument(skip(self))]
+    #[instrument(target = "buzz_datastore", name = "audit_verify_chain", skip_all, fields(otel.kind = "client", db.system.name = "postgresql"))]
     pub async fn verify_chain(
         &self,
         community: CommunityId,
@@ -208,7 +208,7 @@ impl AuditService {
     /// Returns up to `limit` entries from one community's chain starting at
     /// `from_seq`, ordered by sequence number. Scoped to `community` — never
     /// returns another community's rows.
-    #[instrument(skip(self))]
+    #[instrument(target = "buzz_datastore", name = "audit_get_entries", skip_all, fields(otel.kind = "client", db.system.name = "postgresql"))]
     pub async fn get_entries(
         &self,
         community: CommunityId,
@@ -274,7 +274,7 @@ mod tests {
 
     async fn test_pool() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test fixture
         PgPool::connect(&url).await.ok()
     }
 

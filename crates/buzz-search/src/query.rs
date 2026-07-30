@@ -10,6 +10,7 @@
 
 use buzz_core::CommunityId;
 use sqlx::{PgPool, QueryBuilder, Row};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::error::SearchError;
@@ -311,7 +312,16 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = qb
+        .build()
+        .fetch_all(pool)
+        .instrument(tracing::info_span!(
+            target: "buzz_datastore",
+            "search",
+            otel.kind = "client",
+            db.system.name = "postgresql"
+        ))
+        .await?;
 
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
