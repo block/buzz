@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
-import 'channel_management_provider.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
@@ -222,11 +221,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _lastKnownMessages = merged;
       state = AsyncData(merged);
     }
-
-    if (event.kind == EventKind.systemMessage &&
-        _isMembershipEvent(event.content)) {
-      ref.invalidate(channelMembersProvider(channelId));
-    }
   }
 
   void _handleWindowLiveEvent(NostrEvent event) {
@@ -286,12 +280,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ref
         .read(pendingLocalMessagesProvider(channelId).notifier)
         .confirm(eventIds);
-  }
-
-  static bool _isMembershipEvent(String content) {
-    return content.contains('member_joined') ||
-        content.contains('member_left') ||
-        content.contains('member_removed');
   }
 
   /// Adds a just-signed outgoing message before the relay acknowledges it.

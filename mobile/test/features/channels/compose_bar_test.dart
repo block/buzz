@@ -17,11 +17,10 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/mentions/mention_candidates.dart';
-import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/photo_library.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -2269,6 +2268,11 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
+      expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('composer-agent-mention-chip')),
+        findsOneWidget,
+      );
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
@@ -2284,6 +2288,70 @@ void main() {
         ['role', 'bot'],
       ]);
     });
+
+    testWidgets(
+      'renders chips only for selected agents outside code and composition',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        final signer = nostr.Keys.generate();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            relayAgents: [_testAgent('f' * 64)],
+            channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@Helper Bot');
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNothing,
+        );
+
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel('Agent mention: Helper Bot'),
+          findsOneWidget,
+        );
+        expect(find.bySemanticsLabel('Helper Bot'), findsNothing);
+
+        await tester.enterText(find.byType(TextField), '`@Helper Bot`');
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNothing,
+        );
+
+        await tester.enterText(find.byType(TextField), '@Helper Bot typing');
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        textField.controller!.value = textField.controller!.value.copyWith(
+          composing: const TextRange(start: 12, end: 18),
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        semantics.dispose();
+      },
+    );
 
     testWidgets('does not mutate a DM when mentioning a non-member agent', (
       tester,
