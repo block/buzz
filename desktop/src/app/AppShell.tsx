@@ -161,7 +161,6 @@ export function AppShell() {
     ? locationSearchSection
     : DEFAULT_SETTINGS_SECTION;
   const startupReady = useDeferredStartup();
-
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
@@ -304,7 +303,6 @@ export function AppShell() {
       ? (channels.find((channel) => channel.id === targetChannelId) ?? null)
       : null;
   }, [channels, managedChannelId, selectedChannelId]);
-
   const {
     handleChannelNotification,
     handleDmNotification,
@@ -519,7 +517,6 @@ export function AppShell() {
     },
     [applyAgents, applyCanvas, createChannelMutation, goChannel],
   );
-
   const handleCreateForum = React.useCallback(
     async ({
       description,
@@ -587,7 +584,6 @@ export function AppShell() {
     },
     [goHome, hideDmMutation, selectedChannelId],
   );
-
   const handleOpenSettings = React.useCallback(
     (section: SettingsSection = DEFAULT_SETTINGS_SECTION) => {
       setIsChannelManagementOpen(false);
@@ -595,12 +591,10 @@ export function AppShell() {
     },
     [goSettings],
   );
-
   const handleCloseSettings = React.useCallback(
     () => closeSettings(),
     [closeSettings],
   );
-
   // Section switches rewrite the settings entry rather than stacking one
   // history entry per section, so back always exits settings in one step.
   const handleSettingsSectionChange = React.useCallback(
