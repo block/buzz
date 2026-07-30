@@ -152,11 +152,21 @@ export async function stopManagedAgentWithRules({
  * persona whose instances are still deployed cannot be deleted at all.
  *
  * Contract, shared with `deleteProfileManagedAgentsForPersona` in
- * `features/profile/ui/UserProfilePanelDeletion.ts`: abort the persona cascade
- * on the first cancelled or failed instance delete, so a declined confirm or a
- * backend error never leaves a half-torn persona. That variant additionally
- * removes each agent from its channels between deletes, which is why the two
- * loops are kept separate rather than parameterized — keep both in step.
+ * `features/profile/ui/UserProfilePanelDeletion.ts`: stop the cascade at the
+ * first cancelled or failed instance delete, so the persona is not deleted on
+ * top of a partial teardown.
+ *
+ * Aborting stops *further* deletes — it cannot undo the ones that already ran,
+ * and instance deletes are not reversible. Instances are visited in
+ * `managedAgents` order and only provider-deployed ones prompt, so a local
+ * instance ahead of a declined provider instance is already gone by the time
+ * the user cancels. `deletedCount` reports how many were destroyed precisely so
+ * the caller can tell the user about that partial state instead of silently
+ * keeping the persona.
+ *
+ * The profile variant additionally removes each agent from its channels between
+ * deletes, which is why the two loops are kept separate rather than
+ * parameterized — keep both in step.
  */
 export async function deleteManagedAgentsForPersonaWithRules({
   persona,
@@ -166,7 +176,9 @@ export async function deleteManagedAgentsForPersonaWithRules({
   persona: Pick<AgentPersona, "id">;
   managedAgents: readonly ManagedAgent[];
   deleteManagedAgent: DeleteManagedAgent;
-} & ManagedAgentActionContext): Promise<ManagedAgentActionResult> {
+} & ManagedAgentActionContext): Promise<
+  ManagedAgentActionResult & { deletedCount: number }
+> {
   // Dedup by pubkey so a list carrying the same instance twice cannot delete it
   // twice — mirrors the profile variant's Map for the same reason.
   const agentsByPubkey = new Map<string, ManagedAgent>();
@@ -176,12 +188,14 @@ export async function deleteManagedAgentsForPersonaWithRules({
     }
   }
 
+  let deletedCount = 0;
   for (const agent of agentsByPubkey.values()) {
     const result = await deleteManagedAgentWithRules({ agent, ...context });
-    if (result.cancelled) return result;
+    if (result.cancelled) return { ...result, deletedCount };
+    deletedCount += 1;
   }
 
-  return {};
+  return { deletedCount };
 }
 
 export async function deleteManagedAgentWithRules({

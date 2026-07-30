@@ -194,7 +194,7 @@ test("persona cascade deletes every instance backed by that persona", async () =
     },
   });
 
-  assert.deepEqual(result, {});
+  assert.deepEqual(result, { deletedCount: 2 });
   assert.deepEqual(deleted, ["a".repeat(64), "b".repeat(64)]);
 });
 
@@ -255,10 +255,57 @@ test("persona cascade stops at a declined orphan confirm", async () => {
     });
 
     assert.equal(result.cancelled, true, "declining must report cancelled");
+    assert.equal(
+      result.deletedCount,
+      0,
+      "nothing was deleted before the abort",
+    );
     assert.deepEqual(
       deleted,
       [],
       "no instance may be deleted once the confirm is declined",
+    );
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("a declined confirm does not undo instances already deleted", async () => {
+  // The aborting instance is deliberately NOT first: a local instance deletes
+  // with no prompt, then the provider instance's confirm is declined. The
+  // earlier delete is permanent, so the cascade must report it rather than let
+  // it vanish silently behind a cancelled persona delete.
+  const originalWindow = globalThis.window;
+  globalThis.window = { confirm: () => false };
+  try {
+    const deleted = [];
+    const result = await deleteManagedAgentsForPersonaWithRules({
+      persona: { id: "persona-1" },
+      managedAgents: [
+        personaAgent("a"),
+        personaAgent("b", {
+          backend: { type: "provider" },
+          backendAgentId: "remote-1",
+        }),
+        personaAgent("c"),
+      ],
+      channels: [],
+      relayAgents: [],
+      deleteManagedAgent: async ({ pubkey }) => {
+        deleted.push(pubkey);
+      },
+    });
+
+    assert.equal(result.cancelled, true);
+    assert.deepEqual(
+      deleted,
+      ["a".repeat(64)],
+      "the local instance ahead of the declined one is already gone",
+    );
+    assert.equal(
+      result.deletedCount,
+      1,
+      "deletedCount must surface the partial teardown so the caller can report it",
     );
   } finally {
     globalThis.window = originalWindow;

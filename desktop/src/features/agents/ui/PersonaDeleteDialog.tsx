@@ -29,9 +29,13 @@ type PersonaDeleteDialogProps = {
  * (NIP-IA), and that durable side effect must be disclosed before the
  * destructive confirm — matching the direct agent-delete dialog.
  *
- * Provider-hosted instances are removed from the provider as part of the same
- * cascade, which is destructive beyond this machine, so it is disclosed
- * separately rather than folded into the archival sentence.
+ * Provider-hosted instances are disclosed separately because the cascade does
+ * NOT tear them down. `delete_managed_agent` stops the local process, drops the
+ * record and key, and tombstones/archives the identity — it never contacts the
+ * provider, and `force_remote_delete` only bypasses the backend's orphan guard.
+ * Provider teardown is a future `undeploy` operation (see the note in
+ * `managed_agents/runtime.rs`), so the remote deployment keeps running and
+ * keeps costing money. Saying otherwise would be worse than saying nothing.
  */
 export function personaDeleteDescription(
   persona: AgentPersona | null,
@@ -53,8 +57,8 @@ export function personaDeleteDescription(
   }
   const provider =
     providerInstanceCount === 1
-      ? "1 of them is hosted by a provider and will also be removed from that provider."
-      : `${providerInstanceCount} of them are hosted by a provider and will also be removed from that provider.`;
+      ? "1 of them is hosted by a provider: the remote deployment is not torn down and keeps running until you remove it at the provider."
+      : `${providerInstanceCount} of them are hosted by a provider: those remote deployments are not torn down and keep running until you remove them at the provider.`;
   return `Delete ${persona.displayName}. ${cascade} ${provider}`;
 }
 

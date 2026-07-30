@@ -139,11 +139,14 @@ export async function deleteProfileManagedAgent(
  * from its channels as it goes.
  *
  * Contract, shared with `deleteManagedAgentsForPersonaWithRules` in
- * `features/agents/lib/managedAgentControlActions.ts`: abort the persona
- * cascade on the first cancelled or failed instance delete, so a declined
- * confirm or a backend error never leaves a half-torn persona. This variant
- * exists separately because its channel cleanup is interleaved per instance —
- * keep both in step.
+ * `features/agents/lib/managedAgentControlActions.ts`: stop the cascade at the
+ * first cancelled or failed instance delete, so the persona is not deleted on
+ * top of a partial teardown. Aborting stops *further* deletes; it cannot undo
+ * instances already destroyed, since only provider-deployed instances prompt
+ * and any local instance visited earlier is already gone.
+ *
+ * This variant exists separately because its channel cleanup is interleaved per
+ * instance — keep both in step.
  */
 export async function deleteProfileManagedAgentsForPersona(
   persona: AgentPersona,

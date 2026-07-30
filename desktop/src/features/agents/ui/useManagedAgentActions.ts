@@ -309,6 +309,13 @@ export function useManagedAgentActions() {
    * cascade has no provider-deployed instance left to refuse. Throws if any
    * instance delete fails and reports `cancelled` if the user declines an
    * orphan-warning confirm; callers must not delete the persona in either case.
+   *
+   * Unlike `handleDelete` for a single instance, this does not call
+   * `removeAgentFromAllChannels`. That is deliberate: it preserves the
+   * pre-existing behaviour of the persona cascade, which `delete_persona` only
+   * ever tombstoned and archived, so this fix does not quietly widen the blast
+   * radius of a persona delete beyond making it succeed. The profile variant
+   * does clean up channels — see `deleteProfileManagedAgentsForPersona`.
    */
   async function handleDeleteInstancesForPersona(persona: AgentPersona) {
     const channels = await getChannelsForAction();
