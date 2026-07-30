@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod message;
 mod paths;
 mod read_file;
 mod rg;
@@ -25,6 +26,61 @@ struct DevMcp {
     state: Arc<shell::SharedState>,
     todos: Arc<todo::TodoState>,
     tool_router: ToolRouter<DevMcp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpProfile {
+    Developer,
+    Messaging,
+}
+
+fn mcp_profile_for_command(command: &str) -> McpProfile {
+    if command == "buzz-message-mcp" {
+        McpProfile::Messaging
+    } else {
+        McpProfile::Developer
+    }
+}
+
+#[derive(Clone)]
+struct MessagingMcp {
+    state: Arc<message::MessagingState>,
+    tool_router: ToolRouter<MessagingMcp>,
+}
+
+#[tool_router]
+impl MessagingMcp {
+    fn new(state: Arc<message::MessagingState>) -> Self {
+        Self {
+            state,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(
+        name = "send_message",
+        description = "Send one authenticated Buzz message. Credentials stay inside this restricted MCP server and are never exposed to terminal or execute-code tools."
+    )]
+    async fn send_message(
+        &self,
+        Parameters(p): Parameters<message::SendMessageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        message::send_message(&self.state, p).await
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for MessagingMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(rmcp::model::Implementation::new(
+                "buzz-message-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "Use send_message for Buzz replies. Signing credentials are isolated in this server.",
+            )
+    }
 }
 
 #[tool_router]
@@ -176,13 +232,65 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         .with_ansi(false)
         .init();
 
-    let cwd = std::env::current_dir()?;
     let shim = shim::Shim::install()?;
-    let state = Arc::new(shell::SharedState::new(cwd, shim)?);
-
-    let service = DevMcp::new(state).serve(stdio()).await?;
-    service.waiting().await?;
+    match mcp_profile_for_command(&cmd) {
+        McpProfile::Messaging => {
+            let state = Arc::new(message::MessagingState::new(shim));
+            let service = MessagingMcp::new(state).serve(stdio()).await?;
+            service.waiting().await?;
+        }
+        McpProfile::Developer => {
+            let cwd = std::env::current_dir()?;
+            let state = Arc::new(shell::SharedState::new(cwd, shim)?);
+            let service = DevMcp::new(state).serve(stdio()).await?;
+            service.waiting().await?;
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod messaging_profile_tests {
+    use super::*;
+
+    #[test]
+    fn buzz_message_mcp_selects_the_restricted_messaging_profile() {
+        assert_eq!(
+            mcp_profile_for_command("buzz-message-mcp"),
+            McpProfile::Messaging
+        );
+        assert_eq!(
+            mcp_profile_for_command("buzz-dev-mcp"),
+            McpProfile::Developer
+        );
+    }
+
+    #[test]
+    fn messaging_send_builds_only_the_fixed_buzz_cli_command() {
+        let args = message::send_message_args(&message::SendMessageParams {
+            channel: "channel-id".to_string(),
+            content: "HEALTH_ACK token".to_string(),
+            reply_to: Some("event-id".to_string()),
+            mentions: vec!["pubkey-a".to_string(), "pubkey-b".to_string()],
+        });
+        assert_eq!(
+            args,
+            vec![
+                "messages",
+                "send",
+                "--channel",
+                "channel-id",
+                "--content",
+                "-",
+                "--reply-to",
+                "event-id",
+                "--mention",
+                "pubkey-a",
+                "--mention",
+                "pubkey-b",
+            ]
+        );
+    }
 }
 
 /// Suppress the console window that Windows otherwise allocates for every

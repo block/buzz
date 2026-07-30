@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "buzz-dev-mcp"
 path = "src/main.rs"
 
+[[bin]]
+name = "buzz-message-mcp"
+path = "src/message_main.rs"
+
 [dependencies]
 buzz-cli = { path = "../buzz-cli" }
 git-credential-nostr = { path = "../git-credential-nostr" }
