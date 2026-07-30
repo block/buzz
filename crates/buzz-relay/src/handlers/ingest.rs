@@ -2481,7 +2481,12 @@ async fn ingest_event_inner(
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await
         {
-            warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
+            // error!, not warn!: the event was accepted but its side effects
+            // (channel creation, git repo seeding, …) did not run — the relay
+            // is now in a state the client believes it isn't. Production runs
+            // RUST_LOG=error, so warn! made these failures invisible during
+            // the #3527 triage.
+            error!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
         }
     }
 

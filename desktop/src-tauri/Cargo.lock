@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1047,7 +1047,9 @@ dependencies = [
  "neteq",
  "nostr",
  "notify-rust",
+ "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "opus",
  "plist",
  "png 0.18.1",
@@ -1085,6 +1087,7 @@ dependencies = [
  "url",
  "user-idle",
  "uuid",
+ "webkit2gtk",
  "window-vibrancy",
  "windows-sys 0.61.2",
  "zeroize",

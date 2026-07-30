@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -14,6 +15,7 @@ import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
+import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -153,6 +155,7 @@ Widget _buildTestable({
   String? initialMessageId,
   String? initialThreadRootId,
   Map<String, List<NostrEvent>> threadReplies = const {},
+  Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   RelaySessionNotifier? relaySessionNotifier,
 }) {
@@ -193,6 +196,10 @@ Widget _buildTestable({
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) async => entry.value),
+      for (final entry in pendingThreadReplies.entries)
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) => entry.value),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -1130,7 +1137,11 @@ void main() {
         // Small scrolls that keep the newest message visible, so isAtLatest
         // stays true while the scroll offset becomes non-zero. This lets a
         // later programmatic jumpTo dispatch ScrollEndNotification.
-        for (final dy in const [10.0, 20.0, 30.0]) {
+        //
+        // Each drag must clear `kDragSlopDefault`; below it `tester.drag`
+        // sends a single sub-slop move, which a message bubble now claims as
+        // a tap and pushes the thread page over this list.
+        for (final dy in const [30.0, 30.0, 30.0]) {
           await tester.drag(
             find.byKey(const ValueKey('channel-message-list')),
             Offset(0, dy),
@@ -1467,6 +1478,51 @@ void main() {
         reactionRect.left,
         avatarRect.left + messageAvatarSize + messageAvatarContentGap,
       );
+    });
+
+    testWidgets('a reacted message offers the + picker in the timeline', (
+      tester,
+    ) async {
+      // Desktop puts the picker trigger beside existing reactions on every row,
+      // so reacting doesn't require discovering the long-press sheet.
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(id: 'msg1', pubkey: 'alice', content: 'ship it'),
+            _reaction(id: 'reaction-1', targetId: 'msg1'),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('add-reaction-pill')));
+      // Not pumpAndSettle: with no dataset asset in a widget test the sheet
+      // shows its loading spinner, which animates forever.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(EmojiPickerSheet), findsOneWidget);
+    });
+
+    testWidgets('an unreacted message keeps the timeline free of chrome', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [_textMsg(id: 'msg1', pubkey: 'alice', content: 'ship it')],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // No reactions, no row — the + only trails reactions that already exist.
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsNothing);
     });
 
     testWidgets('renders member_left system event', (tester) async {
@@ -2268,14 +2324,322 @@ void main() {
       expect(find.byType(DayDivider), findsNWidgets(2));
       expect(find.text(formatDayHeading(rootCreatedAt)), findsOneWidget);
       expect(find.text(formatDayHeading(nextDayCreatedAt)), findsOneWidget);
+      // The list runs top-down (head first), so tail spacing lives on the list
+      // and reply groups carry none.
       final threadList = tester.widget<ScrollablePositionedList>(
         find.byKey(const ValueKey('thread-message-list')),
       );
-      expect(threadList.padding!.bottom, 0);
+      expect(threadList.reverse, isFalse);
+      expect(threadList.padding!.bottom, Grid.xs);
       final newestThreadGroup = tester.widget<Padding>(
         find.byKey(const ValueKey('thread-message-group-reply-next-day')),
       );
-      expect(newestThreadGroup.padding, const EdgeInsets.only(bottom: Grid.xs));
+      expect(newestThreadGroup.padding, EdgeInsets.zero);
+
+      // The head sits above its replies rather than jammed against the
+      // composer, matching desktop's thread panel.
+      final headY = tester
+          .getTopLeft(
+            find.byKey(const ValueKey('thread-message-group-thread-root')),
+          )
+          .dy;
+      final oldestReplyY = tester
+          .getTopLeft(
+            find.byKey(const ValueKey('thread-message-group-reply-same-day')),
+          )
+          .dy;
+      final newestReplyY = tester
+          .getTopLeft(
+            find.byKey(const ValueKey('thread-message-group-reply-next-day')),
+          )
+          .dy;
+      expect(headY, lessThan(oldestReplyY));
+      expect(oldestReplyY, lessThan(newestReplyY));
+    });
+
+    testWidgets(
+      'initial thread hydration keeps the head visible instead of following the tail',
+      (tester) async {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsOneWidget,
+        );
+
+        completer.complete(replies);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('a reaction landing while the thread is open shows up there', (
+      tester,
+    ) async {
+      // The thread's own relay query is one-shot and asks only for content
+      // kinds, so it can never carry a reaction that arrives afterwards. Until
+      // the live channel events were folded in, the pill (and its burst) only
+      // appeared after leaving the thread and coming back, which refetched.
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final reply = _textMsg(
+        id: 'reply-1',
+        pubkey: 'bob',
+        content: 'A reply',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          messagesNotifier: messagesNotifier,
+          threadReplies: {
+            'thread-root': [reply],
+          },
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('reaction-pill-👍')), findsNothing);
+
+      // The reaction arrives over the channel socket, as it does on device.
+      messagesNotifier.setMessages([
+        rootEvent,
+        _reaction(id: 'reaction-1', targetId: 'reply-1'),
+      ]);
+      await tester.pumpAndSettle();
+
+      // Still on the thread route — no pop needed for the pill to appear.
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(find.byKey(const ValueKey('reaction-pill-👍')), findsOneWidget);
+    });
+
+    testWidgets('a live deletion does not restore the routed thread head', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final reply = _textMsg(
+        id: 'reply-1',
+        pubkey: 'bob',
+        content: 'A reply',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          messagesNotifier: messagesNotifier,
+          threadReplies: {
+            'thread-root': [reply],
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Thread root'), findsOneWidget);
+
+      messagesNotifier.setMessages([
+        rootEvent,
+        _deletion(id: 'delete-root', targetIds: ['thread-root']),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Thread root'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('thread-message-deleted')),
+        findsOneWidget,
+      );
+      expect(find.text('This message was deleted'), findsOneWidget);
+    });
+
+    testWidgets('thread replies earn the + only once they carry a reaction', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final bareReply = _textMsg(
+        id: 'reply-bare',
+        pubkey: 'bob',
+        content: 'No reactions here',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+      final reactedReply = _textMsg(
+        id: 'reply-reacted',
+        pubkey: 'bob',
+        content: 'This one has a reaction',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            rootEvent,
+            _reaction(id: 'reaction-1', targetId: 'reply-reacted'),
+          ],
+          threadReplies: {
+            'thread-root': [bareReply, reactedReply],
+          },
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The head keeps a standing +; the bare reply gets none, so a thread
+      // reads as quietly as the channel does. Two + pills, not three: the head
+      // and the reacted reply.
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsNWidgets(2));
+      final headRow = find.descendant(
+        of: find.byKey(const ValueKey('thread-message-group-thread-root')),
+        matching: find.byKey(const ValueKey('add-reaction-pill')),
+      );
+      expect(headRow, findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('thread-message-group-reply-bare')),
+          matching: find.byKey(const ValueKey('add-reaction-pill')),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('thread-message-group-reply-reacted')),
+          matching: find.byKey(const ValueKey('add-reaction-pill')),
+        ),
+        findsOneWidget,
+      );
     });
   });
 }

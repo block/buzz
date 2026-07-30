@@ -65,6 +65,22 @@ class _MessageBubble extends ConsumerWidget {
           key: ValueKey('message-row-${message.id}'),
           borderRadius: BorderRadius.circular(Radii.md),
           highlightColor: context.colors.primary.withValues(alpha: 0.1),
+          // Tap opens the thread; long-press still opens the action sheet.
+          // MessageContent handles mention, channel-link, and media taps.
+          onTap: allMessages == null
+              ? null
+              : () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ThreadDetailPage(
+                      threadHead: message,
+                      allMessages: allMessages!,
+                      channelId: currentChannelId,
+                      currentPubkey: currentPubkey,
+                      isMember: isMember,
+                      isArchived: isArchived,
+                    ),
+                  ),
+                ),
           onLongPress: () => showMessageActions(
             context: context,
             ref: ref,
@@ -157,6 +173,7 @@ class _MessageBubble extends ConsumerWidget {
                           baseStyle: messageBodyTextStyle.copyWith(
                             color: context.colors.onSurface,
                           ),
+                          scaleEmojiOnly: true,
                           mediaCarouselTrailingOverflow: Grid.gutter,
                           onMediaReply: allMessages == null
                               ? null
@@ -202,9 +219,16 @@ class _MessageBubble extends ConsumerWidget {
                         ),
                         if (message.reactions.isNotEmpty)
                           ReactionRow(
+                            messageId: message.id,
                             reactions: message.reactions,
                             onToggle: (emoji) =>
                                 toggleReaction(ref, message, emoji),
+                            showAddButton: isMember && !isArchived,
+                            onAddReaction: () => showAddReactionPicker(
+                              context: context,
+                              ref: ref,
+                              message: message,
+                            ),
                           ),
                       ],
                     ),
