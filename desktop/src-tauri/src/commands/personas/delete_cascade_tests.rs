@@ -24,6 +24,7 @@ fn make_agent(
         auth_tag: None,
         relay_url: "ws://localhost:3000".to_string(),
         avatar_url: None,
+        name_color: None,
         acp_command: "buzz-acp".to_string(),
         agent_command: "buzz-agent".to_string(),
         agent_command_override: None,

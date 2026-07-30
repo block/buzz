@@ -239,6 +239,7 @@ function MessageComposerImpl({
     editable: !disabled,
     mentionNames: mentions.knownNames,
     agentMentionNames: mentions.agentKnownNames,
+    agentMentionColors: mentions.agentKnownNameColors,
     channelNames: channelLinks.knownChannelNames,
     customEmoji,
     onSubmit: () => submitMessageRef.current(),

@@ -315,6 +315,7 @@ pub fn build_managed_agent_summary(
         parallelism: record.parallelism,
         system_prompt: effective_prompt,
         avatar_url: record.avatar_url.clone(),
+        name_color: record.name_color.clone(),
         model: effective_model,
         model_source,
         provider: effective_provider,

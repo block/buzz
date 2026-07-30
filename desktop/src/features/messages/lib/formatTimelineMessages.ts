@@ -196,6 +196,8 @@ export function formatTimelineMessages(
   relaySelfPubkey?: string | null,
   /** Profiles for verified agent owners, fetched in one batch by the surface. */
   ownerProfiles?: UserProfileLookup,
+  /** Map from lowercase pubkey → configured name-color palette id for agent authors. */
+  nameColorLookup?: Map<string, string>,
 ): TimelineMessage[] {
   const currentPubkeyLower = currentPubkey?.toLowerCase();
   const roleByPubkey = new Map<string, string>();
@@ -447,6 +449,7 @@ export function formatTimelineMessages(
         currentUserAvatarUrl,
         profiles,
       }),
+      nameColor: nameColorLookup?.get(authorPubkey.toLowerCase()) ?? null,
       role,
       personaDisplayName:
         role === "bot"

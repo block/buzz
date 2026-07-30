@@ -135,6 +135,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onUnfollowThread,
   unfollowThreadById,
   personaLookup,
+  nameColorLookup,
   profiles,
   ownerProfiles,
   openThreadHeadId,
@@ -648,6 +649,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             isFollowingThreadById={isFollowingThreadById}
             isMessageUnreadById={isMessageUnreadById}
             personaLookup={personaLookup}
+            nameColorLookup={nameColorLookup}
             profiles={profiles}
             ownerProfiles={ownerProfiles}
             unfollowThreadById={unfollowThreadById}
@@ -871,6 +873,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onScrollTargetSettled={resolveScrollTarget}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={onUnfollowThread}
+                nameColorLookup={nameColorLookup}
                 profiles={profiles}
                 replyTargetMessage={threadReplyTargetMessage}
                 scrollTargetHighlights={!layoutScrollTargetId}

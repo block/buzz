@@ -32,6 +32,8 @@ export type TimelineMessage = {
   /** Viewer-relative owner label (for example, "you" or "baxen"). */
   ownerLabel?: string | null;
   avatarUrl?: string | null;
+  /** Author's configured name color (palette id), if any. */
+  nameColor?: string | null;
   role?: string;
   /** For bot messages, the display name of the persona this bot was created from. */
   personaDisplayName?: string;

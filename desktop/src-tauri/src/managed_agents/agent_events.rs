@@ -165,6 +165,7 @@ mod tests {
             auth_tag: Some("authtagsecret".to_string()),
             relay_url: "wss://relay.example".to_string(),
             avatar_url: Some("https://example.com/a.png".to_string()),
+            name_color: None,
             acp_command: "buzz-acp".to_string(),
             agent_command: "goose".to_string(),
             agent_command_override: None,

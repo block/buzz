@@ -14,6 +14,7 @@ import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { getAgentNameColorStyle } from "@/shared/lib/agentNameColors";
 import { useNow } from "@/shared/lib/useNow";
 import type {
   ManagedAgent,
@@ -233,7 +234,12 @@ function AgentSummary({
         )}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="truncate font-medium text-foreground">{agent.name}</p>
+            <p
+              className="truncate font-medium text-foreground"
+              style={getAgentNameColorStyle(agent.nameColor)}
+            >
+              {agent.name}
+            </p>
             {personaLabel ? (
               <Badge variant="secondary">{personaLabel}</Badge>
             ) : null}

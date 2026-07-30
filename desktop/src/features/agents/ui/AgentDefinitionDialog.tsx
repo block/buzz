@@ -13,6 +13,7 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
+import { AgentNameColorPicker } from "./AgentNameColorPicker";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
@@ -142,6 +143,7 @@ export function AgentDefinitionDialog({
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
+  const [nameColor, setNameColor] = React.useState<string | null>(null);
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
@@ -202,6 +204,7 @@ export function AgentDefinitionDialog({
 
     setDisplayName(initialValues.displayName);
     setAvatarUrl(initialValues.avatarUrl ?? "");
+    setNameColor(initialValues.nameColor ?? null);
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
@@ -353,6 +356,7 @@ export function AgentDefinitionDialog({
     const baseInput = {
       displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
+      nameColor: nameColor ?? undefined,
       systemPrompt: systemPrompt,
       runtime: runtimeForSubmit,
       model: modelForSubmit,
@@ -767,20 +771,30 @@ export function AgentDefinitionDialog({
           onChangeCapture={() => setHasUserChanges(true)}
           onSubmit={handleSubmitForm}
         >
-          <AgentCreationPreview
-            avatarUrl={previewAvatarUrl}
-            disabled={isPending || isAvatarUploadPending}
-            label={previewLabel}
-            onClearAvatar={() => {
-              setHasUserChanges(true);
-              setAvatarUrl("");
-            }}
-            onUploadPendingChange={setIsAvatarUploadPending}
-            onSelectAvatar={(nextAvatarUrl) => {
-              setHasUserChanges(true);
-              setAvatarUrl(nextAvatarUrl);
-            }}
-          />
+          <div className="flex flex-col gap-3">
+            <AgentCreationPreview
+              avatarUrl={previewAvatarUrl}
+              disabled={isPending || isAvatarUploadPending}
+              label={previewLabel}
+              onClearAvatar={() => {
+                setHasUserChanges(true);
+                setAvatarUrl("");
+              }}
+              onUploadPendingChange={setIsAvatarUploadPending}
+              onSelectAvatar={(nextAvatarUrl) => {
+                setHasUserChanges(true);
+                setAvatarUrl(nextAvatarUrl);
+              }}
+            />
+            <AgentNameColorPicker
+              disabled={isPending}
+              onChange={(next) => {
+                setHasUserChanges(true);
+                setNameColor(next);
+              }}
+              value={nameColor}
+            />
+          </div>
 
           <div className="space-y-5">
             <div className="space-y-1.5">

@@ -491,6 +491,7 @@ mod tests {
             auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear in snapshot
             relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear in snapshot
             avatar_url: Some("https://example.com/avatar.png".to_string()),
+            name_color: None,
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear in snapshot
             agent_command: "goose".to_string(),            // MUST NOT appear in snapshot
             agent_command_override: Some("goose-override".to_string()), // MUST NOT appear

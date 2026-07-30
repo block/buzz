@@ -260,6 +260,7 @@ mod tests {
             auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear
             relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear
             avatar_url: Some(format!("https://example.com/{name}.png")),
+            name_color: None,
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear
             agent_command: "goose".to_string(),            // MUST NOT appear
             agent_command_override: None,

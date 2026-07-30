@@ -351,6 +351,7 @@ export type ManagedAgent = {
   parallelism: number;
   systemPrompt: string | null;
   avatarUrl: string | null;
+  nameColor: string | null;
   model: string | null;
   modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
@@ -731,6 +732,7 @@ export type AgentPersona = {
   id: string;
   displayName: string;
   avatarUrl: string | null;
+  nameColor: string | null;
   systemPrompt: string;
   /** Preferred ACP runtime ID (e.g. "goose", "claude"). */
   runtime: string | null;
@@ -784,6 +786,7 @@ export type PersonaBehaviorInput = {
 export type CreatePersonaInput = {
   displayName: string;
   avatarUrl?: string;
+  nameColor?: string;
   systemPrompt: string;
   runtime?: string;
   model?: string;
@@ -802,6 +805,7 @@ export type UpdatePersonaInput = {
   id: string;
   displayName: string;
   avatarUrl?: string;
+  nameColor?: string;
   systemPrompt: string;
   runtime?: string;
   model?: string;

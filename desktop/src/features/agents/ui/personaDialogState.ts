@@ -63,6 +63,7 @@ export function duplicatePersonaDialogState(
     initialValues: {
       displayName: `${persona.displayName} copy`,
       avatarUrl: persona.avatarUrl ?? "",
+      nameColor: persona.nameColor ?? undefined,
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
@@ -113,6 +114,7 @@ export function editPersonaDialogState(
       id: persona.id,
       displayName: persona.displayName,
       avatarUrl: persona.avatarUrl ?? "",
+      nameColor: persona.nameColor ?? undefined,
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,

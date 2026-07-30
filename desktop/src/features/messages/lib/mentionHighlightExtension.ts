@@ -2,6 +2,8 @@ import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
+import { colorIdToCssVarValue } from "@/shared/lib/agentNameColors";
+
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
 
 /**
@@ -18,6 +20,7 @@ export const MentionHighlightExtension = Extension.create({
     return {
       names: [] as string[],
       agentNames: [] as string[],
+      agentNameColors: {} as Record<string, string>,
       channelNames: [] as string[],
     };
   },
@@ -34,6 +37,7 @@ export const MentionHighlightExtension = Extension.create({
               state.doc,
               extension.storage.names,
               extension.storage.agentNames,
+              extension.storage.agentNameColors,
               extension.storage.channelNames,
             );
           },
@@ -44,6 +48,7 @@ export const MentionHighlightExtension = Extension.create({
                 tr.doc,
                 extension.storage.names,
                 extension.storage.agentNames,
+                extension.storage.agentNameColors,
                 extension.storage.channelNames,
               );
             }
@@ -62,6 +67,7 @@ export const MentionHighlightExtension = Extension.create({
                 tr.doc,
                 extension.storage.names,
                 extension.storage.agentNames,
+                extension.storage.agentNameColors,
                 extension.storage.channelNames,
               );
             }
@@ -73,6 +79,7 @@ export const MentionHighlightExtension = Extension.create({
                 tr.doc,
                 extension.storage.names,
                 extension.storage.agentNames,
+                extension.storage.agentNameColors,
                 extension.storage.channelNames,
               );
             }
@@ -239,6 +246,7 @@ function buildDecorations(
   doc: Parameters<typeof DecorationSet.create>[0],
   names: string[],
   agentNames: string[],
+  agentNameColors: Record<string, string>,
   channelNames: string[],
 ): DecorationSet {
   if (
@@ -275,7 +283,7 @@ function buildDecorations(
       pos,
       agentMentionPatterns,
       "mention-chip agent-mention-highlight",
-      { hideMentionPrefix: true },
+      { hideMentionPrefix: true, nameColors: agentNameColors },
     );
     addMatchesForPatterns(
       decorations,
@@ -295,7 +303,7 @@ function addMatchesForPatterns(
   position: number,
   patterns: RegExp[],
   className: string,
-  options?: { hideMentionPrefix?: boolean },
+  options?: { hideMentionPrefix?: boolean; nameColors?: Record<string, string> },
 ) {
   for (const pattern of patterns) {
     pattern.lastIndex = 0;
@@ -303,6 +311,12 @@ function addMatchesForPatterns(
     while (match !== null) {
       const from = position + match.index;
       const to = from + match[0].length;
+      const matchedName = match[1] ?? match[0].replace(/^[@#]/, "");
+      const colorId = options?.nameColors?.[matchedName.trim().toLowerCase()];
+      const colorVar = colorIdToCssVarValue(colorId);
+      const style = colorVar
+        ? `color: ${colorVar}; background: color-mix(in srgb, ${colorVar} 15%, transparent)`
+        : undefined;
       if (options?.hideMentionPrefix && match[0].startsWith("@")) {
         decorations.push(
           Decoration.inline(from, from + 1, {
@@ -314,6 +328,7 @@ function addMatchesForPatterns(
           Decoration.inline(from + 1, to, {
             class: className,
             spellcheck: "false",
+            ...(style ? { style } : {}),
           }),
         );
       } else {
@@ -321,6 +336,7 @@ function addMatchesForPatterns(
           Decoration.inline(from, to, {
             class: className,
             spellcheck: "false",
+            ...(style ? { style } : {}),
           }),
         );
       }

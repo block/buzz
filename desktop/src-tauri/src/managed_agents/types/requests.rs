@@ -76,6 +76,8 @@ pub fn apply_persona_behavior(
 pub struct CreatePersonaRequest {
     pub display_name: String,
     pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub name_color: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -103,6 +105,8 @@ pub struct UpdatePersonaRequest {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub name_color: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -272,6 +276,7 @@ mod tests {
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
             avatar_url: None,
+            name_color: None,
             system_prompt: "prompt".to_string(),
             runtime: None,
             model: None,

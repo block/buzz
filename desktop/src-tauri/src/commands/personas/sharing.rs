@@ -146,6 +146,7 @@ mod tests {
             id: "catalog-reviewer".to_string(),
             display_name: "Catalog Reviewer".to_string(),
             avatar_url: None,
+            name_color: None,
             system_prompt: "Review the catalog.".to_string(),
             runtime: None,
             model: None,

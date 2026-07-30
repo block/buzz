@@ -79,6 +79,7 @@ export type RichTextEditorOptions = {
   editable?: boolean;
   mentionNames?: string[];
   agentMentionNames?: string[];
+  agentMentionColors?: Record<string, string>;
   channelNames?: string[];
   /** Known custom-emoji set; used to render `:shortcode:` inline as images. */
   customEmoji?: CustomEmoji[];
@@ -197,6 +198,7 @@ export function useRichTextEditor({
   editable = true,
   mentionNames,
   agentMentionNames,
+  agentMentionColors,
   channelNames,
   customEmoji,
   onSubmit,
@@ -644,17 +646,23 @@ export function useRichTextEditor({
     if (!editor) return;
     // biome-ignore lint/suspicious/noExplicitAny: TipTap's Storage type doesn't include dynamic extension keys
     const storage = (editor.storage as any).mentionHighlight as
-      | { names: string[]; agentNames: string[]; channelNames: string[] }
+      | {
+          names: string[];
+          agentNames: string[];
+          agentNameColors: Record<string, string>;
+          channelNames: string[];
+        }
       | undefined;
     if (storage) {
       storage.names = mentionNames ?? [];
       storage.agentNames = agentMentionNames ?? [];
+      storage.agentNameColors = agentMentionColors ?? {};
       storage.channelNames = channelNames ?? [];
       // Force the plugin to re-decorate by dispatching a metadata transaction.
       const { tr } = editor.state;
       editor.view.dispatch(tr.setMeta(mentionHighlightKey, true));
     }
-  }, [editor, mentionNames, agentMentionNames, channelNames]);
+  }, [editor, mentionNames, agentMentionNames, agentMentionColors, channelNames]);
 
   // Custom-emoji set changes: re-resolve the `src` attr on any existing
   // node in the doc (e.g. an emoji's image was just published).

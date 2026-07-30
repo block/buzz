@@ -9,12 +9,16 @@ import {
 } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
+import { getAgentNameColorStyle } from "@/shared/lib/agentNameColors";
 import { cn } from "@/shared/lib/cn";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
+export type BotActivityAgent = Pick<
+  ManagedAgent,
+  "pubkey" | "name" | "nameColor"
+>;
 
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
@@ -257,7 +261,12 @@ export function BotActivityComposerAction({
                   displayName={agent.name}
                   size="sm"
                 />
-                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+                <span
+                  className="min-w-0 flex-1 truncate"
+                  style={getAgentNameColorStyle(agent.nameColor)}
+                >
+                  {agent.name}
+                </span>
                 <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-80">
                   View activity
                 </span>

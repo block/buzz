@@ -77,6 +77,7 @@ type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   avatarUrl?: string | null;
+  nameColor?: string | null;
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
@@ -114,6 +115,7 @@ type MockPersonaSeed = {
   id?: string;
   displayName: string;
   avatarUrl?: string | null;
+  nameColor?: string | null;
   systemPrompt: string;
   updatedAt?: string;
   isActive?: boolean;
@@ -759,6 +761,7 @@ type RawManagedAgent = {
   parallelism: number;
   system_prompt: string | null;
   avatar_url: string | null;
+  name_color?: string | null;
   model: string | null;
   provider?: string | null;
   env_vars?: Record<string, string>;
@@ -825,6 +828,7 @@ type RawPersona = {
   id: string;
   display_name: string;
   avatar_url: string | null;
+  name_color?: string | null;
   system_prompt: string;
   runtime?: string | null;
   model?: string | null;
@@ -1526,6 +1530,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     parallelism: agent.parallelism,
     system_prompt: agent.system_prompt,
     avatar_url: agent.avatar_url ?? null,
+    name_color: agent.name_color ?? null,
     model: agent.model,
     provider: agent.provider ?? null,
     env_vars: { ...(agent.env_vars ?? {}) },
@@ -2062,6 +2067,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     parallelism: 1,
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
+    name_color: seed.nameColor ?? null,
     model: null,
     env_vars: {},
     status,
@@ -2218,6 +2224,7 @@ function resetMockPersonas(config?: E2eConfig) {
       id: persona.id ?? crypto.randomUUID(),
       display_name: persona.displayName,
       avatar_url: persona.avatarUrl ?? null,
+      name_color: persona.nameColor ?? null,
       system_prompt: persona.systemPrompt,
       runtime: persona.runtime ?? null,
       model: persona.model ?? null,

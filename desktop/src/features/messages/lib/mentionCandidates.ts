@@ -17,6 +17,7 @@ export type MentionCandidate = {
   teamMembers?: TeamMentionMember[];
   displayName: string | null;
   avatarUrl?: string | null;
+  nameColor?: string | null;
   isMember: boolean;
   role?: ChannelRole | null;
   personaName?: string | null;

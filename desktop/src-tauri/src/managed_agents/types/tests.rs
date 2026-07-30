@@ -475,6 +475,7 @@ fn sample_persona() -> AgentDefinition {
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
+        name_color: None,
         system_prompt: "You help.".to_string(),
         runtime: Some("goose".to_string()),
         model: Some("gpt-x".to_string()),
@@ -536,6 +537,23 @@ fn persona_catalog_source_survives_the_agent_store_fold() {
         .expect("slugged record must present a persona view");
 
     assert_eq!(view.catalog_source, persona.catalog_source);
+}
+
+#[test]
+fn persona_name_color_survives_the_agent_store_fold() {
+    // A local display preference is only useful if it's still there on the
+    // next launch, and `save_personas` funnels every definition through
+    // `into_agent_record`.
+    let mut persona = sample_persona();
+    persona.name_color = Some("blue".to_string());
+
+    let view = persona
+        .clone()
+        .into_agent_record()
+        .to_definition_view()
+        .expect("slugged record must present a persona view");
+
+    assert_eq!(view.name_color, persona.name_color);
 }
 
 #[test]

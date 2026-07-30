@@ -27,6 +27,8 @@ export type MessageLinkPillProps = {
 
 export type MarkdownRuntime = {
   agentMentionPubkeysByName?: Record<string, string>;
+  /** Name (lowercase) → agent name-color id, for coloring rendered mention chips. */
+  agentMentionNameColors?: Record<string, string>;
   channels: Channel[];
   imetaByUrl?: ImetaLookup;
   mentionPubkeysByName?: Record<string, string>;
@@ -56,6 +58,8 @@ export type MarkdownProps = {
   imetaByUrl?: ImetaLookup;
   interactive?: boolean;
   agentMentionPubkeysByName?: Record<string, string>;
+  /** Name (lowercase) → agent name-color id, for coloring rendered mention chips. */
+  agentMentionNameColors?: Record<string, string>;
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;
   mediaInset?: boolean;

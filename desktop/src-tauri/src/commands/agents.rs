@@ -838,6 +838,7 @@ pub async fn create_managed_agent(
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
             avatar_url: resolved_avatar_url.clone(),
+            name_color: linked_persona.as_ref().and_then(|p| p.name_color.clone()),
             acp_command: input
                 .acp_command
                 .as_deref()

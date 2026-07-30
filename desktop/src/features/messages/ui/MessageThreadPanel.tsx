@@ -99,6 +99,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
+  /** Map from lowercase pubkey → agent name-color id, for coloring mention chips. */
+  nameColorLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
   replyTargetMessage: TimelineMessage | null;
   scrollTargetId: string | null;
@@ -216,6 +218,7 @@ export function MessageThreadPanel({
   onSend,
   onToggleReaction,
   onUnfollowThread,
+  nameColorLookup,
   profiles,
   replyTargetMessage,
   scrollTargetId,
@@ -598,6 +601,7 @@ export function MessageThreadPanel({
               onUnfollowThread={
                 onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
               }
+              nameColorLookup={nameColorLookup}
               profiles={profiles}
               showDepthGuides={shouldShowThreadBranchGuides}
               videoReviewContext={videoReviewContextsByMessageId?.get(
@@ -756,6 +760,7 @@ export function MessageThreadPanel({
                         onMarkRead={onMarkRead}
                         onReply={onSelectReplyTarget}
                         onToggleReaction={onToggleReaction}
+                        nameColorLookup={nameColorLookup}
                         profiles={profiles}
                         showDepthGuides={shouldShowThreadBranchGuides}
                         videoReviewContext={videoReviewContextsByMessageId?.get(

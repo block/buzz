@@ -74,6 +74,8 @@ type MessageTimelineProps = {
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
+  /** Map from lowercase pubkey → agent name-color id, for coloring mention chips. */
+  nameColorLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
   ownerProfiles?: UserProfileLookup;
   followThreadById?: (rootId: string) => void;
@@ -171,6 +173,7 @@ const MessageTimelineBase = React.forwardRef<
     isMessageUnreadById,
     messageFooters,
     personaLookup,
+    nameColorLookup,
     profiles,
     ownerProfiles,
     onDelete,
@@ -644,6 +647,7 @@ const MessageTimelineBase = React.forwardRef<
       onVirtualizerScrollerChange={setVirtualizerScrollParent}
       onAtBottomStateChange={handleVirtualizerAtBottomStateChange}
       personaLookup={personaLookup}
+      nameColorLookup={nameColorLookup}
       profiles={profiles}
       ownerProfiles={ownerProfiles}
       searchActiveMessageId={searchActiveMessageId}

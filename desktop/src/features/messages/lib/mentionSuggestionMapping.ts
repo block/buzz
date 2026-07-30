@@ -12,6 +12,7 @@ export type MentionSuggestionCandidate = {
   teamId?: string;
   teamMembers?: TeamMentionMember[];
   avatarUrl?: string | null;
+  nameColor?: string | null;
   isAgent: boolean;
   isMember: boolean;
   role?: ChannelRole | null;
@@ -45,6 +46,7 @@ export function mapMentionCandidateToSuggestion(opts: {
     teamMembers: candidate.teamMembers,
     kind: candidate.kind,
     displayName: label,
+    nameColor: candidate.nameColor ?? null,
     avatarUrl:
       candidate.avatarUrl ??
       (candidate.pubkey

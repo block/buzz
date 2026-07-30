@@ -17,7 +17,7 @@ import type { PanelValueSetter } from "./useChannelPanelHistoryState";
 
 export type ChannelAgentSessionAgent = Pick<
   ManagedAgent,
-  "pubkey" | "name" | "status"
+  "pubkey" | "name" | "status" | "nameColor"
 > & {
   agentSource: "managed" | "member-bot" | "relay";
   canInterruptTurn: boolean;
@@ -66,6 +66,7 @@ export function buildChannelAgentSessionCandidates({
     byPubkey.set(normalizePubkey(agent.pubkey), {
       pubkey: agent.pubkey,
       name: agent.name,
+      nameColor: null,
       status: relayStatusToManagedStatus(agent.status),
       agentSource: "relay",
       canInterruptTurn: false,
@@ -80,6 +81,7 @@ export function buildChannelAgentSessionCandidates({
     byPubkey.set(key, {
       pubkey: agent.pubkey,
       name: agent.name,
+      nameColor: agent.nameColor,
       status: agent.status,
       agentSource: "managed",
       canInterruptTurn: true,
@@ -97,6 +99,7 @@ export function buildChannelAgentSessionCandidates({
     byPubkey.set(key, {
       pubkey: member.pubkey,
       name: member.displayName ?? truncatePubkey(member.pubkey),
+      nameColor: null,
       status: "deployed",
       agentSource: "member-bot",
       canInterruptTurn: false,
