@@ -493,7 +493,19 @@ fn secret_values_from(vars: impl IntoIterator<Item = (String, String)>) -> Vec<S
 }
 
 /// Proxy variables whose value embeds a credential in its userinfo.
-const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
+///
+/// npm's own `npm_config_*` aliases are here too: npm resolves them ahead of
+/// the conventional names and echoes the result from `npm config list`, and
+/// neither name carries a marker [`name_marks_secret`] would catch. Matching is
+/// case-insensitive because the caller uppercases the name first, which is what
+/// npm's lowercase spelling needs.
+const PROXY_VAR_NAMES: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NPM_CONFIG_PROXY",
+    "NPM_CONFIG_HTTPS_PROXY",
+];
 
 /// Whether an environment variable's name marks its value as a credential.
 ///

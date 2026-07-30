@@ -347,6 +347,102 @@ fn test_a_proxy_without_credentials_contributes_no_secret() {
     assert!(secrets.is_empty(), "got: {secrets:?}");
 }
 
+/// npm reads its own `npm_config_*` aliases in preference to the conventional
+/// proxy variables and prints the resolved value back, so a credential set only
+/// under an alias would otherwise never enter the scrub list. npm spells them
+/// in lowercase, so both cases have to classify.
+#[test]
+fn test_npm_proxy_aliases_are_classified_in_either_case() {
+    let secrets = secret_values_from([
+        (
+            "npm_config_proxy".to_string(),
+            "http://corpuser:lowerplain@proxy.example:8080".to_string(),
+        ),
+        (
+            "NPM_CONFIG_PROXY".to_string(),
+            "http://corpuser:upperplain@proxy.example:8080".to_string(),
+        ),
+        (
+            "npm_config_https_proxy".to_string(),
+            "http://corpuser:lowertls@proxy.example:8080".to_string(),
+        ),
+        (
+            "NPM_CONFIG_HTTPS_PROXY".to_string(),
+            "http://corpuser:uppertls@proxy.example:8080".to_string(),
+        ),
+    ]);
+
+    assert_eq!(
+        secrets,
+        vec![
+            "corpuser:lowerplain",
+            "corpuser:upperplain",
+            "corpuser:lowertls",
+            "corpuser:uppertls",
+        ]
+    );
+}
+
+/// The alias carries the same userinfo-only policy as the conventional names:
+/// a credential-less alias contributes nothing, so the proxy stays named in the
+/// record.
+#[test]
+fn test_an_npm_proxy_alias_without_credentials_contributes_no_secret() {
+    let secrets = secret_values_from([
+        (
+            "npm_config_proxy".to_string(),
+            "http://proxy.example:8080".to_string(),
+        ),
+        (
+            "NPM_CONFIG_HTTPS_PROXY".to_string(),
+            "http://user@proxy.example:8080".to_string(),
+        ),
+    ]);
+
+    assert!(secrets.is_empty(), "got: {secrets:?}");
+}
+
+/// The classifier and the reporter have to agree: an alias credential that
+/// classifies but never reaches the scrub list still leaks. This drives the
+/// reporter with exactly what the classifier produced for an alias, and asserts
+/// the log and the returned step both come back clean.
+#[test]
+fn test_an_npm_alias_credential_is_redacted_from_the_log_and_the_returned_step() {
+    let password = "hunter2pass";
+    let h = harness_with_secrets(secret_values_from([(
+        "npm_config_proxy".to_string(),
+        format!("http://corpuser:{password}@proxy.example:8080"),
+    )]));
+
+    let returned = h.reporter.record_attempt(
+        1,
+        InstallOutcome {
+            step: InstallStepResult {
+                stderr: format!(
+                    "npm ERR! proxy=http://corpuser:{password}@proxy.example:8080 tunneling failed"
+                ),
+                ..step("cli", false, "")
+            },
+            log_stdout: String::new(),
+            log_stderr: format!(
+                "npm config: proxy = http://corpuser:{password}@proxy.example:8080"
+            ),
+        },
+    );
+
+    let log = h.log_contents();
+    assert!(!log.contains(password), "log leaked the password: {log}");
+    assert!(
+        log.contains("proxy.example"),
+        "the proxy host is diagnostic and must survive: {log}"
+    );
+    assert!(
+        !returned.stderr.contains(password),
+        "the returned step leaked the password: {}",
+        returned.stderr
+    );
+}
+
 /// `*_PATH` variables must not be mistaken for personal access tokens. A
 /// `contains("_PAT")` rule would match `PATH` itself and scrub every directory
 /// name out of the log, which is why the rule matches `_PAT` as a suffix.
