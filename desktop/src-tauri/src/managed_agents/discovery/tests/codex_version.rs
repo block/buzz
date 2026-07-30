@@ -2,6 +2,33 @@ use super::super::probe_codex_acp_version_with_path;
 
 #[cfg(unix)]
 #[test]
+fn probe_codex_acp_version_parses_full_semver_output() {
+    use super::super::probe_codex_acp_version;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Simulate a current `@agentclientprotocol/codex-acp` output.
+    let dir = std::env::temp_dir().join(format!("buzz-probe-1x-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("codex-acp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    let version = probe_codex_acp_version(&bin);
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(
+        version,
+        Some((1, 1, 7)),
+        "adapter output must parse to its full semantic version"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn probe_codex_acp_version_uses_augmented_path_for_env_shebang_interpreter() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

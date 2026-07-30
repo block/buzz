@@ -93,7 +93,7 @@ mod tests {
             "https://goose-docs.ai/docs/getting-started/installation/"
         );
         assert!(goose.adapter_install_instructions_url.is_empty());
-        assert!(goose.cli_install_hint.contains("Goose CLI"));
+        assert!(goose.cli_install_hint.contains("Goose"));
         assert!(goose
             .cli_install_commands_windows
             .iter()

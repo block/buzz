@@ -10,6 +10,7 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
 } from "@/features/agents/hooks";
+import { runtimeSetupDetailText } from "@/features/agents/ui/runtimeSetupDetailText";
 import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -199,6 +200,11 @@ function RuntimeActions({
     isAvailable && runtime.authStatus.status === "logged_out";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
   const isWorking = isInstalling || isConnecting;
+  const installAction =
+    runtime.availability === "adapter_outdated" ||
+    runtime.availability === "cli_outdated"
+      ? "Update"
+      : "Install";
 
   return (
     <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
@@ -232,7 +238,7 @@ function RuntimeActions({
         // Rows needing multi-step setup render no action here — setup lives in
         // the Add-runtimes catalog. Custom rows keep their ••• menu instead.
         <Button
-          aria-label={`Install ${runtime.label}`}
+          aria-label={`${installAction} ${runtime.label}`}
           className="h-7 px-3 text-xs"
           data-testid={`doctor-runtime-install-${runtime.id}`}
           onClick={onInstall}
@@ -240,7 +246,7 @@ function RuntimeActions({
           type="button"
           variant="outline"
         >
-          {runtime.availability === "adapter_outdated" ? "Update" : "Install"}
+          {installAction}
         </Button>
       ) : null}
     </div>
@@ -355,7 +361,13 @@ export function HarnessRow({
       onError: (error) => {
         setInstallResult({
           success: false,
-          error: error instanceof Error ? error.message : "Install failed.",
+          error:
+            error instanceof Error
+              ? error.message
+              : runtime.availability === "adapter_outdated" ||
+                  runtime.availability === "cli_outdated"
+                ? "Update failed."
+                : "Install failed.",
         });
       },
     });
@@ -384,6 +396,13 @@ export function HarnessRow({
             : "Request failed."
         }`
       : null;
+  const setupDetailText =
+    runtime.availability === "available" ? "" : runtimeSetupDetailText(runtime);
+  const hasInstallInstructions =
+    runtime.installInstructionsUrl.trim().length > 0;
+  const hasSetupGuidance =
+    runtime.availability !== "available" &&
+    (setupDetailText.length > 0 || hasInstallInstructions);
 
   if (editing) {
     return (
@@ -451,13 +470,13 @@ export function HarnessRow({
           />
         </div>
 
-        {runtime.availability !== "available" ? (
+        {hasSetupGuidance ? (
           <div
             className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground"
             data-testid={`doctor-runtime-guidance-${runtime.id}`}
           >
-            <p>{runtime.installHint}</p>
-            {runtime.installInstructionsUrl.trim().length > 0 ? (
+            {setupDetailText ? <p>{setupDetailText}</p> : null}
+            {hasInstallInstructions ? (
               <button
                 className="inline-flex shrink-0 items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
                 onClick={() => void openUrl(runtime.installInstructionsUrl)}

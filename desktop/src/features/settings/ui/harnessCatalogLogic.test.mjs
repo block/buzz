@@ -24,6 +24,8 @@ function entry(overrides = {}) {
     avatarUrl: "",
     command: null,
     binaryPath: null,
+    cliVersion: null,
+    minimumCliVersion: null,
     defaultArgs: [],
     mcpCommand: null,
     modelEnvVar: null,
@@ -270,6 +272,10 @@ describe("entryStatusLabel", () => {
       "Update needed",
     );
     assert.equal(
+      entryStatusLabel(entry({ availability: "cli_outdated" })),
+      "Update needed",
+    );
+    assert.equal(
       entryStatusLabel(entry({ availability: "cli_missing" })),
       "CLI needed",
     );
@@ -358,6 +364,15 @@ describe("catalogPrimaryAction", () => {
     assert.deepEqual(
       catalogPrimaryAction(
         entry({ availability: "adapter_outdated", canAutoInstall: true }),
+      ),
+      { kind: "install", label: "Update" },
+    );
+  });
+
+  it("update label for outdated CLIs", () => {
+    assert.deepEqual(
+      catalogPrimaryAction(
+        entry({ availability: "cli_outdated", canAutoInstall: true }),
       ),
       { kind: "install", label: "Update" },
     );

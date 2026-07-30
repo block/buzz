@@ -6,6 +6,7 @@ import {
   useAcpRuntimesQuery,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
+import { runtimeSetupDetailText } from "@/features/agents/ui/runtimeSetupDetailText";
 import {
   getRuntimeDisplayLabel,
   RuntimeIcon,
@@ -399,6 +400,7 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
   const description = harnessDescription(entry.id);
   const isReady = entry.availability === "available";
   const docsUrl = entry.installInstructionsUrl.trim();
+  const setupDetailText = runtimeSetupDetailText(entry);
 
   function handleInstall() {
     setInstallError(null);
@@ -409,8 +411,13 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
         }
       },
       onError: (error) => {
+        const failedAction =
+          entry.availability === "adapter_outdated" ||
+          entry.availability === "cli_outdated"
+            ? "Update"
+            : "Install";
         setInstallError(
-          error instanceof Error ? error.message : "Install failed.",
+          error instanceof Error ? error.message : `${failedAction} failed.`,
         );
       },
     });
@@ -493,11 +500,11 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
           </p>
         ) : null}
 
-        {entry.installHint ? (
+        {setupDetailText ? (
           <div className="space-y-1">
             <p className="text-xs font-semibold text-muted-foreground">Setup</p>
             <p className="whitespace-pre-line text-sm leading-6 text-foreground">
-              {entry.installHint}
+              {setupDetailText}
             </p>
           </div>
         ) : null}
@@ -559,6 +566,12 @@ function TechnicalDetails({ entry }: { entry: AcpRuntimeCatalogEntry }) {
       : []),
     ...(entry.underlyingCliPath
       ? [{ label: "Underlying CLI", value: entry.underlyingCliPath }]
+      : []),
+    ...(entry.cliVersion
+      ? [{ label: "Version", value: entry.cliVersion }]
+      : []),
+    ...(entry.minimumCliVersion
+      ? [{ label: "Required", value: `>= ${entry.minimumCliVersion}` }]
       : []),
     ...(entry.binaryPath ? [{ label: "Path", value: entry.binaryPath }] : []),
     {

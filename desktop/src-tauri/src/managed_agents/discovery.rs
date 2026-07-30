@@ -11,16 +11,21 @@ use crate::managed_agents::{
 };
 
 mod runtime_metadata;
+mod version_probe;
 
 pub(crate) use runtime_metadata::KnownAcpRuntime;
+use version_probe::format_version_tuple;
+pub(crate) use version_probe::{
+    codex_adapter_availability, codex_adapter_is_outdated_with_path, goose_cli_availability,
+    probe_goose_version, MIN_GOOSE_VERSION, MIN_GOOSE_VERSION_DISPLAY,
+};
+#[cfg(test)]
+use version_probe::{
+    codex_adapter_is_outdated, parse_goose_version_output, probe_codex_acp_version,
+    probe_codex_acp_version_with_path, probe_goose_version_with_path,
+};
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
-#[allow(dead_code)] // Wired into Goose discovery/install in the next implementation steps.
-pub(crate) const MIN_GOOSE_VERSION: (u64, u64, u64) = (1, 44, 0);
-#[allow(dead_code)] // Wired into Goose discovery/install in the next implementation steps.
-pub(crate) const MIN_GOOSE_RELEASE_TAG: &str = "v1.44.0";
-#[allow(dead_code)] // Wired into Goose discovery/install in the next implementation steps.
-pub(crate) const MIN_GOOSE_VERSION_DISPLAY: &str = "1.44.0";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
@@ -92,7 +97,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_commands: &[],
         cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
         adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
+        cli_install_hint: "Buzz uses Goose for this runtime.",
         adapter_install_hint: "",
         skill_dir: Some(".goose/skills"),
         supports_acp_model_switching: false,
@@ -1000,17 +1005,6 @@ fn parse_semver_tag(s: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-#[allow(dead_code)] // Wired into Goose discovery in the next implementation step.
-fn parse_goose_version_output(output: &str) -> Option<(u64, u64, u64)> {
-    let version = output.split_whitespace().last()?;
-    let version = version.strip_prefix('v').unwrap_or(version);
-    let version = semver::Version::parse(version).ok()?;
-    if !version.pre.is_empty() || !version.build.is_empty() {
-        return None;
-    }
-    Some((version.major, version.minor, version.patch))
-}
-
 pub(crate) fn find_command(command: &str) -> Option<PathBuf> {
     resolve_command(command)
 }
@@ -1180,152 +1174,6 @@ pub(crate) fn classify_runtime(
     }
 }
 
-/// The oldest `codex-acp` version supported by Buzz managed agents.
-///
-/// Older 1.x adapters are detected successfully, but can still bundle a Codex runtime
-/// that does not reliably give `buzz` CLI subprocesses outbound relay access.
-///
-/// Bump policy: raise this only when a newer adapter fixes a defect that breaks managed
-/// agents, and only to a version already published on npm — every user below the floor is
-/// offered a reinstall on their next discovery pass.
-pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 1, 7);
-
-/// Probe the full version of a `codex-acp` binary by running `--version`.
-///
-/// The 1.x adapter (`@agentclientprotocol/codex-acp`) outputs
-/// `@agentclientprotocol/codex-acp <major>.<minor>.<patch>` on stdout and exits 0.
-/// The old 0.16.x adapter (`@zed-industries/codex-acp`) is a Rust binary that does
-/// not recognise `--version` and exits non-zero.
-///
-/// Returns the `(major, minor, patch)` triple on success, `None` on any failure
-/// (non-zero exit, unparseable output, timeout, or missing binary).
-///
-/// The parse is deliberately strict: exactly three numeric dot-separated components.
-/// Partial versions (`1.2`) and prerelease tags (`1.2.0-rc1`) return `None` and so
-/// classify as [`AcpAvailabilityStatus::AdapterOutdated`] — failing closed offers a
-/// reinstall rather than running an adapter whose version cannot be compared.
-///
-/// The probe is bounded by a 5-second deadline. The child is polled with
-/// [`std::process::Child::try_wait`] (the repo's standard deadline pattern) and
-/// killed if it does not exit in time.
-///
-/// Stdout is redirected to a temporary file rather than a pipe, so forked
-/// descendants cannot hold EOF open. Reads from a regular file return EOF at its
-/// current write position regardless of inherited file descriptors, cross-platform.
-pub(crate) fn probe_codex_acp_version(binary_path: &Path) -> Option<(u64, u64, u64)> {
-    probe_codex_acp_version_with_path(
-        binary_path,
-        crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
-    )
-}
-pub(crate) fn probe_codex_acp_version_with_path(
-    binary_path: &Path,
-    augmented_path: Option<&str>,
-) -> Option<(u64, u64, u64)> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    use std::time::{Duration, Instant};
-    const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-
-    // A regular file returns EOF at its current size even when a descendant
-    // inherits its descriptor, bounding the post-exit read cross-platform.
-    let mut tmp = tempfile::tempfile().ok()?;
-
-    let mut command = Command::new(binary_path);
-    command.arg("--version");
-    if let Some(path) = augmented_path {
-        command.env("PATH", path);
-    }
-    crate::util::configure_no_window(&mut command);
-    let mut child = command
-        .stdout(tmp.try_clone().ok()?)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-
-    // Poll until the deadline rather than blocking on stdout EOF.
-    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
-    let exit_status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-
-    if !exit_status.success() {
-        return None;
-    }
-
-    // Read at most 4 KiB from the regular file without blocking.
-    tmp.seek(SeekFrom::Start(0)).ok()?;
-    let mut buf = Vec::with_capacity(128);
-    let _ = (&mut tmp as &mut dyn std::io::Read)
-        .take(4096)
-        .read_to_end(&mut buf);
-
-    let stdout = String::from_utf8_lossy(&buf);
-    // Output format: "<package-name> <major>.<minor>.<patch>"
-    let version_str = stdout.split_whitespace().last()?;
-    let mut components = version_str.split('.');
-    let major = components.next()?.parse::<u64>().ok()?;
-    let minor = components.next()?.parse::<u64>().ok()?;
-    let patch = components.next()?.parse::<u64>().ok()?;
-    if components.next().is_some() {
-        return None;
-    }
-    Some((major, minor, patch))
-}
-
-/// Classifies a resolved codex-acp binary path as [`AcpAvailabilityStatus::Available`]
-/// or [`AcpAvailabilityStatus::AdapterOutdated`].
-///
-/// The 0.16.x adapter (`@zed-industries/codex-acp`) does not recognise `--version`
-/// and exits non-zero — that probe failure yields `AdapterOutdated`. An adapter is
-/// available only when its version is at least [`MIN_CODEX_ACP_VERSION`].
-///
-/// Used by `discover_acp_runtimes`, `cli_login_requirements`, and
-/// `install_acp_runtime_blocking` so the version-gate logic is not duplicated.
-pub(crate) fn codex_adapter_availability(path: &Path) -> AcpAvailabilityStatus {
-    match probe_codex_acp_version(path) {
-        Some(version) if version >= MIN_CODEX_ACP_VERSION => AcpAvailabilityStatus::Available,
-        _ => AcpAvailabilityStatus::AdapterOutdated,
-    }
-}
-
-/// Returns `true` when the codex-acp binary at `path` is below
-/// [`MIN_CODEX_ACP_VERSION`] or cannot be probed using `augmented_path`. Thin wrapper
-/// around [`codex_adapter_is_outdated_with_path`].
-#[cfg(test)]
-pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
-    codex_adapter_is_outdated_with_path(
-        path,
-        crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
-    )
-}
-
-/// Returns `true` when the codex-acp binary at `path` is below
-/// [`MIN_CODEX_ACP_VERSION`] or cannot be probed with the supplied PATH.
-pub(crate) fn codex_adapter_is_outdated_with_path(
-    path: &Path,
-    augmented_path: Option<&str>,
-) -> bool {
-    !matches!(
-        probe_codex_acp_version_with_path(path, augmented_path),
-        Some(version) if version >= MIN_CODEX_ACP_VERSION
-    )
-}
-
 /// Intermediate struct built before the (potentially slow) auth probe phase.
 struct PartialEntry {
     runtime: &'static KnownAcpRuntime,
@@ -1344,6 +1192,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
         .unwrap_or(false);
     let (mut availability, command, binary_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
+    let mut cli_version = None;
+    let minimum_cli_version =
+        (runtime.id == "goose").then(|| MIN_GOOSE_VERSION_DISPLAY.to_string());
 
     // For codex-acp: when the adapter resolves as Available, probe its full
     // version. An adapter below MIN_CODEX_ACP_VERSION is treated as outdated.
@@ -1353,6 +1204,17 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
     {
         if let Some(path_str) = &binary_path {
             availability = codex_adapter_availability(&PathBuf::from(path_str));
+        }
+    }
+
+    if runtime.id == "goose" && availability == AcpAvailabilityStatus::Available {
+        if let Some(path_str) = &binary_path {
+            let version = probe_goose_version(&PathBuf::from(path_str));
+            cli_version = version.map(format_version_tuple);
+            availability = match version {
+                Some(version) if version >= MIN_GOOSE_VERSION => AcpAvailabilityStatus::Available,
+                _ => AcpAvailabilityStatus::CliOutdated,
+            };
         }
     }
 
@@ -1380,6 +1242,15 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
     let adapter_hint = runtime.adapter_install_hint;
     let install_hint = match availability {
         AcpAvailabilityStatus::Available => cli_hint.to_string(),
+        AcpAvailabilityStatus::CliOutdated if runtime.id == "goose" => match &cli_version {
+            Some(version) => format!(
+                "Detected Goose {version}. Buzz requires Goose {MIN_GOOSE_VERSION_DISPLAY} or newer. Update Goose to continue."
+            ),
+            None => format!(
+                "Buzz could not verify the Goose version. Buzz requires Goose {MIN_GOOSE_VERSION_DISPLAY} or newer. Update Goose to continue."
+            ),
+        },
+        AcpAvailabilityStatus::CliOutdated => cli_hint.to_string(),
         AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
         AcpAvailabilityStatus::AdapterMissing => adapter_hint.to_string(),
         AcpAvailabilityStatus::AdapterOutdated => adapter_hint.to_string(),
@@ -1398,6 +1269,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             runtime.adapter_install_instructions_url
         }
         AcpAvailabilityStatus::Available
+        | AcpAvailabilityStatus::CliOutdated
         | AcpAvailabilityStatus::CliMissing
         | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
     };
@@ -1422,6 +1294,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             availability,
             command,
             binary_path,
+            cli_version,
+            minimum_cli_version,
             default_args,
             mcp_command: runtime.mcp_command.map(str::to_string),
             model_env_var: runtime.model_env_var.map(str::to_string),
@@ -1530,6 +1404,8 @@ fn preset_catalog_entry(
         availability,
         command,
         binary_path,
+        cli_version: None,
+        minimum_cli_version: None,
         default_args,
         mcp_command: None,
         model_env_var: None,
@@ -1797,6 +1673,8 @@ pub fn discover_acp_runtimes_from(
                 availability,
                 command,
                 binary_path,
+                cli_version: None,
+                minimum_cli_version: None,
                 default_args,
                 // Custom harnesses are plain ACP — no MCP sidecar, no env-var
                 // model switching, no thinking knobs.

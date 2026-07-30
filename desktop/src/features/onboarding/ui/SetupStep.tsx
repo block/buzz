@@ -9,6 +9,7 @@ import {
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
+import { runtimeSetupDetailText } from "@/features/agents/ui/runtimeSetupDetailText";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
@@ -201,14 +202,15 @@ function RuntimeStatus({
   }
 
   if (isInstalling) {
+    const action = runtimeSetupAction(runtime);
     return (
       <div
-        aria-label={`Installing ${runtime.label}`}
+        aria-label={`${action === "UPDATE" ? "Updating" : "Installing"} ${runtime.label}`}
         className="flex h-5 items-center gap-2 rounded-full bg-white/60 px-2.5 font-mono text-badge font-normal uppercase text-foreground"
         role="status"
       >
         <Spinner className="h-3 w-3 border-2 text-foreground" />
-        INSTALLING
+        {action === "UPDATE" ? "UPDATING" : "INSTALLING"}
       </div>
     );
   }
@@ -252,11 +254,20 @@ function RuntimeStatus({
     );
   }
 
-  const installLabel = installError ? "RETRY INSTALL" : "INSTALL";
+  const installAction = runtimeSetupAction(runtime);
+  const installLabel = installError ? `RETRY ${installAction}` : installAction;
+  const installAriaAction =
+    installAction === "UPDATE"
+      ? installError
+        ? "Retry updating"
+        : "Update"
+      : installError
+        ? "Retry installing"
+        : "Install";
   if (runtime.canAutoInstall) {
     return (
       <Button
-        aria-label={`${installError ? "Retry installing" : "Install"} ${runtime.label}`}
+        aria-label={`${installAriaAction} ${runtime.label}`}
         className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
         data-testid={`onboarding-runtime-install-${runtime.id}`}
         onClick={onInstall}
@@ -345,6 +356,14 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     );
   }
 
+  if (runtime.availability === "cli_outdated") {
+    return (
+      <p className="text-xs leading-4 text-white">
+        {runtimeSetupDetailText(runtime)}
+      </p>
+    );
+  }
+
   if (runtime.availability === "cli_missing") {
     return (
       <>
@@ -366,6 +385,15 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   );
 }
 
+function runtimeSetupAction(
+  runtime: AcpRuntimeCatalogEntry,
+): "INSTALL" | "UPDATE" {
+  return runtime.availability === "adapter_outdated" ||
+    runtime.availability === "cli_outdated"
+    ? "UPDATE"
+    : "INSTALL";
+}
+
 function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   if (
     runtime.availability === "available" &&
@@ -383,6 +411,9 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   }
   if (runtime.availability === "adapter_outdated") {
     return "ACP adapter detected but outdated — reinstall required.";
+  }
+  if (runtime.availability === "cli_outdated") {
+    return runtimeSetupDetailText(runtime);
   }
   if (
     runtime.availability === "cli_missing" ||
@@ -508,7 +539,10 @@ function RuntimeCard({
         onInstallResultsChange((current) => ({
           ...current,
           [runtime.id]: {
-            error: error instanceof Error ? error.message : "Install failed.",
+            error:
+              error instanceof Error
+                ? error.message
+                : `${runtimeSetupAction(runtime) === "UPDATE" ? "Update" : "Install"} failed.`,
             success: false,
           },
         }));
@@ -558,7 +592,11 @@ function RuntimeCard({
         <RuntimeErrorTooltip
           className="absolute inset-x-3 bottom-2 flex min-w-0 items-center justify-center gap-1.5 overflow-hidden whitespace-nowrap text-xs leading-4 text-destructive"
           detail={installError}
-          label="Installation failed"
+          label={
+            runtimeSetupAction(runtime) === "UPDATE"
+              ? "Update failed"
+              : "Installation failed"
+          }
           showIcon
           testId={`onboarding-runtime-error-${runtime.id}`}
         />

@@ -3,7 +3,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+        command_availability, is_npm_global_install, AcpAvailabilityStatus, AcpRuntimeCatalogEntry,
         DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
         RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
@@ -11,61 +11,16 @@ use crate::{
     relay::query_relay,
 };
 
+mod install_plan;
 mod post_install_verification;
+
+use install_plan::{goose_update_command, plan_adapter_install};
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
     static ACTIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
-///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) below its
-/// minimum supported version.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
-///
-/// This is a pure planning function: it never spawns a process.  Tests use it to
-/// assert the correct install command is selected without touching real npm.
-pub(crate) fn plan_adapter_install<'c>(
-    runtime_id: &str,
-    adapter_path: Option<&std::path::Path>,
-    adapter_install_commands: &'c [&'c str],
-    adapter_probe_path: Option<&str>,
-) -> Option<Vec<&'c str>> {
-    match adapter_path {
-        // Adapter present and current — no install needed.
-        Some(_) if runtime_id != "codex" => None,
-        Some(path)
-            if !crate::managed_agents::codex_adapter_is_outdated_with_path(
-                path,
-                adapter_probe_path,
-            ) =>
-        {
-            None
-        }
-        // Codex adapter is outdated: uninstall the old package first so npm
-        // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
-        Some(_) => Some(vec![
-            "npm uninstall -g @zed-industries/codex-acp",
-            "npm install -g @agentclientprotocol/codex-acp",
-        ]),
-        // Adapter missing: use the catalog's install commands directly.
-        None => Some(adapter_install_commands.to_vec()),
-    }
 }
 
 #[tauri::command]
@@ -172,6 +127,8 @@ pub async fn save_custom_harness(
         availability,
         command: command_opt,
         binary_path,
+        cli_version: None,
+        minimum_cli_version: None,
         default_args,
         mcp_command: None,
         model_env_var: None,
@@ -304,19 +261,35 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     // adapter installs live in Phase 2 below where they are rewritten to a
     // Buzz-private prefix before execution.
     if let Some(cli) = runtime.underlying_cli {
-        if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd);
-                let success = result.success;
-                steps.push(result);
-                if !success {
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
-                }
+        let cli_path = crate::managed_agents::resolve_command(cli);
+        let cli_commands: Vec<(&'static str, String)> = if let Some(path) = &cli_path {
+            if runtime_id == "goose"
+                && crate::managed_agents::goose_cli_availability(path)
+                    == AcpAvailabilityStatus::CliOutdated
+            {
+                vec![("update", goose_update_command(path))]
+            } else {
+                Vec::new()
+            }
+        } else {
+            runtime
+                .cli_install_commands_for_os()
+                .iter()
+                .map(|cmd| ("cli", (*cmd).to_string()))
+                .collect()
+        };
+
+        for (step, cmd) in cli_commands {
+            let result = run_install_command_with_retry(step, &cmd);
+            let success = result.success;
+            steps.push(result);
+            if !success {
+                return Ok(InstallRuntimeResult {
+                    success: false,
+                    steps,
+                    restarted_count: 0,
+                    failed_restart_count: 0,
+                });
             }
         }
     }

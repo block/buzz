@@ -102,6 +102,26 @@ test("extractConfigNudge parses cli_login with adapter_outdated availability", (
   );
 });
 
+test("extractConfigNudge parses cli_login with cli_outdated availability", () => {
+  const payload = {
+    agent_name: "Goose",
+    agent_pubkey: CODEX_PUBKEY,
+    requirements: [
+      {
+        surface: "cli_login",
+        probe_args: ["goose", "session"],
+        setup_copy: "update Goose",
+        availability: "cli_outdated",
+      },
+    ],
+  };
+  assert.deepEqual(
+    extractConfigNudge(withSentinel("prose", payload)),
+    payload,
+    "cli_outdated availability must be accepted by the validator",
+  );
+});
+
 test("extractConfigNudge returns null for cli_login without availability", () => {
   // availability is required — old-format payloads (no availability field)
   // must not parse so stale nudge JSON from before the Doctor-CTA update

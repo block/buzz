@@ -184,6 +184,26 @@ test("fromRawAcpRuntimeCatalogEntry preserves source preset", () => {
   assert.deepStrictEqual(entry.definitionEnv, {});
 });
 
+test("fromRawAcpRuntimeCatalogEntry maps CLI version metadata", () => {
+  const raw = {
+    id: "goose",
+    label: "Goose",
+    availability: "cli_outdated",
+    command: "goose",
+    source: "builtin",
+    cli_version: "1.43.9",
+    minimum_cli_version: "1.44.0",
+    default_args: [],
+    can_auto_install: true,
+    requires_external_cli: true,
+    install_hint: "",
+    install_instructions_url: "",
+  };
+  const entry = fromRawAcpRuntimeCatalogEntry(raw);
+  assert.equal(entry.cliVersion, "1.43.9");
+  assert.equal(entry.minimumCliVersion, "1.44.0");
+});
+
 test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape", () => {
   // Simulate the full save → re-open cycle: raw entry comes back from Rust
   // with definition_env populated; the edit form reads entry.definitionEnv.

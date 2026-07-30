@@ -11,6 +11,8 @@ function entry(overrides) {
     availability: "not_installed",
     command: null,
     binaryPath: null,
+    cliVersion: null,
+    minimumCliVersion: null,
     defaultArgs: [],
     mcpCommand: null,
     modelEnvVar: null,
@@ -86,4 +88,31 @@ test("adapter-outdated warning stays hint-free reinstall copy", () => {
     entry({ availability: "adapter_outdated" }),
   );
   assert.equal(warning, "Amp ACP adapter is outdated — reinstall to continue.");
+});
+
+test("cli-outdated warning includes the install hint", () => {
+  const warning = runtimeAvailabilityWarning(
+    entry({
+      availability: "cli_outdated",
+      installHint: "Update Goose to continue.",
+      label: "Goose",
+    }),
+  );
+  assert.equal(warning, "Goose is outdated. Update Goose to continue.");
+});
+
+test("cli-outdated warning falls back to version metadata", () => {
+  const warning = runtimeAvailabilityWarning(
+    entry({
+      availability: "cli_outdated",
+      cliVersion: "1.43.9",
+      installHint: "",
+      label: "Goose",
+      minimumCliVersion: "1.44.0",
+    }),
+  );
+  assert.equal(
+    warning,
+    "Goose is outdated. Detected Goose 1.43.9. Buzz requires 1.44.0 or newer.",
+  );
 });

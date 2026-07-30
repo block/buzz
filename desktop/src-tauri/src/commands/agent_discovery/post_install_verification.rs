@@ -20,6 +20,7 @@ fn failure(
     }
 
     let observed = availability
+        .as_ref()
         .map(availability_label)
         .unwrap_or_else(|| "missing from the runtime catalog".to_string());
     Some(InstallStepResult {
@@ -28,21 +29,29 @@ fn failure(
         success: false,
         stdout: String::new(),
         stderr: format!(
-            "The installer finished, but Buzz still could not use {runtime_id} (observed: {observed})."
+            "The setup command finished, but Buzz still could not use {runtime_id} (observed: {observed})."
         ),
         exit_code: None,
-        hint: Some(
-            "Buzz requires the vendor CLI executable, not only its desktop app. If the CLI was installed while Buzz was open, restart Buzz and check again."
-                .to_string(),
-        ),
+        hint: Some(verification_hint(runtime_id, availability.as_ref())),
     })
 }
 
-fn availability_label(status: AcpAvailabilityStatus) -> String {
+fn verification_hint(runtime_id: &str, availability: Option<&AcpAvailabilityStatus>) -> String {
+    if runtime_id == "goose" && availability == Some(&AcpAvailabilityStatus::CliOutdated) {
+        return "Goose updated, but the resolved Goose version is still below Buzz's minimum. Check the Goose path shown in settings and update Goose, or install a newer Goose."
+            .to_string();
+    }
+
+    "Buzz requires the vendor CLI executable, not only its desktop app. If the CLI was installed while Buzz was open, restart Buzz and check again."
+        .to_string()
+}
+
+fn availability_label(status: &AcpAvailabilityStatus) -> String {
     match status {
         AcpAvailabilityStatus::Available => "available",
         AcpAvailabilityStatus::AdapterMissing => "ACP adapter missing",
         AcpAvailabilityStatus::AdapterOutdated => "ACP adapter outdated",
+        AcpAvailabilityStatus::CliOutdated => "CLI outdated",
         AcpAvailabilityStatus::CliMissing => "CLI missing",
         AcpAvailabilityStatus::NotInstalled => "not installed",
     }
@@ -70,5 +79,19 @@ mod tests {
             .hint
             .as_deref()
             .is_some_and(|hint| hint.contains("desktop app")));
+    }
+
+    #[test]
+    fn goose_still_outdated_uses_update_hint() {
+        let failure = failure("goose", Some(AcpAvailabilityStatus::CliOutdated))
+            .expect("outdated Goose runtime must fail verification");
+
+        assert_eq!(failure.step, "verify");
+        assert!(!failure.success);
+        assert!(failure.stderr.contains("observed: CLI outdated"));
+        assert!(failure
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("minimum")));
     }
 }

@@ -143,6 +143,8 @@ export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
       return "Adapter needed";
     case "adapter_outdated":
       return "Update needed";
+    case "cli_outdated":
+      return "Update needed";
     case "cli_missing":
     case "not_installed":
       return "CLI needed";
@@ -216,7 +218,11 @@ export function catalogPrimaryAction(
   if (entry.canAutoInstall && !entry.nodeRequired) {
     return {
       kind: "install",
-      label: entry.availability === "adapter_outdated" ? "Update" : "Install",
+      label:
+        entry.availability === "adapter_outdated" ||
+        entry.availability === "cli_outdated"
+          ? "Update"
+          : "Install",
     };
   }
   if (entry.installInstructionsUrl.trim().length > 0) {

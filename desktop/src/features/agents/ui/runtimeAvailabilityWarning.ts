@@ -1,5 +1,15 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
+function cliOutdatedVersionHint(runtime: AcpRuntimeCatalogEntry): string {
+  if (runtime.cliVersion && runtime.minimumCliVersion) {
+    return `Detected ${runtime.label} ${runtime.cliVersion}. Buzz requires ${runtime.minimumCliVersion} or newer.`;
+  }
+  if (runtime.minimumCliVersion) {
+    return `Buzz could not verify the ${runtime.label} version. Buzz requires ${runtime.minimumCliVersion} or newer.`;
+  }
+  return "";
+}
+
 /**
  * Availability warning sentence for the agent-definition dialog.
  * Returns null when the runtime is available (no warning to show).
@@ -24,6 +34,12 @@ export function runtimeAvailabilityWarning(
       );
     case "adapter_outdated":
       return `${runtime.label} ACP adapter is outdated — reinstall to continue.`;
+    case "cli_outdated": {
+      const versionHint = hint || cliOutdatedVersionHint(runtime);
+      return versionHint
+        ? `${runtime.label} is outdated. ${versionHint}`
+        : `${runtime.label} is outdated.`;
+    }
     default:
       return runtime.requiresExternalCli
         ? withHint(`${runtime.label} CLI is missing.`)
