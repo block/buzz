@@ -39,6 +39,10 @@ import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedB
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import {
+  messageBookmarkTarget,
+  useBookmarkActions,
+} from "@/features/bookmarks/lib/BookmarksContext";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
@@ -178,6 +182,14 @@ export const MessageRow = React.memo(
         });
       },
       [channelId, openReminder],
+    );
+    const bookmarks = useBookmarkActions();
+    const handleBookmark = React.useCallback(
+      (msg: TimelineMessage) => {
+        if (!channelId) return;
+        bookmarks.toggleBookmark(messageBookmarkTarget(msg, channelId));
+      },
+      [bookmarks, channelId],
     );
     const { mentionNames, mentionPubkeysByName } = React.useMemo(
       () => resolveMentionProps(message.tags, profiles),
@@ -467,6 +479,9 @@ export const MessageRow = React.memo(
       />
     ) : null;
 
+    const canBookmark =
+      bookmarks.enabled && Boolean(channelId) && !message.pending;
+
     const actionBarNode = (
       <div
         className={cn(
@@ -478,6 +493,8 @@ export const MessageRow = React.memo(
       >
         <MessageActionBar
           channelId={channelId}
+          isBookmarked={canBookmark && bookmarks.isBookmarked(message.id)}
+          onBookmark={canBookmark ? handleBookmark : undefined}
           isFollowingThread={isFollowingThread}
           isUnread={isUnread}
           message={message}

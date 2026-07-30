@@ -1,6 +1,10 @@
 import * as React from "react";
 
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import {
+  messageBookmarkTarget,
+  useBookmarkActions,
+} from "@/features/bookmarks/lib/BookmarksContext";
 import type { InboxContextMessage } from "@/features/home/lib/inbox";
 import { toTimelineMessage } from "@/features/home/lib/inboxViewHelpers";
 import { formatTimeWithoutDayPeriod } from "@/features/messages/lib/dateFormatters";
@@ -70,6 +74,16 @@ export function InboxMessageRow({
     errorMessage: reactionErrorMessage,
     select: handleReactionSelect,
   } = useReactionHandler(timelineMessage, onToggleReaction);
+  const bookmarks = useBookmarkActions();
+  const canBookmark =
+    bookmarks.enabled && Boolean(channelId) && !timelineMessage.pending;
+  const handleBookmark = React.useCallback(
+    (msg: TimelineMessage) => {
+      if (!channelId) return;
+      bookmarks.toggleBookmark(messageBookmarkTarget(msg, channelId));
+    },
+    [bookmarks, channelId],
+  );
   // "Is this pubkey an agent" = the community-scoped baseline every surface
   // shares plus this surface's extras passed via `agentPubkeys` (HomeView
   // folds feed-profile `isAgent` flags in). Mirrors MessageRow's predicate.
@@ -116,7 +130,7 @@ export function InboxMessageRow({
             : "home-inbox-context-message"
         }
       >
-        {canReply || canToggleReactions ? (
+        {canReply || canToggleReactions || canBookmark ? (
           <div
             className={cn(
               "absolute right-2 top-1 z-10",
@@ -126,6 +140,10 @@ export function InboxMessageRow({
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}
+              isBookmarked={
+                canBookmark && bookmarks.isBookmarked(timelineMessage.id)
+              }
+              onBookmark={canBookmark ? handleBookmark : undefined}
               onReactionSelect={
                 canToggleReactions ? handleReactionSelect : undefined
               }

@@ -72,6 +72,8 @@ import { requestFocusedThreadClose } from "@/features/channels/focusedThreadClos
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
+import { BookmarksProvider } from "@/features/bookmarks/lib/BookmarksContext";
+import { useBookmarks } from "@/features/bookmarks/lib/useBookmarks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   consumePendingCommunityRestore,
@@ -129,6 +131,7 @@ export function AppShell() {
     goNewMessage,
     goProjects,
     goPulse,
+    goSaved,
     goSettings,
     goWorkflows,
     closeSettings,
@@ -167,6 +170,7 @@ export function AppShell() {
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
   );
+  const bookmarks = useBookmarks(identityQuery.data?.pubkey);
   usePersonaSync(
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
@@ -884,6 +888,7 @@ export function AppShell() {
                           onSelectHome={() => void goHome()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}
+                          onSelectSaved={() => void goSaved()}
                           onSelectSettings={handleOpenSettings}
                           onSelectWorkflows={() => void goWorkflows()}
                           onSetPresenceStatus={(status) =>
@@ -926,7 +931,9 @@ export function AppShell() {
                             style={chromeCssVarDefaults as React.CSSProperties}
                           >
                             <BuzzTheme.ContentSurface>
-                              <Outlet />
+                              <BookmarksProvider value={bookmarks}>
+                                <Outlet />
+                              </BookmarksProvider>
                             </BuzzTheme.ContentSurface>
                           </SidebarInset>
                         </MainInsetProvider>

@@ -78,6 +78,16 @@ export function useAppNavigation() {
       ),
     [commitNavigation],
   );
+  const goSaved = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/saved",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
 
   const goProjects = React.useCallback(
     (behavior?: NavigationBehavior) =>
@@ -303,6 +313,7 @@ export function useAppNavigation() {
     goProject,
     goProjects,
     goPulse,
+    goSaved,
     goSettings,
     goWorkflow,
     goWorkflows,
