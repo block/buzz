@@ -1,3 +1,4 @@
+import { Pin } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -53,13 +54,37 @@ function ChannelRow({
       )}
     >
       <button
-        className="flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 rounded-none px-2 py-0.5 text-left text-sm"
+        aria-label={
+          isPinned ? `Unpin # ${channel.name}` : `Pin # ${channel.name}`
+        }
+        className="flex w-5 shrink-0 cursor-pointer items-center self-stretch pl-2 text-muted-foreground/60 hover:text-foreground"
+        onClick={() => toggleChannelPinned(channel.id)}
+        type="button"
+      >
+        {isHighlighted ? (
+          <span
+            aria-hidden
+            className="select-none text-foreground group-hover:hidden"
+          >
+            ▸
+          </span>
+        ) : null}
+        <Pin
+          aria-hidden
+          className={cn(
+            "size-3",
+            isPinned && "fill-current",
+            isHighlighted
+              ? "hidden group-hover:block"
+              : !isPinned && "opacity-0 group-hover:opacity-100",
+          )}
+        />
+      </button>
+      <button
+        className="flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 rounded-none py-0.5 pl-2 pr-2 text-left text-sm"
         onClick={() => onOpen(channel.id)}
         type="button"
       >
-        <span aria-hidden className="w-3 shrink-0 select-none">
-          {isHighlighted ? "▸" : ""}
-        </span>
         <span
           className={cn(
             "min-w-0 flex-1 truncate",
@@ -81,19 +106,6 @@ function ChannelRow({
         <span className="shrink-0 text-xs text-muted-foreground/60">
           {formatRelativeTime(channel.lastMessageAt)}
         </span>
-      </button>
-      <button
-        aria-label={
-          isPinned ? `Unpin # ${channel.name}` : `Pin # ${channel.name}`
-        }
-        className={cn(
-          "shrink-0 cursor-pointer px-1.5 py-0.5 text-xs text-muted-foreground/60 hover:text-foreground",
-          !isPinned && "opacity-0 group-hover:opacity-100",
-        )}
-        onClick={() => toggleChannelPinned(channel.id)}
-        type="button"
-      >
-        {isPinned ? "unpin" : "pin"}
       </button>
     </div>
   );
