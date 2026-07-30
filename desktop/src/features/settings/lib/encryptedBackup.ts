@@ -29,7 +29,6 @@ export type EncryptedBackupEvent =
   | { type: "encrypt-succeeded"; requestId: number; ncryptsec: string }
   | { type: "encrypt-failed"; requestId: number; message: string }
   | { type: "download-clicked" }
-  | { type: "back-to-password" }
   | { type: "start-new-backup" };
 
 export function encryptedBackupReducer(
@@ -41,6 +40,7 @@ export function encryptedBackupReducer(
       return {
         ...state,
         passphrase: event.value,
+        requestId: null,
         encrypted: null,
         createError: null,
       };
@@ -53,24 +53,36 @@ export function encryptedBackupReducer(
       };
     case "encrypt-succeeded":
       if (event.requestId !== state.requestId) return state;
-      return {
-        ...state,
-        passphrase: "",
-        requestId: null,
-        encrypted: event.ncryptsec,
-        ncryptsec: state.downloadPending ? event.ncryptsec : state.ncryptsec,
-        downloadPending: false,
-        savedPassword: true,
-      };
+      return state.downloadPending
+        ? {
+            ...state,
+            passphrase: "",
+            requestId: null,
+            encrypted: event.ncryptsec,
+            ncryptsec: event.ncryptsec,
+            downloadPending: false,
+            savedPassword: true,
+          }
+        : {
+            ...state,
+            requestId: null,
+            encrypted: event.ncryptsec,
+          };
     case "encrypt-failed":
       if (event.requestId !== state.requestId) return state;
-      return {
-        ...state,
-        passphrase: "",
-        requestId: null,
-        createError: event.message,
-        downloadPending: false,
-      };
+      return state.downloadPending
+        ? {
+            ...state,
+            passphrase: "",
+            requestId: null,
+            createError: event.message,
+            downloadPending: false,
+          }
+        : {
+            ...state,
+            requestId: null,
+            createError: event.message,
+          };
     case "download-clicked":
       if (
         state.ncryptsec ||
@@ -85,9 +97,7 @@ export function encryptedBackupReducer(
             passphrase: "",
             savedPassword: true,
           }
-        : { ...state, downloadPending: true };
-    case "back-to-password":
-      return { ...state, createError: null };
+        : { ...state, createError: null, downloadPending: true };
     case "start-new-backup":
       return {
         ...initialEncryptedBackupState,
@@ -112,7 +122,12 @@ export function effectivePassphrase(
 export function pendingEncryptPassphrase(
   state: EncryptedBackupState,
 ): string | null {
-  if (state.savedPassword || state.encrypted || state.requestId !== null)
+  if (
+    state.savedPassword ||
+    state.encrypted ||
+    state.requestId !== null ||
+    (state.createError !== null && !state.downloadPending)
+  )
     return null;
   return effectivePassphrase(state);
 }

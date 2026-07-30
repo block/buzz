@@ -6,25 +6,11 @@ import {
   generateBackupPassphrase,
   saveNcryptsecCopy,
 } from "@/shared/api/tauriIdentity";
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
-import { Spinner } from "@/shared/ui/spinner";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/shared/ui/alert-dialog";
 import {
   downloadDisabled,
-  isEncrypting,
-  passphraseIssue,
   pendingEncryptPassphrase,
   encryptedBackupReducer,
   initialEncryptedBackupState,
@@ -51,90 +37,47 @@ const DEFAULT_SEPARATOR = SEPARATOR_OPTIONS[0].value;
  */
 const ENCRYPT_DEBOUNCE_MS = 400;
 
-const PENDING_TICKER_MESSAGES = [
-  "Downloading once finished",
-  "Encrypting your password",
-  "Just a bit longer...",
-] as const;
-
-/** How long each ticker message holds before sliding to the next. */
-const PENDING_TICKER_INTERVAL_MS = 2500;
-
-/** Matches the `duration-300` slide transition on the ticker column. */
-const PENDING_TICKER_SLIDE_MS = 300;
-
 /**
- * Vertical ticker for the queued-download button label — cycles through the
- * pending messages by sliding a stacked column inside a one-line viewport.
- * The column ends with a clone of the first message, so the wrap-around
- * slides up from the bottom like every other step; once the clone settles,
- * the column snaps (transition disabled) back to the real first row. All
- * lines render at all times, so the button keeps the width of the longest
- * message instead of resizing on each swap.
+ * Indeterminate KDF progress. Scrypt does not expose intermediate progress,
+ * so randomized increments consume a shrinking fraction of the remaining
+ * distance. The bar moves quickly at first and can never reach completion.
  */
-function PendingDownloadTicker() {
-  // Index into the rendered column (messages + trailing clone of the first).
-  const [position, setPosition] = React.useState(0);
-  const [snap, setSnap] = React.useState(false);
+function FakeKdfProgressBar() {
+  const [progress, setProgress] = React.useState(0);
 
   React.useEffect(() => {
-    const timer = window.setInterval(
-      () => setPosition((current) => current + 1),
-      PENDING_TICKER_INTERVAL_MS,
-    );
-    return () => window.clearInterval(timer);
+    let animationFrame = 0;
+    let nextAdvanceAt = 0;
+    const advance = (now: number) => {
+      if (now >= nextAdvanceAt) {
+        setProgress((current) => {
+          const remaining = 90 - current;
+          const fraction = 0.08 + Math.random() * 0.22;
+          return Math.min(90, current + Math.max(0.25, remaining * fraction));
+        });
+        nextAdvanceAt = now + 180 + Math.random() * 420;
+      }
+      animationFrame = window.requestAnimationFrame(advance);
+    };
+    animationFrame = window.requestAnimationFrame(advance);
+    return () => window.cancelAnimationFrame(animationFrame);
   }, []);
 
-  // The clone is visually identical to the first message: once its slide-in
-  // finishes, jump back to the real first row without animating.
-  React.useEffect(() => {
-    if (position !== PENDING_TICKER_MESSAGES.length) return;
-    const timer = window.setTimeout(() => {
-      setSnap(true);
-      setPosition(0);
-    }, PENDING_TICKER_SLIDE_MS);
-    return () => window.clearTimeout(timer);
-  }, [position]);
-
-  // Re-enable the transition one frame after the snap has painted.
-  React.useEffect(() => {
-    if (!snap) return;
-    const raf = window.requestAnimationFrame(() => setSnap(false));
-    return () => window.cancelAnimationFrame(raf);
-  }, [snap]);
-
-  // The clone row duplicates the first message's text, so it carries its own
-  // stable key.
-  const column = [
-    ...PENDING_TICKER_MESSAGES.map((message) => ({ key: message, message })),
-    { key: "wrap-clone", message: PENDING_TICKER_MESSAGES[0] },
-  ];
-
   return (
-    <span
-      aria-live="polite"
-      className="relative block h-5 overflow-hidden"
-      data-testid="encrypted-backup-pending-ticker"
+    <div
+      aria-label="Encrypting your key"
+      aria-valuemax={100}
+      aria-valuemin={0}
+      aria-valuenow={Math.round(progress)}
+      className="h-2 w-full overflow-hidden rounded-full bg-muted"
+      data-testid="encrypted-backup-progress"
+      role="progressbar"
     >
-      <span
-        className={cn(
-          "block ease-out",
-          snap
-            ? "transition-none"
-            : "transition-transform duration-300 motion-reduce:transition-none",
-        )}
-        style={{ transform: `translateY(-${position * 1.25}rem)` }}
-      >
-        {column.map((row) => (
-          <span
-            className="flex h-5 items-center justify-center whitespace-nowrap"
-            key={row.key}
-          >
-            {row.message}
-          </span>
-        ))}
-      </span>
-    </span>
+      <div
+        className="h-full rounded-full bg-primary transition-[width] duration-300 ease-out motion-reduce:transition-none"
+        style={{ width: `${progress}%` }}
+      />
+    </div>
   );
 }
 
@@ -321,12 +264,10 @@ export function EncryptedBackupCreator() {
     encryptedBackupReducer,
     initialEncryptedBackupState,
   );
-  const [savedPath, setSavedPath] = React.useState<string | null>(null);
   const savedForRef = React.useRef<string | null>(null);
   const [isRevealed, setIsRevealed] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
   const [isSaving, setIsSaving] = React.useState(false);
-  const [confirmNewPassword, setConfirmNewPassword] = React.useState(false);
   const mountedRef = React.useRef(true);
 
   React.useEffect(() => {
@@ -336,15 +277,14 @@ export function EncryptedBackupCreator() {
     };
   }, []);
 
-  // A queued download locks the form — mask the password too so it isn't
-  // left readable on screen while the user waits for the save dialog.
+  // A queued download hides the form; mask the password before it can return
+  // in any error state.
   React.useEffect(() => {
     if (state.downloadPending) setIsRevealed(false);
   }, [state.downloadPending]);
 
-  // Correlate KDF completion by an opaque request id. The password exists only
-  // in this short-lived effect closure and is cleared from reducer state once
-  // Rust returns; stale completions cannot commit.
+  // Correlate KDF completion by an opaque request id. The password exists in
+  // this short-lived effect closure; stale completions cannot commit.
   const pendingPassphrase = pendingEncryptPassphrase(state);
   const skipDebounce = state.downloadPending;
   React.useEffect(() => {
@@ -380,31 +320,17 @@ export function EncryptedBackupCreator() {
   }, [pendingPassphrase, skipDebounce, state.nextRequestId]);
 
   // Download commit: fires once per committed blob, whether the commit was
-  // instant (encryption already done) or resolved a queued download. The flow
-  // only advances to the test view once the file is actually on disk — a
-  // canceled save dialog or a save failure rolls the commit back to the
-  // password form so "Download backup" can be clicked again.
+  // instant (encryption already done) or resolved a queued download. A cancel
+  // or save failure preserves the encrypted blob so the user can reopen the
+  // native dialog with "Download backup again".
   React.useEffect(() => {
     const ncryptsec = state.ncryptsec;
     if (!ncryptsec || savedForRef.current === ncryptsec) return;
     savedForRef.current = ncryptsec;
     setIsSaving(true);
     setSaveError(null);
-    const rollBack = () => {
-      savedForRef.current = null;
-      dispatch({ type: "back-to-password" });
-    };
     void saveNcryptsecCopy(ncryptsec)
-      .then((path) => {
-        if (path) {
-          setSavedPath(path);
-        } else {
-          // User canceled the native save dialog — nothing was downloaded.
-          rollBack();
-        }
-      })
       .catch((err: unknown) => {
-        rollBack();
         if (mountedRef.current)
           setSaveError(
             err instanceof Error ? err.message : "Failed to save your key.",
@@ -420,10 +346,7 @@ export function EncryptedBackupCreator() {
     setIsSaving(true);
     setSaveError(null);
     try {
-      const path = await saveNcryptsecCopy(state.ncryptsec);
-      if (mountedRef.current && path) {
-        setSavedPath(path);
-      }
+      await saveNcryptsecCopy(state.ncryptsec);
     } catch (err) {
       if (mountedRef.current)
         setSaveError(
@@ -434,133 +357,64 @@ export function EncryptedBackupCreator() {
     }
   }, [isSaving, state.ncryptsec]);
 
-  const issue = passphraseIssue(state.passphrase);
-
-  // Without the guided test (settings), a completed save keeps the form
-  // visible in its saved-password state: masked input, instant re-download,
-  // and the change-password confirmation guarding any edit.
+  // A completed backup leaves only the re-download action; the password form
+  // never returns after submission.
 
   return (
     <div
-      className={cn("mx-auto w-full max-w-[500px] space-y-3 text-left")}
+      className="w-full space-y-3 text-left"
       data-testid="encrypted-backup-creator"
     >
-      <div className="relative">
-        <Input
-          aria-label="Encryption password"
-          autoComplete="new-password"
-          className="h-10 bg-background pr-19 font-mono"
-          data-testid="backup-passphrase-input"
-          disabled={state.downloadPending}
-          readOnly={state.savedPassword}
-          aria-describedby={
-            state.savedPassword
-              ? "backup-saved-password-description"
-              : undefined
-          }
-          onBeforeInput={(event) => {
-            if (state.savedPassword) {
-              event.preventDefault();
-              setConfirmNewPassword(true);
+      {state.downloadPending ? (
+        <FakeKdfProgressBar />
+      ) : !state.savedPassword ? (
+        <div className="relative">
+          <Input
+            aria-label="Encryption password"
+            autoComplete="new-password"
+            className="h-10 bg-background pr-19"
+            data-testid="backup-passphrase-input"
+            onChange={(event) =>
+              dispatch({ type: "set-passphrase", value: event.target.value })
             }
-          }}
-          onPaste={(event) => {
-            if (state.savedPassword) {
-              event.preventDefault();
-              setConfirmNewPassword(true);
-            }
-          }}
-          onChange={(event) =>
-            dispatch({ type: "set-passphrase", value: event.target.value })
-          }
-          placeholder={
-            state.savedPassword
-              ? ""
-              : `Password (min ${MIN_PASSPHRASE_LEN} characters)`
-          }
-          type={isRevealed ? "text" : "password"}
-          value={state.passphrase}
-        />
-        {state.savedPassword ? (
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-y-0 left-3 flex items-center font-mono tracking-widest text-foreground"
-            data-testid="backup-saved-password-mask"
+            placeholder={`Password (min ${MIN_PASSPHRASE_LEN} characters)`}
+            type={isRevealed ? "text" : "password"}
+            value={state.passphrase}
+          />
+          <Button
+            aria-label={isRevealed ? "Hide password" : "Reveal password"}
+            className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            data-testid="backup-passphrase-reveal-toggle"
+            onClick={() => setIsRevealed((revealed) => !revealed)}
+            size="icon"
+            type="button"
+            variant="ghost"
           >
-            ••••••••••••••••••••••••••••••••
-          </div>
-        ) : null}
-        {state.savedPassword ? (
-          <span className="sr-only" id="backup-saved-password-description">
-            Backup password saved; hidden for security.
-          </span>
-        ) : null}
-        <Button
-          aria-label={
-            state.savedPassword
-              ? "Change saved backup password"
-              : isRevealed
-                ? "Hide password"
-                : "Reveal password"
-          }
-          className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          data-testid="backup-passphrase-reveal-toggle"
-          disabled={state.downloadPending}
-          onClick={() =>
-            state.savedPassword
-              ? setConfirmNewPassword(true)
-              : setIsRevealed((revealed) => !revealed)
-          }
-          size="icon"
-          type="button"
-          variant="ghost"
-        >
-          {isRevealed ? (
-            <EyeOff className="h-4 w-4" aria-hidden="true" />
-          ) : (
-            <Eye className="h-4 w-4" aria-hidden="true" />
-          )}
-        </Button>
-        <PassphraseGeneratorPopover
-          disabled={state.downloadPending}
-          onRequestGenerate={
-            state.savedPassword ? () => setConfirmNewPassword(true) : undefined
-          }
-          onGenerated={(value) => {
-            dispatch({ type: "set-passphrase", value });
-            // A generated password must be visible so the user can save it.
-            setIsRevealed(true);
-          }}
-        />
-        {issue ? (
-          <p
-            className="absolute left-1 top-full mt-1 animate-in text-xs text-muted-foreground fade-in slide-in-from-top-1 duration-200 motion-reduce:animate-none"
-            data-testid="backup-passphrase-issue"
-          >
-            {issue}
-          </p>
-        ) : null}
-      </div>
-
-      {state.savedPassword && state.ncryptsec && savedPath ? (
-        <div
-          className="space-y-1 text-center"
-          data-testid="encrypted-backup-created"
-        >
-          <p
-            className="text-xs text-muted-foreground"
-            data-testid="encrypted-backup-saved-path"
-          >
-            Backup saved to {savedPath}
-          </p>
-          <p className="text-xs leading-5 text-muted-foreground">
-            Your password isn't kept — download another copy anytime, or start
-            over to choose a new password.
-          </p>
+            {isRevealed ? (
+              <EyeOff className="h-4 w-4" aria-hidden="true" />
+            ) : (
+              <Eye className="h-4 w-4" aria-hidden="true" />
+            )}
+          </Button>
+          <PassphraseGeneratorPopover
+            onGenerated={(value) => {
+              dispatch({ type: "set-passphrase", value });
+              // A generated password must be visible so the user can save it.
+              setIsRevealed(true);
+            }}
+          />
         </div>
       ) : null}
 
-      {state.createError ? (
+      {!state.downloadPending && !state.savedPassword ? (
+        <p className="text-xs leading-5 text-muted-foreground">
+          Keep the file private and save its password somewhere safe — Buzz
+          cannot reset it. Creating another backup does not invalidate copies
+          you saved before.
+        </p>
+      ) : null}
+
+      {state.createError && state.passphrase.length === 0 ? (
         <p
           className="text-center text-sm text-destructive"
           data-testid="encrypted-backup-create-error"
@@ -578,70 +432,23 @@ export function EncryptedBackupCreator() {
         </p>
       ) : null}
 
-      {(() => {
-        // Absolute spinner: signals the background encryption without
-        // shifting the centered button while it appears and disappears.
-        const createButton = (
-          <div className="relative">
-            {isEncrypting(state) || state.downloadPending || isSaving ? (
-              <Spinner
-                aria-label="Encrypting your key"
-                className="absolute right-full top-1/2 mr-3 h-4 w-4 -translate-y-1/2 border-2"
-                data-testid="encrypted-backup-encrypting"
-              />
-            ) : null}
-            <Button
-              className="h-9 rounded-full px-6"
-              data-testid="encrypted-backup-create"
-              disabled={downloadDisabled(state) || isSaving}
-              onClick={() =>
-                state.savedPassword && state.ncryptsec
-                  ? void handleSaveCopy()
-                  : dispatch({ type: "download-clicked" })
-              }
-              type="button"
-            >
-              {state.downloadPending ? (
-                <PendingDownloadTicker />
-              ) : state.savedPassword ? (
-                "Download backup again"
-              ) : (
-                "Backup key"
-              )}
-            </Button>
-          </div>
-        );
-        return <div className="flex justify-center">{createButton}</div>;
-      })()}
-      <AlertDialog
-        open={confirmNewPassword}
-        onOpenChange={setConfirmNewPassword}
-      >
-        <AlertDialogContent data-testid="backup-change-password-dialog">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Create a new backup password?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Starting over lets you pick a new password and download a fresh
-              backup file. Backups you saved earlier will still work — just use
-              the password you created them with.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep current backup</AlertDialogCancel>
-            <AlertDialogAction
-              data-testid="backup-start-new-password"
-              onClick={() => {
-                dispatch({ type: "start-new-backup" });
-                setSavedPath(null);
-                savedForRef.current = null;
-                setIsRevealed(false);
-              }}
-            >
-              Start with a new password
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {!state.downloadPending ? (
+        <div className="flex justify-end">
+          <Button
+            className="h-9 rounded-full px-6"
+            data-testid="encrypted-backup-create"
+            disabled={downloadDisabled(state) || isSaving}
+            onClick={() =>
+              state.savedPassword && state.ncryptsec
+                ? void handleSaveCopy()
+                : dispatch({ type: "download-clicked" })
+            }
+            type="button"
+          >
+            {state.savedPassword ? "Download backup again" : "Backup key"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

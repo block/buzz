@@ -419,6 +419,8 @@ type E2eConfig = {
     backupVerificationErrors?: (string | null)[];
     /** Public identities returned by successive successful backup verifications. */
     backupVerificationPubkeys?: string[];
+    /** Delay (ms) applied to backup encryption so specs can observe pending UI. */
+    backupEncryptionDelayMs?: number;
     /** Native paths returned by successive backup saves. */
     backupSavePaths?: Array<string | null>;
     /**
@@ -9844,8 +9846,13 @@ export function maybeInstallE2eTauriMocks() {
         return;
       case "generate_backup_passphrase":
         return "correct horse battery staple";
-      case "create_ncryptsec_backup":
+      case "create_ncryptsec_backup": {
+        const delayMs = activeConfig?.mock?.backupEncryptionDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
         return "ncryptsec1mockbackupmaterial";
+      }
       case "save_ncryptsec_copy": {
         const paths = activeConfig?.mock?.backupSavePaths ?? [
           "/tmp/buzz-identity.ncryptsec",

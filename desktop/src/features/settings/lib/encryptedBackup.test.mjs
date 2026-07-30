@@ -32,16 +32,29 @@ test("valid password requests encryption without copying it into events", () => 
   assert.equal(started.requestId, 1);
   assert.equal(Object.hasOwn(started, "encryptingPassphrase"), false);
 });
-test("success clears password and retains only encrypted blob", () => {
+test("background success retains the password without committing the download", () => {
   const state = reduce([
     { type: "set-passphrase", value: "one-two-three-four" },
     { type: "encrypt-started", requestId: 1 },
     { type: "encrypt-succeeded", requestId: 1, ncryptsec: "ncryptsec1abc" },
   ]);
-  assert.equal(state.passphrase, "");
+  assert.equal(state.passphrase, "one-two-three-four");
   assert.equal(state.encrypted, "ncryptsec1abc");
-  assert.equal(state.savedPassword, true);
+  assert.equal(state.ncryptsec, null);
+  assert.equal(state.savedPassword, false);
   assert.equal(state.requestId, null);
+  assert.equal(downloadDisabled(state), false);
+});
+test("submit commits a completed preload immediately", () => {
+  const state = reduce([
+    { type: "set-passphrase", value: "one-two-three-four" },
+    { type: "encrypt-started", requestId: 1 },
+    { type: "encrypt-succeeded", requestId: 1, ncryptsec: "ncryptsec1abc" },
+    { type: "download-clicked" },
+  ]);
+  assert.equal(state.ncryptsec, "ncryptsec1abc");
+  assert.equal(state.passphrase, "");
+  assert.equal(state.savedPassword, true);
 });
 test("stale async completions cannot replace current request", () => {
   const state = reduce([
@@ -67,6 +80,21 @@ test("failure clears submitted password", () => {
   assert.equal(state.downloadPending, false);
   assert.equal(downloadDisabled(state), true);
 });
+test("background failure stays silent until submit retries encryption", () => {
+  const failed = reduce([
+    { type: "set-passphrase", value: "one-two-three-four" },
+    { type: "encrypt-started", requestId: 1 },
+    { type: "encrypt-failed", requestId: 1, message: "keychain unavailable" },
+  ]);
+  assert.equal(failed.passphrase, "one-two-three-four");
+  assert.equal(failed.createError, "keychain unavailable");
+  assert.equal(pendingEncryptPassphrase(failed), null);
+
+  const retrying = reduce([{ type: "download-clicked" }], failed);
+  assert.equal(retrying.createError, null);
+  assert.equal(retrying.downloadPending, true);
+  assert.equal(pendingEncryptPassphrase(retrying), "one-two-three-four");
+});
 test("queued download commits and clears password", () => {
   const state = reduce([
     { type: "set-passphrase", value: "one-two-three-four" },
@@ -77,18 +105,6 @@ test("queued download commits and clears password", () => {
   assert.equal(state.ncryptsec, "ncryptsec1abc");
   assert.equal(state.passphrase, "");
   assert.equal(state.savedPassword, true);
-});
-test("Back preserves blob for immediate re-download without password", () => {
-  const made = reduce([
-    { type: "set-passphrase", value: "one-two-three-four" },
-    { type: "encrypt-started", requestId: 1 },
-    { type: "encrypt-succeeded", requestId: 1, ncryptsec: "ncryptsec1abc" },
-    { type: "download-clicked" },
-    { type: "back-to-password" },
-  ]);
-  assert.equal(made.ncryptsec, "ncryptsec1abc");
-  assert.equal(made.passphrase, "");
-  assert.equal(downloadDisabled(made), false);
 });
 test("starting over discards blob and invalidates late requests", () => {
   const made = {

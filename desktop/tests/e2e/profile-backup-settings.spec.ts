@@ -33,6 +33,13 @@ async function openBackupSettings(
   await openIdentity(page);
 }
 
+async function openCreateBackup(page: Page) {
+  await page.getByTestId("profile-encrypted-backup-row-toggle").click();
+  const dialog = page.getByTestId("encrypted-backup-dialog");
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
 async function selectBackupFile(page: Page) {
   await page.getByTestId("backup-test-file-input").setInputFiles(BACKUP_FILE);
   await expect(page.getByTestId("backup-test-file-accepted")).toContainText(
@@ -43,6 +50,15 @@ async function selectBackupFile(page: Page) {
 async function verifyBackup(page: Page, password: string) {
   await page.getByTestId("backup-test-password").fill(password);
   await page.getByTestId("backup-test-verify").click();
+}
+
+async function backupSaveCallCount(page: Page) {
+  return page.evaluate(
+    () =>
+      window.__BUZZ_E2E_COMMANDS__?.filter(
+        (command) => command === "save_ncryptsec_copy",
+      ).length ?? 0,
+  );
 }
 
 test("identity settings expose independent create and test backup tools", async ({
@@ -57,17 +73,18 @@ test("identity settings expose independent create and test backup tools", async 
   await expect(testRow).toContainText("Test a key backup");
   await expect(testRow).toContainText("which identity it unlocks");
 
-  await createRow.getByTestId("profile-encrypted-backup-row-toggle").click();
-  await expect(createRow.getByLabel("Encryption password")).toBeVisible();
+  const createDialog = await openCreateBackup(page);
+  await expect(createDialog.getByLabel("Encryption password")).toBeVisible();
   await expect(testRow.getByText("Select your backup file")).toHaveCount(0);
+  await createDialog.getByRole("button", { name: "Close" }).click();
 
   await testRow.getByTestId("profile-backup-test-row-toggle").click();
   await expect(testRow.getByText("Select your backup file")).toBeVisible();
-  await expect(createRow.getByLabel("Encryption password")).toBeVisible();
 
-  await createRow.getByTestId("profile-encrypted-backup-row-toggle").click();
-  await expect(createRow.getByLabel("Encryption password")).toHaveCount(0);
+  const reopenedDialog = await openCreateBackup(page);
+  await expect(reopenedDialog.getByLabel("Encryption password")).toBeVisible();
   await expect(testRow.getByText("Select your backup file")).toBeVisible();
+  await reopenedDialog.getByRole("button", { name: "Close" }).click();
 });
 
 test("creation requires a sufficiently long password and supports another download", async ({
@@ -79,57 +96,80 @@ test("creation requires a sufficiently long password and supports another downlo
       "/Users/test/Desktop/identity-copy.ncryptsec",
     ],
   });
-  const row = page.getByTestId("profile-encrypted-backup-row");
-  await row.getByTestId("profile-encrypted-backup-row-toggle").click();
+  const dialog = await openCreateBackup(page);
 
-  const password = row.getByTestId("backup-passphrase-input");
-  const submit = row.getByTestId("encrypted-backup-create");
+  const password = dialog.getByTestId("backup-passphrase-input");
+  const submit = dialog.getByTestId("encrypted-backup-create");
   await expect(password).toHaveAttribute(
     "placeholder",
     "Password (min 12 characters)",
   );
   await expect(submit).toBeDisabled();
   await password.fill("short");
-  await expect(row.getByTestId("backup-passphrase-issue")).toHaveText(
-    "Use at least 12 characters.",
-  );
+  await expect(dialog.getByTestId("backup-passphrase-issue")).toHaveCount(0);
   await expect(submit).toBeDisabled();
 
   await password.fill("custom password");
   await expect(submit).toBeEnabled();
   await submit.click();
-  await expect(row.getByTestId("backup-saved-password-mask")).toBeVisible();
-  await expect(row.getByTestId("encrypted-backup-saved-path")).toContainText(
-    "/Users/test/Downloads/identity.ncryptsec",
-  );
+  await expect(dialog.getByTestId("backup-passphrase-input")).toHaveCount(0);
+  await expect.poll(() => backupSaveCallCount(page)).toBe(1);
   await expect(submit).toHaveText("Download backup again");
 
   await submit.click();
-  await expect(row.getByTestId("encrypted-backup-saved-path")).toContainText(
-    "/Users/test/Desktop/identity-copy.ncryptsec",
-  );
+  await expect.poll(() => backupSaveCallCount(page)).toBe(2);
+});
+
+test("submit replaces the form with progress and automatically opens save", async ({
+  page,
+}) => {
+  await openBackupSettings(page, {
+    backupEncryptionDelayMs: 750,
+    backupSavePaths: [null, "/Users/test/Downloads/identity-retry.ncryptsec"],
+  });
+  const dialog = await openCreateBackup(page);
+  await dialog.getByTestId("backup-passphrase-input").fill("progress password");
+  await dialog.getByTestId("encrypted-backup-create").click();
+
+  const progress = dialog.getByTestId("encrypted-backup-progress");
+  await expect(progress).toBeVisible();
+  await expect(progress).toHaveAttribute("aria-valuemax", "100");
+  await expect(dialog.getByTestId("backup-passphrase-input")).toHaveCount(0);
+  await expect(dialog.getByTestId("encrypted-backup-create")).toHaveCount(0);
+
+  const downloadAgain = dialog.getByTestId("encrypted-backup-create");
+  await expect(downloadAgain).toHaveText("Download backup again");
+  await expect(progress).toHaveCount(0);
+  await expect(dialog.getByTestId("backup-passphrase-input")).toHaveCount(0);
+  await expect.poll(() => backupSaveCallCount(page)).toBe(1);
+
+  await downloadAgain.click();
+  await expect.poll(() => backupSaveCallCount(page)).toBe(2);
 });
 
 test("closing and reopening creation clears unsaved and completed state", async ({
   page,
 }) => {
   await openBackupSettings(page);
-  const row = page.getByTestId("profile-encrypted-backup-row");
-  const toggle = row.getByTestId("profile-encrypted-backup-row-toggle");
-  await toggle.click();
-  await row.getByTestId("backup-passphrase-input").fill("unsaved password");
-  await toggle.click();
-  await toggle.click();
-  await expect(row.getByTestId("backup-passphrase-input")).toHaveValue("");
+  const dialog = await openCreateBackup(page);
+  await dialog.getByTestId("backup-passphrase-input").fill("unsaved password");
+  await dialog.getByRole("button", { name: "Close" }).click();
 
-  await row.getByTestId("backup-passphrase-input").fill("completed password");
-  await row.getByTestId("encrypted-backup-create").click();
-  await expect(row.getByTestId("encrypted-backup-created")).toBeVisible();
-  await toggle.click();
-  await toggle.click();
-  await expect(row.getByTestId("backup-passphrase-input")).toHaveValue("");
-  await expect(row.getByTestId("encrypted-backup-created")).toHaveCount(0);
-  await expect(row.getByTestId("encrypted-backup-create")).toHaveText(
+  await openCreateBackup(page);
+  await expect(dialog.getByTestId("backup-passphrase-input")).toHaveValue("");
+
+  await dialog
+    .getByTestId("backup-passphrase-input")
+    .fill("completed password");
+  await dialog.getByTestId("encrypted-backup-create").click();
+  await expect(dialog.getByTestId("encrypted-backup-create")).toHaveText(
+    "Download backup again",
+  );
+  await dialog.getByRole("button", { name: "Close" }).click();
+
+  await openCreateBackup(page);
+  await expect(dialog.getByTestId("backup-passphrase-input")).toHaveValue("");
+  await expect(dialog.getByTestId("encrypted-backup-create")).toHaveText(
     "Backup key",
   );
 });

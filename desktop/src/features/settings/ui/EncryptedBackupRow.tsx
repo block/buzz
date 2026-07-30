@@ -5,27 +5,36 @@ import {
   initialBackupTestProgress,
 } from "@/features/settings/ui/BackupTestFlow";
 import { EncryptedBackupCreator } from "@/features/settings/ui/EncryptedBackupCreator";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/shared/ui/dialog";
 
 /**
- * Collapsible settings row shared by the two backup tools. `relative`
- * anchors the backup-test drop overlay (BackupTestFlow) so a file drag takes
- * over the whole row, mirroring the composer treatment.
+ * Settings row shared by the two backup tools. `relative` anchors the
+ * backup-test drop overlay (BackupTestFlow) so a file drag takes over the
+ * whole row, mirroring the composer treatment.
  */
 function ToolRow({
   title,
   description,
   action,
-  open,
-  onToggle,
+  expanded,
+  hasPopup = false,
+  onAction,
   children,
   testId,
 }: {
   title: string;
   description: string;
   action: string;
-  open: boolean;
-  onToggle: () => void;
-  children: React.ReactNode;
+  expanded?: boolean;
+  hasPopup?: boolean;
+  onAction: () => void;
+  children?: React.ReactNode;
   testId: string;
 }) {
   return (
@@ -36,17 +45,18 @@ function ToolRow({
           <p className="text-sm text-muted-foreground">{description}</p>
         </div>
         <button
-          aria-expanded={open}
-          aria-label={open ? `Close ${title.toLowerCase()}` : title}
+          aria-expanded={expanded}
+          aria-haspopup={hasPopup ? "dialog" : undefined}
+          aria-label={expanded ? `Close ${title.toLowerCase()}` : title}
           className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           data-testid={`${testId}-toggle`}
-          onClick={onToggle}
+          onClick={onAction}
           type="button"
         >
-          {open ? "Close" : action}
+          {expanded ? "Close" : action}
         </button>
       </div>
-      {open ? <div className="mt-3">{children}</div> : null}
+      {expanded ? <div className="mt-3">{children}</div> : null}
     </div>
   );
 }
@@ -66,23 +76,30 @@ export function EncryptedBackupRow() {
       <ToolRow
         action="Create backup"
         description="Download a password-protected copy of your identity key."
-        onToggle={() => setCreateOpen((open) => !open)}
-        open={createOpen}
+        hasPopup
+        onAction={() => setCreateOpen(true)}
         testId="profile-encrypted-backup-row"
         title="Create a key backup"
-      >
-        <EncryptedBackupCreator />
-        <p className="mt-3 text-xs leading-5 text-muted-foreground">
-          Keep the file private and save its password somewhere safe — Buzz
-          cannot reset it. Creating another backup does not invalidate copies
-          you saved before.
-        </p>
-      </ToolRow>
+      />
+      <Dialog onOpenChange={setCreateOpen} open={createOpen}>
+        <DialogContent
+          className="max-w-lg"
+          data-testid="encrypted-backup-dialog"
+        >
+          <DialogHeader className="pr-8">
+            <DialogTitle>Create a key backup</DialogTitle>
+            <DialogDescription>
+              Download a password-protected copy of your identity key.
+            </DialogDescription>
+          </DialogHeader>
+          <EncryptedBackupCreator />
+        </DialogContent>
+      </Dialog>
       <ToolRow
         action="Test backup"
         description="Check a backup file and its password, and see which identity it unlocks."
-        onToggle={() => setTestOpen((open) => !open)}
-        open={testOpen}
+        expanded={testOpen}
+        onAction={() => setTestOpen((open) => !open)}
         testId="profile-backup-test-row"
         title="Test a key backup"
       >
