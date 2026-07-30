@@ -4,6 +4,7 @@ pub mod auth;
 mod builtin;
 pub mod catalog;
 pub mod config;
+pub mod sigv4;
 mod handoff;
 mod hints;
 mod llm;

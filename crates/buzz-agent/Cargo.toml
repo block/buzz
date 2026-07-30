@@ -44,9 +44,11 @@ sha2 = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
 # AWS SigV4 signing for Bedrock provider
-aws-sigv4 = "1.2"
+aws-sigv4 = { version = "1.2", features = ["http1"] }
 aws-credential-types = "1.2"
 aws-types = "1.2"
+http = "1"
+aws-smithy-runtime-api = "1.7"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

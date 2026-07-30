@@ -158,6 +158,11 @@ impl Llm {
                 let v = self.post_openrouter(cfg, &body).await?;
                 parse_openai_with_reasoning_details(v)
             }
+            Provider::Bedrock => {
+                return Err(AgentError::Llm(
+                    "Bedrock provider not yet implemented for completion".into(),
+                ));
+            }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(
                     cfg,
@@ -269,6 +274,11 @@ impl Llm {
                 );
                 let v = self.post_openrouter(cfg, &body).await?;
                 Ok(parse_openai(v)?.text)
+            }
+            Provider::Bedrock => {
+                return Err(AgentError::Llm(
+                    "Bedrock provider not yet implemented for summarize".into(),
+                ));
             }
             Provider::OpenAi | Provider::Databricks => {
                 let r = self
@@ -1922,7 +1932,7 @@ where
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::Bedrock => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
