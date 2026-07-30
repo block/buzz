@@ -182,7 +182,10 @@ fn cleanup_stale_backup_removes_only_on_identity_change() {
     assert!(path.exists(), "same identity must keep the backup");
 
     cleanup_stale_backup(&a, &b, dir.path()).unwrap();
-    assert!(!path.exists(), "identity change must remove the stale backup");
+    assert!(
+        !path.exists(),
+        "identity change must remove the stale backup"
+    );
 }
 
 #[test]
