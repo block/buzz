@@ -18,6 +18,14 @@ use nostr::{FromBech32, Keys, ToBech32};
 /// breaking existing backups.
 pub const BACKUP_LOG_N: u8 = 18;
 
+/// Highest scrypt cost accepted when decrypting an untrusted backup.
+///
+/// NIP-49 intentionally leaves `log_n` client-selected. Capping it at the tier
+/// Buzz itself emits keeps generated and upstream-compatible lower-cost backups
+/// readable without allowing a crafted payload to request unbounded memory
+/// before password authentication.
+pub const MAX_VERIFY_LOG_N: u8 = BACKUP_LOG_N;
+
 /// Filename of the app-managed canonical backup inside the app data dir.
 pub const BACKUP_FILE_NAME: &str = "identity.ncryptsec";
 
@@ -88,6 +96,12 @@ pub fn parse_ncryptsec(input: &str) -> Result<EncryptedSecretKey, String> {
 /// Decrypt an `ncryptsec1…` string with `password` into identity keys.
 pub fn decrypt_ncryptsec(input: &str, password: &str) -> Result<Keys, String> {
     let encrypted = parse_ncryptsec(input)?;
+    let log_n = encrypted.log_n();
+    if log_n > MAX_VERIFY_LOG_N {
+        return Err(format!(
+            "unsupported backup KDF cost: log_n {log_n} exceeds maximum {MAX_VERIFY_LOG_N}"
+        ));
+    }
     let secret_key = encrypted
         .decrypt(password)
         .map_err(|_| "wrong backup password or damaged key backup".to_string())?;

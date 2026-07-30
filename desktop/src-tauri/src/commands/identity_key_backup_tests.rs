@@ -1,6 +1,6 @@
 use super::{create_backup_with_log_n, verify_ncryptsec_backup_inner};
 use crate::app_state::build_app_state;
-use nostr::Keys;
+use nostr::{Keys, ToBech32};
 
 /// Fast scrypt tier for tests; production uses BACKUP_LOG_N (18), covered
 /// once in key_backup_tests::round_trip_at_production_cost.
@@ -38,6 +38,42 @@ fn verification_rejects_wrong_password() {
     assert_eq!(
         verify_ncryptsec_backup_inner(&state, &backup, "wrong password").unwrap_err(),
         "wrong backup password or damaged key backup"
+    );
+}
+
+#[test]
+fn verification_accepts_maximum_supported_kdf_cost() {
+    let state = build_app_state();
+    let backup = crate::key_backup::create_backup_blob(
+        &Keys::generate(),
+        PASSWORD,
+        crate::key_backup::MAX_VERIFY_LOG_N,
+    )
+    .unwrap();
+    verify_ncryptsec_backup_inner(&state, &backup, PASSWORD).unwrap();
+}
+
+#[test]
+fn verification_rejects_unsupported_kdf_cost_before_decryption() {
+    let state = build_app_state();
+    let supported =
+        crate::key_backup::create_backup_blob(&Keys::generate(), PASSWORD, FAST_LOG_N).unwrap();
+    let encrypted = crate::key_backup::parse_ncryptsec(&supported).unwrap();
+    let mut payload = encrypted.as_vec();
+    payload[1] = crate::key_backup::MAX_VERIFY_LOG_N + 1;
+    let unsupported = nostr::nips::nip49::EncryptedSecretKey::from_slice(&payload)
+        .unwrap()
+        .to_bech32()
+        .unwrap();
+
+    let err = verify_ncryptsec_backup_inner(&state, &unsupported, PASSWORD).unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "unsupported backup KDF cost: log_n {} exceeds maximum {}",
+            crate::key_backup::MAX_VERIFY_LOG_N + 1,
+            crate::key_backup::MAX_VERIFY_LOG_N
+        )
     );
 }
 
