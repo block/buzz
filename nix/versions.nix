@@ -22,9 +22,9 @@
     };
   };
 
-  # Cargo.lock output hashes for sidecar builds (workspace root Cargo.lock).
+  # Cargo.lock output hashes for workspace builds (root Cargo.lock).
   # Regenerate after Cargo.lock changes: remove one, nix build will error with the correct hash.
-  sidecarCargoOutputHashes = {
+  workspaceCargoOutputHashes = {
     "aws-creds-0.39.1" = "sha256-QAAm1phmeLFtDRgfDCoHijN1ce/rYzh18KziOUbL+hw=";
     "mesh-llm-api-client-0.73.1" = "sha256-2ArkxK7Ze13mqkQB+JkuqVSCLeHpdxXHMZ0592VyEWw=";
   };

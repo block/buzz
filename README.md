@@ -154,6 +154,17 @@ Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
 
 For a split-terminal workflow (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another.
 
+Using Nix, the flake exposes the desktop app, relay server, administration CLI,
+agent sidecars, and a NixOS relay module:
+
+```bash
+nix run .#buzz-desktop
+nix run .#buzz-relay
+```
+
+See the [NixOS deployment guide](deploy/nixos/README.md) for package names,
+module options, secrets, and reverse-proxy configuration.
+
 Want a single-node / VPS relay instead of the local-dev stack? Use the production Compose bundle in [`deploy/compose/`](deploy/compose/README.md) (`docker compose` + Postgres, Redis, MinIO, optional Caddy/TLS). The root [`docker-compose.yml`](docker-compose.yml) is for day-to-day development only.
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
@@ -223,6 +234,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 - **[VISION.md](VISION.md)** · **[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md)** · **[VISION_PROJECTS.md](VISION_PROJECTS.md)** · **[VISION_AGENT.md](VISION_AGENT.md)** — the four vision docs
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
+- **[deploy/nixos](deploy/nixos/README.md)** · **[deploy/compose](deploy/compose/README.md)** · **[deploy/charts/buzz](deploy/charts/buzz/README.md)** — relay deployment guides
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[SECURITY.md](SECURITY.md)** · **[GOVERNANCE.md](GOVERNANCE.md)**
 
 <details>
