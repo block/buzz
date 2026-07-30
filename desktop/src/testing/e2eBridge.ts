@@ -11,6 +11,7 @@ import {
 } from "./e2eBridgeCustomHarnesses.ts";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
@@ -1115,6 +1116,7 @@ declare global {
       unavailable: boolean,
     ) => void;
     __BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => number[];
+    __BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__?: (seconds: number) => void;
     __BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
@@ -9706,6 +9708,9 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => [
     ...relayWebsocketConnectAttemptStarts,
   ];
+  window.__BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__ = (seconds) => {
+    activateRateLimit(seconds);
+  };
   window.__BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => {
     relayWebsocketConnectAttemptStarts.length = 0;
   };
