@@ -264,7 +264,6 @@ export class RelayClient {
       tags.push(["p", pubkey]);
     }
     tags.push(...withMentionReferenceTags(extraTags, mentionPubkeys));
-
     const event = await signRelayEvent({
       kind: KIND_STREAM_MESSAGE,
       content: content.trim(),
@@ -784,9 +783,8 @@ export class RelayClient {
       return;
     }
 
-    if (handleRelayNoticeFrame(data)) return;
-
     const [type, ...rest] = data;
+    if (type === "NOTICE" && handleRelayNoticeFrame(data)) return;
     if (type === "AUTH" && typeof rest[0] === "string") {
       await this.handleAuthChallenge(rest[0], generation);
       return;
@@ -829,7 +827,7 @@ export class RelayClient {
     }
 
     if (type === "NOTICE" && typeof rest[0] === "string") {
-      const notice: string = rest[0];
+      const notice = rest[0];
       // Relay back-pressure — arm the gate until the window expires.
       if (notice.startsWith("rate-limited:")) {
         activateRateLimit(parseRateLimitHint(notice));

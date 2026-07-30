@@ -37,7 +37,6 @@ import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
-
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   getErrorMessage,
@@ -94,7 +93,6 @@ type UseMentionSendFlowOptions = {
   }) => void;
   resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
-
 
 export function useMentionSendFlow({
   channelId,
@@ -515,7 +513,6 @@ export function useMentionSendFlow({
             [...draft.savedSpoileredAttachmentUrls],
             draft.savedMentionRefs,
           );
-
         };
         const restoreComposerAfterFailure = () => {
           persistCanceledDraft();
@@ -567,7 +564,6 @@ export function useMentionSendFlow({
           if (signal?.aborted) return;
           await send(
             finalContent,
-
             mentionPubkeys,
             finalOutgoingTags,
             sendChannelId,
@@ -873,8 +869,8 @@ export function useMentionSendFlow({
     const mentionPubkeys = pendingNonMemberSend.mentionPubkeys.filter(
       (pubkey) => !nonMemberPubkeys.has(normalizePubkey(pubkey)),
     );
-    const outgoingTags = withMentionReferenceTags(
-      pendingNonMemberSend.outgoingTags ?? [],
+    const outgoingTags = mergeOutgoingTagsWithReferenceMentions(
+      pendingNonMemberSend.outgoingTags,
       nonMemberPubkeys,
     );
     void completeSend(pendingNonMemberSend, mentionPubkeys, outgoingTags);

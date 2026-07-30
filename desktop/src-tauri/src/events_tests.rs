@@ -74,6 +74,8 @@ fn build_message_accepts_deduped_mention_reference_tags() {
             vec!["mention".to_string(), PUBKEY_A.to_string()],
             vec!["mention".to_string(), PUBKEY_B.to_string()],
         ],
+        &[],
+        "https://relay.example",
     )
     .expect("build message");
 
@@ -105,6 +107,8 @@ fn build_message_rejects_malformed_mention_reference_tags() {
         &[],
         &[],
         &[vec!["p".into(), PUBKEY.into()]],
+        &[],
+        "https://relay.example",
     )
     .unwrap_err();
     assert!(wrong_prefix.contains("mention reference tags must use 'mention' prefix"));
@@ -117,12 +121,25 @@ fn build_message_rejects_malformed_mention_reference_tags() {
         &[],
         &[],
         &[vec!["mention".into(), PUBKEY.into(), "extra".into()]],
+        &[],
+        "https://relay.example",
     )
     .unwrap_err();
     assert!(extra_field.contains("exactly prefix and pubkey"));
 
     let too_many = vec![vec!["mention".into(), PUBKEY.into()]; MAX_MENTIONS + 1];
-    let too_many_err = build_message(channel_id, "hi", None, &[], &[], &[], &too_many).unwrap_err();
+    let too_many_err = build_message(
+        channel_id,
+        "hi",
+        None,
+        &[],
+        &[],
+        &[],
+        &too_many,
+        &[],
+        "https://relay.example",
+    )
+    .unwrap_err();
     assert!(too_many_err.contains("too many mention reference tags"));
 }
 
@@ -165,7 +182,8 @@ fn edit_tags(mentions: &[&str]) -> Vec<Vec<String>> {
     let target =
         EventId::from_hex("d24da132115ca0a46233cf4c2ad8338fbf914250cbcaa9181a6dd59533cb5ac1")
             .unwrap();
-    let builder = build_message_edit(channel, target, "hi @alice", &[], &[], mentions).unwrap();
+    let builder =
+        build_message_edit(channel, target, "hi @alice", &[], &[], mentions, false).unwrap();
     let secret = nostr::SecretKey::from_hex(
         "0000000000000000000000000000000000000000000000000000000000000003",
     )
