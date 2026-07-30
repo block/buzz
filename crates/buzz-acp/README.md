@@ -286,6 +286,7 @@ Buzz Desktop supports registering any ACP-speaking agent tool as a selectable ru
   "env": {
     "MY_AGENT_MODE": "acp"
   },
+  "cwd": "/home/agentuser/workspace",
   "installInstructionsUrl": "https://example.com/docs",
   "installHint": "Download from example.com"
 }
@@ -297,9 +298,20 @@ Fields:
 - `command` — the executable name or absolute path (must be non-empty)
 - `args` — optional default CLI arguments (array); instance-level args override this when non-empty
 - `env` — optional environment variables injected at spawn time (definition env is a floor; user/persona/global env overrides it; Buzz-reserved keys like `BUZZ_MANAGED_AGENT` are always stripped and cannot be overridden)
+- `cwd` — optional session working directory, sent verbatim as ACP `session/new`'s `cwd`. Omit it and the harness sends its own process working directory (today's behavior) — correct only when the harness runs on the same machine as `buzz-acp` itself. Set it when the harness command executes elsewhere (see "Remote harnesses over SSH" below).
 - `installInstructionsUrl` / `installHint` — shown when the binary is not on PATH
 
 Invalid files (bad JSON, unknown id, empty command) are skipped with a warning and do not break discovery for other entries.
+
+### Remote harnesses over SSH
+
+A harness `command` can be `ssh` — the ACP agent then runs on another machine while Desktop stays the client (e.g. `"command": "ssh", "args": ["-T", "-e", "none", "-o", "SendEnv=BUZZ_*", "<host>", "cd ~/buzz && PATH=$HOME/.local/bin:$PATH exec claude-agent-acp"]`). Three things to know before trying this:
+
+- **Set `cwd` on the definition.** Without it, `session/new` sends `buzz-acp`'s own local working directory — a path on the Desktop machine, meaningless on the remote host, and the adapter rejects it (`cwd does not exist on the machine running the agent`). Set `cwd` to a path that exists on the *remote* machine.
+- **Forward `BUZZ_*` env vars explicitly.** `buzz-acp` injects `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, and `BUZZ_AUTH_TAG` into the harness process so the agent can use the `buzz` CLI — but SSH does not forward arbitrary environment variables by default. Without forwarding, the agent still answers turns (the harness publishes those), but every Buzz CLI call it makes fails silently, which looks like a slow/unresponsive agent rather than a misconfiguration. Use client-side `SendEnv='BUZZ_*'` paired with `AcceptEnv BUZZ_*` in the remote host's `sshd_config`. Never pass the private key via `argv` — it would be visible in `ps` on the remote host; `SendEnv` keeps it inside the encrypted channel instead.
+- **Set `PATH` inline in the harness command.** A non-interactive SSH session does not load the login shell profile, so a binary installed under `~/.local/bin` won't be found unless the command sets `PATH` itself (`PATH=$HOME/.local/bin:$PATH exec ...`). The same applies to any local harness run under systemd, where `PATH`/`HOME` must be set in the unit.
+
+A BYOH agent is still spawned *by Desktop*, so it lives and dies with the Desktop process — SSH-over-BYOH is a workaround for "mention an agent that executes elsewhere while I'm working," not a substitute for an always-on hosted agent.
 
 ### Security guarantees
 
@@ -329,7 +341,7 @@ The harness works with any agent that implements the [ACP spec](https://agentcli
 - Accept `session/prompt` with a text message and stream `session/update` notifications
 - Return a `stopReason` (`end_turn`, `cancelled`, `max_tokens`, etc.)
 
-Set `BUZZ_ACP_AGENT_COMMAND` and `BUZZ_ACP_AGENT_ARGS` to point at your agent binary.
+Set `BUZZ_ACP_AGENT_COMMAND` and `BUZZ_ACP_AGENT_ARGS` to point at your agent binary. Set `BUZZ_ACP_SESSION_CWD` to override the `cwd` sent on `session/new` — required when the agent runs on a different machine than `buzz-acp` (see "Remote harnesses over SSH" above).
 
 ## Testing
 

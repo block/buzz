@@ -1636,6 +1636,7 @@ pub(crate) fn preset_harness_definitions(
                 env: std::collections::BTreeMap::new(),
                 install_instructions_url: p.install_instructions_url.to_string(),
                 install_hint: p.install_hint.to_string(),
+                cwd: None,
             },
         )
         .collect()
