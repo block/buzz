@@ -869,7 +869,7 @@ pub fn spawn_agent_child(
     // uses the same trim semantics as the preflight callers.
     #[cfg(feature = "mesh-llm")]
     if let Some(ref mesh_model_id) = mesh_model_id {
-        let mut mesh_env = std::collections::BTreeMap::new();
+        let mut mesh_env = descriptor.env.clone(); // #2558 keep UI overrides
         super::apply_relay_mesh_env(
             &mut mesh_env,
             Some(super::RELAY_MESH_PROVIDER_ID),
