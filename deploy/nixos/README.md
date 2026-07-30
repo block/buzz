@@ -21,6 +21,20 @@ nix run .#buzz-admin -- --help
 The `buzz-relay` package contains both `buzz-relay` and `buzz-admin`. The named
 apps select the appropriate executable.
 
+### Codex ACP adapter
+
+The desktop package includes Buzz's own agent sidecars, but external managed
+agent runtimes and their ACP adapters must also be available on `PATH`.
+
+Despite having the same `codex-acp` executable name, `pkgs.codex-acp` at this
+flake's pinned nixpkgs revision is version 0.13.0 from the legacy
+`@zed-industries/codex-acp` project. Buzz requires the official
+`@agentclientprotocol/codex-acp` adapter at or above the minimum version
+enforced by the desktop app (currently 1.1.7). NixOS configurations should
+package that upstream adapter explicitly rather than install the nixpkgs
+package with the matching name. The Codex CLI must also be on `PATH`, or its
+executable can be selected with `CODEX_PATH`.
+
 ## Import the NixOS module
 
 Pin Buzz as a flake input and import its relay module:
