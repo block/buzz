@@ -284,9 +284,27 @@ export function usePersonaActions() {
     }
   }
 
-  async function handleDelete(persona: AgentPersona) {
+  /**
+   * `deleteInstances` must tear down the persona's managed-agent instances
+   * first: `delete_persona` refuses to cascade over a provider-deployed
+   * instance, so without it deleting such a persona fails outright. It is a
+   * required parameter rather than an internal call because the instance
+   * context lives in `useManagedAgentActions`, and requiring it keeps a caller
+   * from silently reintroducing the unguarded delete.
+   */
+  async function handleDelete(
+    persona: AgentPersona,
+    deleteInstances: (
+      persona: AgentPersona,
+    ) => Promise<{ cancelled?: boolean }>,
+  ) {
     clearFeedback("library");
     try {
+      // Abort the cascade if the user declined a confirm; a throw here skips
+      // the persona delete for the same reason.
+      const instances = await deleteInstances(persona);
+      if (instances.cancelled) return;
+
       await deletePersonaMutation.mutateAsync(persona.id);
       setPersonaNoticeMessage(`Deleted ${persona.displayName}.`);
       setPersonaToDelete(null);

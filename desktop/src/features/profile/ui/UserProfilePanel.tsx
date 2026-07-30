@@ -608,6 +608,12 @@ export function UserProfilePanel({
       }
 
       try {
+        // Instances first: delete_persona refuses to cascade over a
+        // provider-deployed instance, so the persona delete fails outright
+        // unless they are torn down. Matches the built-in path above.
+        const instances = await deleteManagedAgentsForPersona(personaToConfirm);
+        if (instances.cancelled) return;
+
         await deletePersonaMutation.mutateAsync(personaToConfirm.id);
         toast.success(`Deleted ${personaToConfirm.displayName}.`);
         setPersonaToDelete(null);
@@ -618,7 +624,7 @@ export function UserProfilePanel({
         );
       }
     },
-    [deletePersonaMutation.mutateAsync, onClose],
+    [deleteManagedAgentsForPersona, deletePersonaMutation.mutateAsync, onClose],
   );
 
   // Count of managed-agent instances backed by the persona being deleted.
@@ -628,6 +634,19 @@ export function UserProfilePanel({
       personaToDelete
         ? (managedAgentsQuery.data ?? []).filter(
             (a) => a.personaId === personaToDelete.id,
+          ).length
+        : 0,
+    [managedAgentsQuery.data, personaToDelete],
+  );
+
+  const personaDeleteProviderInstanceCount = React.useMemo(
+    () =>
+      personaToDelete
+        ? (managedAgentsQuery.data ?? []).filter(
+            (a) =>
+              a.personaId === personaToDelete.id &&
+              a.backend.type === "provider" &&
+              a.backendAgentId,
           ).length
         : 0,
     [managedAgentsQuery.data, personaToDelete],
@@ -945,6 +964,7 @@ export function UserProfilePanel({
             : null
         }
         instanceCount={personaDeleteInstanceCount}
+        providerInstanceCount={personaDeleteProviderInstanceCount}
         isPending={
           createPersonaMutation.isPending ||
           updatePersonaMutation.isPending ||

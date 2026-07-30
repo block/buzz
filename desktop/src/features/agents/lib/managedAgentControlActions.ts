@@ -1,5 +1,6 @@
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type {
+  AgentPersona,
   Channel,
   ManagedAgent,
   PresenceLookup,
@@ -138,6 +139,48 @@ export async function stopManagedAgentWithRules({
   }
 
   await stopManagedAgent(agent.pubkey);
+  return {};
+}
+
+/**
+ * Delete every managed-agent instance backed by `persona`, applying the same
+ * per-agent rules as {@link deleteManagedAgentWithRules} — including the
+ * orphan-warning confirm for provider deployments.
+ *
+ * Callers must run this to completion *before* deleting the persona itself:
+ * `delete_persona` refuses to cascade over a provider-deployed instance, so a
+ * persona whose instances are still deployed cannot be deleted at all.
+ *
+ * Contract, shared with `deleteProfileManagedAgentsForPersona` in
+ * `features/profile/ui/UserProfilePanelDeletion.ts`: abort the persona cascade
+ * on the first cancelled or failed instance delete, so a declined confirm or a
+ * backend error never leaves a half-torn persona. That variant additionally
+ * removes each agent from its channels between deletes, which is why the two
+ * loops are kept separate rather than parameterized — keep both in step.
+ */
+export async function deleteManagedAgentsForPersonaWithRules({
+  persona,
+  managedAgents,
+  ...context
+}: {
+  persona: Pick<AgentPersona, "id">;
+  managedAgents: readonly ManagedAgent[];
+  deleteManagedAgent: DeleteManagedAgent;
+} & ManagedAgentActionContext): Promise<ManagedAgentActionResult> {
+  // Dedup by pubkey so a list carrying the same instance twice cannot delete it
+  // twice — mirrors the profile variant's Map for the same reason.
+  const agentsByPubkey = new Map<string, ManagedAgent>();
+  for (const agent of managedAgents) {
+    if (agent.personaId === persona.id) {
+      agentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
+    }
+  }
+
+  for (const agent of agentsByPubkey.values()) {
+    const result = await deleteManagedAgentWithRules({ agent, ...context });
+    if (result.cancelled) return result;
+  }
+
   return {};
 }
 
