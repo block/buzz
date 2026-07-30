@@ -278,10 +278,9 @@ async fn agent_chat_in_isolated_home(
         .env("OPENAI_COMPAT_API_KEY", "buzz-mesh-local")
         .env("OPENAI_COMPAT_API", "chat")
         .env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096")
-        // Must track apply_relay_mesh_env()'s default. `none` suppresses tool
-        // calling on local models, so pinning it here would test a config the
-        // product no longer ships and hide the very regression P5/P6 exist for.
-        .env("BUZZ_AGENT_THINKING_EFFORT", "low")
+        // No BUZZ_AGENT_THINKING_EFFORT: apply_relay_mesh_env() deliberately
+        // leaves it unset so each model's chat template picks its own default.
+        // Pinning a value here would test a config the product does not ship.
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

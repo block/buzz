@@ -47,14 +47,15 @@ pub fn apply_relay_mesh_env(
     // may deliberately choose a smaller cap or a different effort. This function
     // runs after those layers during readiness, so never clobber their values.
     insert_default_if_unset(env, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096");
-    // `none` suppresses tool calling outright on local models: llama.cpp's
-    // Gemma grammar is lazy under `tool_choice: auto`, and `reasoning_effort:
-    // "none"` keeps the model on its prose path so it never emits the tool-call
-    // token. Measured with the real prompt and toolset, gemma-4-E4B delivered a
-    // reply 0/8 times at `none` and 8/8 at `low`; `minimal` was 3/4. `low` buys
-    // just enough deliberation to pick a tool without spending the output
-    // budget on hidden reasoning.
-    insert_default_if_unset(env, "BUZZ_AGENT_THINKING_EFFORT", "low");
+    // Deliberately no BUZZ_AGENT_THINKING_EFFORT default: mesh translates
+    // `reasoning_effort` into the chat template's `enable_thinking` flag, so any
+    // value we pick overrides each model's own template default — and the right
+    // value is model-specific. Measured with the real prompt and toolset:
+    // gemma-4-E4B delivers 0/8 at `none` but 6/6 with the field absent, while
+    // Qwen3-8B delivers 8/8 either way and burns ~4x the output tokens once
+    // thinking is on (121 -> ~470), risking the 4096 cap. Omitting the field
+    // lets every model use its own default; explicit agent/persona/global
+    // values still apply.
 }
 
 #[cfg(feature = "mesh-llm")]
@@ -107,12 +108,11 @@ mod tests {
             env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
             Some("4096")
         );
-        // Must not be "none": that suppresses tool calling on local models, so
-        // the agent answers in prose and the reply is never published.
-        assert_eq!(
-            env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
-            Some("low")
-        );
+        // Must stay unset: any value we pick overrides the model's own chat
+        // template default, and the right value is model-specific ("none"
+        // stops gemma tool-calling; enabling thinking makes Qwen3 burn ~4x the
+        // output budget).
+        assert_eq!(env.get("BUZZ_AGENT_THINKING_EFFORT"), None);
         assert_eq!(
             env.get(RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV)
                 .map(String::as_str),
@@ -127,8 +127,6 @@ mod tests {
                 "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
                 "2048".to_string(),
             ),
-            // Deliberately not the default ("low"), so this asserts
-            // preservation rather than coinciding with the default.
             ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string()),
         ]);
         apply_relay_mesh_env(
