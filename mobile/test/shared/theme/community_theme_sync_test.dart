@@ -120,6 +120,53 @@ void main() {
   );
 
   test(
+    'relay CLOSED resubscribes then catches up latest replacement event',
+    () async {
+      final applied = <CommunityThemePreference>[];
+      final session = _FakeSession();
+      final manager = _manager(
+        session,
+        _FakeSignedRelay(),
+        onRemote: (remote) => applied.add(remote.preference),
+      );
+      await manager.initialize(local);
+      expect(session.subscribeCalls, 1);
+
+      const replacement = CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+      );
+      session.history = [
+        _event(
+          id: 'replacement',
+          createdAt: 100,
+          content: jsonEncode(replacement.toJson()),
+        ),
+      ];
+      session.closeLiveSubscription('rate-limited: quota exceeded');
+
+      await _waitUntil(() => session.subscribeCalls == 2 && applied.isNotEmpty);
+      expect(applied.single, replacement);
+      expect(session.activeListeners, 1);
+      manager.dispose();
+    },
+  );
+
+  test('relay CLOSED after dispose never resubscribes', () async {
+    final session = _FakeSession();
+    final manager = _manager(session, _FakeSignedRelay());
+    await manager.initialize(local);
+    final close = session.latestClosedCallback;
+
+    manager.dispose();
+    close?.call('late close');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(session.subscribeCalls, 1);
+  });
+
+  test(
     'publish failure keeps pending preference for reconnect retry',
     () async {
       final relay = _FakeSignedRelay(fail: true);
@@ -141,6 +188,7 @@ CommunityThemeSyncManager _manager(
   signedEventRelay: relay,
   crypto: const CommunityThemeCrypto(encrypt: _identity, decrypt: _identity),
   debounce: const Duration(days: 1),
+  subscriptionRetryBase: const Duration(milliseconds: 1),
   onRemote: onRemote ?? (_) {},
 );
 
@@ -163,10 +211,17 @@ NostrEvent _event({
 );
 
 class _FakeSession extends RelaySessionNotifier {
-  _FakeSession({this.history = const [], this.error});
-  final List<NostrEvent> history;
+  _FakeSession({List<NostrEvent> history = const [], this.error})
+    : history = List.of(history);
+  List<NostrEvent> history;
   final Object? error;
-  void Function(NostrEvent)? listener;
+  int subscribeCalls = 0;
+  final List<void Function(NostrEvent)> _listeners = [];
+  final List<void Function(String)> _closedCallbacks = [];
+
+  int get activeListeners => _listeners.length;
+  void Function(String)? get latestClosedCallback =>
+      _closedCallbacks.isEmpty ? null : _closedCallbacks.last;
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -183,11 +238,41 @@ class _FakeSession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String)? onClosed,
   }) async {
-    listener = onEvent;
-    return () => listener = null;
+    subscribeCalls++;
+    _listeners.add(onEvent);
+    _closedCallbacks.add(onClosed ?? (_) {});
+    return () {
+      final index = _listeners.indexOf(onEvent);
+      if (index < 0) return;
+      _listeners.removeAt(index);
+      _closedCallbacks.removeAt(index);
+    };
   }
 
-  void emit(NostrEvent event) => listener?.call(event);
+  void emit(NostrEvent event) {
+    for (final listener in List.of(_listeners)) {
+      listener(event);
+    }
+  }
+
+  void closeLiveSubscription(String message) {
+    if (_listeners.isEmpty) return;
+    _listeners.removeAt(0);
+    _closedCallbacks.removeAt(0)(message);
+  }
+}
+
+Future<void> _waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 2),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('condition not met within $timeout');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+  }
 }
 
 class _Submission {

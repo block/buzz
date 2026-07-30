@@ -41,14 +41,18 @@ class CommunityThemeSyncManager {
   final SignedEventRelay signedEventRelay;
   final CommunityThemeCrypto crypto;
   final Duration debounce;
+  final Duration subscriptionRetryBase;
   final void Function(RemoteCommunityTheme) onRemote;
 
   Timer? _publishTimer;
+  Timer? _subscriptionRetryTimer;
   void Function()? _unsubscribe;
   CommunityThemePreference? _pending;
   CommunityThemePreference? _lastPublished;
   int _lastCreatedAt = 0;
   String _lastEventId = '';
+  int _subscriptionEpoch = 0;
+  int _subscriptionRetryAttempt = 0;
   bool _disposed = false;
 
   CommunityThemeSyncManager({
@@ -58,22 +62,14 @@ class CommunityThemeSyncManager {
     required this.crypto,
     required this.onRemote,
     this.debounce = const Duration(seconds: 2),
+    this.subscriptionRetryBase = const Duration(seconds: 1),
   });
 
   CommunityThemePreference? get pending => _pending;
 
   Future<CommunityThemeRemoteResult> fetchRemote() async {
     try {
-      final events = await relaySession.fetchHistory(
-        NostrFilter(
-          kinds: const [EventKind.readState],
-          authors: [pubkey],
-          tags: const {
-            '#d': [communityThemeDTag],
-          },
-          limit: 1,
-        ),
-      );
+      final events = await relaySession.fetchHistory(_themeFilter(limit: 1));
       if (events.isEmpty) {
         return const CommunityThemeRemoteResult(
           CommunityThemeRemoteStatus.absent,
@@ -104,27 +100,78 @@ class CommunityThemeSyncManager {
     } else if (result.status == CommunityThemeRemoteStatus.absent) {
       publish(local);
     }
+    await _startLiveSubscription();
+    return result;
+  }
+
+  Future<bool> _startLiveSubscription() async {
+    if (_disposed) return false;
+    final epoch = ++_subscriptionEpoch;
     try {
-      _unsubscribe = await relaySession.subscribe(
-        NostrFilter(
-          kinds: const [EventKind.readState],
-          authors: [pubkey],
-          tags: const {
-            '#d': [communityThemeDTag],
-          },
-          limit: 0,
-        ),
+      final unsubscribe = await relaySession.subscribe(
+        _themeFilter(limit: 0),
         (event) {
-          if (_disposed) return;
+          if (_disposed || epoch != _subscriptionEpoch) return;
           final remote = _decode(event);
           if (remote != null) _accept(remote);
         },
+        onClosed: (message) => _handleSubscriptionClosed(epoch, message),
       );
-    } catch (_) {
-      // History and the local cache remain usable without a live subscription.
+      if (_disposed || epoch != _subscriptionEpoch) {
+        unsubscribe();
+        return false;
+      }
+      _unsubscribe = unsubscribe;
+      _subscriptionRetryAttempt = 0;
+      return true;
+    } catch (error) {
+      if (!_disposed && epoch == _subscriptionEpoch) {
+        debugPrint('[CommunityThemeSync] live subscription failed: $error');
+        _scheduleSubscriptionRetry();
+      }
+      return false;
     }
-    return result;
   }
+
+  void _handleSubscriptionClosed(int epoch, String message) {
+    if (_disposed || epoch != _subscriptionEpoch) return;
+    debugPrint('[CommunityThemeSync] live subscription closed: $message');
+    _unsubscribe = null;
+    _scheduleSubscriptionRetry();
+  }
+
+  void _scheduleSubscriptionRetry() {
+    if (_disposed || _subscriptionRetryTimer != null) return;
+    final multiplier = 1 << min(_subscriptionRetryAttempt, 5);
+    _subscriptionRetryAttempt++;
+    _subscriptionRetryTimer = Timer(subscriptionRetryBase * multiplier, () {
+      _subscriptionRetryTimer = null;
+      unawaited(_recoverLiveSubscription());
+    });
+  }
+
+  Future<void> _recoverLiveSubscription() async {
+    if (_disposed) return;
+    if (!await _startLiveSubscription()) return;
+
+    // A relay CLOSED removes the retained subscription from RelaySession, so
+    // reconnect replay cannot recover it. Query the replacement coordinate
+    // after re-subscribing to close the gap while this stream was silent.
+    final result = await fetchRemote();
+    if (_disposed) return;
+    if (result.status == CommunityThemeRemoteStatus.valid) {
+      _accept(result.remote!);
+    }
+  }
+
+  NostrFilter _themeFilter({required int limit}) => NostrFilter(
+    kinds: const [EventKind.readState],
+    authors: [pubkey],
+    tags: const {
+      '#d': [communityThemeDTag],
+    },
+    limit: limit,
+  );
 
   void publish(CommunityThemePreference preference) {
     if (_disposed) return;
@@ -203,6 +250,9 @@ class CommunityThemeSyncManager {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _subscriptionEpoch++;
+    _subscriptionRetryTimer?.cancel();
+    _subscriptionRetryTimer = null;
     cancelPending();
     _unsubscribe?.call();
     _unsubscribe = null;
