@@ -416,7 +416,7 @@ test("the new agent card offers create, discover, and import", async ({
   const cardBoxes = await agentCards.evaluateAll((cards) =>
     cards.map((card) => {
       const box = card.getBoundingClientRect();
-      return { right: box.right, top: box.top };
+      return { left: box.left, right: box.right, top: box.top };
     }),
   );
   const firstRowTop = Math.min(...cardBoxes.map(({ top }) => top));
@@ -425,12 +425,16 @@ test("the new agent card offers create, discover, and import", async ({
       .filter(({ top }) => Math.abs(top - firstRowTop) < 1)
       .map(({ right }) => right),
   );
+  const leftmostFirstRowCard = Math.min(
+    ...cardBoxes
+      .filter(({ top }) => Math.abs(top - firstRowTop) < 1)
+      .map(({ left }) => left),
+  );
   expect(headerBox).not.toBeNull();
-  expect(
-    Math.abs(
-      (headerBox?.x ?? 0) + (headerBox?.width ?? 0) - rightmostFirstRowCard,
-    ),
-  ).toBeLessThan(1);
+  expect(Math.abs((headerBox?.x ?? 0) - leftmostFirstRowCard)).toBeLessThan(1);
+  expect(rightmostFirstRowCard).toBeLessThanOrEqual(
+    (headerBox?.x ?? 0) + (headerBox?.width ?? 0) + 1,
+  );
 
   await newAgentCard.click();
   await expect(
@@ -490,6 +494,63 @@ test("the new team card offers create and import", async ({ page }) => {
   await expect(
     page.getByRole("menuitem", { exact: true, name: "Import" }),
   ).toBeVisible();
+});
+
+test("team cards follow the agents grid alignment at compact widths", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:team-layout",
+        displayName: "Team layout agent",
+        systemPrompt: "A test agent for team layout alignment.",
+      },
+    ],
+    teams: [
+      {
+        id: "team-layout",
+        name: "Team layout",
+        personaIds: ["custom:team-layout"],
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const agentsContent = page.getByTestId("agents-page-content");
+  const firstAgentCard = page.getByTestId(
+    "persona-agent-row-custom:team-layout",
+  );
+  const firstTeamCard = page.getByTestId("team-card-team-layout");
+  const agentGrid = firstAgentCard.locator("xpath=..");
+  const teamGrid = firstTeamCard.locator("xpath=..");
+  const firstAgentGridCard = agentGrid.locator(":scope > *").first();
+  const firstTeamGridCard = teamGrid.locator(":scope > *").first();
+
+  await agentsContent.evaluate((element) => {
+    (element as HTMLElement).style.width = "650px";
+  });
+  const wideAgentBox = await firstAgentGridCard.boundingBox();
+  const wideTeamBox = await firstTeamGridCard.boundingBox();
+  expect(wideAgentBox).not.toBeNull();
+  expect(wideTeamBox).not.toBeNull();
+  expect(Math.abs((wideAgentBox?.x ?? 0) - (wideTeamBox?.x ?? 0))).toBeLessThan(
+    1,
+  );
+
+  await agentsContent.evaluate((element) => {
+    (element as HTMLElement).style.width = "600px";
+  });
+  await expect
+    .poll(async () => (await firstAgentGridCard.boundingBox())?.x ?? 0)
+    .toBeGreaterThan(wideAgentBox?.x ?? 0);
+
+  const compactAgentBox = await firstAgentGridCard.boundingBox();
+  const compactTeamBox = await firstTeamGridCard.boundingBox();
+  expect(
+    Math.abs((compactAgentBox?.x ?? 0) - (compactTeamBox?.x ?? 0)),
+  ).toBeLessThan(1);
 });
 
 test("team cards use the thread-style overlapping avatar stack", async ({
@@ -632,6 +693,62 @@ test("unconfigured agent defaults use the setup label", async ({ page }) => {
   await expect(page.getByTestId("agent-defaults-button")).toHaveText(
     "Set agent defaults",
   );
+});
+
+test("moves agent actions into an overflow menu in a narrow view", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:compact-actions",
+        displayName: "Compact actions agent",
+        isActive: true,
+        systemPrompt: "A test agent for compact header actions.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "Compact actions instance",
+        personaId: "custom:compact-actions",
+        pubkey: "cd".repeat(32),
+        status: "running",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("agents-page-content").evaluate((element) => {
+    (element as HTMLElement).style.width = "650px";
+  });
+
+  await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  await expect(
+    page.getByText("Set up and manage your agents.", { exact: true }),
+  ).toHaveJSProperty("scrollHeight", 24);
+
+  await page.getByTestId("agents-page-content").evaluate((element) => {
+    (element as HTMLElement).style.width = "600px";
+  });
+  await expect(page.getByTestId("agent-defaults-button")).toBeHidden();
+  await page.getByTestId("agent-actions-menu-trigger").click();
+  await expect(
+    page.getByRole("menuitem", { name: "Set agent defaults" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Stop running agents" }),
+  ).toBeVisible();
+
+  await page.getByRole("menuitem", { name: "Set agent defaults" }).click();
+  await expect(page.getByTestId("agent-ai-defaults-dialog")).toBeVisible();
+
+  await page.getByTestId("agents-page-content").evaluate((element) => {
+    (element as HTMLElement).style.width = "650px";
+  });
+  await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("agent-ai-defaults-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("agent-defaults-button")).toBeFocused();
 });
 
 test("agent catalog chooser order stays stable when selection changes", async ({
