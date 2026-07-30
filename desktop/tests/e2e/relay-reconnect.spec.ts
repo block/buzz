@@ -66,7 +66,7 @@ async function getMockWebsocketConnectAttempts(
   page: import("@playwright/test").Page,
 ) {
   return page.evaluate(() => {
-    const getAttempts = window.__BUZZ_E2E_GET_MOCK_WEBSOCKET_CONNECT_ATTEMPTS__;
+    const getAttempts = window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__;
     if (!getAttempts) {
       throw new Error("E2E websocket attempt seam is not installed.");
     }

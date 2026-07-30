@@ -1101,7 +1101,8 @@ declare global {
     __BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__?: (
       unavailable: boolean,
     ) => void;
-    __BUZZ_E2E_GET_MOCK_WEBSOCKET_CONNECT_ATTEMPTS__?: () => number[];
+    __BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => number[];
+    __BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -2815,7 +2816,7 @@ const mockPersonaEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketUnavailable = false;
-const mockWebsocketConnectAttempts: number[] = [];
+const relayWebsocketConnectAttemptStarts: number[] = [];
 let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
@@ -8919,6 +8920,7 @@ async function resolveGetEvent(
 }
 
 async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
+  relayWebsocketConnectAttemptStarts.push(Date.now());
   const wsId = nextSocketId++;
   const ws = new WebSocket(args.url ?? DEFAULT_RELAY_WS_URL);
   const handler = resolveHandler(args.onMessage);
@@ -8947,7 +8949,7 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
 }
 
 async function connectMockSocket(args: { onMessage: unknown }) {
-  mockWebsocketConnectAttempts.push(Date.now());
+  relayWebsocketConnectAttemptStarts.push(Date.now());
   if (mockWebsocketUnavailable) {
     throw new Error("mock relay unavailable");
   }
@@ -9397,7 +9399,7 @@ export function maybeInstallE2eTauriMocks() {
 
   mockClosedChannelLiveSubscription = false;
   mockWebsocketUnavailable = false;
-  mockWebsocketConnectAttempts.length = 0;
+  relayWebsocketConnectAttemptStarts.length = 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -9623,11 +9625,14 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__ = (unavailable) => {
     mockWebsocketUnavailable = unavailable;
-    if (unavailable) mockWebsocketConnectAttempts.length = 0;
+    if (unavailable) relayWebsocketConnectAttemptStarts.length = 0;
   };
-  window.__BUZZ_E2E_GET_MOCK_WEBSOCKET_CONNECT_ATTEMPTS__ = () => [
-    ...mockWebsocketConnectAttempts,
+  window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => [
+    ...relayWebsocketConnectAttemptStarts,
   ];
+  window.__BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => {
+    relayWebsocketConnectAttemptStarts.length = 0;
+  };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.
   window.__BUZZ_E2E_SET_MESH__ = (mesh) => {
