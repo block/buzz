@@ -95,7 +95,7 @@ export function HuddleParticipantsControl({
                   {profile?.displayName || profile?.avatarUrl ? (
                     <ProfileAvatar
                       avatarUrl={profile.avatarUrl ?? null}
-                      label={profile.displayName || pubkey.slice(0, 6)}
+                      label={profile.displayName || truncatePubkey(pubkey)}
                       className={cn(
                         "h-8 w-8 rounded-full text-2xs",
                         isActive &&
