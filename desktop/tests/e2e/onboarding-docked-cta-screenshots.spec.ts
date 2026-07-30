@@ -86,7 +86,7 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
 
   // Backup options leave the yellow flow for the dark security view without
   // adding a progress step or a generic Next action.
-  await page.getByTestId("backup-options-toggle").click();
+  await page.getByTestId("backup-options-link").click();
   await expect(
     page.getByTestId("onboarding-page-backup-options"),
   ).toBeVisible();
@@ -190,7 +190,7 @@ test("backup options keep one-column geometry on narrow windows", async ({
       name: "Your unique identity key has been created",
     }),
   ).toBeVisible();
-  await page.getByTestId("backup-options-toggle").click();
+  await page.getByTestId("backup-options-link").click();
 
   const panels = page.getByTestId("backup-option-panel");
   await expect(panels).toHaveCount(3);

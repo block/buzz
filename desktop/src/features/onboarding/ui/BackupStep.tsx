@@ -1,12 +1,4 @@
-import {
-  Check,
-  ChevronDown,
-  Copy,
-  Eye,
-  EyeOff,
-  Info,
-  ShieldCheck,
-} from "lucide-react";
+import { Check, Copy, Eye, EyeOff, Info, ShieldCheck } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import * as React from "react";
 
@@ -326,8 +318,16 @@ export function BackupStep({
               REVEAL_ANIMATION_CLASS,
             )}
           >
-            {introStorageDescription} Back it up somewhere safe so you can
-            restore your account. Never share your key.
+            {introStorageDescription} You can continue now, or{" "}
+            <button
+              className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              data-testid="backup-options-link"
+              onClick={onShowOptions}
+              type="button"
+            >
+              review backup options
+            </button>{" "}
+            for ways to restore your account.
           </p>
         ) : null}
       </div>
@@ -388,28 +388,16 @@ export function BackupStep({
               </div>
             </Card>
 
-            <div className="mt-4 flex flex-col items-center">
-              <Button
-                className={cn(ONBOARDING_SECONDARY_CTA_CLASS, "gap-1.5")}
-                data-testid="backup-options-toggle"
-                onClick={onShowOptions}
-                type="button"
-                variant="ghost"
+            {copyError ? (
+              <p
+                className="mt-4 text-center text-sm text-destructive"
+                data-testid="backup-copy-error"
               >
-                Backup options
-                <ChevronDown className="h-4 w-4" aria-hidden="true" />
-              </Button>
-              {copyError ? (
-                <p
-                  className="mt-3 text-center text-sm text-destructive"
-                  data-testid="backup-copy-error"
-                >
-                  Could not retrieve your private key: {copyError}. You can
-                  continue and find it later in Settings &gt; Profile &gt;
-                  Identity.
-                </p>
-              ) : null}
-            </div>
+                Could not retrieve your private key: {copyError}. You can
+                continue and find it later in Settings &gt; Profile &gt;
+                Identity.
+              </p>
+            ) : null}
 
             <p className="mx-auto mt-5 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />

@@ -18,7 +18,7 @@ async function enterMachineBackup(page: import("@playwright/test").Page) {
 
 async function openBackupOptions(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
-  await page.getByTestId("backup-options-toggle").click();
+  await page.getByTestId("backup-options-link").click();
   await expect(
     page.getByTestId("onboarding-page-backup-options"),
   ).toBeVisible();
@@ -101,7 +101,7 @@ test("key view reveals explicitly; options copy explicitly", async ({
   await expect(key).not.toContainText("nsec1");
 
   // Copy is available only after opening the dark backup-options view.
-  await page.getByTestId("backup-options-toggle").click();
+  await page.getByTestId("backup-options-link").click();
   await expect(
     page.getByTestId("onboarding-page-backup-options"),
   ).toBeVisible();
