@@ -415,10 +415,18 @@ pub async fn handle_req(
     );
 }
 
-/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
-/// Search subscriptions are one-shot — no persistent subscription is registered.
+/// FTS candidate hits fetched per page. Pages are always full regardless of the
+/// requested limit — post-filtering may discard many hits, so the scan needs
+/// headroom to fill the limit.
+const SEARCH_PAGE_SIZE: u32 = 100;
+
 /// Maximum FTS pages to fetch per filter (prevents unbounded loops).
-const MAX_SEARCH_PAGES: u32 = 10;
+///
+/// Derived from the advertised page ceiling rather than fixed, so the search
+/// path can always reach the limit NIP-11 promises. A bare page count would let
+/// a future ceiling change leave search silently emitting fewer events than the
+/// relay advertises — the same class of lie this ceiling exists to prevent.
+const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(SEARCH_PAGE_SIZE);
 
 /// Resolve request-local channel access, repairing a stale cache-negative.
 ///
@@ -500,6 +508,8 @@ pub(crate) fn build_search_channel_scope_filter(
     })
 }
 
+/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
+/// Search subscriptions are one-shot — no persistent subscription is registered.
 #[allow(clippy::too_many_arguments)]
 async fn handle_search_req(
     sub_id: &str,
@@ -586,9 +596,6 @@ async fn handle_search_req(
         // or exhausted the search result set. This ensures post-filtering
         // doesn't silently reduce the result count below the requested limit.
         let mut emitted: u32 = 0;
-        // Always fetch full pages (100) regardless of limit — post-filtering
-        // may discard many hits, so we need headroom to fill the requested limit.
-        let per_page: u32 = 100;
 
         for page in 1..=MAX_SEARCH_PAGES {
             if emitted >= limit {
@@ -604,7 +611,7 @@ async fn handle_search_req(
                 since,
                 until,
                 page,
-                per_page,
+                per_page: SEARCH_PAGE_SIZE,
                 mode: buzz_search::SearchMode::FullText,
             };
 
@@ -616,9 +623,9 @@ async fn handle_search_req(
                 }
             };
 
-            // A short page is the last page: FTS returns up to `per_page` hits,
-            // so fewer than that means the result set is exhausted.
-            let exhausted = search_result.hits.len() < per_page as usize;
+            // A short page is the last page: FTS returns up to a full page of
+            // hits, so fewer than that means the result set is exhausted.
+            let exhausted = search_result.hits.len() < SEARCH_PAGE_SIZE as usize;
             let page_empty = search_result.hits.is_empty();
 
             let hit_ids: Vec<[u8; 32]> =
@@ -1415,9 +1422,9 @@ mod tests {
         )
     }
 
-    #[test]
-    fn req_filter_limit_clamps_to_advertised_nip11_max_limit() {
-        let advertised = crate::nip11::RelayInfo::build(
+    /// NIP-11 `limitation.max_limit` as this relay actually advertises it.
+    fn advertised_max_limit() -> i64 {
+        crate::nip11::RelayInfo::build(
             None,
             None,
             false,
@@ -1427,7 +1434,12 @@ mod tests {
         .limitation
         .expect("limitation")
         .max_limit
-        .expect("max_limit") as i64;
+        .expect("max_limit") as i64
+    }
+
+    #[test]
+    fn req_filter_limit_clamps_to_advertised_nip11_max_limit() {
+        let advertised = advertised_max_limit();
 
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
 
@@ -1455,6 +1467,34 @@ mod tests {
         // Under-ceiling requests are honored verbatim.
         let modest = filter_to_query_params(&Filter::new().limit(10), None, community);
         assert_eq!(modest.limit, Some(10));
+    }
+
+    /// The NIP-50 search path clamps its emission target to the advertised
+    /// ceiling like every other REQ, but its ability to *reach* that target is
+    /// bounded a second time by how many FTS pages it will scan. If that scan
+    /// budget falls below the ceiling, search under-delivers against NIP-11
+    /// while the clamp above still looks correct — so the budget is asserted
+    /// against the advertised value, not just against the DB constant it is
+    /// derived from.
+    #[test]
+    fn search_scan_capacity_covers_advertised_nip11_max_limit() {
+        let advertised = advertised_max_limit();
+        let capacity = i64::from(MAX_SEARCH_PAGES) * i64::from(SEARCH_PAGE_SIZE);
+
+        assert!(
+            capacity >= advertised,
+            "NIP-50 scans at most {capacity} hits ({MAX_SEARCH_PAGES} pages of \
+             {SEARCH_PAGE_SIZE}) but NIP-11 advertises {advertised} — search \
+             would silently emit a short page"
+        );
+
+        // The budget is derived, not hand-tuned: one page under the derived
+        // count must be insufficient, or the ceiling could rise without the
+        // page count following it.
+        assert!(
+            capacity - i64::from(SEARCH_PAGE_SIZE) < advertised,
+            "scan budget has a spare page of slack — derive it from the ceiling"
+        );
     }
 
     #[test]
