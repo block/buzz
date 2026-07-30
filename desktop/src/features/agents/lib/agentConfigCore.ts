@@ -73,7 +73,10 @@ export type AgentConfigFieldDescriptor =
 
 export type AgentConfigOmission = {
   kind: "effort";
-  reason: "ownedByModelId" | "unsupportedByHarness";
+  reason:
+    | "ownedByModelId"
+    | "pendingNativePersistence"
+    | "unsupportedByHarness";
 };
 
 export type AgentConfigFieldModel = {
@@ -127,13 +130,10 @@ export function deriveAgentConfigFieldModel({
     value: config.model,
   });
 
-  if (runtime?.thinkingEnvVar) {
+  if (runtime?.id === "buzz-agent" && runtime.thinkingEnvVar) {
     fields.push({
       kind: "effort",
-      optionSource:
-        runtime.id === "buzz-agent"
-          ? "buzzAgentCatalog"
-          : "legacyProviderModelCatalog",
+      optionSource: "buzzAgentCatalog",
       currentPersistence: {
         kind: "envVar",
         key: BUZZ_AGENT_THINKING_EFFORT,
@@ -142,6 +142,8 @@ export function deriveAgentConfigFieldModel({
       render: "control",
       value: valueFromEnv(config, BUZZ_AGENT_THINKING_EFFORT),
     });
+  } else if (runtime?.id === "goose" && runtime.thinkingEnvVar) {
+    omissions.push({ kind: "effort", reason: "pendingNativePersistence" });
   } else if (runtime?.id === "claude") {
     fields.push({
       kind: "effort",

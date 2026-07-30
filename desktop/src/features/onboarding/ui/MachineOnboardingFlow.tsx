@@ -64,13 +64,9 @@ export function MachineOnboardingFlow({
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
-  const [readyRuntimeIds, setReadyRuntimeIds] = React.useState<string[]>([]);
-  const handleReadyRuntimeIdsChange = React.useCallback(
-    (runtimeIds: readonly string[]) => {
-      setReadyRuntimeIds(Array.from(new Set(runtimeIds)));
-    },
-    [],
-  );
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState<
+    string | null
+  >(null);
 
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -234,17 +230,11 @@ export function MachineOnboardingFlow({
               actions={{
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
-                next: (runtimeIds) => {
-                  const ids = Array.from(runtimeIds);
-                  setReadyRuntimeIds(ids);
-                  // Harness install can fail (Windows/PATH/network). Don't soft-lock
-                  // onboarding — users can finish setup later in Settings → Agents.
-                  if (ids.length === 0) {
-                    complete(selectedPubkey ?? undefined);
-                    return;
-                  }
+                next: (runtimeId) => {
+                  setSelectedRuntimeId(runtimeId);
                   setPage("config");
                 },
+                skip: () => complete(selectedPubkey ?? undefined),
                 navigateToAgentSettings: () => {
                   // Complete onboarding first, then delegate the Settings → Agents
                   // navigation to the parent.  The parent owns RouterProvider, so
@@ -258,18 +248,18 @@ export function MachineOnboardingFlow({
                 },
               }}
               direction="forward"
-              onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
+              selectedRuntimeId={selectedRuntimeId}
             />
-          ) : (
+          ) : page === "config" ? (
             <DefaultConfigStep
               actions={{
                 back: () => setPage("setup"),
                 complete: () => complete(selectedPubkey ?? undefined),
               }}
               direction="forward"
-              readyRuntimeIds={readyRuntimeIds}
+              selectedRuntimeId={selectedRuntimeId}
             />
-          )}
+          ) : null}
         </div>
       </OnboardingFooterProvider>
     </div>

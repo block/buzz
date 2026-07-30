@@ -60,7 +60,7 @@ test("Buzz Agent exposes provider, model, and Buzz-owned effort", () => {
   });
 });
 
-test("Goose exposes provider, model, and its real effort application key", () => {
+test("Goose omits effort until native persistence and options are wired", () => {
   const model = deriveAgentConfigFieldModel({
     config,
     runtime: runtime("goose", {
@@ -72,17 +72,12 @@ test("Goose exposes provider, model, and its real effort application key", () =>
   });
 
   assert.equal(
-    field(model, "effort").optionSource,
-    "legacyProviderModelCatalog",
+    model.fields.some((item) => item.kind === "effort"),
+    false,
   );
-  assert.deepEqual(field(model, "effort").currentPersistence, {
-    kind: "envVar",
-    key: "BUZZ_AGENT_THINKING_EFFORT",
-  });
-  assert.deepEqual(field(model, "effort").targetApplication, {
-    kind: "envVar",
-    key: "GOOSE_THINKING_EFFORT",
-  });
+  assert.deepEqual(model.omissions, [
+    { kind: "effort", reason: "pendingNativePersistence" },
+  ]);
 });
 
 test("Claude models effort as a deferred native ACP option", () => {

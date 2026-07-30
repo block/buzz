@@ -1,14 +1,11 @@
 /**
  * Controlled field group for global agent config (provider, model, effort, env vars).
  *
- * Used by AgentDefaultsSettingsCard (settings panel) and AgentDefaultsSection
- * (onboarding setup step). The parent manages load/save state; this component is
- * purely presentational and calls onConfigChange on every user edit.
+ * The parent manages load/save state; edits are reported through onConfigChange.
  */
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-
 import type {
   BakedEnvEntry,
   RuntimeFileConfigSubset,
@@ -27,7 +24,7 @@ import {
 } from "@/features/agents/lib/agentConfigCore";
 import {
   getBakedProviderInheritLabel,
-  getGlobalModelFallback,
+  getRuntimeBakedDefaults,
 } from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -271,11 +268,12 @@ export function AgentConfigFields({
     effortField?.currentPersistence.kind === "envVar"
       ? effortField.currentPersistence.key
       : null;
-  const bakedProvider = React.useMemo(
-    () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
-    [bakedEnv],
-  );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
+  const runtimeBakedDefaults = React.useMemo(
+    () => getRuntimeBakedDefaults(bakedEnv, selectedRuntime, config.env_vars),
+    [bakedEnv, config.env_vars, selectedRuntime],
+  );
+  const bakedProvider = runtimeBakedDefaults.provider;
   const providerFieldVisible = hasRenderableAgentConfigField(
     fieldModel,
     "provider",
@@ -283,10 +281,7 @@ export function AgentConfigFields({
   const effectiveProvider = providerFieldVisible
     ? config.provider?.trim() || bakedProvider || ""
     : "";
-  const fallbackModel = React.useMemo(
-    () => getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars),
-    [bakedEnv, config.env_vars, effectiveProvider],
-  );
+  const fallbackModel = runtimeBakedDefaults.model;
   const modelField = fieldModel.fields.find(
     (field) => field.kind === "model" && field.render === "control",
   );
@@ -641,14 +636,20 @@ export function AgentConfigFields({
   const effortFieldVisible = showEffortField && effortField !== undefined;
 
   const progressiveDefaults = disclosure === "progressive-defaults";
+  const onboardingEssential = disclosure === "onboarding-essential";
   const fieldClassName = unstyled
-    ? progressiveDefaults
-      ? "space-y-1.5"
-      : "space-y-4"
+    ? onboardingEssential
+      ? "space-y-0"
+      : progressiveDefaults
+        ? "space-y-1.5"
+        : "space-y-4"
     : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
-  const fieldLabelClassName =
-    unstyled && !progressiveDefaults ? "pl-3" : undefined;
+  const fieldLabelClassName = onboardingEssential
+    ? "sr-only"
+    : unstyled && !progressiveDefaults
+      ? "pl-3"
+      : undefined;
   const providerDropdownOptions = [
     ...providerOptions
       .filter(

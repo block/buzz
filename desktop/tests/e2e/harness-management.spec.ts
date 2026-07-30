@@ -677,7 +677,7 @@ test("onboarding setup More-harnesses click navigates to Settings → Agents", a
 
   // Now on the setup page.
   await expect(
-    page.getByRole("heading", { name: "Set up your agent harnesses" }),
+    page.getByRole("heading", { name: "Choose your default harness" }),
   ).toBeVisible({ timeout: 10_000 });
 
   // Click the "More harnesses" link — fires navigateToAgentSettings.

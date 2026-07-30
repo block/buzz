@@ -190,6 +190,8 @@ type E2eConfig = {
     acpRuntimesCatalogAfterInstallSequence?: RawAcpRuntimeCatalogEntry[][];
     /** Catalog responses for successive discovery calls. The final response repeats. */
     acpRuntimesCatalogSequence?: RawAcpRuntimeCatalogEntry[][];
+    /** Sequenced discovery failures. Null succeeds; a string throws. */
+    acpRuntimesErrors?: (string | null)[];
     acpRuntimesDelayMs?: number;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
@@ -10417,8 +10419,11 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayHttpUrl(activeConfig);
       case "relay_requires_membership":
         return activeConfig?.mock?.relayRequiresMembership ?? false;
-      case "discover_acp_providers":
+      case "discover_acp_providers": {
+        const error = activeConfig?.mock?.acpRuntimesErrors?.shift();
+        if (error) throw new Error(error);
         return handleDiscoverAcpRuntimes(activeConfig);
+      }
       case "save_custom_harness":
         return handleSaveCustomHarness(
           payload as Parameters<typeof handleSaveCustomHarness>[0],

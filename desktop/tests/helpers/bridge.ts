@@ -162,6 +162,8 @@ type MockBridgeOptions = {
   acpRuntimesCatalogAfterInstallSequence?: Record<string, unknown>[][];
   /** Catalog responses for successive discovery calls. The final response repeats. */
   acpRuntimesCatalogSequence?: Record<string, unknown>[][];
+  /** Sequenced discovery failures. Null succeeds; a string throws. */
+  acpRuntimesErrors?: (string | null)[];
   acpRuntimesDelayMs?: number;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;

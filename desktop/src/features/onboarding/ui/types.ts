@@ -58,7 +58,8 @@ export type ProfileStepActions = {
 
 export type SetupStepActions = {
   back: () => void;
-  next: (readyRuntimeIds: readonly string[]) => void;
+  next: (runtimeId: string) => void;
+  skip: () => void;
   navigateToAgentSettings?: () => void;
 };
 

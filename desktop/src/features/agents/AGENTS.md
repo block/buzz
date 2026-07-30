@@ -34,13 +34,12 @@ with a TypeScript lookup table or an id comparison in a component.
    descriptor's `currentPersistence` key — never a raw
    `BUZZ_AGENT_THINKING_EFFORT` literal in UI code. `currentPersistence` is
    where the value lives *today*; `targetApplication` is how the harness
-   *should* receive it. They intentionally differ until PR 2.7 migrates
-   Goose/Claude — do not "fix" one to match the other without doing the
-   migration work.
+   *should* receive it. Do not render Goose effort until its native
+   `GOOSE_THINKING_EFFORT` persistence and live option source are wired.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
-   New absences get new named reasons in `AgentConfigOmission` /
-   `render` — never a `showX` prop.
+   `ownedByModelId`; Goose effort is `pendingNativePersistence`; Claude effort
+   is `deferredUntilNativeOptionsAvailable`. New absences get new named reasons
+   in `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`
@@ -64,14 +63,17 @@ with a TypeScript lookup table or an id comparison in a component.
    via `synthesizeEmptyDiscoveryStatus()` and is intentionally **not cached**
    so that closing → reopening the dialog re-runs discovery after the user
    installs or signs into the CLI (`isCacheableDiscoveryResponse()`).
-7. **Onboarding setup detects readiness; it does not select defaults.** The
-   setup page derives visible and ready harnesses from the runtime catalog and
-   only offers install or sign-in actions. The following defaults page is the
-   sole onboarding surface that chooses and persists `preferred_runtime`, and
-   its Finish gate consumes the shared renderer's `onValidityChange` signal —
-   a harness selection alone does not complete onboarding when the harness
+7. **Onboarding chooses locally, then sets up one selected harness.** The
+   chooser page derives visible harnesses from the runtime catalog, renders
+   simple single-choice cards, and must not install, sign in, configure, or
+   persist. The selected-harness setup page handles only the chosen harness's
+   missing work: install, sign-in, or provider/model defaults — and its
+   Finish gate consumes the shared renderer's `onValidityChange` signal: a
+   harness selection alone does not complete onboarding when the harness
    requires provider/model/credential config (e.g. buzz-agent with no
    provider). Baked build env and runtime-file config satisfy the gate.
+   Card clicks are local draft state; final completion is the only
+   onboarding action that persists `preferred_runtime`.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
 8. **Omit the Model control only after a confirmed successful empty
