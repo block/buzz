@@ -77,6 +77,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
     mediaTags?: string[][],
     mentionPubkeys?: string[],
   ) => Promise<void>;
+  onDeleteEditTarget?: (eventId: string) => void | Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
@@ -206,6 +207,7 @@ export function MessageThreadPanel({
   onEdit,
   onEditLastOwnMessage,
   onEditSave,
+  onDeleteEditTarget,
   onFollowThread,
   onMarkUnread,
   onMarkRead,
@@ -877,6 +879,7 @@ export function MessageThreadPanel({
               onCaptureSendContext={onCaptureSendContext}
               onEditLastOwnMessage={onEditLastOwnMessage}
               onEditSave={onEditSave}
+              onDeleteEditTarget={onDeleteEditTarget}
               onSend={onSend}
               placeholder={`Reply in thread to ${threadHead.author}`}
               profiles={profiles}

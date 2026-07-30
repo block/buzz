@@ -30,7 +30,6 @@ import {
   hasMentionClipboardHtml,
   normalizeMentionClipboardHtml,
 } from "@/features/messages/lib/normalizeMentionClipboard";
-import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
   type AutocompleteEdit,
   type LinkSelectionInfo,
@@ -54,6 +53,8 @@ import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
+import { useComposerInsertEmoji } from "./useComposerInsertEmoji";
+import { useEmptyEditDelete } from "./useEmptyEditDelete";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
 import type { MessageComposerProps } from "./MessageComposer.types";
@@ -76,6 +77,7 @@ function MessageComposerImpl({
   onCaptureSendContext,
   onEditLastOwnMessage,
   onEditSave,
+  onDeleteEditTarget,
   onPrepareSendChannel,
   onPreparingMentionSendChange,
   onSend,
@@ -438,41 +440,26 @@ function MessageComposerImpl({
   );
 
   // ── Emoji insertion ─────────────────────────────────────────────────
-  const insertEmoji = React.useCallback(
-    (emoji: string) => {
-      if (!richText.editor) return;
-      // A `:shortcode:` for a known custom emoji becomes a selectable atom
-      // node (same as the input rule / autocomplete), so it can be selected,
-      // copied, and deleted as one unit. Everything else (native unicode)
-      // inserts as plain content.
-      const match = /^:([^:\s]+):$/.exec(emoji);
-      const shortcode = match?.[1]?.toLowerCase();
-      const known =
-        shortcode &&
-        customEmoji.some((e) => e.shortcode.toLowerCase() === shortcode);
-      if (known && shortcode) {
-        richText.editor
-          .chain()
-          .focus()
-          .insertContent({
-            type: CUSTOM_EMOJI_NODE_NAME,
-            attrs: {
-              shortcode,
-              src:
-                customEmoji.find((e) => e.shortcode.toLowerCase() === shortcode)
-                  ?.url ?? "",
-            },
-          })
-          .insertContent(" ")
-          .run();
-      } else {
-        richText.editor.chain().focus().insertContent(emoji).run();
-      }
+  const insertEmoji = useComposerInsertEmoji({
+    editor: richText.editor,
+    customEmoji,
+    onAfterInsert: () => {
       setIsEmojiPickerOpen(false);
       mentions.clearMentions();
     },
-    [richText.editor, mentions.clearMentions, customEmoji],
-  );
+  });
+
+  // ── Empty-edit → delete ─────────────────────────────────────────────
+  // Clearing an edit to empty and submitting is the keyboard shorthand for
+  // "Delete message"; the hook owns the confirmation dialog + delete handoff.
+  const { requestEmptyEditDelete, emptyEditDeleteDialog } = useEmptyEditDelete({
+    editTargetRef,
+    onDeleteEditTarget,
+    clearComposerBody: () => {
+      setComposerContent("");
+      richText.clearContent();
+    },
+  });
 
   // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
@@ -514,9 +501,14 @@ function MessageComposerImpl({
       if (isSendingRef.current || isUploadingRef.current) return;
       const currentPendingImeta = media.pendingImetaRef.current;
       const hasMedia = currentPendingImeta.length > 0;
-      // Empty text + zero attachments is a no-op (don't let edit become an
-      // effective deletion).
-      if (!trimmed && !hasMedia) return;
+      // Empty text + zero attachments: clearing an edit to nothing is the
+      // keyboard shorthand for deleting the message (confirm-then-delete via
+      // the hook). No-ops when no delete handler is wired, so an empty edit
+      // never silently publishes an empty body.
+      if (!trimmed && !hasMedia) {
+        requestEmptyEditDelete();
+        return;
+      }
 
       // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
       // because edit semantics use `[]` as the explicit "wipe all
@@ -628,6 +620,7 @@ function MessageComposerImpl({
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
+    requestEmptyEditDelete,
     richText.clearContent,
     richText.setContent,
     setComposerContent,
@@ -1007,6 +1000,8 @@ function MessageComposerImpl({
           </form>
         </div>
       </footer>
+
+      {emptyEditDeleteDialog}
 
       <NonMemberMentionDialog
         error={mentionSendFlow.nonMemberPromptError}

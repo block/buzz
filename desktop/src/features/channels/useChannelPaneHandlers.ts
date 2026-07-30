@@ -133,6 +133,18 @@ export function useChannelPaneHandlers({
     await deleteMutateRef.current({ eventId: message.id }).catch(() => {});
   }, []);
 
+  // Delete the message currently being edited and leave edit mode. Fired when
+  // the user clears an edit to empty and confirms — the keyboard equivalent of
+  // the "Delete message" action. Exit edit mode first so the composer collapses
+  // immediately; the delete follows (its own onError toast surfaces failures).
+  const handleDeleteEditTarget = React.useCallback(
+    async (eventId: string) => {
+      setEditTargetId(null);
+      await deleteMutateRef.current({ eventId }).catch(() => {});
+    },
+    [setEditTargetId],
+  );
+
   const handleEdit = React.useCallback(
     (message: { id: string }) => {
       setEditTargetId((current) =>
@@ -341,6 +353,7 @@ export function useChannelPaneHandlers({
     handleCancelThreadReply,
     handleCloseThread,
     handleDelete,
+    handleDeleteEditTarget,
     handleEdit,
     handleEditSave,
     handleExpandThreadReplies,

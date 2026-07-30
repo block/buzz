@@ -113,6 +113,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onDelete,
   onEdit,
   onEditSave,
+  onDeleteEditTarget,
   onFollowThread,
   onMarkUnread,
   onMarkRead,
@@ -762,6 +763,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   onCancelEdit={onCancelEdit}
                   onEditLastOwnMessage={handleEditLastOwnMainMessage}
                   onEditSave={onEditSave}
+                  onDeleteEditTarget={onDeleteEditTarget}
                   onPrepareSendChannel={
                     activeChannel?.channelType === "dm"
                       ? prepareDmSendChannel
@@ -861,6 +863,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onEdit={onEdit}
                 onEditLastOwnMessage={handleEditLastOwnThreadMessage}
                 onEditSave={onEditSave}
+                onDeleteEditTarget={onDeleteEditTarget}
                 onFollowThread={onFollowThread}
                 onMarkUnread={onMarkUnread}
                 onMarkRead={onMarkRead}

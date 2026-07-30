@@ -488,6 +488,7 @@ export function ChannelScreen({
     handleCancelThreadReply,
     handleCloseThread,
     handleDelete,
+    handleDeleteEditTarget,
     handleEdit,
     handleEditSave,
     handleExpandThreadReplies,
@@ -910,6 +911,11 @@ export function ChannelScreen({
                   onEdit={activeChannel?.archivedAt ? undefined : handleEdit}
                   onEditSave={
                     activeChannel?.archivedAt ? undefined : handleEditSave
+                  }
+                  onDeleteEditTarget={
+                    activeChannel?.archivedAt
+                      ? undefined
+                      : handleDeleteEditTarget
                   }
                   onMarkUnread={handleMessageMarkUnread}
                   onMarkRead={handleMessageMarkRead}

@@ -67,6 +67,15 @@ export type MessageComposerProps = {
     mediaTags?: string[][],
     mentionPubkeys?: string[],
   ) => Promise<void>;
+  /**
+   * Invoked when the user submits an edit whose body has been cleared to empty
+   * (no text and no attachments). Clearing an edit to nothing is the keyboard
+   * shorthand for deleting the message: the composer surfaces the same
+   * confirmation the "Delete message" action uses and only calls this after
+   * the user confirms. The owner should delete the message identified by
+   * `eventId` and exit edit mode. When omitted, an empty edit stays a no-op.
+   */
+  onDeleteEditTarget?: (eventId: string) => void | Promise<void>;
   /** Captures send context synchronously before awaits can change navigation. */
   onCaptureSendContext?: () => {
     parentEventId: string | null;
