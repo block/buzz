@@ -37,7 +37,14 @@ pub struct BlobDescriptor {
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
-pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
+///
+/// `filename`, when present, is the original filename for the file-card label
+/// (mirrors Desktop's `buildImetaTags`). Relay URLs are content-addressed and
+/// end in `.bin`/a hash, so without this tag the attachment's name survives
+/// only in the message body's markdown link text. Caller must pre-validate
+/// the value against the relay's constraints (1-255 chars, no path
+/// separators or control characters) — see `buzz-relay/src/handlers/imeta.rs`.
+pub fn build_imeta_tag(d: &BlobDescriptor, filename: Option<&str>) -> Vec<String> {
     let mut tag = vec![
         "imeta".to_string(),
         format!("url {}", d.url),
@@ -56,6 +63,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     }
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
+    }
+    if let Some(f) = filename {
+        tag.push(format!("filename {f}"));
     }
     tag
 }
@@ -2263,16 +2273,15 @@ mod retry_policy_tests {
         let client = test_client(&base);
 
         let json_file = write_temp_file(br#"{"a":1}"#);
-        let result = client
-            .upload_file(json_file.path().to_str().unwrap())
-            .await;
+        let result = client.upload_file(json_file.path().to_str().unwrap()).await;
         assert!(result.is_ok(), "JSON upload should succeed, got {result:?}");
 
         let text_file = write_temp_file(b"hello world, this is plain text");
-        let result = client
-            .upload_file(text_file.path().to_str().unwrap())
-            .await;
-        assert!(result.is_ok(), "plain text upload should succeed, got {result:?}");
+        let result = client.upload_file(text_file.path().to_str().unwrap()).await;
+        assert!(
+            result.is_ok(),
+            "plain text upload should succeed, got {result:?}"
+        );
 
         // Minimal PDF header — enough for `infer` to detect application/pdf.
         let pdf_file = write_temp_file(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
