@@ -1036,6 +1036,7 @@ dependencies = [
  "buzz-media",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-ws-client",
  "bytes",
  "bzip2 0.6.1",
  "chrono",
@@ -1158,6 +1159,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "buzz-ws-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "hyper-util",
+ "nostr",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tower-service",
+ "tracing",
+ "url",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]

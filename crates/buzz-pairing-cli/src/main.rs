@@ -23,11 +23,12 @@ use buzz_core::pairing::{
     types::PayloadType,
     PairingError,
 };
+use buzz_ws_client::connect_websocket;
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, RelayUrl, SecretKey, ToBech32};
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -125,7 +126,7 @@ async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliEr
 
     // Connect to relay and handle NIP-42 auth if required.
     // Auth uses the session's ephemeral keys so the relay accepts our events.
-    let (ws, _) = connect_async(&relay_url).await?;
+    let (ws, _) = connect_websocket(&relay_url).await?;
     let (mut write, mut read) = ws.split();
     handle_nip42_auth(&mut read, &mut write, &session, &relay_url).await?;
 
@@ -227,7 +228,7 @@ async fn cmd_target(relay_override: Option<String>, show_secret: bool) -> Result
     let (mut session, offer_event) = PairingSession::new_target(&qr)?;
 
     // Connect to relay and handle NIP-42 auth if required.
-    let (ws, _) = connect_async(&relay_url).await?;
+    let (ws, _) = connect_websocket(&relay_url).await?;
     let (mut write, mut read) = ws.split();
     handle_nip42_auth(&mut read, &mut write, &session, &relay_url).await?;
 

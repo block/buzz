@@ -117,12 +117,13 @@ use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_TYPING_INDICATOR,
 };
+use buzz_ws_client::connect_websocket;
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -449,7 +450,7 @@ pub struct BuzzEvent {
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
     #[error("WebSocket error: {0}")]
-    WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
+    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -3359,17 +3360,27 @@ fn jittered_duration(base: Duration) -> Duration {
 
 /// Classify a `RelayError` as a DNS resolution failure.
 ///
-/// Matches the OS-level "name not found" strings surfaced by the platform's
-/// resolver, covering macOS (`nodename nor servname`), Linux (`Name or service not
-/// known`), and common BSD/Windows variants (`No such host`,
-/// `failed to lookup address`). These are transient on brownouts and must NOT
-/// consume a backoff ladder rung — they retry on a flat `DNS_RETRY_INTERVAL`.
+/// Walks the error source chain so connector context does not hide the
+/// resolver failure. Matches hyper-util's typed DNS error plus the OS-level
+/// strings surfaced on macOS, Linux, BSD, and Windows. These are transient on
+/// brownouts and must NOT consume a backoff ladder rung — they retry on a flat
+/// `DNS_RETRY_INTERVAL`.
 pub(crate) fn is_dns_error(err: &RelayError) -> bool {
-    let msg = err.to_string();
-    msg.contains("nodename nor servname")
-        || msg.contains("Name or service not known")
-        || msg.contains("No such host")
-        || msg.contains("failed to lookup address")
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(error) = current {
+        let message = error.to_string().to_ascii_lowercase();
+        if message == "dns error"
+            || message.contains("nodename nor servname")
+            || message.contains("name or service not known")
+            || message.contains("no such host")
+            || message.contains("failed to lookup address")
+        {
+            return true;
+        }
+        current = error.source();
+    }
+
+    false
 }
 
 /// Shutdown-aware fixed-duration sleep for REQ pacing in `resubscribe_after_reconnect`.
@@ -3665,7 +3676,7 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 ///   EOF, timeout, refused) and ambiguous TLS errors stay retryable.
 /// - `WebSocket(ConnectionClosed)` — link-level closure.
 /// - `WebSocket(AlreadyClosed)`, `WebSocket(WriteBufferFull)` — unreachable
-///   during `connect_async`; kept fail-safe transient.
+///   during connection establishment; kept fail-safe transient.
 /// - `NoAuthChallenge`, `ConnectionClosed`, `Timeout` — timing/link noise.
 fn is_terminal_connect_error(err: &RelayError) -> bool {
     match err {
@@ -3721,7 +3732,7 @@ fn is_terminal_ws_error(err: &tokio_tungstenite::tungstenite::Error) -> bool {
         // downcast above).
         WsError::Tls(_) => true,
 
-        // Unreachable during connect_async; kept fail-safe transient.
+        // Unreachable during connection establishment; kept fail-safe transient.
         WsError::AlreadyClosed | WsError::WriteBufferFull(_) => false,
     }
 }
@@ -3844,7 +3855,7 @@ async fn do_connect(
         .parse::<url::Url>()
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_websocket(parsed.as_str()))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
@@ -4361,7 +4372,7 @@ mod tests {
                 .await
                 .expect("complete server websocket handshake")
         });
-        let (client, _) = connect_async(format!("ws://{address}"))
+        let (client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
             .await
             .expect("connect test websocket");
         (client, server.await.expect("join test websocket server"))
@@ -6026,13 +6037,28 @@ mod tests {
             "failed to lookup address information".into()
         )));
         // F15: production-shaped error — RelayError::WebSocket wrapping a
-        // tungstenite I/O error (the shape emitted by connect_async on macOS).
+        // tungstenite I/O error (the shape emitted by connection failures on macOS).
         let ws_io_err = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
             std::io::Error::other("nodename nor servname provided, or not known"),
         )));
         assert!(
             is_dns_error(&ws_io_err),
             "WebSocket-wrapped I/O DNS error must be classified as DNS"
+        );
+        #[derive(Debug, thiserror::Error)]
+        #[error("connection failed")]
+        struct NestedConnectionError {
+            #[source]
+            source: std::io::Error,
+        }
+        let nested_dns_err = RelayError::WebSocket(Box::new(tungstenite::Error::Io(
+            std::io::Error::other(NestedConnectionError {
+                source: std::io::Error::other("Name or service not known"),
+            }),
+        )));
+        assert!(
+            is_dns_error(&nested_dns_err),
+            "connector context must not hide a nested resolver failure"
         );
         // Normal connection errors are NOT DNS errors.
         assert!(!is_dns_error(&RelayError::Timeout));

@@ -782,6 +782,7 @@ dependencies = [
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-ws-client",
  "chrono",
  "clap",
  "evalexpr",
@@ -1057,6 +1058,7 @@ name = "buzz-pairing-cli"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-ws-client",
  "clap",
  "futures-util",
  "hex",
@@ -1306,13 +1308,16 @@ name = "buzz-ws-client"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "hyper-util",
  "nostr",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tower-service",
  "tracing",
  "url",
+ "windows-registry",
 ]
 
 [[package]]
