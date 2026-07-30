@@ -630,6 +630,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
 
+        let s3_addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
+            Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
+            Err(std::env::VarError::NotPresent) => buzz_media::config::S3AddressingStyle::default(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_S3_ADDRESSING_STYLE must be valid Unicode and one of 'path' or 'virtual'"
+                        .to_string(),
+                ));
+            }
+        };
         let media = buzz_media::MediaConfig {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
@@ -641,6 +651,7 @@ impl Config {
             s3_region: std::env::var("BUZZ_S3_REGION")
                 .or_else(|_| std::env::var("AWS_REGION"))
                 .unwrap_or_else(|_| "us-east-1".to_string()),
+            s3_addressing_style,
             max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -990,6 +1001,11 @@ mod tests {
             !config.require_media_get_auth,
             "require_media_get_auth should default to false for staged client rollout"
         );
+        assert_eq!(
+            config.media.s3_addressing_style,
+            buzz_media::config::S3AddressingStyle::Path,
+            "S3 addressing must default to path style for bundled MinIO compatibility"
+        );
         assert!(
             config.join_policy.is_none(),
             "join_policy should default to None so policy prompts and acceptance receipts are opt-in"
@@ -998,6 +1014,61 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    #[test]
+    fn s3_addressing_style_env_accepts_virtual_and_rejects_invalid_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
+
+        std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "virtual");
+        let configured = Config::from_env()
+            .expect("virtual style config")
+            .media
+            .s3_addressing_style;
+
+        std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "auto");
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", value);
+        } else {
+            std::env::remove_var("BUZZ_S3_ADDRESSING_STYLE");
+        }
+
+        assert_eq!(configured, buzz_media::config::S3AddressingStyle::Virtual);
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn s3_addressing_style_env_rejects_non_unicode_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
+        std::env::set_var(
+            "BUZZ_S3_ADDRESSING_STYLE",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", value);
+        } else {
+            std::env::remove_var("BUZZ_S3_ADDRESSING_STYLE");
+        }
+
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must be valid Unicode")
+        ));
     }
 
     #[test]

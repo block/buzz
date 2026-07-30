@@ -198,6 +198,15 @@
       "properties": {
         "endpoint": { "type": "string", "pattern": "^(https?://.+)?$" },
         "bucket": { "type": "string", "minLength": 1 },
+        "region": {
+          "type": "string",
+          "description": "Optional S3 region used for SigV4 signing. When empty, BUZZ_S3_REGION is omitted so the relay can use AWS_REGION or its own default."
+        },
+        "addressingStyle": {
+          "type": "string",
+          "enum": ["path", "virtual"],
+          "description": "S3 URL style shared by media and Git/CAS clients. Defaults to path for bundled MinIO compatibility."
+        },
         "accessKey": { "type": "string" },
         "secretKey": { "type": "string" }
       }
