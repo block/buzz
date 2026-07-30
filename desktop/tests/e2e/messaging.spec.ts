@@ -1662,6 +1662,51 @@ test("code block shows language label when language is specified", async ({
   await expect(codeBlock.getByText("typescript")).toBeVisible();
 });
 
+test("Mermaid fences render diagrams and invalid input falls back to code", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  await page.evaluate(() => {
+    const createdAt = Math.floor(Date.now() / 1000);
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content:
+        "Architecture diagram\n\n```mermaid\nflowchart LR\n  Browser --> Relay\n  Relay --> Agent\n```",
+      createdAt,
+    });
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content:
+        "Broken diagram\n\n```mermaid\nthis is not valid Mermaid syntax\n```",
+      createdAt: createdAt + 1,
+    });
+  });
+
+  const validRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Architecture diagram" });
+  const invalidRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Broken diagram" });
+
+  await expect(validRow.locator("[data-mermaid-diagram]")).toBeVisible();
+  await expect(
+    validRow.getByRole("img", { name: "Mermaid diagram" }),
+  ).toBeVisible();
+  await expect(validRow.locator("[data-code-block]")).toHaveCount(0);
+
+  const fallback = invalidRow.locator("[data-code-block]");
+  await expect(fallback).toBeVisible();
+  await expect(fallback.getByText("mermaid", { exact: true })).toBeVisible();
+  await expect(fallback).toContainText("this is not valid Mermaid syntax");
+});
+
 test("typing triple backticks and Enter creates a code block in composer", async ({
   page,
 }) => {
