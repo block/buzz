@@ -57,6 +57,7 @@ export function DevThreadPanel({
   currentPubkey,
   active,
   onCycleMode,
+  onCycleAgent,
   onSwitchPane,
   onSend,
   onClose,
@@ -67,7 +68,10 @@ export function DevThreadPanel({
   currentPubkey: string | null;
   /** Whether this pane owns the keyboard (vs the main channel composer). */
   active: boolean;
-  onCycleMode: (direction: 1 | -1) => void;
+  /** Tab — toggle chat ↔ last agent. */
+  onCycleMode: () => void;
+  /** ⌃Tab / ⌘Tab (+⇧ reverses) — cycle through the agents. */
+  onCycleAgent: (direction: 1 | -1) => void;
   /** ArrowLeft / ArrowRight while the input is empty. */
   onSwitchPane: (pane: "main" | "thread") => void;
   /** Mentions are the `@Name`s still present in the sent text. */
@@ -196,7 +200,11 @@ export function DevThreadPanel({
 
     if (event.key === "Tab") {
       event.preventDefault();
-      onCycleMode(event.shiftKey ? -1 : 1);
+      if (event.metaKey || event.ctrlKey) {
+        onCycleAgent(event.shiftKey ? -1 : 1);
+      } else {
+        onCycleMode();
+      }
       return;
     }
     if (event.key === "Enter" && !event.shiftKey) {

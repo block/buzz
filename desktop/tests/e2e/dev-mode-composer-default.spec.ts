@@ -3,9 +3,10 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
 // The fresh composer must target the default agent — the first managed
-// (local) agent — rather than plain chat. Tab still cycles through every
-// mode, including chat. Relay agents need an explicit allowlist to appear
-// in the cycle, so the specs seed managed agents (always eligible).
+// (local) agent — rather than plain chat. Tab toggles chat ↔ the last agent;
+// ⌃Tab cycles through the agents only. Relay agents need an explicit
+// allowlist to appear in the cycle, so the specs seed managed agents
+// (always eligible).
 
 const managedAgents = [
   {
@@ -38,21 +39,48 @@ test("fresh composer defaults to an agent target, not chat", async ({
   await expect(modeLine).toContainText(/^to /);
   await expect(modeLine).not.toHaveText("chat");
 
-  // Tab cycling still reaches chat mode and comes back around.
+  // Tab toggles to plain chat and straight back to the same agent.
   await composer.focus();
   const initial = await modeLine.innerText();
-  let sawChat = false;
-  for (let step = 0; step < 12; step += 1) {
-    await page.keyboard.press("Tab");
-    const label = (await modeLine.innerText()).trim();
-    if (label === "chat") sawChat = true;
-    if (sawChat && label === initial.trim()) break;
-  }
-  expect(sawChat).toBe(true);
+  await page.keyboard.press("Tab");
+  await expect(modeLine).toHaveText("chat");
+  await page.keyboard.press("Tab");
   await expect(modeLine).toHaveText(initial);
 });
 
-test("composer remembers the last Tab-cycled target across reloads", async ({
+test("⌃Tab cycles through agents only, skipping chat", async ({ page }) => {
+  await installMockBridge(page, { managedAgents });
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.displayStyle", "developer");
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  const composer = page.getByTestId("dev-mode-composer");
+  await composer.waitFor();
+
+  const modeLine = page.getByTestId("dev-mode-pill").first();
+  await expect(modeLine).toHaveText("to Fizz");
+
+  await composer.focus();
+  await page.keyboard.press("Control+Tab");
+  await expect(modeLine).toHaveText("to Honey");
+
+  // Wraps around the agent list without ever landing on chat.
+  await page.keyboard.press("Control+Tab");
+  await expect(modeLine).toHaveText("to Fizz");
+
+  // ⌃⇧Tab reverses.
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(modeLine).toHaveText("to Honey");
+
+  // From chat, ⌃Tab resumes at the last agent instead of restarting.
+  await page.keyboard.press("Tab");
+  await expect(modeLine).toHaveText("chat");
+  await page.keyboard.press("Control+Tab");
+  await expect(modeLine).toHaveText("to Honey");
+});
+
+test("Tab from chat returns to the last agent, not the default", async ({
   page,
 }) => {
   await installMockBridge(page, { managedAgents });
@@ -65,23 +93,41 @@ test("composer remembers the last Tab-cycled target across reloads", async ({
   await composer.waitFor();
 
   const modeLine = page.getByTestId("dev-mode-pill").first();
-  await expect(modeLine).toContainText(/^to /);
-  const initial = (await modeLine.innerText()).trim();
+  await expect(modeLine).toHaveText("to Fizz");
 
-  // Cycle to a different agent target (skipping plain chat).
   await composer.focus();
-  let cycled = "";
-  for (let step = 0; step < 12; step += 1) {
-    await page.keyboard.press("Tab");
-    const label = (await modeLine.innerText()).trim();
-    if (label !== "chat" && label !== initial) {
-      cycled = label;
-      break;
-    }
-  }
-  expect(cycled).not.toBe("");
+  await page.keyboard.press("Control+Tab");
+  await expect(modeLine).toHaveText("to Honey");
+
+  await page.keyboard.press("Tab");
+  await expect(modeLine).toHaveText("chat");
+  await page.keyboard.press("Tab");
+  await expect(modeLine).toHaveText("to Honey");
+});
+
+test("composer remembers the last cycled target across reloads", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents });
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.displayStyle", "developer");
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  const composer = page.getByTestId("dev-mode-composer");
+  await composer.waitFor();
+
+  const modeLine = page.getByTestId("dev-mode-pill").first();
+  await expect(modeLine).toHaveText("to Fizz");
+
+  // Cycle to a different agent target.
+  await composer.focus();
+  await page.keyboard.press("Control+Tab");
+  await expect(modeLine).toHaveText("to Honey");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.getByTestId("dev-mode-composer").waitFor();
-  await expect(page.getByTestId("dev-mode-pill").first()).toHaveText(cycled);
+  await expect(page.getByTestId("dev-mode-pill").first()).toHaveText(
+    "to Honey",
+  );
 });

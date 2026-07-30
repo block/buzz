@@ -37,8 +37,10 @@ type DevPromptComposerProps = {
   onChange: (value: string) => void;
   /** Mentions are the `@Name`s still present in the submitted text. */
   onSubmit: (mentions: MentionRecord[], media: ImetaMedia[]) => void;
-  /** Tab / Shift+Tab. */
-  onCycleMode: (direction: 1 | -1) => void;
+  /** Tab — toggle chat ↔ last agent. */
+  onCycleMode: () => void;
+  /** ⌃Tab / ⌘Tab (+⇧ reverses) — cycle through the agents. */
+  onCycleAgent: (direction: 1 | -1) => void;
   /** ArrowUp / ArrowDown while the input is empty — channels or prompt cards. */
   onNavigate: (direction: 1 | -1) => void;
   /** ⌥ArrowUp / ⌥ArrowDown — switch channels without leaving the box. */
@@ -67,6 +69,7 @@ export function DevPromptComposer({
   onChange,
   onSubmit,
   onCycleMode,
+  onCycleAgent,
   onNavigate,
   onStepChannel,
   onSwitchPane,
@@ -129,7 +132,11 @@ export function DevPromptComposer({
 
     if (event.key === "Tab") {
       event.preventDefault();
-      onCycleMode(event.shiftKey ? -1 : 1);
+      if (event.metaKey || event.ctrlKey) {
+        onCycleAgent(event.shiftKey ? -1 : 1);
+      } else {
+        onCycleMode();
+      }
       return;
     }
 

@@ -7,7 +7,8 @@ const SHORTCUT_GROUPS: {
   {
     title: "composer",
     shortcuts: [
-      { keys: "tab / ⇧tab", action: "cycle target (chat ↔ agents)" },
+      { keys: "tab", action: "toggle target (chat ↔ last agent)" },
+      { keys: "⌃tab / ⌃⇧tab", action: "cycle agents" },
       { keys: "enter", action: "send · open highlighted channel or card" },
       { keys: "↑ / ↓", action: "empty input: preview channels · walk prompts" },
       { keys: "⌥↑ / ⌥↓", action: "switch channels without leaving the box" },

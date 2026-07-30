@@ -6,6 +6,7 @@
  */
 
 const STORAGE_KEY = "buzz.devMode.lastComposerMode";
+const AGENT_STORAGE_KEY = "buzz.devMode.lastComposerAgent";
 
 export function loadLastComposerModeKey(): string | null {
   try {
@@ -18,6 +19,26 @@ export function loadLastComposerModeKey(): string | null {
 export function storeLastComposerModeKey(key: string): void {
   try {
     globalThis.localStorage?.setItem(STORAGE_KEY, key);
+  } catch {
+    // Persistence is best-effort; the in-memory selection still applies.
+  }
+}
+
+/**
+ * The last *agent* target, tracked separately from the last mode so Tab can
+ * toggle chat ↔ that agent even when the last-used mode was plain chat.
+ */
+export function loadLastComposerAgentKey(): string | null {
+  try {
+    return globalThis.localStorage?.getItem(AGENT_STORAGE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeLastComposerAgentKey(key: string): void {
+  try {
+    globalThis.localStorage?.setItem(AGENT_STORAGE_KEY, key);
   } catch {
     // Persistence is best-effort; the in-memory selection still applies.
   }

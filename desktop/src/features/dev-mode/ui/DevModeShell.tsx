@@ -9,10 +9,7 @@ import {
   groupSessionChannels,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
-import {
-  loadLastComposerModeKey,
-  storeLastComposerModeKey,
-} from "@/features/dev-mode/lib/composerModePreference";
+import { useComposerModeSelection } from "@/features/dev-mode/lib/useComposerModeSelection";
 import { copySelectionWithLinkUrls } from "@/features/dev-mode/lib/copyLinkUrls";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import {
@@ -26,7 +23,6 @@ import { useUnreadRouting } from "@/features/dev-mode/lib/useUnreadRouting";
 import {
   devComposerModeLabel,
   useDevComposerModes,
-  type DevComposerMode,
 } from "@/features/dev-mode/lib/useDevComposerModes";
 import { useDevReadMarking } from "@/features/dev-mode/lib/useDevReadMarking";
 import {
@@ -50,17 +46,7 @@ import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
-
-/**
- * Stable identity for the cycled mode. Selection is keyed rather than
- * indexed so agent list refreshes cannot silently retarget the next prompt
- * at a different agent; a vanished agent falls back to the default agent.
- */
-function devComposerModeKey(mode: DevComposerMode): string {
-  return mode.kind === "chat" ? "chat" : normalizePubkey(mode.target.pubkey);
-}
 
 /**
  * Keyboard model:
@@ -103,9 +89,6 @@ export function DevModeShell({
     routeSeed ? "channel" : "fresh",
   );
   const [input, setInput] = React.useState("");
-  const [modeKey, setModeKey] = React.useState<string | null>(
-    loadLastComposerModeKey,
-  );
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
     routeSeed?.channelId ?? null,
   );
@@ -141,30 +124,9 @@ export function DevModeShell({
   const cardSelectionActive =
     view === "channel" && selectedRootId !== null && !threadOpen;
 
-  // The composer remembers the last target the user talked to (persisted
-  // across launches). Before any selection exists — or when the remembered
-  // agent vanishes — it falls back to the default: the first managed (local)
-  // agent, else the first agent; plain chat only when no agents exist.
-  const defaultModeIndex = React.useMemo(() => {
-    const managedIndex = modes.findIndex(
-      (candidate) =>
-        candidate.kind === "agent" && candidate.target.source === "managed",
-    );
-    if (managedIndex !== -1) return managedIndex;
-    const agentIndex = modes.findIndex(
-      (candidate) => candidate.kind === "agent",
-    );
-    return agentIndex === -1 ? 0 : agentIndex;
-  }, [modes]);
-
-  const foundModeIndex =
-    modeKey === null
-      ? -1
-      : modes.findIndex(
-          (candidate) => devComposerModeKey(candidate) === modeKey,
-        );
-  const modeIndex = foundModeIndex === -1 ? defaultModeIndex : foundModeIndex;
-  const mode = modes[modeIndex];
+  // Tab toggles chat ↔ the last agent; ⌃Tab / ⌘Tab cycles the agents.
+  const { mode, toggleMode, cycleAgent, rememberMode } =
+    useComposerModeSelection(modes);
 
   const sessions = React.useMemo(
     () =>
@@ -427,17 +389,6 @@ export function DevModeShell({
     onOpenChannel: openChannel,
   });
 
-  const handleCycleMode = React.useCallback(
-    (direction: 1 | -1) => {
-      if (modes.length === 0) return;
-      const nextIndex = (modeIndex + direction + modes.length) % modes.length;
-      const nextKey = devComposerModeKey(modes[nextIndex]);
-      setModeKey(nextKey);
-      storeLastComposerModeKey(nextKey);
-    },
-    [modeIndex, modes],
-  );
-
   const navigateChannels = React.useCallback(
     (direction: 1 | -1) => {
       if (orderedChannels.length === 0) return;
@@ -601,7 +552,7 @@ export function DevModeShell({
       }
       if (busy || !mode) return;
 
-      storeLastComposerModeKey(devComposerModeKey(mode));
+      rememberMode(mode);
       setBusy(true);
       setError(null);
       setInput("");
@@ -654,6 +605,7 @@ export function DevModeShell({
       mode,
       navigatorId,
       openChannelAtUnread,
+      rememberMode,
       selectedRootId,
       sendToSession,
       subDraftActive,
@@ -666,7 +618,7 @@ export function DevModeShell({
       if (!activeChannel || !mode) {
         throw new Error("Thread is no longer available.");
       }
-      storeLastComposerModeKey(devComposerModeKey(mode));
+      rememberMode(mode);
       if (selectedRoot) {
         await sendToSession(
           activeChannel,
@@ -691,7 +643,7 @@ export function DevModeShell({
       );
       setSelectedRootId(newRoot.id);
     },
-    [activeChannel, mode, selectedRoot, sendToSession],
+    [activeChannel, mode, rememberMode, selectedRoot, sendToSession],
   );
 
   const placeholder = subDraftActive
@@ -772,7 +724,8 @@ export function DevModeShell({
       focusSignal={focusSignal}
       mode={mode}
       onChange={setInput}
-      onCycleMode={handleCycleMode}
+      onCycleAgent={cycleAgent}
+      onCycleMode={toggleMode}
       onEscape={handleEscape}
       onNavigate={handleNavigate}
       onOpenPalette={() => openPalette()}
@@ -920,7 +873,8 @@ export function DevModeShell({
                         setActivePane("main");
                         focusComposer();
                       }}
-                      onCycleMode={handleCycleMode}
+                      onCycleAgent={cycleAgent}
+                      onCycleMode={toggleMode}
                       onSend={handleThreadSend}
                       onSwitchPane={handleSwitchPane}
                       root={selectedRoot}
