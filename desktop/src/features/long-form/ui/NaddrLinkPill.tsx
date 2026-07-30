@@ -28,6 +28,7 @@ export function NaddrLinkPill({
   href: string;
   interactive: boolean;
 }) {
+  const [hasOpened, setHasOpened] = React.useState(false);
   const [open, setOpen] = React.useState(false);
   const address = parseNaddrUri(href);
   const label = children ?? href;
@@ -51,6 +52,7 @@ export function NaddrLinkPill({
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
+          setHasOpened(true);
           setOpen(true);
         }}
         type="button"
@@ -58,11 +60,13 @@ export function NaddrLinkPill({
         <BookOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 truncate">{label}</span>
       </button>
-      <LongFormNoteDialog
-        address={address}
-        onOpenChange={setOpen}
-        open={open}
-      />
+      {hasOpened ? (
+        <LongFormNoteDialog
+          address={address}
+          onOpenChange={setOpen}
+          open={open}
+        />
+      ) : null}
     </>
   );
 }

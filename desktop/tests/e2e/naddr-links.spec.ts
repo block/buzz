@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { naddrEncode } from "nostr-tools/nip19";
+import { naddrEncode, nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -160,4 +160,17 @@ test("does not open unsupported or code-formatted nostr references", async ({
     .filter({ hasText: "Unsupported:" });
   await expect(message.locator("[data-naddr-link]")).toHaveCount(0);
   await expect(message.locator("code")).toContainText(LONG_FORM_URI);
+});
+
+test("does not autolink secret-key nostr references in the composer", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openGeneralChannel(page);
+
+  const composer = page.getByTestId("message-input");
+  const nsec = `nostr:${nsecEncode(new Uint8Array(32).fill(1))}`;
+  await composer.fill(nsec);
+  await composer.press("Space");
+  await expect(composer.locator("a")).toHaveCount(0);
 });

@@ -1,10 +1,11 @@
 import { nip19 } from "nostr-tools";
 
-export const LONG_FORM_KIND = 30023;
+import { KIND_LONG_FORM } from "@/shared/constants/kinds";
+
 export const NIP19_MAX_LENGTH = 5000;
 
 export type LongFormAddress = {
-  kind: typeof LONG_FORM_KIND;
+  kind: typeof KIND_LONG_FORM;
   pubkey: string;
   identifier: string;
   relays: string[];
@@ -34,7 +35,7 @@ function parseLongFormNaddr(value: string): LongFormNaddr | null {
 
   try {
     const decoded = nip19.decode(url.slice("nostr:".length));
-    if (decoded.type !== "naddr" || decoded.data.kind !== LONG_FORM_KIND) {
+    if (decoded.type !== "naddr" || decoded.data.kind !== KIND_LONG_FORM) {
       return null;
     }
     if (
@@ -46,7 +47,7 @@ function parseLongFormNaddr(value: string): LongFormNaddr | null {
 
     return {
       identifier: decoded.data.identifier,
-      kind: LONG_FORM_KIND,
+      kind: KIND_LONG_FORM,
       pubkey: decoded.data.pubkey.toLowerCase(),
       relays: decoded.data.relays ?? [],
       url,

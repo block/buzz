@@ -7,8 +7,7 @@ use crate::{
     app_state::AppState,
     events,
     models::{
-        ContactEntry, ContactListResponse, LongFormNoteInfo, NoteReactionSummary, UserNoteInfo,
-        UserNotesResponse,
+        ContactEntry, ContactListResponse, NoteReactionSummary, UserNoteInfo, UserNotesResponse,
     },
     nostr_convert,
     relay::{query_relay, submit_event, SubmitEventResponse},
@@ -85,18 +84,7 @@ fn long_form_note_filter(pubkey: &str, identifier: &str) -> serde_json::Value {
     })
 }
 
-fn first_tag_value(event: &Event, name: &str) -> Option<String> {
-    event.tags.iter().find_map(|tag| {
-        let values = tag.as_slice();
-        if values.first().map(String::as_str) == Some(name) {
-            values.get(1).cloned()
-        } else {
-            None
-        }
-    })
-}
-
-fn long_form_note_from_event(event: &Event) -> Result<LongFormNoteInfo, String> {
+fn long_form_note_from_event(event: &Event) -> Result<(String, UserNoteInfo), String> {
     if event.kind.as_u16() as u32 != KIND_LONG_FORM {
         return Err(format!(
             "expected kind:{KIND_LONG_FORM}, got {}",
@@ -104,28 +92,23 @@ fn long_form_note_from_event(event: &Event) -> Result<LongFormNoteInfo, String> 
         ));
     }
 
-    let identifier = first_tag_value(event, "d")
-        .ok_or_else(|| "kind:30023 event is missing required d tag".to_string())?;
-    validate_long_form_identifier(&identifier)?;
-
-    let topics = event
+    let identifier = event
         .tags
         .iter()
-        .filter_map(|tag| {
+        .find_map(|tag| {
             let values = tag.as_slice();
-            if values.first().map(String::as_str) == Some("t") {
+            if values.first().map(String::as_str) == Some("d") {
                 values.get(1).cloned()
             } else {
                 None
             }
         })
-        .collect();
-    let published_at = first_tag_value(event, "published_at").and_then(|value| value.parse().ok());
+        .ok_or_else(|| "kind:30023 event is missing required d tag".to_string())?;
+    validate_long_form_identifier(&identifier)?;
 
-    Ok(LongFormNoteInfo {
+    let note = UserNoteInfo {
         id: event.id.to_hex(),
         pubkey: event.pubkey.to_hex(),
-        identifier,
         created_at: event.created_at.as_secs() as i64,
         content: event.content.clone(),
         tags: event
@@ -133,11 +116,9 @@ fn long_form_note_from_event(event: &Event) -> Result<LongFormNoteInfo, String> 
             .iter()
             .map(|tag| tag.as_slice().to_vec())
             .collect(),
-        title: first_tag_value(event, "title"),
-        summary: first_tag_value(event, "summary"),
-        published_at,
-        topics,
-    })
+    };
+
+    Ok((identifier, note))
 }
 
 /// Publish a global kind:1 text note (NIP-01).
@@ -270,7 +251,7 @@ pub async fn get_long_form_note(
     pubkey: String,
     identifier: String,
     state: State<'_, AppState>,
-) -> Result<Option<LongFormNoteInfo>, String> {
+) -> Result<Option<UserNoteInfo>, String> {
     let pubkey = validate_pubkey(&pubkey)?;
     validate_long_form_identifier(&identifier)?;
 
@@ -283,8 +264,8 @@ pub async fn get_long_form_note(
         return Err("relay returned long-form note for a different author".to_string());
     }
 
-    let note = long_form_note_from_event(event)?;
-    if note.identifier != identifier {
+    let (returned_identifier, note) = long_form_note_from_event(event)?;
+    if returned_identifier != identifier {
         return Err("relay returned long-form note for a different identifier".to_string());
     }
 
@@ -589,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn long_form_note_from_event_extracts_metadata() {
+    fn long_form_note_from_event_reuses_user_note_shape() {
         let event = long_form_event(
             vec![
                 tag(&["d", "article-slug"]),
@@ -602,16 +583,16 @@ mod tests {
             "# Body",
         );
 
-        let note = long_form_note_from_event(&event).unwrap();
+        let (identifier, note) = long_form_note_from_event(&event).unwrap();
 
         assert_eq!(note.id, event.id.to_hex());
         assert_eq!(note.pubkey, event.pubkey.to_hex());
-        assert_eq!(note.identifier, "article-slug");
+        assert_eq!(identifier, "article-slug");
         assert_eq!(note.content, "# Body");
-        assert_eq!(note.title.as_deref(), Some("Article title"));
-        assert_eq!(note.summary.as_deref(), Some("Short summary"));
-        assert_eq!(note.published_at, Some(1_710_000_000));
-        assert_eq!(note.topics, vec!["rust".to_string(), "nostr".to_string()]);
+        assert!(note
+            .tags
+            .iter()
+            .any(|tag| tag == &["title".to_string(), "Article title".to_string()]));
     }
 
     #[test]
