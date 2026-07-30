@@ -133,18 +133,6 @@ export function useChannelPaneHandlers({
     await deleteMutateRef.current({ eventId: message.id }).catch(() => {});
   }, []);
 
-  // Delete the message currently being edited and leave edit mode. Fired when
-  // the user clears an edit to empty and confirms — the keyboard equivalent of
-  // the "Delete message" action. Exit edit mode first so the composer collapses
-  // immediately; the delete follows (its own onError toast surfaces failures).
-  const handleDeleteEditTarget = React.useCallback(
-    async (eventId: string) => {
-      setEditTargetId(null);
-      await deleteMutateRef.current({ eventId }).catch(() => {});
-    },
-    [setEditTargetId],
-  );
-
   const handleEdit = React.useCallback(
     (message: { id: string }) => {
       setEditTargetId((current) =>
@@ -163,6 +151,22 @@ export function useChannelPaneHandlers({
     ) => {
       const eventId = editTargetIdRef.current;
       if (!eventId) {
+        return;
+      }
+
+      // Clearing an edit to empty (no text, no attachments) is the keyboard
+      // shorthand for "Delete message": delete the message instead of
+      // publishing an empty edit — the same `deleteMutate` the Delete button
+      // uses. This is the single decision point for both the main timeline and
+      // the thread panel, since both route edit-save through here. Exit edit
+      // mode first so the composer collapses immediately; the delete's own
+      // onError toast surfaces failures.
+      const isEmptyDeletion =
+        content.trim().length === 0 &&
+        (mediaTags === undefined || mediaTags.length === 0);
+      if (isEmptyDeletion) {
+        setEditTargetId(null);
+        await deleteMutateRef.current({ eventId }).catch(() => {});
         return;
       }
 
@@ -353,7 +357,6 @@ export function useChannelPaneHandlers({
     handleCancelThreadReply,
     handleCloseThread,
     handleDelete,
-    handleDeleteEditTarget,
     handleEdit,
     handleEditSave,
     handleExpandThreadReplies,

@@ -88,7 +88,6 @@ export type ChannelPaneProps = {
     mediaTags?: string[][],
     mentionPubkeys?: string[],
   ) => Promise<void>;
-  onDeleteEditTarget?: (eventId: string) => void | Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;

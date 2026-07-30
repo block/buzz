@@ -54,7 +54,6 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useComposerInsertEmoji } from "./useComposerInsertEmoji";
-import { resolveEmptyEditDelete } from "./emptyEditDelete";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
 import type { MessageComposerProps } from "./MessageComposer.types";
@@ -77,7 +76,6 @@ function MessageComposerImpl({
   onCaptureSendContext,
   onEditLastOwnMessage,
   onEditSave,
-  onDeleteEditTarget,
   onPrepareSendChannel,
   onPreparingMentionSendChange,
   onSend,
@@ -490,22 +488,13 @@ function MessageComposerImpl({
       const currentPendingImeta = media.pendingImetaRef.current;
       const hasMedia = currentPendingImeta.length > 0;
       // Empty text + zero attachments: clearing an edit to nothing is the
-      // keyboard shorthand for "Delete message" — call the existing delete
-      // path directly (same handler the Delete button uses; it exits edit
-      // mode). No extra confirmation: clearing a message and hitting Enter is
-      // already deliberate. `resolveEmptyEditDelete` keeps the historical
-      // no-op when no delete handler is wired, so an empty edit never
-      // publishes an empty body.
+      // keyboard shorthand for "Delete message". Hand empty content to
+      // onEditSave, which deletes the message instead of publishing an empty
+      // body (see handleEditSave). Nothing to build, so short-circuit here.
       if (!trimmed && !hasMedia) {
-        const deleteTargetId = resolveEmptyEditDelete(
-          editTargetRef.current?.id,
-          Boolean(onDeleteEditTarget),
-        );
-        if (deleteTargetId) {
-          setComposerContent("");
-          richText.clearContent();
-          void onDeleteEditTarget?.(deleteTargetId);
-        }
+        setComposerContent("");
+        richText.clearContent();
+        void onEditSaveRef.current("", [], []);
         return;
       }
 
@@ -619,7 +608,6 @@ function MessageComposerImpl({
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
-    onDeleteEditTarget,
     richText.clearContent,
     richText.setContent,
     setComposerContent,
