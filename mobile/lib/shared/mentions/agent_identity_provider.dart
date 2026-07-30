@@ -1,6 +1,7 @@
 import 'dart:collection';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/crypto/nip_oa.dart';
@@ -157,11 +158,83 @@ Map<String, String> mentionNamesWithDirectoryLabels({
 String _agentFallbackLabel(String pubkey) =>
     pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey;
 
+/// Keeps the role feed alive for consumers that render mentions outside the
+/// channel timeline, such as search results. A membership change refreshes the
+/// shared bot-role lookup below, regardless of which surface owns the channel.
+class _ChannelBotRoleSubscription extends Notifier<int> {
+  final String channelId;
+  void Function()? _unsubscribe;
+  int _subscriptionVersion = 0;
+
+  _ChannelBotRoleSubscription(this.channelId);
+
+  @override
+  int build() {
+    final sessionState = ref.watch(relaySessionProvider);
+    final subscriptionVersion = ++_subscriptionVersion;
+    _clearSubscription();
+    ref.onDispose(() {
+      _subscriptionVersion++;
+      _clearSubscription();
+    });
+
+    if (sessionState.status != SessionStatus.connected) return 0;
+    Future.microtask(() => _subscribe(channelId, subscriptionVersion));
+    return 0;
+  }
+
+  Future<void> _subscribe(String channelId, int subscriptionVersion) async {
+    final session = ref.read(relaySessionProvider.notifier);
+    try {
+      final unsubscribe = await session.subscribe(
+        NostrFilter(
+          kinds: const [39002],
+          tags: {
+            '#h': [channelId],
+          },
+          since: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          limit: 1,
+        ),
+        (_) {
+          if (_isCurrent(subscriptionVersion)) {
+            state++;
+          }
+        },
+      );
+      if (!_isCurrent(subscriptionVersion)) {
+        unsubscribe();
+        return;
+      }
+      _unsubscribe = unsubscribe;
+    } catch (error) {
+      if (_isCurrent(subscriptionVersion)) {
+        debugPrint(
+          '[ChannelBotRoleSubscription] failed for $channelId: $error',
+        );
+      }
+    }
+  }
+
+  bool _isCurrent(int subscriptionVersion) =>
+      subscriptionVersion == _subscriptionVersion;
+
+  void _clearSubscription() {
+    _unsubscribe?.call();
+    _unsubscribe = null;
+  }
+}
+
+final _channelBotRoleSubscriptionProvider =
+    NotifierProvider.family<_ChannelBotRoleSubscription, int, String>(
+      _ChannelBotRoleSubscription.new,
+    );
+
 /// Bot pubkeys currently assigned a channel bot role.
 final channelBotPubkeysProvider = FutureProvider.family<Set<String>, String>((
   ref,
   channelId,
 ) async {
+  ref.watch(_channelBotRoleSubscriptionProvider(channelId));
   final sessionState = ref.watch(relaySessionProvider);
   if (sessionState.status != SessionStatus.connected) return const {};
   final session = ref.read(relaySessionProvider.notifier);
