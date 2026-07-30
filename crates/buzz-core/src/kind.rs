@@ -203,12 +203,40 @@ pub fn is_persona_shared_kind(kind: u32) -> bool {
 /// reach foreign readers; stripping them at the author-only layer would break
 /// the catalog query.
 pub fn is_unshared_persona_event(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+    is_unshared_persona_event_for(event, requester_pubkey_bytes, None)
+}
+
+/// Owner-delegated variant of [`is_unshared_persona_event`].
+///
+/// `requester_owner_pubkey_bytes` is the requester's NIP-OA attesting owner, as
+/// recorded in `users.agent_owner_pubkey` when the requester authenticated with
+/// an `auth` tag. An attested reader may read its own owner's unshared personas.
+///
+/// This is what lets a `buzz-spawner` daemon (or any owner-attested agent)
+/// resolve the system prompt for an agent it runs on the owner's behalf, without
+/// forcing the owner to mark every persona `["shared","true"]` — which would
+/// expose those prompts to the whole community. It reuses the same delegation
+/// the relay already applies to kind:24200 observer frames rather than
+/// introducing a second authorization concept.
+///
+/// Delegation is one hop and one direction: an owner does NOT gain read access
+/// to personas authored by agents they own.
+pub fn is_unshared_persona_event_for(
+    event: &nostr::Event,
+    requester_pubkey_bytes: &[u8],
+    requester_owner_pubkey_bytes: Option<&[u8]>,
+) -> bool {
     let kind = event.kind.as_u16() as u32;
     if !is_persona_shared_kind(kind) {
         return false;
     }
+    let author_bytes = event.pubkey.to_bytes();
     // Author reads are always allowed.
-    if event.pubkey.to_bytes() == requester_pubkey_bytes {
+    if author_bytes == requester_pubkey_bytes {
+        return false;
+    }
+    // An owner-attested requester may read its own owner's personas.
+    if requester_owner_pubkey_bytes.is_some_and(|owner| author_bytes == owner) {
         return false;
     }
     // Foreign reader: allowed only if the event is explicitly shared.
@@ -257,6 +285,57 @@ pub const KIND_TEAM: u32 = 30176;
 /// carry the agent's secret key, NIP-OA auth tag, env vars, or runtime fields,
 /// since these events are world-readable on the relay.
 pub const KIND_MANAGED_AGENT: u32 = 30177;
+
+/// NIP-AS: Spawner Announcement (replaceable, spawner-authored).
+///
+/// How an owner finds a spawner without reading a server log. A `buzz-spawner`
+/// publishes one of these — keyed by `(pubkey, kind)`, so there is exactly one
+/// per spawner — describing itself and its current capacity. Clients list them
+/// so the user can pick a spawner instead of pasting 64 hex characters.
+///
+/// # An announcement is advertising, not authorization
+///
+/// Anyone can publish one. Appearing in a client's list must never imply the
+/// spawner is trusted: an owner still signs a NIP-OA attestation per agent
+/// (kind [`KIND_SPAWNER_ATTESTATION`]), and that signature is the only thing
+/// that grants an agent access. Treat the content as self-reported hints —
+/// capacity numbers included.
+pub const KIND_SPAWNER_ANNOUNCEMENT: u32 = 10180;
+
+/// NIP-AS: Spawner Agent Spec (parameterized replaceable, owner-authored).
+///
+/// Desired state for a server-hosted agent, published by the owner and consumed
+/// by a `buzz-spawner` daemon. Addressed by `(pubkey, kind, d_tag)` where
+/// `d_tag` is a client-chosen stable spec slug — *not* the agent pubkey, which
+/// does not exist until the spawner mints it.
+///
+/// Like [`KIND_MANAGED_AGENT`], the content is an explicit opt-IN allowlist
+/// projection and these events are world-readable: it MUST never carry a secret
+/// key, NIP-OA auth tag, env vars, or provider config. The system prompt is
+/// resolved through the referenced [`KIND_PERSONA`], never inlined here.
+///
+/// Publishing an empty-content replacement is the signal to tear the agent
+/// down. A NIP-09 deletion does not work here: it leaves nothing to fan out, so
+/// a spawner that is already connected never learns the spec is gone.
+pub const KIND_SPAWNER_AGENT_SPEC: u32 = 30178;
+
+/// NIP-AS: Spawner Agent Status (parameterized replaceable, spawner-authored).
+///
+/// Actual state reported back by the spawner for a given
+/// [`KIND_SPAWNER_AGENT_SPEC`]. Addressed by `(pubkey, kind, d_tag)` where
+/// `d_tag` is the spec slug it reconciles, so a spec and its status share a
+/// slug but differ in author.
+///
+/// Content carries the reconciliation phase, the minted agent pubkey once it
+/// exists, and a human-readable error when the phase is failed.
+///
+/// The relay applies no author gate: anyone may publish this kind, and a client
+/// must therefore match a status to the spawner its own spec named rather than
+/// trusting the kind alone. Nothing is granted by a status event — access comes
+/// only from the owner's NIP-OA signature in a
+/// [`KIND_SPAWNER_ATTESTATION`] exchange — so a forged one misreports a badge
+/// and nothing more.
+pub const KIND_SPAWNER_AGENT_STATUS: u32 = 30179;
 
 // NIP-56 reporting
 /// NIP-56: Report an event, pubkey, or blob to relay moderators (kind:1984).
@@ -407,6 +486,14 @@ pub const KIND_PAIRING: u32 = 24134;
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// NIP-AS: Ephemeral spawner attestation handshake frame, NIP-44 encrypted and
+/// `#p`-gated to the counterparty.
+///
+/// Carries the two-round NIP-OA attestation exchange between a `buzz-spawner`
+/// and an agent owner: spawner → owner announces a freshly minted agent pubkey
+/// plus a nonce, owner → spawner returns the signed auth tag. Ephemeral so the
+/// auth tag never lands in relay storage.
+pub const KIND_SPAWNER_ATTESTATION: u32 = 24201;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
@@ -586,6 +673,10 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
+    KIND_SPAWNER_ANNOUNCEMENT,
+    KIND_SPAWNER_AGENT_SPEC,
+    KIND_SPAWNER_AGENT_STATUS,
+    KIND_SPAWNER_ATTESTATION,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
@@ -784,6 +875,10 @@ const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–
 const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
+const _: () = assert!(is_replaceable(KIND_SPAWNER_ANNOUNCEMENT)); // 10180 ∈ 10000–19999
+const _: () = assert!(is_parameterized_replaceable(KIND_SPAWNER_AGENT_SPEC)); // 30178 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_SPAWNER_AGENT_STATUS)); // 30179 ∈ 30000–39999
+const _: () = assert!(is_ephemeral(KIND_SPAWNER_ATTESTATION)); // 24201 ∈ 20000–29999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
@@ -925,6 +1020,58 @@ mod tests {
             .unwrap();
         let author_bytes = keys.public_key().to_bytes();
         assert!(!is_unshared_persona_event(&ev, &author_bytes));
+    }
+
+    #[test]
+    fn is_unshared_persona_event_attested_reader_reads_its_owners_persona() {
+        // A spawner attested to the persona author may read the unshared
+        // persona — this is what lets it resolve a system prompt without the
+        // owner publishing the prompt to the whole community.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        let owner = Keys::generate();
+        let spawner = Keys::generate();
+        let ev = EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "")
+            .tags(vec![Tag::parse(["d", "builtin:fizz"]).unwrap()])
+            .sign_with_keys(&owner)
+            .unwrap();
+
+        let spawner_bytes = spawner.public_key().to_bytes();
+        let owner_bytes = owner.public_key().to_bytes();
+
+        // Without the attestation the spawner is an ordinary foreign reader.
+        assert!(is_unshared_persona_event(&ev, &spawner_bytes));
+        assert!(!is_unshared_persona_event_for(
+            &ev,
+            &spawner_bytes,
+            Some(&owner_bytes)
+        ));
+    }
+
+    #[test]
+    fn is_unshared_persona_event_delegation_is_one_hop_and_one_direction() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let stranger = Keys::generate();
+
+        // Persona authored by the agent, read by its owner: delegation runs
+        // reader→owner, not owner→agent, so this stays blocked.
+        let ev = EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "")
+            .tags(vec![Tag::parse(["d", "agent-authored"]).unwrap()])
+            .sign_with_keys(&agent)
+            .unwrap();
+        assert!(is_unshared_persona_event_for(
+            &ev,
+            &owner.public_key().to_bytes(),
+            None
+        ));
+
+        // Being attested to somebody else grants nothing here.
+        assert!(is_unshared_persona_event_for(
+            &ev,
+            &stranger.public_key().to_bytes(),
+            Some(&owner.public_key().to_bytes())
+        ));
     }
 
     #[test]

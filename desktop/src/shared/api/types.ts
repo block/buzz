@@ -389,6 +389,9 @@ export type ManagedAgent = {
   logPath: string;
   startOnAppLaunch: boolean;
   autoRestartOnConfigChange: boolean;
+  /** Spawner pubkey this identity was handed to, or null when it runs here.
+   * A relocated agent must never be started locally (split-brain guard). */
+  relocatedToSpawner: string | null;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */

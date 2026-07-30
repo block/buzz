@@ -1,0 +1,42 @@
+[package]
+name = "buzz-spawner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reconciles Nostr agent specs into Docker-isolated buzz-acp containers"
+
+[[bin]]
+name = "buzz-spawner"
+path = "src/main.rs"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
+buzz-ws-client = { workspace = true }
+
+nostr = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+futures-util = { workspace = true }
+chrono = { workspace = true }
+async-trait = "0.1"
+bollard = "0.21"
+# Explicit rustls dep with the ring provider, so the binary can install a
+# process-level CryptoProvider. The workspace unifies both ring and aws-lc-rs
+# features, leaving rustls unable to auto-select one; without an explicit
+# install every wss:// relay connection panics. Same rationale as buzz-cli,
+# buzz-acp, and buzz-admin.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

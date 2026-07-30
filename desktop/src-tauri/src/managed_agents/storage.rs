@@ -206,6 +206,21 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
     })
 }
 
+/// Refuse to spawn an agent whose identity has been relocated to a spawner.
+/// Once the attestation hand-off gives the spawner this agent's secret key,
+/// the server copy is the agent — starting a local process too would run one
+/// identity in two places (duplicate replies, two turns billed per message).
+/// Every local spawn path must check this and fail closed.
+pub(crate) fn spawn_relocation_refusal(record: &ManagedAgentRecord) -> Option<String> {
+    record.relocated_to_spawner.as_ref().map(|spawner| {
+        format!(
+            "agent {} now runs on a server (spawner {}). Refusing to start a local copy — \
+             it would answer every mention twice.",
+            record.name, spawner
+        )
+    })
+}
+
 /// Read the raw unified store — keyed instances AND key-less definitions —
 /// with fail-loud parse handling. Internal seam; public readers filter.
 fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {

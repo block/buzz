@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_persona_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
+    is_unshared_persona_event_for, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
     KIND_DM_VISIBILITY, KIND_PERSONA, P_GATED_KINDS, RESULT_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
@@ -47,7 +47,7 @@ pub async fn handle_req(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
-    let (conn_id, pubkey_bytes, token_channel_ids) = {
+    let (conn_id, pubkey_bytes, agent_owner_bytes, token_channel_ids) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => {
@@ -71,7 +71,12 @@ pub async fn handle_req(
                     return;
                 }
 
-                (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
+                let owner_bytes = ctx
+                    .agent_owner_pubkey
+                    .as_ref()
+                    .map(|owner| owner.to_bytes().to_vec());
+
+                (conn.conn_id, pk_bytes, owner_bytes, ctx.channel_ids.clone())
             }
             _ => {
                 conn.send(RelayMessage::notice(
@@ -224,6 +229,7 @@ pub async fn handle_req(
             token_channel_ids.is_none(),
             &conn.tenant,
             &pubkey_bytes,
+            agent_owner_bytes.as_deref(),
             &conn,
             &state,
             trace_state.as_ref(),
@@ -385,7 +391,11 @@ pub async fn handle_req(
             // Also enforces author-only kinds (30300/30350) and the persona
             // shared-gate (kind:30175 without ["shared","true"]). Single call
             // covers all three gated event classes.
-            if !event_visible_to_reader(&stored.event, &pubkey_bytes) {
+            if !event_visible_to_reader_for(
+                &stored.event,
+                &pubkey_bytes,
+                agent_owner_bytes.as_deref(),
+            ) {
                 continue;
             }
 
@@ -509,6 +519,7 @@ async fn handle_search_req(
     include_global: bool,
     tenant: &TenantContext,
     reader_pubkey_bytes: &[u8],
+    reader_owner_pubkey_bytes: Option<&[u8]>,
     conn: &ConnectionState,
     state: &AppState,
     trace_state: Option<&crate::conformance::AbstractState>,
@@ -702,7 +713,11 @@ async fn handle_search_req(
                     }
                     // Result-level gate: covers author-only, persona shared-gate,
                     // and result-gated kinds in one call.
-                    if !event_visible_to_reader(&stored.event, reader_pubkey_bytes) {
+                    if !event_visible_to_reader_for(
+                        &stored.event,
+                        reader_pubkey_bytes,
+                        reader_owner_pubkey_bytes,
+                    ) {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -1220,10 +1235,29 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 /// (NIP-98 `/query`, `/count`, FTS search) — instead of inlining the three
 /// individual predicates at each site.
 pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+    event_visible_to_reader_for(event, requester_pubkey_bytes, None)
+}
+
+/// NIP-OA-aware variant of [`event_visible_to_reader`].
+///
+/// `requester_owner_pubkey_bytes` is the reader's attesting owner, present when
+/// the connection authenticated with an `auth` tag. It relaxes exactly one gate
+/// — the persona shared-gate — so an owner-attested agent (notably a
+/// `buzz-spawner` daemon resolving the system prompt for an agent it runs) can
+/// read its own owner's unshared personas without the owner having to publish
+/// them `["shared","true"]` to the whole community.
+///
+/// It deliberately does NOT relax the author-only or result-gated checks:
+/// delegation grants persona reads, not blanket impersonation.
+pub(crate) fn event_visible_to_reader_for(
+    event: &nostr::Event,
+    requester_pubkey_bytes: &[u8],
+    requester_owner_pubkey_bytes: Option<&[u8]>,
+) -> bool {
     if is_author_only_event(event, requester_pubkey_bytes) {
         return false;
     }
-    if is_unshared_persona_event(event, requester_pubkey_bytes) {
+    if is_unshared_persona_event_for(event, requester_pubkey_bytes, requester_owner_pubkey_bytes) {
         return false;
     }
     let requester_pubkey_hex = hex::encode(requester_pubkey_bytes);

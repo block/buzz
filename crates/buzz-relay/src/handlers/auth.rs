@@ -275,10 +275,21 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
+            let owner_bytes = auth_ctx
+                .agent_owner_pubkey
+                .as_ref()
+                .map(|owner| owner.to_bytes().to_vec());
             *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);
             state
                 .conn_manager
                 .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
+            // Mirror the attested owner onto the connection entry so the
+            // synchronous fan-out gates can honor NIP-OA delegation. Always
+            // written, including the `None` case, so a re-auth on this socket
+            // cannot inherit a previous identity's delegation.
+            state
+                .conn_manager
+                .set_agent_owner_pubkey(conn_id, owner_bytes);
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
         }
         Err(e) => {
