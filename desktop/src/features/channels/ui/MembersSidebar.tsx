@@ -9,7 +9,7 @@ import {
 import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
-  isAgentIdentityInManagedList,
+  shouldHideAgentFromAddSearch,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
@@ -265,6 +265,12 @@ export function MembersSidebar({
         agent,
       ]),
     );
+    const relayAgentAddPolicies = new Map(
+      (relayAgentsQuery.data ?? []).map((agent) => [
+        normalizePubkey(agent.pubkey),
+        agent.channelAddPolicy,
+      ]),
+    );
     const memberAgentLabels = new Set(
       rawMembers
         .filter((member) => member.isAgent === true || member.role === "bot")
@@ -282,7 +288,12 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        shouldHideAgentFromAddSearch({
+          candidate,
+          currentPubkey,
+          managedAgentPubkeys,
+          relayAgentAddPolicies,
+        })
       ) {
         return;
       }

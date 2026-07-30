@@ -7,6 +7,7 @@ import {
   getSharedChannelIds,
   isAgentIdentityInManagedList,
   relayAgentIsSharedWithUser,
+  shouldHideAgentFromAddSearch,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
 
@@ -305,4 +306,125 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
   const second = makeAgent({ pubkey: PUB_B, isAgent: false });
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
+});
+
+// ── shouldHideAgentFromAddSearch: mirror relay add enforcement ─────────────
+
+function addArgs(overrides = {}) {
+  const {
+    candidate = {},
+    currentPubkey = CURRENT_PUBKEY,
+    managedAgentPubkeys = new Set(),
+    relayAgentAddPolicies = new Map(),
+  } = overrides;
+  return {
+    candidate: {
+      isAgent: true,
+      ownerPubkey: null,
+      pubkey: PUB_A,
+      ...candidate,
+    },
+    currentPubkey,
+    managedAgentPubkeys,
+    relayAgentAddPolicies,
+  };
+}
+
+function addPolicy(policy) {
+  return new Map([[PUB_A, policy]]);
+}
+
+test("shouldHideAgentFromAddSearch: never hides people", () => {
+  assert.equal(
+    shouldHideAgentFromAddSearch(addArgs({ candidate: { isAgent: false } })),
+    false,
+  );
+});
+
+test("shouldHideAgentFromAddSearch: always offers managed agents", () => {
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({ managedAgentPubkeys: new Set([PUB_A]) }),
+    ),
+    false,
+  );
+});
+
+test("shouldHideAgentFromAddSearch: offers agents declaring add-policy anyone", () => {
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({ relayAgentAddPolicies: addPolicy("anyone") }),
+    ),
+    false,
+  );
+});
+
+test("shouldHideAgentFromAddSearch: owner_only admits only the verified owner", () => {
+  // The relay refuses owner_only adds from anyone but the stored attested
+  // owner — the picker must mirror both directions.
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({
+        candidate: { ownerPubkey: CURRENT_PUBKEY },
+        relayAgentAddPolicies: addPolicy("owner_only"),
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({
+        candidate: { ownerPubkey: OTHER_OWNER_PUBKEY },
+        relayAgentAddPolicies: addPolicy("owner_only"),
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({ relayAgentAddPolicies: addPolicy("owner_only") }),
+    ),
+    true,
+  );
+});
+
+test("shouldHideAgentFromAddSearch: hides nobody-policy agents from everyone including the owner", () => {
+  // Relay enforcement rejects nobody-policy adds regardless of actor.
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({
+        candidate: { ownerPubkey: CURRENT_PUBKEY },
+        relayAgentAddPolicies: addPolicy("nobody"),
+      }),
+    ),
+    true,
+  );
+});
+
+test("shouldHideAgentFromAddSearch: hides agents with no directory entry or no declared policy", () => {
+  // No declaration, no offer — preserves #2149's stale-identity guarantee.
+  assert.equal(shouldHideAgentFromAddSearch(addArgs()), true);
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({ relayAgentAddPolicies: addPolicy(null) }),
+    ),
+    true,
+  );
+});
+
+test("shouldHideAgentFromAddSearch: normalizes pubkeys before every comparison", () => {
+  const mixedCase = "Ab".repeat(32);
+  const normalized = mixedCase.toLowerCase();
+  assert.equal(
+    shouldHideAgentFromAddSearch(
+      addArgs({
+        candidate: {
+          ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+          pubkey: mixedCase,
+        },
+        relayAgentAddPolicies: new Map([[normalized, "owner_only"]]),
+      }),
+    ),
+    false,
+  );
 });

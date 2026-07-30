@@ -54,7 +54,9 @@ const { isRateLimited, resetRateLimitGate } = await import(
 
 // Import the production classifier from tauri.ts — tests must exercise the
 // real function, not a local copy, so a logic change is always caught here.
-const { applyTauriRateLimitIfNeeded } = await import("./tauri.ts");
+const { applyTauriRateLimitIfNeeded, fromRawRelayAgent } = await import(
+  "./tauri.ts"
+);
 
 function resetGate(startMs = 0) {
   pendingTimers.clear();
@@ -209,6 +211,53 @@ test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape",
     envValues,
     "env must round-trip: edit form must see the same values that Rust serialized",
   );
+});
+
+// ── fromRawRelayAgent: kind:10100 directory wire contract ─────────────────────
+
+// These tests pin the snake_case → camelCase field mapping for the relay
+// agent directory. A misnamed field here fails CLOSED with no error — the
+// value silently defaults and eligibility gates (add-search, mentions) hide
+// the agent app-wide — so the contract must be covered, not just reviewed.
+
+function rawRelayAgent(overrides = {}) {
+  return {
+    pubkey: "ab".repeat(32),
+    name: "Scout",
+    agent_type: "agent",
+    channels: [],
+    channel_ids: [],
+    capabilities: [],
+    status: "online",
+    ...overrides,
+  };
+}
+
+test("fromRawRelayAgent maps channel_add_policy to channelAddPolicy", () => {
+  const agent = fromRawRelayAgent(
+    rawRelayAgent({ channel_add_policy: "owner_only" }),
+  );
+  assert.equal(agent.channelAddPolicy, "owner_only");
+});
+
+test("fromRawRelayAgent defaults a missing channel_add_policy to null", () => {
+  const agent = fromRawRelayAgent(rawRelayAgent());
+  assert.equal(agent.channelAddPolicy, null);
+});
+
+test("fromRawRelayAgent maps respond_to fields and defaults them when absent", () => {
+  const declared = fromRawRelayAgent(
+    rawRelayAgent({
+      respond_to: "allowlist",
+      respond_to_allowlist: ["cd".repeat(32)],
+    }),
+  );
+  assert.equal(declared.respondTo, "allowlist");
+  assert.deepStrictEqual(declared.respondToAllowlist, ["cd".repeat(32)]);
+
+  const sparse = fromRawRelayAgent(rawRelayAgent());
+  assert.equal(sparse.respondTo, null);
+  assert.deepStrictEqual(sparse.respondToAllowlist, []);
 });
 
 // ── Teardown ──────────────────────────────────────────────────────────────────
