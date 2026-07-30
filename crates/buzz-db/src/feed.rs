@@ -133,6 +133,29 @@ pub async fn query_mentions(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
+    let mut conn = pool.acquire().await?;
+    query_mentions_on(
+        &mut conn,
+        community,
+        pubkey_bytes,
+        accessible_channel_ids,
+        since,
+        limit,
+    )
+    .await
+}
+
+/// [`query_mentions`] on a specific session — the replica-routing path runs
+/// the query on the exact reader connection whose heartbeat observation
+/// proved its predicate.
+pub(crate) async fn query_mentions_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey_bytes: &[u8],
+    accessible_channel_ids: &[Uuid],
+    since: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<StoredEvent>> {
     let mut qb = build_mentions_query(
         community,
         pubkey_bytes,
@@ -140,7 +163,7 @@ pub async fn query_mentions(
         since,
         limit,
     );
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = qb.build().fetch_all(&mut *conn).await?;
     collect_stored_events(rows)
 }
 
@@ -194,6 +217,27 @@ pub async fn query_needs_action(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
+    let mut conn = pool.acquire().await?;
+    query_needs_action_on(
+        &mut conn,
+        community,
+        pubkey_bytes,
+        accessible_channel_ids,
+        since,
+        limit,
+    )
+    .await
+}
+
+/// [`query_needs_action`] on a specific session — see [`query_mentions_on`].
+pub(crate) async fn query_needs_action_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey_bytes: &[u8],
+    accessible_channel_ids: &[Uuid],
+    since: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<StoredEvent>> {
     let mut qb = build_needs_action_query(
         community,
         pubkey_bytes,
@@ -201,7 +245,7 @@ pub async fn query_needs_action(
         since,
         limit,
     );
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = qb.build().fetch_all(&mut *conn).await?;
     collect_stored_events(rows)
 }
 
@@ -242,8 +286,20 @@ pub async fn query_activity(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
+    let mut conn = pool.acquire().await?;
+    query_activity_on(&mut conn, community, accessible_channel_ids, since, limit).await
+}
+
+/// [`query_activity`] on a specific session — see [`query_mentions_on`].
+pub(crate) async fn query_activity_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    accessible_channel_ids: &[Uuid],
+    since: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<StoredEvent>> {
     let mut qb = build_activity_query(community, accessible_channel_ids, since, limit);
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = qb.build().fetch_all(&mut *conn).await?;
     collect_stored_events(rows)
 }
 

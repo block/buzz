@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     // spans under the correct service identity.
     let resource = telemetry::service_resource();
     let tracer_init = telemetry::try_init_tracer(resource.clone());
+    let otel_enabled = matches!(&tracer_init, telemetry::TracerInit::Enabled(_));
     let otel_layer = match &tracer_init {
         telemetry::TracerInit::Enabled(p) => {
             use opentelemetry::trace::TracerProvider as _;
@@ -109,12 +110,18 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    let trace_context_lookup = telemetry::TraceContextLookup::default();
+    let trace_context_lookup_layer = otel_enabled.then(|| {
+        trace_context_lookup
+            .clone()
+            .with_filter(tracing_subscriber::filter::LevelFilter::OFF)
+    });
 
     tracing_subscriber::registry()
         .with(
             fmt::layer()
                 .json()
-                .flatten_event(true)
+                .event_format(trace_context_lookup.json_formatter(otel_enabled))
                 .with_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref())),
         )
         .with(otel_layer.map(|layer| {
@@ -122,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
                 std::env::var("BUZZ_OTEL_FILTER").ok().as_deref(),
             ))
         }))
+        .with(trace_context_lookup_layer)
         .init();
 
     // Log any exporter-build failure now that the subscriber is installed.
@@ -158,7 +166,9 @@ async fn main() -> anyhow::Result<()> {
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
+        replica_read_max_age_ms: config.replica_read_max_age_ms,
         max_connections: config.db_pool_size,
+        read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
@@ -166,7 +176,11 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     if db.has_read_pool() {
-        info!("Postgres connected (writer + read replica)");
+        info!("Postgres connected (writer + lazy read replica pool)");
+        // Reader-down at boot must not crash or block the relay; this warn-only
+        // ping is the sole boot-time visibility that the replica is unreachable
+        // (the lazy pool with min_connections=0 dials nothing until first use).
+        db.spawn_read_pool_boot_ping();
     } else {
         info!("Postgres connected");
     }
@@ -990,6 +1004,12 @@ async fn main() -> anyhow::Result<()> {
                         None => {
                             metrics::gauge!("buzz_db_replica_fence_open").set(0.0);
                         }
+                    }
+                    // Probe liveness, ungated by staleness: how long since
+                    // the probe last committed a heartbeat token.
+                    if let Some(age) = pool_state.db.fence().heartbeat_age() {
+                        metrics::gauge!("buzz_db_replica_heartbeat_age_seconds")
+                            .set(age.as_secs_f64());
                     }
                 }
 

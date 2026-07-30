@@ -114,6 +114,39 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Shared agent access names the consequence where it is selected.** The
+   shared respond-to field shows a persistent warning whenever `anyone` **or**
+   `allowlist` is selected — both hand the host's access to someone other than
+   the owner, so both disclose it and only the audience phrase differs. This
+   covers persona-backed create and edit surfaces. Keep that disclosure in
+   the shared field instead of adding surface-specific flags. It renders
+   directly below the selector for `anyone` but *after* the people picker for
+   `allowlist`, so it never sits between the user and the selection they came
+   to make. The copy leads with the audience ("Anyone can use this agent to
+   access…") so it reads as a warning rather than an explanation, and stays one
+   sentence — don't split the mechanism into a second sentence. Both the machine
+   and the stakes it names come from `lib/agentAccessWarning.ts`, keyed on an
+   optional `runLocation`: instance surfaces resolve it from
+   `ManagedAgent.backend` via `runLocationForBackend`, and the create flow from
+   `WhereToRunDraft.runOn` via `runLocationForRunOn`. `AgentDialog` is the one
+   place that resolves it for dialog surfaces and publishes it through
+   `ui/AgentRunLocationContext.tsx`; the field reads that context and lets an
+   explicit `runLocation` prop win. Do **not** thread the value as a prop
+   through `AgentDefinitionDialog` / `AgentInstanceEditDialog` — both are
+   already over the 1000-line ceiling, and neither uses the value itself.
+   Surfaces rendered outside `AgentDialog` (e.g. `EditRespondToDialog`) pass the
+   prop directly. Local names "your
+   computer, including files, accounts, and connected tools"; remote names "the
+   server it runs on, including any accounts and tools available there" —
+   deliberately *not* the owner's files, which aren't theirs to describe on a
+   host they don't own. **An unknown location falls back to the local wording —
+   never hedge with "computer or server".** A remote host requires an
+   installed `buzz-backend-*` provider, and without one `WhereToRunSection`
+   never renders, so "server" would name a concept the owner has never been
+   shown; when it *is* remote they picked that host from the selector
+   themselves. Never synthesize a run location a surface doesn't have. Don't
+   expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
+   copy.
 
 ## The tests that enforce this
 
@@ -128,6 +161,12 @@ with a TypeScript lookup table or an id comparison in a component.
   `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`,
   `isSuccessfulEmptyDiscovery`. If the "reopen to retry" copy becomes inert
   again, these tests will catch it.
+- `ui/respondToFieldContract.test.mjs` — plain-language mode labels, the
+  persistent warning contract for shared agent access, and its two render
+  positions (after the people picker for `allowlist`).
+- `lib/agentAccessWarning.test.mjs` — every mode × run-location copy variant
+  plus both resolvers, including unknown-reads-as-local and
+  blank-`runOn`-is-not-a-provider.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, navigation,
   successful-empty vs failed optional-model discovery, and persistence races.

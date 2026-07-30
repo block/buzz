@@ -543,8 +543,15 @@ mod tests {
     #[tokio::test]
     async fn materialized_repo_is_created_under_configured_scratch_dir() {
         let scratch = TempDir::new().unwrap();
-        let store = GitStore::new("http://localhost:9000", "x", "x", "x", "us-east-1")
-            .expect("construct store");
+        let store = GitStore::new(
+            "http://localhost:9000",
+            "x",
+            "x",
+            "x",
+            "us-east-1",
+            buzz_media::config::S3AddressingStyle::Path,
+        )
+        .expect("construct store");
         let manifest = Manifest {
             version: 1,
             head: "refs/heads/main".into(),
@@ -587,8 +594,9 @@ mod tests {
             "buzz_dev_secret",
             "buzz-git",
             "us-east-1",
+            buzz_media::config::S3AddressingStyle::Path,
         )
-        .expect("connect minio")
+        .expect("connect local MinIO")
     }
 
     /// Build a tiny on-disk repo, return (pack bytes, head_oid).

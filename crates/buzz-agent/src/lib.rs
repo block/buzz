@@ -105,6 +105,14 @@ struct Session {
     /// it so a consumer can price the cached slice at the provider's discounted
     /// rate instead of assuming every input token cost full price.
     accumulated_cached_input_tokens: u64,
+    /// Session-cumulative total-token state across all turns.
+    ///
+    /// Mirrors the per-turn `TurnTotalState` tri-state: starts `Unseen`,
+    /// becomes `Exact(n)` as turns with genuine provider totals complete,
+    /// transitions permanently to `Unknown` when any turn lacks a total or
+    /// when the cumulative would otherwise decrease. Only emitted in the
+    /// `usage_update` notification when `Exact`.
+    accumulated_total_state: crate::types::TurnTotalState,
 }
 
 fn die(msg: String) -> ! {
@@ -432,6 +440,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             accumulated_input_tokens: 0,
             accumulated_output_tokens: 0,
             accumulated_cached_input_tokens: 0,
+            accumulated_total_state: crate::types::TurnTotalState::Unseen,
         },
     );
     drop(sessions);
@@ -679,6 +688,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let mut turn_input_tokens: Option<u64> = None;
     let mut turn_output_tokens: Option<u64> = None;
     let mut turn_cached_input_tokens: Option<u64> = None;
+    let mut turn_total_state = crate::types::TurnTotalState::Unseen;
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         effective_model: effective_model_str,
@@ -698,6 +708,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         turn_input_tokens: &mut turn_input_tokens,
         turn_output_tokens: &mut turn_output_tokens,
         turn_cached_input_tokens: &mut turn_cached_input_tokens,
+        turn_total_state: &mut turn_total_state,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -733,10 +744,18 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                 s.accumulated_cached_input_tokens = s
                     .accumulated_cached_input_tokens
                     .saturating_add(turn_cached_input_tokens.unwrap_or(0));
+                // Fold the per-turn total state into the session cumulative.
+                // Unknown poisons the session permanently; Exact adds to running sum;
+                // Unseen (turn emitted no usage) leaves the cumulative unchanged.
+                // Uses TurnTotalState::merge_session, which applies the same
+                // checked-add / overflow-poisons contract as the per-response fold.
+                s.accumulated_total_state =
+                    s.accumulated_total_state.merge_session(turn_total_state);
                 Some((
                     s.accumulated_input_tokens,
                     s.accumulated_output_tokens,
                     s.accumulated_cached_input_tokens,
+                    s.accumulated_total_state,
                 ))
             } else {
                 // Session is gone — the accumulated baseline no longer exists, so
@@ -744,29 +763,32 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                 None
             }
         };
-        if let Some((accumulated_in, accumulated_out, accumulated_cached)) = accumulated {
-            wire::send(
-                &wire_tx,
-                goose_session_update(
-                    &sid,
-                    json!({
-                        "sessionUpdate": "usage_update",
-                        // used: total tokens as a context-usage proxy;
-                        // contextLimit: 0 (buzz-agent has no context limit tracking).
-                        "used": accumulated_in.saturating_add(accumulated_out),
-                        "contextLimit": 0u64,
-                        "accumulatedInputTokens": accumulated_in,
-                        "accumulatedOutputTokens": accumulated_out,
-                        // A subset of accumulatedInputTokens, not an addition to
-                        // it. Extends goose's usage_update shape; a consumer that
-                        // does not know the field ignores it and prices exactly as
-                        // it did before.
-                        "accumulatedCachedInputTokens": accumulated_cached,
-                        "model": effective_model_str,
-                    }),
-                ),
-            )
-            .await;
+        if let Some((accumulated_in, accumulated_out, accumulated_cached, accumulated_total)) =
+            accumulated
+        {
+            // Build the usage_update payload. `accumulatedTotalTokens` is only
+            // included when the cumulative is exactly known — never when Unseen
+            // (no total ever observed) or Unknown (at least one turn lacked a
+            // total). A goose consumer that doesn't recognise the field ignores it.
+            let mut update = serde_json::json!({
+                "sessionUpdate": "usage_update",
+                // used: total tokens as a context-usage proxy;
+                // contextLimit: 0 (buzz-agent has no context limit tracking).
+                "used": accumulated_in.saturating_add(accumulated_out),
+                "contextLimit": 0u64,
+                "accumulatedInputTokens": accumulated_in,
+                "accumulatedOutputTokens": accumulated_out,
+                // A subset of accumulatedInputTokens, not an addition to
+                // it. Extends goose's usage_update shape; a consumer that
+                // does not know the field ignores it and prices exactly as
+                // it did before.
+                "accumulatedCachedInputTokens": accumulated_cached,
+                "model": effective_model_str,
+            });
+            if let crate::types::TurnTotalState::Exact(total) = accumulated_total {
+                update["accumulatedTotalTokens"] = serde_json::json!(total);
+            }
+            wire::send(&wire_tx, goose_session_update(&sid, update)).await;
         }
     }
     match result {

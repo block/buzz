@@ -30,6 +30,18 @@ tests:
           path: kind
           value: Service
         template: templates/service.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_REGION
+          any: true
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ADDRESSING_STYLE
+            value: "path"
+        template: templates/deployment.yaml
       - contains:
           path: spec.template.spec.containers[0].env
           content:
@@ -45,6 +57,32 @@ tests:
           content:
             name: BUZZ_REQUIRE_MEDIA_GET_AUTH
             value: "true"
+        template: templates/deployment.yaml
+
+  - it: renders virtual-hosted S3 addressing for providers that require it
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://storage.railway.app
+      s3.bucket: buzz-media-example
+      s3.region: auto
+      s3.addressingStyle: virtual
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_REGION
+            value: "auto"
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ADDRESSING_STYLE
+            value: "virtual"
         template: templates/deployment.yaml
 
   - it: lets an explicit value opt out of media read auth for dev/public deployments

@@ -913,8 +913,8 @@ function createMockRelayMembershipEvent(): RelayEvent {
  * sets from distinct pubkeys so the e2e exercises the union/collapse path, not
  * a single relay-owned set. `:buzz:` is the stable shortcode exercised by
  * custom-emoji.spec.ts (claimed by BOTH members with different URLs, so the
- * palette must collapse it to one deterministic winner); `:narf:` proves a
- * second member's distinct emoji unions in.
+ * palette must collapse it to one deterministic winner); `:narf:` and
+ * `:bufo_joy:` prove a second member's distinct emoji unions in.
  */
 function createMockCustomEmojiSetEvents(): RelayEvent[] {
   return [
@@ -941,6 +941,7 @@ function createMockCustomEmojiSetEvents(): RelayEvent[] {
         // member B claims :buzz: with a DIFFERENT url — unionCustomEmoji must
         // collapse it to one deterministic winner, never expose two URLs.
         ["emoji", "buzz", "https://example.com/e2e/buzz-b.png"],
+        ["emoji", "bufo_joy", "https://example.com/e2e/bufo-joy.png"],
       ],
       "b".repeat(64),
     ),
@@ -1017,6 +1018,8 @@ declare global {
       mentionPubkeys?: string[];
       extraTags?: string[][];
       createdAt?: number;
+      /** Marks this test-only message as locally pending. */
+      pending?: boolean;
       /** 64-hex id required for the event to be a valid reaction target. */
       id?: string;
     }) => RelayEvent;
@@ -2887,9 +2890,7 @@ const mockMeshState: {
   servingUsage: MockServingUsage;
 } = {
   admitted: true,
-  models: [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ],
+  models: [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }],
   denyReason: "not a relay member",
   nodeState: "off",
   nodeMode: null,
@@ -2898,9 +2899,7 @@ const mockMeshState: {
 
 function resetMockMesh() {
   mockMeshState.admitted = true;
-  mockMeshState.models = [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ];
+  mockMeshState.models = [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }];
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
@@ -4013,6 +4012,7 @@ function emitMockChannelMessage(
   mentionPubkeys?: string[],
   extraTags?: string[][],
   createdAt?: number,
+  pending?: boolean,
   id?: string,
 ) {
   const eventKind = kind ?? 9;
@@ -4031,6 +4031,7 @@ function emitMockChannelMessage(
       createdAt,
       id,
     );
+    if (pending) event.pending = true;
     recordMockMessage(channelId, event);
     emitMockLiveEvent(channelId, event);
     return event;
@@ -4063,6 +4064,7 @@ function emitMockChannelMessage(
     createdAt,
     id,
   );
+  if (pending) event.pending = true;
   recordMockMessage(channelId, event);
   emitMockLiveEvent(channelId, event);
   return event;
@@ -9415,6 +9417,7 @@ export function maybeInstallE2eTauriMocks() {
     mentionPubkeys,
     extraTags,
     createdAt,
+    pending,
     id,
   }) => {
     const channel = mockChannels.find(
@@ -9433,6 +9436,7 @@ export function maybeInstallE2eTauriMocks() {
       mentionPubkeys,
       extraTags,
       createdAt,
+      pending,
       id,
     );
   };
@@ -9736,6 +9740,25 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "mesh_model_catalog":
+        return {
+          gpuName: "Mock Apple GPU",
+          vramDisplay: "32 GB",
+          vramGb: 32,
+          recommended: "Gemma-4-E4B-it-Q4_K_M",
+          entries: [
+            {
+              name: "Gemma-4-E4B-it-Q4_K_M",
+              size: "3.5GB",
+              sizeGb: 3.5,
+              description: "Buzz-curated local agent model",
+              fit: "comfortable",
+              installed: true,
+              recommended: true,
+              curated: true,
+            },
+          ],
+        };
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_serving_usage":
@@ -9865,6 +9888,12 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
+      case "update_tray_agent_activity":
+      case "clear_tray_agent_activity":
+      case "requeue_tray_actions":
+        return null;
+      case "take_tray_actions":
+        return [];
       case "get_profile":
         return handleGetProfile(activeConfig);
       case "update_profile":
