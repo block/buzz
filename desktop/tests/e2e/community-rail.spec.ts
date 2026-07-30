@@ -780,6 +780,8 @@ test.describe("community rail", () => {
     await page.getByRole("button", { name: "Leave Community" }).click();
 
     await expect(page.getByText("Join or create a community")).toBeVisible();
+    await expect(page.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect(page.getByTestId("community-choice-join")).toBeVisible();
     await expect
       .poll(() =>
         page.evaluate(() => window.localStorage.getItem("buzz-communities")),

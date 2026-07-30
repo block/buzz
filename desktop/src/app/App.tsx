@@ -319,6 +319,12 @@ function CommunityApp({
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
+  const hasConfiguredCommunityRef = useRef(activeCommunity !== null);
+  if (activeCommunity) {
+    hasConfiguredCommunityRef.current = true;
+  }
+  const isFindingCommunityAfterLeave =
+    activeCommunity === null && hasConfiguredCommunityRef.current;
 
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
@@ -512,7 +518,9 @@ function CommunityApp({
       appContent = (
         <WelcomeSetup
           initialPage={resumeFirstCommunityPage ?? undefined}
-          onBack={onBackToMachineConfig}
+          onBack={
+            isFindingCommunityAfterLeave ? undefined : onBackToMachineConfig
+          }
         />
       );
     } else if ("error" in community && community.error) {
