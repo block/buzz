@@ -80,6 +80,54 @@ pub struct AgentModelCapabilities {
     pub available_models_raw: Option<serde_json::Value>,
 }
 
+fn model_capabilities_from_response(
+    response: &serde_json::Value,
+) -> Option<AgentModelCapabilities> {
+    let config_options_raw = extract_model_config_options(response);
+    let available_models_raw = response
+        .get("models")
+        .filter(|models| models.is_object())
+        .cloned();
+    if config_options_raw.is_empty() && available_models_raw.is_none() {
+        None
+    } else {
+        Some(AgentModelCapabilities {
+            config_options_raw,
+            available_models_raw,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum LoadModelResolution {
+    Method(ModelSwitchMethod),
+    Unsupported,
+    Unverifiable,
+}
+
+fn resolve_load_model_switch(
+    load_response: &serde_json::Value,
+    cached: Option<&AgentModelCapabilities>,
+    desired_model: &str,
+) -> LoadModelResolution {
+    if model_capabilities_from_response(load_response).is_some() {
+        return resolve_model_switch_method(load_response, desired_model)
+            .map(LoadModelResolution::Method)
+            .unwrap_or(LoadModelResolution::Unsupported);
+    }
+
+    let Some(cached) = cached else {
+        return LoadModelResolution::Unverifiable;
+    };
+    let cached_response = serde_json::json!({
+        "configOptions": cached.config_options_raw,
+        "models": cached.available_models_raw,
+    });
+    resolve_model_switch_method(&cached_response, desired_model)
+        .map(LoadModelResolution::Method)
+        .unwrap_or(LoadModelResolution::Unsupported)
+}
+
 /// Per-channel session IDs and turn counters.
 ///
 /// Separated from `OwnedAgent` so the state machine is testable without
@@ -268,6 +316,25 @@ fn apply_completed_before_control_signal(
         ControlSignal::Rotate | ControlSignal::SwitchModel(_)
     ) {
         state.invalidate(source);
+    }
+}
+
+fn control_signal_discards_session(control_signal: &ControlSignal) -> bool {
+    matches!(
+        control_signal,
+        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+    )
+}
+
+pub(crate) fn clear_durable_channel_binding(ctx: &PromptContext, channel_id: &Uuid) -> bool {
+    ctx.session_store
+        .remove(&ctx.agent_command, &ctx.agent_args, channel_id)
+}
+
+fn clear_durable_source_binding(ctx: &PromptContext, source: &PromptSource) -> bool {
+    match source {
+        PromptSource::Channel(channel_id) => clear_durable_channel_binding(ctx, channel_id),
+        PromptSource::Heartbeat => false,
     }
 }
 
@@ -909,21 +976,37 @@ async fn try_load_persisted_session(
     {
         Ok(resp) => {
             if agent.model_capabilities.is_none() {
-                agent.model_capabilities = Some(AgentModelCapabilities {
-                    config_options_raw: extract_model_config_options(&resp.raw),
-                    available_models_raw: extract_model_state(&resp.raw),
-                });
+                agent.model_capabilities = model_capabilities_from_response(&resp.raw);
             }
             // Re-apply desired model after load when present.
             if let Some(ref desired) = agent.desired_model {
-                if let Some(method) = resolve_model_switch_method(&resp.raw, desired) {
-                    if let Err(e) =
-                        apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await
-                    {
+                match resolve_load_model_switch(
+                    &resp.raw,
+                    agent.model_capabilities.as_ref(),
+                    desired,
+                ) {
+                    LoadModelResolution::Method(method) => {
+                        if let Err(e) =
+                            apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method)
+                                .await
+                        {
+                            tracing::warn!(
+                                target: "pool::session",
+                                error = %e,
+                                "model re-apply after session/load failed — continuing with loaded session"
+                            );
+                        }
+                    }
+                    LoadModelResolution::Unsupported => {
                         tracing::warn!(
-                            target: "pool::session",
-                            error = %e,
-                            "model re-apply after session/load failed — continuing with loaded session"
+                            target: "pool::model",
+                            "desired model {desired} is absent from the advertised model catalog after session/load"
+                        );
+                    }
+                    LoadModelResolution::Unverifiable => {
+                        tracing::debug!(
+                            target: "pool::model",
+                            "session/load returned no model catalog and none is cached — leaving desired model unverifiable"
                         );
                     }
                 }
@@ -2131,6 +2214,8 @@ pub async fn run_prompt_task(
                 ) => result,
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    let discard_durable_session =
+                        control_signal_discards_session(&control_signal);
                     // Land the model switch before any cancel/requeue work: setting
                     // `desired_model` here means the fresh session created by the
                     // requeued turn (busy) or the next turn (already-completed)
@@ -2151,6 +2236,9 @@ pub async fn run_prompt_task(
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
                                 agent.state.invalidate(&source);
+                                if discard_durable_session {
+                                    clear_durable_source_binding(&ctx, &source);
+                                }
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -2188,6 +2276,9 @@ pub async fn run_prompt_task(
                                     agent.state.invalidate_all();
                                 } else {
                                     agent.state.invalidate(&source);
+                                }
+                                if discard_durable_session {
+                                    clear_durable_source_binding(&ctx, &source);
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -2245,6 +2336,9 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        if discard_durable_session {
+                            clear_durable_source_binding(&ctx, &source);
+                        }
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2304,6 +2398,7 @@ pub async fn run_prompt_task(
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
                 agent.state.invalidate(&source);
+                clear_durable_source_binding(&ctx, &source);
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -5447,6 +5542,62 @@ mod tests {
     }
 
     #[test]
+    fn load_without_catalog_does_not_poison_model_capabilities() {
+        let response = json!({"sessionId": "loaded"});
+        assert!(model_capabilities_from_response(&response).is_none());
+    }
+
+    #[test]
+    fn load_uses_cached_catalog_when_response_omits_it() {
+        let cached_response = json!({
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "options": [{"value": "model-a"}]
+            }]
+        });
+        let cached = model_capabilities_from_response(&cached_response)
+            .expect("model catalog should be captured");
+
+        assert_eq!(
+            resolve_load_model_switch(&json!({}), Some(&cached), "model-a"),
+            LoadModelResolution::Method(ModelSwitchMethod::ConfigOption {
+                config_id: "model".into(),
+                option_value: "model-a".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn advertised_load_catalog_is_authoritative_even_when_empty() {
+        let cached_response = json!({
+            "models": {
+                "availableModels": [{"modelId": "model-a"}]
+            }
+        });
+        let cached = model_capabilities_from_response(&cached_response)
+            .expect("model catalog should be captured");
+        let load_response = json!({
+            "models": {
+                "availableModels": []
+            }
+        });
+
+        assert_eq!(
+            resolve_load_model_switch(&load_response, Some(&cached), "model-a"),
+            LoadModelResolution::Unsupported
+        );
+    }
+
+    #[test]
+    fn load_without_any_catalog_is_unverifiable() {
+        assert_eq!(
+            resolve_load_model_switch(&json!({}), None, "model-a"),
+            LoadModelResolution::Unverifiable
+        );
+    }
+
+    #[test]
     fn test_rotate_after_natural_completion_invalidates_channel_state() {
         let (mut s, ch_a, ch_b) = make_state();
 
@@ -6720,6 +6871,27 @@ mod tests {
                 )),
             )),
         }
+    }
+
+    #[test]
+    fn explicit_rotation_clears_the_durable_channel_binding() {
+        let ctx = make_prompt_context_no_owner();
+        let channel_id = Uuid::new_v4();
+        ctx.session_store.put(
+            &ctx.agent_command,
+            &ctx.agent_args,
+            &channel_id,
+            "session-before-rotate",
+        );
+
+        assert!(clear_durable_source_binding(
+            &ctx,
+            &PromptSource::Channel(channel_id)
+        ));
+        assert!(ctx
+            .session_store
+            .get(&ctx.agent_command, &ctx.agent_args, &channel_id)
+            .is_none());
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────
