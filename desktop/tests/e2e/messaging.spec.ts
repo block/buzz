@@ -918,10 +918,10 @@ test("opens a single-level thread panel with inline expansion", async ({
     `[data-testid="message-thread-summary"][data-thread-head-id="${firstReplyId}"]`,
   );
   await expect(firstReplySummaryRow).toHaveCount(0);
-  const firstReplyBranchRail = threadReplies.locator(
-    `[data-testid="thread-collapse-rail"][data-thread-head-id="${firstReplyId}"]`,
+  const firstReplyBranchGuide = threadReplies.locator(
+    `[data-testid="thread-collapse-guide"][data-thread-head-id="${firstReplyId}"]`,
   );
-  await expect(firstReplyBranchRail).toHaveCount(1);
+  await expect(firstReplyBranchGuide).not.toHaveCount(0);
 
   await expect(rootSummaryRow).toContainText("18 replies");
   await expect(
@@ -941,7 +941,7 @@ test("opens a single-level thread panel with inline expansion", async ({
 
   await expectThreadReplyUnobscured(nestedReplyRow);
 
-  await firstReplyBranchRail.click();
+  await firstReplyBranchGuide.first().click();
   await expect(firstReplySummaryRow).toHaveCount(1);
   await expect(firstReplySummaryRow).toContainText("2 replies");
   await expect(
