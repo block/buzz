@@ -1,5 +1,6 @@
 import { useChannelMembersQuery } from "@/features/channels/hooks";
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
+import { memberCountLabel } from "@/features/dev-mode/lib/memberCount";
 import type { Channel } from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
@@ -44,10 +45,7 @@ export function DevChannelMembers({
           </span>
         ))
       ) : (
-        <span>
-          {channel.memberCount}{" "}
-          {channel.memberCount === 1 ? "member" : "members"}
-        </span>
+        <span>{memberCountLabel(channel.memberCount)}</span>
       )}
     </button>
   );

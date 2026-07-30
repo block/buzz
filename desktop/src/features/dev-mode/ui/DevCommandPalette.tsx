@@ -23,6 +23,10 @@ import {
 } from "@/features/dev-mode/lib/authorColors";
 import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import {
+  CHANNEL_MEMBER_SNAPSHOT_CAP,
+  memberCountLabel,
+} from "@/features/dev-mode/lib/memberCount";
+import {
   toggleChannelPinned,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
@@ -401,6 +405,15 @@ export function DevCommandPalette({
           run: () => {},
         });
       }
+      // The relay's member snapshot is truncated at the cap, so both the
+      // roster and any client-side search over it can miss members.
+      if (members.length >= CHANNEL_MEMBER_SNAPSHOT_CAP) {
+        memberEntries.push({
+          id: "members-roster-cap",
+          label: `only the first ${CHANNEL_MEMBER_SNAPSHOT_CAP} members are listed (relay cap)`,
+          run: () => {},
+        });
+      }
       return memberEntries;
     }
 
@@ -440,9 +453,7 @@ export function DevCommandPalette({
           {
             id: "view-members",
             label: `view members of # ${activeChannel.name}`,
-            detail: `${activeChannel.memberCount} ${
-              activeChannel.memberCount === 1 ? "member" : "members"
-            }`,
+            detail: memberCountLabel(activeChannel.memberCount),
             run: () => {
               setMode("members");
               setQuery("");
