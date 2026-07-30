@@ -14,7 +14,7 @@ use crate::mcp::ResultBudget;
 
 use crate::types::{
     AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent,
+    ToolResultContent, TurnTotalState,
 };
 use crate::wire::{self, WireSender};
 
@@ -65,6 +65,17 @@ pub struct RunCtx<'a> {
     /// Consumers price this slice at the provider's cached rate; without it
     /// every round of a growing conversation is billed at full price.
     pub turn_cached_input_tokens: &'a mut Option<u64>,
+    /// Tri-state total-token accumulator for this turn.
+    ///
+    /// - `Unseen`: no usage-bearing response observed yet this turn (initial state).
+    /// - `Exact(n)`: every usage-bearing response so far reported a genuine
+    ///   provider total; `n` is their sum.
+    /// - `Unknown`: at least one usage-bearing response lacked a provider total;
+    ///   this turn can never produce a reliable total.
+    ///
+    /// Reset to `Unseen` at turn start in `run()`. Callers must not derive a
+    /// total by summing input+output — that is the UI display approximation only.
+    pub turn_total_state: &'a mut TurnTotalState,
 }
 
 impl RunCtx<'_> {
@@ -84,6 +95,7 @@ impl RunCtx<'_> {
         *self.turn_input_tokens = None;
         *self.turn_output_tokens = None;
         *self.turn_cached_input_tokens = None;
+        *self.turn_total_state = TurnTotalState::Unseen;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -191,6 +203,20 @@ impl RunCtx<'_> {
                         .unwrap_or(0)
                         .saturating_add(cached),
                 );
+            }
+            // Fold the provider-reported total into the turn tri-state, but only
+            // when this response was usage-bearing (had input or output tokens).
+            // A response with no usage at all is not evidence of a missing total
+            // and must not poison the accumulator.
+            //
+            // Shape assumption: documented OpenAI-compatible responses that carry
+            // `total_tokens` always co-report at least one of `prompt_tokens` /
+            // `completion_tokens`. A response that supplies only `total_tokens`
+            // with neither category is therefore not a supported shape and would
+            // be silently ignored here. If that shape is ever encountered, extend
+            // this gate rather than representing absent categories as zero.
+            if response.input_tokens.is_some() || response.output_tokens.is_some() {
+                *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
             }
 
             if !response.reasoning.is_empty() {

@@ -1195,6 +1195,9 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         &["cache_read_input_tokens"],
         &[("input_tokens_details", "cached_tokens")],
     );
+    // Responses API reports a genuine provider total. Read it directly —
+    // never derived, so it stays None when the provider omits it.
+    let total_tokens = sum_usage(&v, &["total_tokens"]);
     Ok(LlmResponse {
         text,
         tool_calls,
@@ -1202,6 +1205,7 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         input_tokens,
         cached_input_tokens,
         output_tokens,
+        total_tokens,
         reasoning,
     })
 }
@@ -1434,6 +1438,9 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
         input_tokens,
         cached_input_tokens,
         output_tokens,
+        // Anthropic reports only category counts; NIP-AM forbids deriving a
+        // total from them. Always None for this provider.
+        total_tokens: None,
         reasoning,
     })
 }
@@ -1498,6 +1505,9 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     let input_tokens = openai_chat_input_tokens(&v);
     let output_tokens = sum_usage(&v, &["completion_tokens"]);
     let cached_input_tokens = openai_chat_cached_tokens(&v);
+    // OpenAI Chat Completions reports a genuine provider total. Read it
+    // directly — never derived, so it stays None when the provider omits it.
+    let total_tokens = sum_usage(&v, &["total_tokens"]);
     Ok(LlmResponse {
         text,
         tool_calls,
@@ -1505,6 +1515,7 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         input_tokens,
         cached_input_tokens,
         output_tokens,
+        total_tokens,
         reasoning,
     })
 }
@@ -4070,6 +4081,85 @@ mod tests {
             "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]
         });
         assert_eq!(parse_openai(v).unwrap().input_tokens, None);
+    }
+
+    // ── total_tokens parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_openai_chat_total_tokens_present_is_read() {
+        // Chat Completions: `usage.total_tokens` is a genuine provider total.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 25, "total_tokens": 125}
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.total_tokens, Some(125));
+        assert_eq!(r.input_tokens, Some(100));
+        assert_eq!(r.output_tokens, Some(25));
+    }
+
+    #[test]
+    fn parse_openai_chat_total_tokens_absent_is_none() {
+        // Chat Completions without `total_tokens` → None, not a derived sum.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 25}
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.total_tokens, None);
+    }
+
+    #[test]
+    fn parse_responses_total_tokens_present_is_read() {
+        // Responses API: `usage.total_tokens` is a genuine provider total.
+        let v = serde_json::json!({
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+            "status": "completed",
+            "usage": {"input_tokens": 80, "output_tokens": 20, "total_tokens": 100}
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.total_tokens, Some(100));
+        assert_eq!(r.input_tokens, Some(80));
+        assert_eq!(r.output_tokens, Some(20));
+    }
+
+    #[test]
+    fn parse_responses_total_tokens_absent_is_none() {
+        // Responses API without `total_tokens` → None.
+        let v = serde_json::json!({
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+            "status": "completed",
+            "usage": {"input_tokens": 80, "output_tokens": 20}
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.total_tokens, None);
+    }
+
+    #[test]
+    fn parse_anthropic_total_tokens_always_none() {
+        // Anthropic reports only category counts; NIP-AM forbids deriving a total.
+        // total_tokens must always be None regardless of what the response contains —
+        // including if a future Anthropic API version unexpectedly adds total_tokens.
+        let v = serde_json::json!({
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 50,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 30,
+                // Unexpected field: parse_anthropic must ignore this and return None.
+                "total_tokens": 180
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert!(
+            r.total_tokens.is_none(),
+            "Anthropic must never supply a total_tokens value"
+        );
+        // Verify other fields still parse correctly.
+        assert_eq!(r.input_tokens, Some(150)); // inclusive sum with cache
+        assert_eq!(r.output_tokens, Some(30));
     }
 
     #[test]
