@@ -3042,6 +3042,27 @@ mod tests {
         assert_eq!(extract_page_offset(&raw, None), None);
     }
 
+    /// Offsets are sized from the *clamped* limit the DB will honor, not from
+    /// what the client asked for. `filter_to_query_params` clamps an absent or
+    /// over-ceiling `limit` to `DEFAULT_MAX_PAGE_LIMIT` (guarded in
+    /// `handlers::req::tests::req_filter_limit_clamps_to_advertised_nip11_max_limit`)
+    /// and that clamped value is what arrives here — so page N starts exactly
+    /// N-1 full pages in. Sizing from an unclamped limit would step past rows
+    /// the previous page never returned.
+    #[test]
+    fn extract_page_offset_sizes_pages_from_clamped_limit() {
+        let clamped = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
+
+        assert_eq!(
+            extract_page_offset(&serde_json::json!({ "page": 2 }), Some(clamped)),
+            Some(clamped)
+        );
+        assert_eq!(
+            extract_page_offset(&serde_json::json!({ "page": 3 }), Some(clamped)),
+            Some(clamped * 2)
+        );
+    }
+
     #[test]
     fn extract_depth_limit_valid() {
         let raw = serde_json::json!({ "depth_limit": 3 });

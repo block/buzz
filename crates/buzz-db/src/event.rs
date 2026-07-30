@@ -17,6 +17,13 @@ use buzz_core::{CommunityId, StoredEvent};
 
 use crate::error::{DbError, Result};
 
+/// Largest page [`query_events`] will return when [`EventQuery::max_limit`] is
+/// unset — the effective ceiling on any client-requested `limit`.
+///
+/// This is the value the relay advertises as NIP-11 `limitation.max_limit`, so
+/// the advertised ceiling and the enforced one cannot drift.
+pub const DEFAULT_MAX_PAGE_LIMIT: i64 = 1_000;
+
 /// Optional filters for [`query_events`].
 #[derive(Debug, Clone)]
 pub struct EventQuery {
@@ -67,9 +74,9 @@ pub struct EventQuery {
     /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
     /// historical pages have exact exhaustion semantics.
     pub channel_ids: Option<Vec<uuid::Uuid>>,
-    /// Override the default limit clamp (1000). Used by COUNT fallback path
-    /// which needs to fetch all matching events for post-filter counting.
-    /// When None, the default clamp of 1000 applies.
+    /// Override the default page clamp ([`DEFAULT_MAX_PAGE_LIMIT`]). Used by
+    /// the COUNT fallback path, which needs to fetch all matching events for
+    /// post-filter counting. When None, the default clamp applies.
     pub max_limit: Option<i64>,
     /// Shared-gated visibility reader: when set, append an SQL visibility
     /// clause for every kind in [`SHARED_GATED_KINDS`] before ORDER/LIMIT so
@@ -357,7 +364,7 @@ pub(crate) async fn query_events_on(
         return Ok(vec![]);
     }
 
-    let clamp = q.max_limit.unwrap_or(1000);
+    let clamp = q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT);
     let limit_val = q.limit.unwrap_or(100).min(clamp);
     let offset_val = q.offset.unwrap_or(0);
 
