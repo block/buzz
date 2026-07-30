@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -238,6 +239,18 @@ final _animatedWebpBytes = Uint8List.fromList([
 
 const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
 
+class _AbortAwareClient extends http.BaseClient {
+  final started = Completer<void>();
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (!started.isCompleted) started.complete();
+    final abortTrigger = (request as http.AbortableRequest).abortTrigger;
+    await abortTrigger;
+    throw http.RequestAbortedException(request.url);
+  }
+}
+
 void _setMockMediaUploadPlatformHandler(
   Future<Object?> Function(MethodCall call)? handler,
 ) {
@@ -353,6 +366,40 @@ void main() {
   });
 
   group('MediaUploadService', () {
+    test('cancels an in-flight upload', () async {
+      final client = _AbortAwareClient();
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: client,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+
+      final upload = service.uploadBytes(_pngBytes, mimeType: 'image/png');
+      await client.started.future;
+      service.cancelPendingUploads();
+
+      await expectLater(upload, throwsA(isA<MediaUploadCancelledException>()));
+    });
+
+    test('times out an upload that never receives a response', () async {
+      final client = _AbortAwareClient();
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: client,
+        mediaUploadTimeout: const Duration(milliseconds: 10),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+
+      await expectLater(
+        service.uploadBytes(_pngBytes, mimeType: 'image/png'),
+        throwsA(isA<TimeoutException>()),
+      );
+    });
+
     test('signs Blossom auth and uploads gallery image bytes', () async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;

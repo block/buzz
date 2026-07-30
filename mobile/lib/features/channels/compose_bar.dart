@@ -533,6 +533,8 @@ class ComposeBar extends HookConsumerWidget {
         if (uploaded != null && context.mounted) {
           attachments.value = [...attachments.value, uploaded];
         }
+      } on MediaUploadCancelledException {
+        // User-initiated cancellation is an expected recovery action.
       } catch (error) {
         if (context.mounted) {
           uploadError.value = _formatUploadError(error);
@@ -573,6 +575,8 @@ class ComposeBar extends HookConsumerWidget {
                 .read(mediaUploadServiceProvider)
                 .uploadImage(image);
             return (uploaded: uploaded, error: null);
+          } on MediaUploadCancelledException catch (error) {
+            return (uploaded: null, error: error);
           } catch (error) {
             return (uploaded: null, error: error);
           }
@@ -588,12 +592,15 @@ class ComposeBar extends HookConsumerWidget {
             start + _maxConcurrentImageUploads,
             images.length,
           );
-          results.addAll(
-            await Future.wait([
-              for (final image in images.sublist(start, end))
-                uploadImage(image),
-            ]),
-          );
+          final batchResults = await Future.wait([
+            for (final image in images.sublist(start, end)) uploadImage(image),
+          ]);
+          results.addAll(batchResults);
+          if (batchResults.any(
+            (result) => result.error is MediaUploadCancelledException,
+          )) {
+            break;
+          }
         }
         if (!context.mounted) return;
 
@@ -603,6 +610,7 @@ class ComposeBar extends HookConsumerWidget {
         }
         final firstError = results
             .map((result) => result.error)
+            .where((error) => error is! MediaUploadCancelledException)
             .whereType<Object>()
             .firstOrNull;
         if (firstError != null) {
@@ -670,6 +678,11 @@ class ComposeBar extends HookConsumerWidget {
             .read(mediaUploadServiceProvider)
             .uploadImage(XFile.fromData(bytes)),
       );
+    }
+
+    void cancelPendingUploads() {
+      ref.read(mediaUploadServiceProvider).cancelPendingUploads();
+      uploadError.value = null;
     }
 
     // Wrap (or insert) markdown formatting around the current selection.
@@ -938,7 +951,9 @@ class ComposeBar extends HookConsumerWidget {
           attachments: attachments.value,
           uploadingCount: uploadingCount.value,
           onRemoveAttachment: removeAttachment,
+          onCancelUploads: cancelPendingUploads,
           uploadError: uploadError.value,
+          onDismissUploadError: () => uploadError.value = null,
           isExpanded: isComposerExpanded.value,
           controller: controller,
           focusNode: focusNode,
