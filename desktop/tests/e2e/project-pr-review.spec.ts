@@ -945,6 +945,79 @@ test("project overview does not paint a background behind its cards", async ({
   }
 });
 
+test("project subsections do not paint backgrounds behind list or grid items", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  for (const section of ["Repositories", "Pull Requests", "Issues"]) {
+    await page.getByRole("button", { name: section, exact: true }).click();
+    await page.getByRole("button", { name: "List layout" }).click();
+
+    const listContainer = page.getByTestId("projects-list-container");
+    await expect(listContainer).toBeVisible();
+    await expect(listContainer).toHaveCSS(
+      "background-color",
+      "rgba(0, 0, 0, 0)",
+    );
+    await expect(listContainer).toHaveCSS("border-style", "solid");
+
+    await page.getByRole("button", { name: "Grid layout" }).click();
+    const gridCards = page.locator("[data-projects-grid-card]");
+    await expect(gridCards.first()).toBeVisible();
+    const gridCardCount = await gridCards.count();
+    for (let index = 0; index < gridCardCount; index += 1) {
+      await expect(gridCards.nth(index)).toHaveCSS(
+        "background-color",
+        "rgba(0, 0, 0, 0)",
+      );
+      await expect(gridCards.nth(index)).toHaveCSS("border-style", "solid");
+    }
+  }
+});
+
+test("project detail content areas do not paint background fills", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  const expectVisiblePanelsToBeTransparent = async () => {
+    const panels = page.locator("[data-project-detail-panel]:visible");
+    await expect(panels.first()).toBeVisible();
+    const panelCount = await panels.count();
+    for (let index = 0; index < panelCount; index += 1) {
+      await expect(panels.nth(index)).toHaveCSS(
+        "background-color",
+        "rgba(0, 0, 0, 0)",
+      );
+      await expect(panels.nth(index)).toHaveCSS("border-style", "solid");
+    }
+  };
+
+  for (const tab of [
+    "Overview",
+    "Files",
+    "Commits",
+    "Issues",
+    "Pull Request",
+    "Contributors",
+  ]) {
+    await page.getByRole("tab", { name: tab, exact: true }).click();
+    await expectVisiblePanelsToBeTransparent();
+  }
+
+  await page.getByRole("tab", { name: "Pull Request", exact: true }).click();
+  const pullRequest = page.getByTestId("project-pull-request-row").first();
+  await expect(pullRequest).toBeVisible();
+  await pullRequest.getByRole("button", { name: /^#/ }).click();
+  await expectVisiblePanelsToBeTransparent();
+});
+
 test("project without a checkout offers fetch feedback and dropdown cloning", async ({
   page,
 }) => {
