@@ -33,3 +33,16 @@ test("passes a present channel_type through unchanged", () => {
 
   assert.equal(item.channelType, "dm");
 });
+
+test("canonicalizes plural mentions category to singular mention", () => {
+  const item = fromRawFeedItem(rawFeedItem({ category: "mentions" }));
+
+  assert.equal(item.category, "mention");
+});
+
+test("passes a singular mention category through unchanged", () => {
+  const item = fromRawFeedItem(rawFeedItem({ category: "mention" }));
+
+  assert.equal(item.category, "mention");
+});
+

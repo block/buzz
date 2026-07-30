@@ -163,7 +163,6 @@
 
   .buzz-onboarding-step-frame {
     min-height: min(1000px, max(0px, calc(100dvh - 106px - 7rem)));
-    max-height: 1000px;
   }
 
   .buzz-onboarding-step-frame > .buzz-onboarding-slide,
