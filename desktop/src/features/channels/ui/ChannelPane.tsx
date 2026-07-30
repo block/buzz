@@ -11,6 +11,7 @@ import { isModerationDm } from "@/features/moderation/lib/moderationDm";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
+import { useSelfCorrectingSend } from "@/features/messages/ui/useSelfCorrectingSend";
 import { MessageThreadPanelSkeleton } from "@/features/messages/ui/MessageThreadPanelSkeleton";
 import {
   MessageTimeline,
@@ -113,6 +114,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onDelete,
   onEdit,
   onEditSave,
+  onEditSaveById,
   onFollowThread,
   onMarkUnread,
   onMarkRead,
@@ -360,6 +362,11 @@ export const ChannelPane = React.memo(function ChannelPane({
     clearWelcomeComposerDismissTimer,
     isActiveWelcomeChannel,
   ]);
+  const trySelfCorrectingSend = useSelfCorrectingSend({
+    messages,
+    onEditSaveById,
+    currentPubkey,
+  });
   const handleSendMessage = React.useCallback(
     async (
       content: string,
@@ -372,6 +379,8 @@ export const ChannelPane = React.memo(function ChannelPane({
         (containsWelcomePersonaMention(content) ||
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
 
+      // `s/old/new/` self-correction edits your last message, not a new send.
+      if (await trySelfCorrectingSend(content, mediaTags)) return;
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
       await onSendMessage(content, mentionPubkeys, mediaTags, channelId);
 
@@ -395,6 +404,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       isActiveWelcomeChannel,
       knownAgentPubkeys,
       onSendMessage,
+      trySelfCorrectingSend,
     ],
   );
   const canDropInMainColumn =

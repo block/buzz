@@ -165,6 +165,27 @@ export function useChannelPaneHandlers({
     [setEditTargetId],
   );
 
+  // Publishes an edit to an explicit message id, bypassing the interactive
+  // edit-mode state (`editTargetId`). Used by IRC-style `s/old/new/`
+  // self-correction, which edits the author's previous message without ever
+  // loading it into the composer.
+  const handleEditSaveById = React.useCallback(
+    async (
+      eventId: string,
+      content: string,
+      mediaTags?: string[][],
+      mentionPubkeys?: string[],
+    ) => {
+      await editMutateRef.current({
+        eventId,
+        content,
+        mediaTags,
+        mentionPubkeys,
+      });
+    },
+    [],
+  );
+
   const handleOpenThread = React.useCallback(
     (message: { id: string }) => {
       if (openThreadHeadIdRef.current === message.id) {
@@ -343,6 +364,7 @@ export function useChannelPaneHandlers({
     handleDelete,
     handleEdit,
     handleEditSave,
+    handleEditSaveById,
     handleExpandThreadReplies,
     handleOpenThread,
     handleSendMessage,

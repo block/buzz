@@ -88,6 +88,16 @@ export type ChannelPaneProps = {
     mediaTags?: string[][],
     mentionPubkeys?: string[],
   ) => Promise<void>;
+  /**
+   * Publishes an edit to an explicit message id (for `s/old/new/`
+   * self-correction), without entering interactive edit mode.
+   */
+  onEditSaveById?: (
+    eventId: string,
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;
