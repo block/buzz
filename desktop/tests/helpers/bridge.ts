@@ -443,6 +443,8 @@ type MockBridgeOptions = {
   backupVerificationErrors?: (string | null)[];
   /** Public identities returned by successive successful backup verifications. */
   backupVerificationPubkeys?: string[];
+  /** Delay (ms) applied to backup encryption so specs can observe pending UI. */
+  backupEncryptionDelayMs?: number;
   /** Native paths returned by successive backup saves. */
   backupSavePaths?: Array<string | null>;
   /**
