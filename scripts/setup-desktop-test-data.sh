@@ -59,14 +59,14 @@ COMMUNITY_HOST_SQL="${COMMUNITY_HOST//\'/\'\'}"
 
 run_sql "
 INSERT INTO communities (host)
-VALUES ('${COMMUNITY_HOST_SQL}')
+VALUES ('${COMMUNITY_HOST_SQL}'), ('127.0.0.1:3000'), ('localhost:3000')
 ON CONFLICT (lower(host)) DO NOTHING
 ;
 "
 COMMUNITY_ID="$(run_sql "
 SELECT id
 FROM communities
-WHERE lower(host) = lower('${COMMUNITY_HOST_SQL}')
+WHERE lower(host) = lower('127.0.0.1:3000') OR lower(host) = lower('${COMMUNITY_HOST_SQL}')
 LIMIT 1
 ;
 ")"
