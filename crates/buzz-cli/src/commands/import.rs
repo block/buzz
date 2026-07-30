@@ -23,9 +23,15 @@
 //! claim). See `docs/slack-import.md` for the residual trust in a colluding
 //! admin + subject.
 
+mod channel_state;
+mod dm;
 mod export;
 mod importer;
+mod mapping;
+mod model;
 mod mrkdwn;
+mod render;
+mod report;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -35,19 +41,25 @@ use nostr::PublicKey;
 
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use export::{SlackChannel, SlackExport, SlackMessage};
-use importer::{emoji_for_shortcode, publish_binding, submit, Importer};
-use state::ImportState;
+use dm::dm_import_blockers;
+use export::{SlackChannel, SlackConversationKind, SlackExport};
+use importer::{publish_binding, submit, Importer, ImporterOptions};
+use mapping::load_channel_map;
+use report::dry_run_report;
+use state::{ChannelState, ImportState};
 
 /// Parameters for `buzz import slack`.
 pub struct ImportSlackParams {
-    /// Unzipped Slack export directory.
-    pub export_dir: String,
+    /// One or more unzipped Slack export directories. Multiple roots support
+    /// Slackdump's separate public/private export passes.
+    pub export_dirs: Vec<String>,
     /// Slack workspace id (team id) — namespaces identity bindings and channel
     /// UUIDs so ids can't collide across workspaces.
     pub team_id: String,
     /// State file path override.
     pub state: Option<String>,
+    /// Optional Slack conversation id → existing Buzz channel UUID crosswalk.
+    pub channel_map: Option<String>,
     /// Optional comma-separated channel-name filter.
     pub channels: Option<String>,
     /// Report the plan without writing anything.
@@ -61,15 +73,23 @@ pub struct ImportSlackParams {
 
 pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Result<(), CliError> {
     let team_id = validate_team_id(&p.team_id)?.to_string();
-    let export_dir = PathBuf::from(&p.export_dir);
-    let export = SlackExport::load(&export_dir)?;
+    let export_dirs: Vec<PathBuf> = p.export_dirs.iter().map(PathBuf::from).collect();
+    let export = SlackExport::load_many(&export_dirs)?;
+    let channel_map = p
+        .channel_map
+        .as_deref()
+        .map(PathBuf::from)
+        .map(|path| load_channel_map(&path))
+        .transpose()?
+        .unwrap_or_default();
 
     let state_path = p
         .state
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| export_dir.join("buzz-import-state.json"));
-    let state = ImportState::load_for_workspace(&state_path, &team_id)?;
+        .unwrap_or_else(|| export_dirs[0].join("buzz-import-state.json"));
+    let mut state = ImportState::load_for_workspace(&state_path, &team_id)?;
+    validate_channel_map(&export, &state, &channel_map)?;
 
     // Slack user id → display name, for mrkdwn mention rewriting and
     // author attribution tags.
@@ -81,21 +101,53 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
 
     // Parse identity bindings (Slack id → Buzz pubkey), public keys only.
     let bindings = parse_identity_map(p.identity_map.as_deref())?;
+    let binding_map: HashMap<String, String> = bindings.iter().cloned().collect();
 
     let selected = select_channels(&export, p.channels.as_deref())?;
+    let dm_blockers = dm_import_blockers(
+        &export,
+        &selected,
+        &state,
+        &binding_map,
+        &client.keys().public_key().to_hex(),
+    );
 
     if p.dry_run {
-        return dry_run_report(&export, &selected, &state, &bindings, p.skip_reactions);
+        return dry_run_report(
+            &export,
+            &selected,
+            &state,
+            &channel_map,
+            &binding_map,
+            &dm_blockers,
+            p.skip_reactions,
+        );
+    }
+    if !dm_blockers.is_empty() {
+        let mut blocked: Vec<String> = dm_blockers
+            .iter()
+            .map(|(id, reason)| format!("{id}: {reason}"))
+            .collect();
+        blocked.sort();
+        return Err(CliError::Usage(format!(
+            "{} Slack DM/MPIM conversation(s) are not safe to import:\n{}",
+            blocked.len(),
+            blocked.join("\n")
+        )));
     }
 
+    seed_channel_map(&mut state, &channel_map);
     let mut importer = Importer::new(
         client,
         &export,
         &names,
-        &team_id,
-        state,
-        state_path,
-        p.skip_reactions,
+        ImporterOptions {
+            team_id: &team_id,
+            state,
+            state_path,
+            skip_reactions: p.skip_reactions,
+            bindings: &binding_map,
+        },
     );
 
     for channel in &selected {
@@ -225,8 +277,8 @@ fn parse_pubkey(key: &str) -> Result<String, CliError> {
         .map_err(|_| CliError::Usage(format!("invalid pubkey (expected npub or 64-hex): {key}")))
 }
 
-/// Resolve the `--channels` filter against the export's channel list,
-/// erroring if the filter selects nothing.
+/// Resolve the `--channels` filter against conversation names or Slack IDs,
+/// erroring if any selector is unknown.
 fn select_channels<'e>(
     export: &'e SlackExport,
     filter: Option<&str>,
@@ -238,7 +290,11 @@ fn select_channels<'e>(
             .collect()
     });
     if let Some(requested) = &filter {
-        let available: HashSet<&str> = export.channels.iter().map(|c| c.name.as_str()).collect();
+        let available: HashSet<&str> = export
+            .channels
+            .iter()
+            .flat_map(|c| [c.name.as_str(), c.id.as_str()])
+            .collect();
         let mut missing: Vec<&str> = requested
             .iter()
             .map(String::as_str)
@@ -255,58 +311,73 @@ fn select_channels<'e>(
     let selected: Vec<&SlackChannel> = export
         .channels
         .iter()
-        .filter(|c| filter.as_ref().is_none_or(|f| f.contains(&c.name)))
+        .filter(|c| {
+            filter
+                .as_ref()
+                .is_none_or(|f| f.contains(&c.name) || f.contains(&c.id))
+        })
         .collect();
     if selected.is_empty() {
         return Err(CliError::Usage(
-            "no channels selected — check --channels against channels.json".into(),
+            "no conversations selected — check --channels against Slack names or ids".into(),
         ));
     }
     Ok(selected)
 }
 
-fn dry_run_report(
+fn validate_channel_map(
     export: &SlackExport,
-    selected: &[&SlackChannel],
-    st: &ImportState,
-    bindings: &[(String, String)],
-    skip_reactions: bool,
+    state: &ImportState,
+    channel_map: &HashMap<String, String>,
 ) -> Result<(), CliError> {
-    let mut channels_to_create = 0u64;
-    let mut messages = 0u64;
-    let mut reactions = 0u64;
-    for channel in selected {
-        if !st.channels.contains_key(&channel.id) {
-            channels_to_create += 1;
+    let conversations: HashMap<&str, &SlackChannel> = export
+        .channels
+        .iter()
+        .map(|conversation| (conversation.id.as_str(), conversation))
+        .collect();
+    for (slack_id, buzz_id) in channel_map {
+        let conversation = conversations.get(slack_id.as_str()).ok_or_else(|| {
+            CliError::Usage(format!(
+                "channel map references Slack conversation {slack_id}, which is absent from the export"
+            ))
+        })?;
+        if matches!(
+            conversation.kind,
+            SlackConversationKind::DirectMessage | SlackConversationKind::GroupDirectMessage
+        ) {
+            return Err(CliError::Usage(format!(
+                "channel map cannot adopt Slack {} {slack_id}; DMs and MPIMs must be opened \
+                 natively from their complete mapped participant set",
+                conversation.kind.as_str()
+            )));
         }
-        for msg in export.channel_messages(&channel.name)? {
-            let message_key = ImportState::message_key(&channel.id, &msg.ts);
-            if !st.messages.contains_key(&message_key) {
-                messages += 1;
-            }
-            if !skip_reactions {
-                reactions += pending_reaction_count(st, &message_key, &msg) as u64;
+        if let Some(existing) = state.channels.get(slack_id) {
+            if existing.uuid != *buzz_id {
+                return Err(CliError::Usage(format!(
+                    "channel map assigns Slack conversation {slack_id} to {buzz_id}, but the \
+                     state file already assigns it to {}",
+                    existing.uuid
+                )));
             }
         }
     }
-    print_json(&serde_json::json!({
-        "dry_run": true,
-        "channels_selected": selected.len(),
-        "channels_to_create": channels_to_create,
-        "messages_to_import": messages,
-        "reactions_to_import": reactions,
-        "bindings_to_publish": bindings.len(),
-    }))
+    Ok(())
 }
 
-/// Number of distinct bot-signed reactions that still need publishing.
-fn pending_reaction_count(st: &ImportState, message_key: &str, msg: &SlackMessage) -> usize {
-    msg.reactions
-        .iter()
-        .map(|reaction| emoji_for_shortcode(&reaction.name))
-        .filter(|emoji| !st.reactions.contains(&format!("{message_key}:{emoji}")))
-        .collect::<HashSet<_>>()
-        .len()
+fn seed_channel_map(state: &mut ImportState, channel_map: &HashMap<String, String>) {
+    for (slack_id, buzz_id) in channel_map {
+        state
+            .channels
+            .entry(slack_id.clone())
+            .or_insert_with(|| ChannelState {
+                uuid: buzz_id.clone(),
+                metadata_done: false,
+                archived_done: false,
+                private_visibility_done: false,
+                prepared_for_import: false,
+                members_added: HashSet::new(),
+            });
+    }
 }
 
 /// Serialize `value` to compact JSON on stdout.
@@ -321,9 +392,10 @@ fn print_json(value: &serde_json::Value) -> Result<(), CliError> {
 pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), CliError> {
     match cmd {
         crate::ImportCmd::Slack {
-            export_dir,
+            export_dirs,
             team_id,
             state,
+            channel_map,
             channels,
             dry_run,
             skip_reactions,
@@ -332,9 +404,10 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
             cmd_import_slack(
                 client,
                 ImportSlackParams {
-                    export_dir,
+                    export_dirs,
                     team_id,
                     state,
+                    channel_map,
                     channels,
                     dry_run,
                     skip_reactions,
@@ -356,16 +429,27 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    use super::channel_state::metadata_archived_state;
+    use super::dm::{
+        build_import_dm_open, ensure_dm_uuid_unclaimed, mapped_dm_participants, response_payload,
+    };
+    use super::export::SlackMessage;
     use super::importer::{
         author_display, author_id, build_imported_message, channel_uuid, provenance_tags,
         thread_root_key,
     };
+    use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks};
+    use super::report::pending_reaction_count;
     use super::*;
     use nostr::{EventId, Keys};
     use uuid::Uuid;
 
     fn msg(json: &str) -> SlackMessage {
         serde_json::from_str(json).expect("test message parses")
+    }
+
+    fn channel() -> SlackChannel {
+        serde_json::from_str(r#"{"id":"C1","name":"general"}"#).expect("channel parses")
     }
 
     #[test]
@@ -377,6 +461,224 @@ mod tests {
         // cross-channel collision).
         assert_ne!(channel_uuid("T1", "C1"), channel_uuid("T2", "C1"));
         assert_ne!(channel_uuid("T1", "C1"), channel_uuid("T1", "C2"));
+    }
+
+    #[test]
+    fn existing_channel_map_is_validated_and_seeded_as_unprepared() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-import-channel-map-export-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("channels.json"),
+            r#"[{"id":"C1","name":"general"}]"#,
+        )
+        .expect("write channels");
+        std::fs::write(dir.join("users.json"), "[]").expect("write users");
+        let export = SlackExport::load_many(std::slice::from_ref(&dir)).expect("export");
+        let mut state =
+            ImportState::load_for_workspace(&dir.join("state.json"), "T1").expect("fresh state");
+        let buzz_id = Uuid::new_v4().to_string();
+        let channel_map = HashMap::from([("C1".to_string(), buzz_id.clone())]);
+
+        validate_channel_map(&export, &state, &channel_map).expect("valid map");
+        seed_channel_map(&mut state, &channel_map);
+        let adopted = &state.channels["C1"];
+        assert_eq!(adopted.uuid, buzz_id);
+        assert!(!adopted.prepared_for_import);
+        assert!(!adopted.private_visibility_done);
+        assert!(!adopted.archived_done);
+
+        let unknown = HashMap::from([("C9".to_string(), Uuid::new_v4().to_string())]);
+        assert!(validate_channel_map(&export, &state, &unknown).is_err());
+        let conflict = HashMap::from([("C1".to_string(), Uuid::new_v4().to_string())]);
+        assert!(validate_channel_map(&export, &state, &conflict).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn native_dm_open_requires_the_exact_mapped_participant_set() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-import-dm-participants-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("D1")).expect("mkdir");
+        std::fs::write(dir.join("channels.json"), "[]").expect("write channels");
+        std::fs::write(
+            dir.join("users.json"),
+            r#"[{"id":"U1","name":"alice"},{"id":"U2","name":"bob"}]"#,
+        )
+        .expect("write users");
+        std::fs::write(
+            dir.join("dms.json"),
+            r#"[{"id":"D1","created":1700000000,"members":["U1","U2"]}]"#,
+        )
+        .expect("write dms");
+        let export = SlackExport::load_many(std::slice::from_ref(&dir)).expect("load export");
+        let dm = export
+            .channels
+            .iter()
+            .find(|conversation| conversation.id == "D1")
+            .expect("DM");
+
+        let importer_keys = Keys::generate();
+        let importer_pubkey = importer_keys.public_key().to_hex();
+        let other_pubkey = Keys::generate().public_key().to_hex();
+        let mut bindings = HashMap::from([("U1".to_string(), importer_pubkey.clone())]);
+        assert!(mapped_dm_participants(&export, dm, &bindings, &importer_pubkey).is_err());
+
+        bindings.insert("U2".to_string(), other_pubkey.clone());
+        let participants =
+            mapped_dm_participants(&export, dm, &bindings, &importer_pubkey).expect("complete map");
+        assert_eq!(
+            participants.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([importer_pubkey.clone(), other_pubkey.clone()])
+        );
+        assert!(
+            mapped_dm_participants(
+                &export,
+                dm,
+                &bindings,
+                &Keys::generate().public_key().to_hex()
+            )
+            .is_err(),
+            "migration operator cannot become an extra DM participant"
+        );
+
+        let event = build_import_dm_open(dm, "T1", &participants, &importer_pubkey)
+            .expect("build native DM open")
+            .sign_with_keys(&importer_keys)
+            .expect("sign");
+        assert_eq!(event.kind.as_u16(), 41010);
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags.contains(&vec!["p".into(), other_pubkey]));
+        assert!(!tags.contains(&vec!["p".into(), importer_pubkey]));
+        assert!(tags.contains(&vec!["d".into(), "slack:T1:D1".into()]));
+        assert!(tags.contains(&vec!["import".into(), "slack".into()]));
+        assert!(tags.contains(&vec![
+            "import_conversation".into(),
+            "T1:D1".into(),
+            "direct_message".into()
+        ]));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn native_dm_response_payload_extracts_relay_channel_id() {
+        let channel_id = Uuid::new_v4();
+        let response = serde_json::json!({
+            "event_id": "abc",
+            "accepted": true,
+            "message": format!(
+                "response:{}",
+                serde_json::json!({"channel_id": channel_id, "created": true})
+            ),
+        })
+        .to_string();
+        let payload = response_payload(&response).expect("response payload");
+        let channel_id_string = channel_id.to_string();
+        assert_eq!(
+            payload
+                .get("channel_id")
+                .and_then(serde_json::Value::as_str),
+            Some(channel_id_string.as_str())
+        );
+        assert_eq!(
+            payload.get("created").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn separate_slack_dms_cannot_collapse_into_one_buzz_participant_set() {
+        let dir = std::env::temp_dir().join(format!("buzz-import-dm-collision-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("D1")).expect("mkdir D1");
+        std::fs::create_dir_all(dir.join("D2")).expect("mkdir D2");
+        std::fs::write(dir.join("channels.json"), "[]").expect("channels");
+        std::fs::write(
+            dir.join("users.json"),
+            r#"[{"id":"U1","name":"alice"},{"id":"U2","name":"bob"}]"#,
+        )
+        .expect("users");
+        std::fs::write(
+            dir.join("dms.json"),
+            r#"[{"id":"D1","members":["U1","U2"]},{"id":"D2","members":["U1","U2"]}]"#,
+        )
+        .expect("dms");
+        let export = SlackExport::load_many(std::slice::from_ref(&dir)).expect("export");
+        let selected: Vec<&SlackChannel> = export.channels.iter().collect();
+        let importer_pubkey = Keys::generate().public_key().to_hex();
+        let bindings = HashMap::from([
+            ("U1".to_string(), importer_pubkey.clone()),
+            ("U2".to_string(), Keys::generate().public_key().to_hex()),
+        ]);
+        let state = ImportState::load_for_workspace(&dir.join("state.json"), "T1").expect("state");
+        let blockers = dm_import_blockers(&export, &selected, &state, &bindings, &importer_pubkey);
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers["D1"].contains("merge separate histories"));
+        assert!(blockers["D2"].contains("merge separate histories"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resumed_dm_cannot_reuse_another_slack_conversations_buzz_uuid() {
+        let uuid = Uuid::new_v4();
+        let mut state = ImportState::default();
+        state.channels.insert(
+            "D1".into(),
+            ChannelState {
+                uuid: uuid.to_string(),
+                metadata_done: true,
+                archived_done: true,
+                private_visibility_done: true,
+                prepared_for_import: true,
+                members_added: HashSet::new(),
+            },
+        );
+        let mut d2 = channel();
+        d2.id = "D2".into();
+        d2.name = "dm-two".into();
+        d2.kind = SlackConversationKind::DirectMessage;
+
+        let error = ensure_dm_uuid_unclaimed(&state, &d2, uuid)
+            .expect_err("different Slack DM must not claim an existing Buzz DM");
+        assert!(error.to_string().contains("already imported for D1"));
+        assert!(error.to_string().contains("merge separate histories"));
+    }
+
+    #[test]
+    fn channel_metadata_readback_reports_archived_state() {
+        let channel_id = Uuid::new_v4();
+        let active = serde_json::json!([{
+            "kind": 39000,
+            "tags": [["d", channel_id], ["name", "general"]],
+        }])
+        .to_string();
+        let archived = serde_json::json!([{
+            "kind": 39000,
+            "tags": [["d", channel_id], ["name", "general"], ["archived", "true"]],
+        }])
+        .to_string();
+        let unrelated = serde_json::json!([{
+            "kind": 39000,
+            "tags": [["d", Uuid::new_v4()], ["archived", "true"]],
+        }])
+        .to_string();
+
+        assert_eq!(
+            metadata_archived_state(&active, channel_id).expect("active metadata"),
+            Some(false)
+        );
+        assert_eq!(
+            metadata_archived_state(&archived, channel_id).expect("archived metadata"),
+            Some(true)
+        );
+        assert_eq!(
+            metadata_archived_state(&unrelated, channel_id).expect("unrelated metadata"),
+            None
+        );
     }
 
     #[test]
@@ -393,6 +695,19 @@ mod tests {
         names.insert("U1".to_string(), "alice".to_string());
         assert_eq!(author_display(&user_msg, &names), "alice");
         assert_eq!(author_display(&bot_msg, &names), "CI");
+    }
+
+    #[test]
+    fn imported_message_escapes_markdown_in_the_author_prefix() {
+        let message = msg(r#"{"type":"message","user":"U1","text":"hello","ts":"100.0"}"#);
+        let names = HashMap::from([("U1".to_string(), r"A*B_C\D[bot]`".to_string())]);
+        let event =
+            build_imported_message(&channel(), Uuid::new_v4(), &message, &names, "T1", None)
+                .expect("builder")
+                .sign_with_keys(&Keys::generate())
+                .expect("signs");
+
+        assert_eq!(event.content, r"**A\*B\_C\\D\[bot\]\`**: hello");
     }
 
     #[test]
@@ -468,10 +783,17 @@ mod tests {
         let mut names = HashMap::new();
         names.insert("U1".to_string(), "Alice".to_string());
 
-        let event = build_imported_message(channel_id, &message, &names, "T1", Some(&thread_ref))
-            .expect("builder")
-            .sign_with_keys(&Keys::generate())
-            .expect("signs");
+        let event = build_imported_message(
+            &channel(),
+            channel_id,
+            &message,
+            &names,
+            "T1",
+            Some(&thread_ref),
+        )
+        .expect("builder")
+        .sign_with_keys(&Keys::generate())
+        .expect("signs");
         let tags: Vec<Vec<String>> = event
             .tags
             .iter()
@@ -489,6 +811,11 @@ mod tests {
             "Alice".into()
         ]));
         assert!(tags.contains(&vec!["import_ts".into(), "100.000002".into()]));
+        assert!(tags.contains(&vec![
+            "import_conversation".into(),
+            "T1:C1".into(),
+            "public_channel".into()
+        ]));
         assert_eq!(event.created_at.as_secs(), 100);
     }
 
@@ -505,6 +832,7 @@ mod tests {
                 "text":"shared reply","ts":"100.000002","thread_ts":"99.000001"}"#,
         );
         let event = build_imported_message(
+            &channel(),
             channel_id,
             &message,
             &HashMap::new(),
@@ -520,6 +848,73 @@ mod tests {
             parts.first().map(String::as_str) == Some("broadcast")
                 && parts.get(1).map(String::as_str) == Some("1")
         }));
+    }
+
+    #[test]
+    fn attachment_only_message_retains_visible_card_content() {
+        let message = msg(
+            r#"{"type":"message","subtype":"bot_message","bot_id":"B1","username":"CI",
+                "text":"","ts":"100.000002","attachments":[{
+                    "author_name":"Buildkite","author_link":"https://ci.example.test",
+                    "title":"main passed","title_link":"https://ci.example.test/build/1",
+                    "text":"*42 tests* passed",
+                    "fields":[{"title":"Commit","value":"`abc123`"}]
+                }]}"#,
+        );
+        let event = build_imported_message(
+            &channel(),
+            Uuid::new_v4(),
+            &message,
+            &HashMap::new(),
+            "T1",
+            None,
+        )
+        .expect("builder")
+        .sign_with_keys(&Keys::generate())
+        .expect("signs");
+
+        assert!(event
+            .content
+            .contains("[Buildkite](https://ci.example.test)"));
+        assert!(event
+            .content
+            .contains("**[main passed](https://ci.example.test/build/1)**"));
+        assert!(event.content.contains("**42 tests** passed"));
+        assert!(event.content.contains("**Commit:** `abc123`"));
+    }
+
+    #[test]
+    fn rich_text_blocks_render_lists_mentions_links_and_styles() {
+        let blocks: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"type":"rich_text","elements":[
+                {"type":"rich_text_section","elements":[
+                    {"type":"text","text":"Hello ","style":{"bold":true}},
+                    {"type":"user","user_id":"U1"},
+                    {"type":"text","text":" — "},
+                    {"type":"link","url":"https://example.test","text":"details"}
+                ]},
+                {"type":"rich_text_list","style":"bullet","elements":[
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"first"}]},
+                    {"type":"rich_text_section","elements":[{"type":"text","text":"second"}]}
+                ]}
+            ]}]"#,
+        )
+        .expect("blocks");
+        let names = HashMap::from([("U1".to_string(), "Alice".to_string())]);
+        let rendered = render_slack_blocks(&blocks, &names);
+        assert!(rendered.contains("**Hello **@Alice"));
+        assert!(rendered.contains("[details](https://example.test)"));
+        assert!(rendered.contains("- first"));
+        assert!(rendered.contains("- second"));
+
+        let attachment: export::SlackAttachment = serde_json::from_str(
+            r#"{"fallback":"fallback only","original_url":"https://example.test/source"}"#,
+        )
+        .expect("attachment");
+        assert_eq!(
+            render_attachment(&attachment, &HashMap::new()),
+            "fallback only\n[Slack attachment](https://example.test/source)"
+        );
     }
 
     #[tokio::test]
@@ -551,9 +946,10 @@ mod tests {
         cmd_import_slack(
             &client,
             ImportSlackParams {
-                export_dir: dir.display().to_string(),
+                export_dirs: vec![dir.display().to_string()],
                 team_id: "T1".into(),
                 state: None,
+                channel_map: None,
                 channels: None,
                 dry_run: true,
                 skip_reactions: false,
@@ -563,7 +959,7 @@ mod tests {
         .await
         .expect("dry run succeeds offline");
 
-        let export = SlackExport::load(&dir).expect("export");
+        let export = SlackExport::load_many(std::slice::from_ref(&dir)).expect("export");
         assert!(select_channels(&export, Some("general,missing")).is_err());
         assert!(!dir.join("buzz-import-state.json").exists());
         std::fs::remove_dir_all(&dir).ok();

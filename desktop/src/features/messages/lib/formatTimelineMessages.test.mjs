@@ -416,6 +416,22 @@ test("deletion target with non-hex `e` tag value is ignored", () => {
   );
 });
 
+test("imported message strips a Markdown-escaped author prefix", () => {
+  const imported = streamMessage({
+    content: String.raw`**A\*B\_C\\D\[bot\]\`**: hello from slack`,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["import", "slack"],
+      ["import_author", "U061", "A*B_C\\D[bot]`"],
+      ["import_ts", "1700000000.000200"],
+    ],
+  });
+  const out = formatTimelineMessages([imported], null, undefined, null);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].author, "A*B_C\\D[bot]`");
+  assert.equal(out[0].body, "hello from slack");
+});
+
 // ---------------------------------------------------------------------------
 // Reaction pill ordering — pills must sort left→right by when each emoji was
 // first added (ascending created_at), independent of input event order.

@@ -105,8 +105,17 @@ export function stripImportAuthorPrefix(
   importAuthor: { displayName: string } | null,
 ): string {
   if (!importAuthor) return body;
-  const prefix = `**${importAuthor.displayName}**: `;
-  return body.startsWith(prefix) ? body.slice(prefix.length) : body;
+  const rawPrefix = `**${importAuthor.displayName}**: `;
+  if (body.startsWith(rawPrefix)) return body.slice(rawPrefix.length);
+
+  const escapedName = importAuthor.displayName.replace(
+    /[\\*_`[\]()~]/g,
+    "\\$&",
+  );
+  const escapedPrefix = `**${escapedName}**: `;
+  return body.startsWith(escapedPrefix)
+    ? body.slice(escapedPrefix.length)
+    : body;
 }
 
 /**

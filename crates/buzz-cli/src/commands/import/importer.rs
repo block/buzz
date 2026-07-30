@@ -11,9 +11,14 @@ use std::path::PathBuf;
 use nostr::{EventBuilder, EventId, Timestamp};
 use uuid::Uuid;
 
+use super::channel_state::require_unarchived;
+use super::dm::{
+    build_import_dm_open, ensure_dm_uuid_unclaimed, mapped_dm_participants, response_payload,
+};
 use super::export::{ts_seconds, SlackChannel, SlackExport, SlackMessage};
 use super::mrkdwn;
 use super::print_json;
+use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks};
 use super::state::{ChannelState, ImportState};
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -40,6 +45,8 @@ struct Summary {
     messages_imported: u64,
     reactions_imported: u64,
     bindings_published: u64,
+    private_members_added: u64,
+    private_members_unmapped: u64,
     skipped: u64,
     warnings: Vec<String>,
 }
@@ -64,9 +71,22 @@ pub(super) struct Importer<'a> {
     state_path: PathBuf,
     summary: Summary,
     skip_reactions: bool,
+    /// Slack user id → Buzz public key. Besides publishing identity
+    /// attestations, explicit mappings populate private conversation members.
+    bindings: &'a HashMap<String, String>,
     /// Writes recorded since the last state flush (see
     /// [`STATE_CHECKPOINT_WRITES`]).
     unsaved: usize,
+}
+
+/// Owned and borrowed run settings grouped separately from the parsed export
+/// indexes supplied to [`Importer::new`].
+pub(super) struct ImporterOptions<'a> {
+    pub(super) team_id: &'a str,
+    pub(super) state: ImportState,
+    pub(super) state_path: PathBuf,
+    pub(super) skip_reactions: bool,
+    pub(super) bindings: &'a HashMap<String, String>,
 }
 
 impl<'a> Importer<'a> {
@@ -75,20 +95,18 @@ impl<'a> Importer<'a> {
         client: &'a BuzzClient,
         export: &'a SlackExport,
         names: &'a HashMap<String, String>,
-        team_id: &'a str,
-        state: ImportState,
-        state_path: PathBuf,
-        skip_reactions: bool,
+        options: ImporterOptions<'a>,
     ) -> Self {
         Self {
             client,
             export,
             names,
-            team_id,
-            state,
-            state_path,
+            team_id: options.team_id,
+            state: options.state,
+            state_path: options.state_path,
             summary: Summary::default(),
-            skip_reactions,
+            skip_reactions: options.skip_reactions,
+            bindings: options.bindings,
             unsaved: 0,
         }
     }
@@ -116,7 +134,19 @@ impl<'a> Importer<'a> {
     }
 
     /// Create a channel once and independently resume its topic metadata.
-    async fn ensure_channel(&mut self, channel: &SlackChannel) -> Result<Uuid, CliError> {
+    async fn ensure_channel(
+        &mut self,
+        channel: &SlackChannel,
+        needs_writes: bool,
+    ) -> Result<Uuid, CliError> {
+        if matches!(
+            channel.kind,
+            super::export::SlackConversationKind::DirectMessage
+                | super::export::SlackConversationKind::GroupDirectMessage
+        ) {
+            return self.ensure_dm(channel).await;
+        }
+
         let (uuid, metadata_done) = match self.state.channels.get(&channel.id) {
             Some(state) => (
                 Uuid::parse_str(&state.uuid)
@@ -133,8 +163,12 @@ impl<'a> Importer<'a> {
                 let builder = buzz_sdk::build_create_channel(
                     uuid,
                     &channel.name,
-                    Some(buzz_sdk::Visibility::Open),
-                    Some(buzz_sdk::ChannelKind::Stream),
+                    Some(if channel.kind.is_private() {
+                        buzz_sdk::Visibility::Private
+                    } else {
+                        buzz_sdk::Visibility::Open
+                    }),
+                    Some(channel.kind.buzz_channel_kind()),
                     about,
                     None,
                 )
@@ -152,6 +186,9 @@ impl<'a> Importer<'a> {
                         uuid: uuid.to_string(),
                         metadata_done: false,
                         archived_done: false,
+                        private_visibility_done: channel.kind.is_private(),
+                        prepared_for_import: true,
+                        members_added: std::collections::HashSet::new(),
                     },
                 );
                 self.flush()?;
@@ -159,6 +196,60 @@ impl<'a> Importer<'a> {
                 (uuid, false)
             }
         };
+
+        let (prepared_for_import, archived_done) = self
+            .state
+            .channels
+            .get(&channel.id)
+            .map(|state| (state.prepared_for_import, state.archived_done))
+            .unwrap_or((true, false));
+        if !prepared_for_import || (channel.is_archived && archived_done && needs_writes) {
+            // The crosswalk says which channel to adopt, but not whether that
+            // Buzz channel is currently archived. Attempt the transition on
+            // every first adoption, even when Slack says the source is active.
+            // Kind:9002 side effects are best-effort at the relay, so its
+            // accepted response cannot prove the channel is active. Read the
+            // relay-generated channel metadata back before any history write.
+            let builder = buzz_sdk::build_unarchive(uuid)
+                .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
+            submit(self.client, builder).await.map_err(|error| {
+                CliError::Other(format!(
+                    "could not prepare conversation {} for history import: {error}",
+                    channel.id
+                ))
+            })?;
+            require_unarchived(self.client, uuid, &channel.id).await?;
+            if let Some(state) = self.state.channels.get_mut(&channel.id) {
+                state.prepared_for_import = true;
+                state.archived_done = false;
+            }
+            self.flush()?;
+        }
+
+        // Older importer ledgers could contain a Slackdump private record from
+        // `channels.json` even though the old create path always emitted
+        // `visibility=open`. Narrow it before publishing any history.
+        let private_visibility_done = self
+            .state
+            .channels
+            .get(&channel.id)
+            .is_some_and(|state| state.private_visibility_done);
+        if channel.kind.is_private() && !private_visibility_done {
+            let builder =
+                buzz_sdk::build_update_channel(uuid, None, None, Some("private"), None)
+                    .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+            submit(self.client, builder).await.map_err(|e| {
+                CliError::Other(format!(
+                    "refusing to import private conversation {} because Buzz visibility \
+                     could not be narrowed: {e}",
+                    channel.id
+                ))
+            })?;
+            if let Some(state) = self.state.channels.get_mut(&channel.id) {
+                state.private_visibility_done = true;
+            }
+            self.flush()?;
+        }
 
         if !metadata_done {
             let topic_result = if channel.topic.value.is_empty() {
@@ -185,14 +276,166 @@ impl<'a> Importer<'a> {
         Ok(uuid)
     }
 
+    /// Open a native Buzz DM using the exact mapped Slack participant set.
+    ///
+    /// The relay always includes the caller in a DM. Requiring the importer to
+    /// map to one Slack participant prevents an operator who merely has access
+    /// to an export from becoming an extra participant in every imported DM.
+    /// Requiring all active human participants up front avoids Buzz's immutable
+    /// DM participant-set rule splitting later history across two DMs.
+    async fn ensure_dm(&mut self, channel: &SlackChannel) -> Result<Uuid, CliError> {
+        if let Some(state) = self.state.channels.get(&channel.id) {
+            let uuid = Uuid::parse_str(&state.uuid)
+                .map_err(|e| CliError::Other(format!("state file holds invalid UUID: {e}")))?;
+            ensure_dm_uuid_unclaimed(&self.state, channel, uuid)?;
+            return Ok(uuid);
+        }
+
+        let importer_pubkey = self.client.keys().public_key().to_hex();
+        let participant_pubkeys =
+            mapped_dm_participants(self.export, channel, self.bindings, &importer_pubkey)?;
+        let builder = build_import_dm_open(
+            channel,
+            self.team_id,
+            &participant_pubkeys,
+            &importer_pubkey,
+        )?;
+        let (_, response) = submit_with_response(self.client, builder)
+            .await
+            .map_err(|e| {
+                CliError::Other(format!(
+                    "DM open failed for Slack conversation {}: {e}",
+                    channel.id
+                ))
+            })?;
+        let payload = response_payload(&response).ok_or_else(|| {
+            CliError::Other(format!(
+                "DM open response for Slack conversation {} did not contain a channel id",
+                channel.id
+            ))
+        })?;
+        let channel_id = payload
+            .get("channel_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                CliError::Other(format!(
+                    "DM open response for Slack conversation {} did not contain a channel id",
+                    channel.id
+                ))
+            })?;
+        let uuid = Uuid::parse_str(channel_id)
+            .map_err(|e| CliError::Other(format!("relay returned invalid DM UUID: {e}")))?;
+        ensure_dm_uuid_unclaimed(&self.state, channel, uuid)?;
+        let created = payload
+            .get("created")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        self.state.channels.insert(
+            channel.id.clone(),
+            ChannelState {
+                uuid: uuid.to_string(),
+                metadata_done: true,
+                archived_done: true,
+                private_visibility_done: true,
+                prepared_for_import: true,
+                members_added: participant_pubkeys.into_iter().collect(),
+            },
+        );
+        self.flush()?;
+        if created {
+            self.summary.channels_created += 1;
+        }
+        Ok(uuid)
+    }
+
+    /// Add every explicitly mapped Slack participant to a private Buzz
+    /// conversation. Unmapped people are counted, never substituted with the
+    /// importer or another participant, so private history cannot be widened
+    /// accidentally.
+    async fn ensure_private_members(
+        &mut self,
+        channel: &SlackChannel,
+        channel_uuid: Uuid,
+    ) -> Result<(), CliError> {
+        if !channel.kind.is_private()
+            || matches!(
+                channel.kind,
+                super::export::SlackConversationKind::DirectMessage
+                    | super::export::SlackConversationKind::GroupDirectMessage
+            )
+        {
+            return Ok(());
+        }
+
+        let importer_pubkey = self.client.keys().public_key().to_hex();
+        let mut mapped_pubkeys = std::collections::BTreeSet::new();
+        let mut unmapped = 0u64;
+        for slack_id in &channel.members {
+            if !self.export.is_mappable_member(slack_id) {
+                continue;
+            }
+            match self.bindings.get(slack_id) {
+                Some(pubkey) => {
+                    mapped_pubkeys.insert(pubkey.clone());
+                }
+                None => unmapped += 1,
+            }
+        }
+        self.summary.private_members_unmapped += unmapped;
+
+        for pubkey in mapped_pubkeys {
+            let already_added = self
+                .state
+                .channels
+                .get(&channel.id)
+                .is_some_and(|state| state.members_added.contains(&pubkey));
+            if already_added {
+                continue;
+            }
+
+            // The channel creator is already its owner. Record an explicit
+            // mapping to that same key without publishing a redundant
+            // add-member event.
+            if pubkey != importer_pubkey {
+                let builder = buzz_sdk::build_add_member(
+                    channel_uuid,
+                    &pubkey,
+                    Some(buzz_sdk::MemberRole::Member),
+                )
+                .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
+                if let Err(e) = submit(self.client, builder).await {
+                    self.summary.warn(format!(
+                        "mapped member add failed for private conversation {}: {e}",
+                        channel.id
+                    ));
+                    continue;
+                }
+            }
+            if let Some(state) = self.state.channels.get_mut(&channel.id) {
+                state.members_added.insert(pubkey);
+            }
+            self.summary.private_members_added += 1;
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn import_channel(&mut self, channel: &SlackChannel) -> Result<(), CliError> {
         let export = self.export;
         let names = self.names;
 
-        let messages = export.channel_messages(&channel.name)?;
-        eprintln!("importing #{} ({} messages)", channel.name, messages.len());
+        let messages = export.channel_messages(channel)?;
+        eprintln!(
+            "importing {} {} ({} messages)",
+            channel.kind.as_str(),
+            channel.name,
+            messages.len()
+        );
 
-        let channel_uuid = self.ensure_channel(channel).await?;
+        let needs_writes = self.channel_needs_writes(channel, &messages);
+        let channel_uuid = self.ensure_channel(channel, needs_writes).await?;
+        self.ensure_private_members(channel, channel_uuid).await?;
 
         // Messages, oldest first; thread roots always precede replies.
         //
@@ -258,6 +501,7 @@ impl<'a> Importer<'a> {
             };
 
             let builder = match build_imported_message(
+                channel,
                 channel_uuid,
                 msg,
                 names,
@@ -310,7 +554,14 @@ impl<'a> Importer<'a> {
             .channels
             .get(&channel.id)
             .is_some_and(|state| state.archived_done);
-        if channel.is_archived && !archive_done {
+        if channel.is_archived
+            && !matches!(
+                channel.kind,
+                super::export::SlackConversationKind::DirectMessage
+                    | super::export::SlackConversationKind::GroupDirectMessage
+            )
+            && !archive_done
+        {
             let builder = buzz_sdk::build_archive(channel_uuid)
                 .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
             match submit(self.client, builder).await {
@@ -327,6 +578,45 @@ impl<'a> Importer<'a> {
         }
         self.flush()?;
         Ok(())
+    }
+
+    /// Whether an archived stream must be reopened before this run can finish
+    /// its metadata, membership, message, or reaction writes.
+    fn channel_needs_writes(&self, channel: &SlackChannel, messages: &[SlackMessage]) -> bool {
+        let Some(state) = self.state.channels.get(&channel.id) else {
+            return true;
+        };
+        if !state.prepared_for_import
+            || !state.metadata_done
+            || (channel.kind.is_private() && !state.private_visibility_done)
+        {
+            return true;
+        }
+
+        if channel.kind == super::export::SlackConversationKind::PrivateChannel
+            && channel.members.iter().any(|slack_id| {
+                self.export.is_mappable_member(slack_id)
+                    && self
+                        .bindings
+                        .get(slack_id)
+                        .is_some_and(|pubkey| !state.members_added.contains(pubkey))
+            })
+        {
+            return true;
+        }
+
+        messages.iter().any(|message| {
+            let message_key = ImportState::message_key(&channel.id, &message.ts);
+            !self.state.messages.contains_key(&message_key)
+                || (!self.skip_reactions
+                    && message.reactions.iter().any(|reaction| {
+                        let emoji = emoji_for_shortcode(&reaction.name);
+                        !self
+                            .state
+                            .reactions
+                            .contains(&format!("{message_key}:{emoji}"))
+                    }))
+        })
     }
 
     /// Import reactions for one message. Bot mode signs with a single key, so
@@ -409,6 +699,8 @@ impl<'a> Importer<'a> {
             "messages_imported": self.summary.messages_imported,
             "reactions_imported": self.summary.reactions_imported,
             "bindings_published": self.summary.bindings_published,
+            "private_members_added": self.summary.private_members_added,
+            "private_members_unmapped": self.summary.private_members_unmapped,
             "skipped": self.summary.skipped,
             "warnings": self.summary.warnings,
             "state_file": self.state_path.display().to_string(),
@@ -419,6 +711,7 @@ impl<'a> Importer<'a> {
 /// Build one imported message while preserving the channel/thread tags from
 /// the SDK builder and appending Slack provenance.
 pub(super) fn build_imported_message(
+    channel: &SlackChannel,
     channel_uuid: Uuid,
     msg: &SlackMessage,
     names: &HashMap<String, String>,
@@ -433,26 +726,68 @@ pub(super) fn build_imported_message(
     // Buzz profile. Without the team prefix the join would miss.
     let author_foreign = format!("{team_id}:{}", author.as_deref().unwrap_or("unknown"));
 
-    let mut content = mrkdwn::convert(&msg.text, names);
-    for file in &msg.files {
-        match file.link() {
-            Some(link) => content.push_str(&format!("\n📎 [{}]({link})", file.label())),
-            None => content.push_str(&format!("\n📎 {}", file.label())),
+    let mut content_parts = Vec::new();
+    if !msg.text.trim().is_empty() {
+        content_parts.push(mrkdwn::convert(&msg.text, names));
+    } else {
+        let blocks = render_slack_blocks(&msg.blocks, names);
+        if !blocks.is_empty() {
+            content_parts.push(blocks);
         }
     }
+    for attachment in &msg.attachments {
+        let rendered = render_attachment(attachment, names);
+        if !rendered.is_empty() {
+            content_parts.push(rendered);
+        }
+    }
+    for file in &msg.files {
+        match file.link() {
+            Some(link) => content_parts.push(format!("📎 [{}]({link})", file.label())),
+            None => content_parts.push(format!("📎 {}", file.label())),
+        }
+    }
+    let content = content_parts.join("\n\n");
     // The prefix keeps imported history readable in clients that do not
     // understand identity-binding events. Buzz Desktop removes the redundant
     // prefix when rendering the provenance-aware message.
-    let content = format!("**{author_name}**: {}", content.trim());
+    let escaped_author_name = escape_markdown_emphasis(&author_name);
+    let content = format!("**{escaped_author_name}**: {}", content.trim());
 
-    let broadcast = msg.subtype.as_deref() == Some("thread_broadcast");
+    let broadcast = matches!(
+        msg.subtype.as_deref(),
+        Some("thread_broadcast" | "reply_broadcast")
+    );
+    let mut import_tags = provenance_tags(&author_foreign, &author_name, &msg.ts)?;
+    import_tags.push(
+        nostr::Tag::parse([
+            "import_conversation",
+            &format!("{team_id}:{}", channel.id),
+            channel.kind.as_str(),
+        ])
+        .map_err(|e| CliError::Other(format!("invalid conversation provenance tag: {e}")))?,
+    );
     buzz_sdk::build_message(channel_uuid, &content, thread_ref, &[], broadcast, &[])
         .map_err(|e| CliError::Other(format!("build_message failed: {e}")))
         .and_then(|builder| {
             Ok(builder
                 .custom_created_at(Timestamp::from(ts_seconds(&msg.ts)?))
-                .tags(provenance_tags(&author_foreign, &author_name, &msg.ts)?))
+                .tags(import_tags))
         })
+}
+
+fn escape_markdown_emphasis(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '*' | '_' | '`' | '[' | ']' | '(' | ')' | '~'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Sign with `client` and submit, returning the locally computed event id.
@@ -467,6 +802,15 @@ pub(super) fn build_imported_message(
 /// signed event is resubmitted verbatim; a re-send that lands twice is a
 /// relay-side duplicate, which the acceptance check below treats as success.
 pub(super) async fn submit(client: &BuzzClient, builder: EventBuilder) -> Result<String, CliError> {
+    submit_with_response(client, builder)
+        .await
+        .map(|(event_id, _)| event_id)
+}
+
+async fn submit_with_response(
+    client: &BuzzClient,
+    builder: EventBuilder,
+) -> Result<(String, String), CliError> {
     let event = client.sign_event(builder)?;
     let event_id = event.id.to_hex();
     let mut backoff_secs = 1u64;
@@ -499,7 +843,7 @@ pub(super) async fn submit(client: &BuzzClient, builder: EventBuilder) -> Result
             )));
         }
     }
-    Ok(event_id)
+    Ok((event_id, resp))
 }
 
 /// Deterministic Buzz channel UUID for a Slack channel, derived from the
@@ -564,58 +908,6 @@ pub(super) fn author_display(msg: &SlackMessage, names: &HashMap<String, String>
         }
     }
     author_id(msg).unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Map common Slack reaction shortcodes to Unicode; anything unknown keeps
-/// the `:shortcode:` form (rendered when the custom emoji is registered).
-/// Skin-tone suffixes (`::skin-tone-N`) are dropped.
-pub(super) fn emoji_for_shortcode(name: &str) -> String {
-    let base = name.split("::").next().unwrap_or(name);
-    let mapped = match base {
-        "+1" | "thumbsup" => "👍",
-        "-1" | "thumbsdown" => "👎",
-        "heart" => "❤️",
-        "joy" => "😂",
-        "smile" => "😄",
-        "grin" => "😁",
-        "laughing" => "😆",
-        "sweat_smile" => "😅",
-        "sob" => "😭",
-        "cry" => "😢",
-        "tada" => "🎉",
-        "eyes" => "👀",
-        "fire" => "🔥",
-        "rocket" => "🚀",
-        "pray" => "🙏",
-        "clap" => "👏",
-        "wave" => "👋",
-        "raised_hands" => "🙌",
-        "ok_hand" => "👌",
-        "muscle" => "💪",
-        "100" => "💯",
-        "thinking_face" => "🤔",
-        "white_check_mark" => "✅",
-        "heavy_check_mark" => "✔️",
-        "x" => "❌",
-        "heart_eyes" => "😍",
-        "sunglasses" => "😎",
-        "sparkles" => "✨",
-        "star" => "⭐",
-        "zap" => "⚡",
-        "warning" => "⚠️",
-        "question" => "❓",
-        "exclamation" => "❗",
-        "bulb" => "💡",
-        "memo" => "📝",
-        "bug" => "🐛",
-        "wink" => "😉",
-        "point_up" => "☝️",
-        "point_down" => "👇",
-        "seedling" => "🌱",
-        "bee" | "honeybee" => "🐝",
-        _ => return format!(":{base}:"),
-    };
-    mapped.to_string()
 }
 
 /// `Some(state key of the thread root)` when `msg` is a reply (its
