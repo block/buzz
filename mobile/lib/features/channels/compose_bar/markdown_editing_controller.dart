@@ -256,7 +256,13 @@ class _MarkdownEditingController extends TextEditingController {
       // The visual chip replaces the `@` placeholder. Keep the label as
       // invisible source text so the text span still has one character per
       // source character, preserving native cursor and deletion behavior.
-      spans.add(TextSpan(text: label, style: _hiddenMentionTextStyle(style)));
+      spans.add(
+        TextSpan(
+          text: label,
+          semanticsLabel: '',
+          style: _hiddenMentionTextStyle(style),
+        ),
+      );
       offset = match.end;
     }
     if (offset < source.length) {
@@ -354,6 +360,7 @@ class _ComposerAgentMentionChip extends StatelessWidget {
 
     return Semantics(
       label: 'Agent mention: $label',
+      excludeSemantics: true,
       child: Container(
         key: const ValueKey('composer-agent-mention-chip'),
         padding: const EdgeInsets.fromLTRB(

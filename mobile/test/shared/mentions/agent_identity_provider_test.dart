@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/features/channels/agent_activity/working_bots_provider.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -28,7 +29,7 @@ void main() {
     });
     await relaySession.subscribed;
     expect(relaySession.liveFilters.single.kinds, const [39002]);
-    expect(relaySession.liveFilters.single.tags['#h'], [_channelId]);
+    expect(relaySession.liveFilters.single.tags['#d'], [_channelId]);
 
     relaySession.emit(_membershipEvent(role: 'member'));
     await _pumpEventQueue();
@@ -95,6 +96,44 @@ void main() {
 
     expect(relaySession.unsubscribeCount, 1);
   });
+
+  test(
+    'does not retain a live role subscription through working bots',
+    () async {
+      final relaySession = _MembershipRelaySessionNotifier([
+        _membershipEvent(role: 'bot'),
+      ]);
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+      );
+      addTearDown(container.dispose);
+      final keepAlive = container.listen(
+        workingBotPubkeysProvider(_channelId),
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      await relaySession.subscribed;
+      keepAlive.close();
+      await container.pump();
+
+      expect(relaySession.unsubscribeCount, 1);
+    },
+  );
+
+  test('blank profile labels defer to the directory label', () {
+    const pubkey = 'deadbeef0123456789';
+
+    expect(
+      mentionNamesWithDirectoryLabels(
+        mentionPubkeys: const [pubkey],
+        profileMentionNames: const {pubkey: '  '},
+        directoryDisplayNames: const {pubkey: 'Directory bot'},
+        agentMentionPubkeys: const {pubkey},
+      ),
+      const {pubkey: 'Directory bot'},
+    );
+  });
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
@@ -107,7 +146,7 @@ NostrEvent _membershipEvent({required String role}) => NostrEvent(
   createdAt: 1,
   kind: 39002,
   tags: [
-    ['h', _channelId],
+    ['d', _channelId],
     ['p', _agentPubkey, 'wss://relay.example', role],
   ],
   content: '',
@@ -122,7 +161,7 @@ Future<void> _pumpEventQueue() async {
 class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrEvent> _memberships;
   final List<NostrFilter> liveFilters = [];
-  final List<void Function(NostrEvent)> _listeners = [];
+  final List<_LiveSubscription> _subscriptions = [];
   final Completer<void> _subscribed = Completer<void>();
   var unsubscribeCount = 0;
   var _membershipIndex = 0;
@@ -149,17 +188,40 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
     void Function(String message)? onClosed,
   }) async {
     liveFilters.add(filter);
-    _listeners.add(onEvent);
+    final subscription = _LiveSubscription(filter, onEvent);
+    _subscriptions.add(subscription);
     if (!_subscribed.isCompleted) _subscribed.complete();
     return () {
       unsubscribeCount++;
-      _listeners.remove(onEvent);
+      _subscriptions.remove(subscription);
     };
   }
 
   void emit(NostrEvent event) {
-    for (final listener in List.of(_listeners)) {
-      listener(event);
+    for (final subscription in List.of(_subscriptions)) {
+      if (_matches(subscription.filter, event)) {
+        subscription.onEvent(event);
+      }
     }
   }
+}
+
+class _LiveSubscription {
+  final NostrFilter filter;
+  final void Function(NostrEvent) onEvent;
+
+  const _LiveSubscription(this.filter, this.onEvent);
+}
+
+bool _matches(NostrFilter filter, NostrEvent event) {
+  if (!filter.kinds.contains(event.kind)) return false;
+  return filter.tags.entries.every((entry) {
+    final tagName = entry.key.substring(1);
+    return event.tags.any(
+      (tag) =>
+          tag.isNotEmpty &&
+          tag.first == tagName &&
+          tag.skip(1).any(entry.value.contains),
+    );
+  });
 }

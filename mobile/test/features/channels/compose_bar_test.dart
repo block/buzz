@@ -2292,6 +2292,7 @@ void main() {
     testWidgets(
       'renders chips only for selected agents outside code and composition',
       (tester) async {
+        final semantics = tester.ensureSemantics();
         final signer = nostr.Keys.generate();
         await tester.pumpWidget(
           _buildComposeBar(
@@ -2324,6 +2325,11 @@ void main() {
           find.byKey(const ValueKey('composer-agent-mention-chip')),
           findsOneWidget,
         );
+        expect(
+          find.bySemanticsLabel('Agent mention: Helper Bot'),
+          findsOneWidget,
+        );
+        expect(find.bySemanticsLabel('Helper Bot'), findsNothing);
 
         await tester.enterText(find.byType(TextField), '`@Helper Bot`');
         await tester.pump();
@@ -2343,6 +2349,7 @@ void main() {
           findsOneWidget,
         );
         await tester.pump(const Duration(milliseconds: 250));
+        semantics.dispose();
       },
     );
 
