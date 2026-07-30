@@ -329,6 +329,9 @@ pub struct CliArgs {
     )]
     pub subscribe: SubscribeMode,
 
+    /// Event kinds to subscribe to. When unset: Mentions uses a small default;
+    /// All uses a durable allowlist (messages/reactions/canvas/workflow) that
+    /// excludes ephemeral typing/presence (#3649). Explicit list overrides.
     #[arg(long, env = "BUZZ_ACP_KINDS", value_delimiter = ',')]
     pub kinds: Option<Vec<u32>>,
 
@@ -482,7 +485,9 @@ pub struct CliArgs {
 /// Merged NIP-01 subscription filter for a single channel.
 #[derive(Debug, Clone)]
 pub struct ChannelFilter {
-    /// Event kinds to subscribe to. None = wildcard (all kinds).
+    /// Event kinds to subscribe to. None = wildcard (all kinds) — only used
+    /// when an explicit empty/wildcard path remains (Config rules). All mode
+    /// defaults to a durable allowlist so typing/presence do not wake agents.
     pub kinds: Option<Vec<u32>>,
     /// Whether to include `#p` tag filter for agent pubkey.
     pub require_mention: bool,
@@ -1229,6 +1234,42 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
     Ok(config.rules)
 }
 
+/// Default kind allowlist for `SubscribeMode::All` when `BUZZ_ACP_KINDS` is unset.
+///
+/// Ephemeral traffic (typing 20002, presence 20001, observer frames 24200) must
+/// not wake the agent — each keystroke was burning a model turn and showing a
+/// false "agent is typing" badge (#3649). Operators can still opt into
+/// everything with an explicit kinds override.
+fn default_subscribe_all_kinds() -> Vec<u32> {
+    use buzz_core::kind::{
+        KIND_CANVAS, KIND_DELETION, KIND_GIFT_WRAP, KIND_REACTION, KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER,
+        KIND_WORKFLOW_APPROVAL_REQUESTED, KIND_WORKFLOW_TRIGGER,
+    };
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_V2,
+        KIND_STREAM_MESSAGE_EDIT,
+        KIND_DELETION,
+        KIND_REACTION,
+        KIND_GIFT_WRAP,
+        KIND_CANVAS,
+        KIND_STREAM_REMINDER,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_WORKFLOW_TRIGGER,
+    ]
+}
+
+/// Kinds used for All mode: explicit override, or default durable allowlist.
+fn subscribe_all_kinds(config: &Config) -> Option<Vec<u32>> {
+    Some(
+        config
+            .kinds_override
+            .clone()
+            .unwrap_or_else(default_subscribe_all_kinds),
+    )
+}
+
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
 pub fn resolve_channel_filters(
     config: &Config,
@@ -1272,11 +1313,12 @@ pub fn resolve_channel_filters(
             }
         }
         SubscribeMode::All => {
+            let kinds = subscribe_all_kinds(config);
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
-                        kinds: config.kinds_override.clone(),
+                        kinds: kinds.clone(),
                         require_mention: false,
                     },
                 );
@@ -1368,7 +1410,7 @@ pub fn resolve_dynamic_channel_filter(
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
-            kinds: config.kinds_override.clone(),
+            kinds: subscribe_all_kinds(config),
             require_mention: false,
         }),
         SubscribeMode::Config => {
@@ -1760,7 +1802,8 @@ mod tests {
     }
 
     #[test]
-    fn test_all_mode_wildcard() {
+    fn test_all_mode_default_excludes_ephemeral_kinds() {
+        // #3649: subscribe=all without BUZZ_ACP_KINDS must not deliver typing/presence.
         let config = test_config(SubscribeMode::All);
         let channels = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
         let result = resolve_channel_filters(&config, &channels, &[]);
@@ -1768,12 +1811,30 @@ mod tests {
         assert_eq!(result.len(), 3);
         for ch in &channels {
             let f = result.get(ch).unwrap();
-            assert!(
-                f.kinds.is_none(),
-                "all mode with no override = wildcard kinds"
-            );
             assert!(!f.require_mention);
+            let kinds = f
+                .kinds
+                .as_ref()
+                .expect("All mode should set durable kinds by default");
+            assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
+            assert!(kinds.contains(&buzz_core::kind::KIND_REACTION));
+            assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
+            assert!(
+                !kinds.contains(&buzz_core::kind::KIND_TYPING_INDICATOR),
+                "typing must not wake agents"
+            );
+            assert!(
+                !kinds.contains(&buzz_core::kind::KIND_PRESENCE_UPDATE),
+                "presence must not wake agents"
+            );
+            assert!(
+                !kinds.contains(&buzz_core::kind::KIND_AGENT_OBSERVER_FRAME),
+                "observer frames must not wake agents by default"
+            );
         }
+
+        let dynamic = resolve_dynamic_channel_filter(&config, channels[0], &[]).unwrap();
+        assert_eq!(dynamic.kinds, result.get(&channels[0]).unwrap().kinds);
     }
 
     #[test]
@@ -1785,6 +1846,17 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
+    }
+
+    #[test]
+    fn test_all_mode_kinds_override_can_opt_into_typing() {
+        let mut config = test_config(SubscribeMode::All);
+        // Explicit override still allows operators to include ephemeral kinds.
+        config.kinds_override = Some(vec![9, 20002]);
+        let channels = vec![Uuid::new_v4()];
+        let result = resolve_channel_filters(&config, &channels, &[]);
+        let f = result.get(&channels[0]).unwrap();
+        assert_eq!(f.kinds.as_ref().unwrap(), &[9, 20002]);
     }
 
     #[test]
