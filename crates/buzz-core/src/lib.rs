@@ -30,6 +30,8 @@ pub mod network;
 pub mod observer;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
+/// Signed, channel-scoped extension-panel manifest types.
+pub mod panel;
 /// Presence status types shared across crates.
 pub mod presence;
 /// Canonical relay runtime identities.
@@ -42,6 +44,7 @@ pub mod verification;
 pub use error::VerificationError;
 pub use event::StoredEvent;
 pub use nostr::{Event, EventId, Filter, Keys, Kind, PublicKey};
+pub use panel::{PanelManifest, PanelManifestError};
 pub use presence::PresenceStatus;
 pub use tenant::{normalize_host, CommunityId, TenantContext};
 pub use verification::verify_event;
