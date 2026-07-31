@@ -133,3 +133,29 @@ If none of the above match your situation:
 3. Try `--safe-rendering` first — if it resolves the issue, it's a WebKit rendering incompatibility and the crash log will help narrow down which driver is involved.
 
 4. File a [new issue](https://github.com/block/buzz/issues/new) with your distro, GPU, driver version, and the terminal output.
+
+## Crash (SEGV) when switching communities on Linux (#3488)
+
+**Symptoms:** Clicking another community exits the process. Journal / terminal may show:
+
+```text
+(WebKitWebProcess:…): GStreamer-CRITICAL **: gst_value_set_int_range_step: assertion 'start < end' failed
+Segmentation fault (core dumped)
+```
+
+**Likely cause:** WebKitGTK tearing down or re-initializing media (GStreamer) while the React tree remounts for a community switch (`AGENTS.md` → Community Switching). Bad or incomplete GStreamer plugin registries on AppImage / mixed host stacks trigger the assert then SEGV inside the WebKit web process.
+
+**Workarounds to try (in order):**
+
+1. Prefer the **`.deb` / `.rpm`** package over AppImage when available — native WebKit + system GStreamer.
+2. Launch with safe rendering: `./Buzz.AppImage --safe-rendering` (or set `WEBKIT_DISABLE_DMABUF_RENDERER=1`).
+3. If you still hit GStreamer assert spam, unset a stale per-user registry and retry:
+   ```bash
+   rm -rf ~/.cache/gstreamer-1.0
+   # Buzz may also keep an AppImage-scoped registry under ~/.cache/buzz/ — see #2694
+   ```
+4. Avoid leaving a channel with an in-flight video/voice attachment focused when switching communities (reduces media teardown races).
+
+**Related fixes in flight / shipped:** AppImage GStreamer registry path (#2694 / #2560), Linux notification sound as mp3 (#2804), earlier AppImage GStreamer host fixes (#2176).
+
+
