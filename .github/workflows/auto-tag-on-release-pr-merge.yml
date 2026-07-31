@@ -111,7 +111,6 @@ jobs:
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           VERSION="${VERSION#desktop-v}"
