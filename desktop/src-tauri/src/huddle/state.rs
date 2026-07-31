@@ -288,9 +288,11 @@ impl HuddleState {
     pub(crate) fn reset_preserving_generation(&mut self) {
         let gen = Arc::clone(&self.session_generation);
         let huddle_generation = self.huddle_generation;
+        let tts_enabled = self.tts_enabled;
         *self = Self::default();
         self.session_generation = gen;
         self.huddle_generation = huddle_generation;
+        self.tts_enabled = tts_enabled;
     }
 }
 
@@ -428,6 +430,18 @@ mod tests {
 
         assert!(!state.owns_huddle_lifetime(first_generation, super::HuddlePhase::Connecting));
         assert!(state.owns_huddle_lifetime(replacement_generation, super::HuddlePhase::Connecting));
+    }
+
+    #[test]
+    fn teardown_preserves_installation_global_tts_preference() {
+        let mut state = HuddleState {
+            tts_enabled: false,
+            phase: super::HuddlePhase::Active,
+            ..HuddleState::default()
+        };
+        state.reset_preserving_generation();
+        assert!(!state.tts_enabled);
+        assert_eq!(state.phase, super::HuddlePhase::Idle);
     }
 
     #[test]

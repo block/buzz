@@ -23,6 +23,7 @@
 //!    takes `stt_pipeline`/`tts_pipeline` out of the lock, then calls `shutdown()`
 //!    and drops them outside the lock (thread joins can block ~200ms).
 
+mod agent_tts_routing;
 pub mod agents;
 pub mod audio_output;
 pub mod jitter;
@@ -37,6 +38,8 @@ pub mod state;
 pub mod stt;
 pub mod transcription;
 pub mod tts;
+pub mod tts_settings;
+mod tts_voice_registry;
 pub mod wire;
 
 // ── Shared utilities ──────────────────────────────────────────────────────────
@@ -63,6 +66,7 @@ pub(super) fn drain_until_shutdown<T>(
 
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
+pub use tts_settings::set_tts_enabled;
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
@@ -71,10 +75,15 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{app_state::AppState, events, relay::submit_event};
+
+use agent_tts_routing::{
+    classify_agent_tts_runtime, enqueue_agent_tts_text, normalize_agent_tts_text,
+    AgentTtsRuntimeGate,
+};
 pub use pipeline::check_pipeline_hotstart;
 use pipeline::{
-    maybe_start_stt_pipeline, maybe_start_tts_pipeline, post_connect_setup,
-    start_auto_enabled_transcription, PostConnectOutcome,
+    await_inflight_tts_start, maybe_start_stt_pipeline, maybe_start_tts_pipeline,
+    post_connect_setup, start_auto_enabled_transcription, PostConnectOutcome,
 };
 use relay_api::{
     count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
@@ -745,91 +754,90 @@ pub fn get_model_status(_state: State<'_, AppState>) -> Result<models::VoiceMode
     })
 }
 
-/// Enable or disable TTS output.
-///
-/// When disabled, the TTS pipeline is shut down and audio output stops.
-/// When re-enabled, the pipeline is restarted if TTS models are available.
-///
-/// Takes the pipeline handle out of the lock before calling shutdown() — the
-/// thread join in Drop can block for ~200 ms (ONNX inference) and we don't
-/// want to hold the HuddleState mutex during that time.
-#[tauri::command]
-pub async fn set_tts_enabled(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
-    let old_pipeline = {
-        let mut hs = state.huddle()?;
-        hs.tts_enabled = enabled;
-        if !enabled {
-            hs.tts_pipeline.take() // Take out of lock.
-        } else {
-            None
-        }
-    };
-    // Shut down outside the lock — thread join happens here.
-    if let Some(ref pipeline) = old_pipeline {
-        pipeline.shutdown();
-    }
-    drop(old_pipeline);
-
-    if enabled {
-        // Re-start TTS pipeline if models are available and huddle is active.
-        let phase = {
-            let hs = state.huddle()?;
-            hs.phase.clone()
-        };
-        if matches!(phase, HuddlePhase::Connected | HuddlePhase::Active) {
-            if let Err(e) = maybe_start_tts_pipeline(&state).await {
-                eprintln!("buzz-desktop: TTS pipeline restart failed: {e}");
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Speak an agent message via TTS.
 ///
-/// Maximum text length accepted for TTS synthesis.
-/// ~2000 chars ≈ 1–2 minutes of speech. Longer messages are truncated.
-const MAX_TTS_TEXT_LEN: usize = 2000;
-
-/// Called by the WebView when it receives an incoming agent kind:9 message.
+/// Called by the WebView when it receives an eligible live agent message.
 /// Lazily starts the TTS pipeline if models are ready but the pipeline hasn't
 /// been created yet (e.g. models finished downloading after huddle started).
 ///
-/// No-op if TTS is disabled or models aren't ready.
+/// Disabled is the only intentional no-op. Enabled-but-unavailable speech
+/// returns an error so the caller cannot mistake a dropped message for success.
 #[tauri::command]
-pub async fn speak_agent_message(text: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn speak_agent_message(
+    text: String,
+    route_id: u64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    eprintln!("buzz-desktop: tts stage=invoke status=started route_id={route_id}");
     // Truncate oversized messages — agents shouldn't monologue in a voice huddle.
     // Use char count (not byte length) to avoid panicking on multi-byte UTF-8.
-    let text = if text.chars().count() > MAX_TTS_TEXT_LEN {
-        let mut truncated: String = text.chars().take(MAX_TTS_TEXT_LEN).collect();
-        truncated.push_str("... message truncated.");
-        truncated
-    } else {
-        text
-    };
+    let text = normalize_agent_tts_text(text);
 
     let needs_pipeline = {
-        let hs = state.huddle()?;
-        hs.tts_enabled
-            && hs.tts_pipeline.is_none()
-            && matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
+        let mut hs = state.huddle()?;
+        if hs
+            .tts_pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.is_finished())
+        {
+            hs.tts_pipeline = None;
+        }
+        match classify_agent_tts_runtime(hs.tts_enabled, &hs.phase, hs.tts_pipeline.is_some()) {
+            AgentTtsRuntimeGate::Disabled => {
+                eprintln!(
+                    "buzz-desktop: tts stage=invoke status=no_op reason=disabled route_id={route_id}"
+                );
+                return Ok(());
+            }
+            AgentTtsRuntimeGate::Inactive => {
+                eprintln!(
+                    "buzz-desktop: tts stage=invoke status=failed reason=inactive_huddle route_id={route_id}"
+                );
+                return Err(
+                    "Agent text to speech is unavailable outside an active huddle".to_string(),
+                );
+            }
+            AgentTtsRuntimeGate::NeedsPipeline => true,
+            AgentTtsRuntimeGate::Ready => false,
+        }
     };
 
     // Lazy-start: models may have finished downloading after the huddle began.
     if needs_pipeline {
-        if let Err(e) = maybe_start_tts_pipeline(&state).await {
-            eprintln!("buzz-desktop: TTS lazy-start failed: {e}");
-        }
+        maybe_start_tts_pipeline(&state).await.inspect_err(|_| {
+            eprintln!(
+                "buzz-desktop: tts stage=invoke status=failed reason=startup_failed route_id={route_id}"
+            );
+        })?;
+        await_inflight_tts_start(&state).await.inspect_err(|_| {
+            eprintln!(
+                "buzz-desktop: tts stage=invoke status=failed reason=startup_timeout route_id={route_id}"
+            );
+        })?;
     }
 
-    let hs = state.huddle()?;
-    if hs.tts_enabled {
-        if let Some(ref pipeline) = hs.tts_pipeline {
-            pipeline.speak(text)?;
-        }
-    }
-    Ok(())
+    let sender = {
+        let hs = state.huddle()?;
+        hs.tts_pipeline
+            .as_ref()
+            .map(|pipeline| pipeline.text_sender())
+    };
+    let Some(sender) = sender else {
+        eprintln!(
+            "buzz-desktop: tts stage=invoke status=failed reason=unavailable route_id={route_id}"
+        );
+        return Err("Agent text to speech is enabled but its audio pipeline is unavailable".into());
+    };
+    enqueue_agent_tts_text(route_id, text, move |route_id, text| {
+        sender
+            .send(route_id, text)
+            .map_err(|error| format!("TTS queue closed while waiting to enqueue: {error}"))
+    })
+    .await
+    .inspect(|_| eprintln!("buzz-desktop: tts stage=queue status=accepted route_id={route_id}"))
+    .inspect_err(|_| {
+        eprintln!("buzz-desktop: tts stage=queue status=failed reason=closed route_id={route_id}")
+    })
 }
 
 /// Add an agent to the active huddle.

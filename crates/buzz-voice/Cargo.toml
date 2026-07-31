@@ -1,0 +1,18 @@
+[package]
+name = "buzz-voice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reusable local voice primitives for Buzz"
+
+[dependencies]
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["api-24", "ndarray", "std"] }
+ort-sys = { version = "=2.0.0-rc.12", features = ["disable-linking"] }
+rand = "0.10"
+sentencepiece-model = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sherpa-onnx = "1.12"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
