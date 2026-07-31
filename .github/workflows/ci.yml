@@ -704,6 +704,17 @@ jobs:
             --run-ignored ignored-only
         env:
           RELAY_URL: ws://localhost:3000
+      - name: NIP-MP coordinate deletion guard
+        # Verifies the never-delete-newer invariant of soft_delete_by_coordinate:
+        # a stale tombstone (created_at earlier than the live head) spares that
+        # head, and an equal-timestamp tombstone deletes it.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(coordinate_delete_spares_head_newer_than_the_deletion)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Upload relay log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -739,7 +750,7 @@ jobs:
           ./scripts/start-relay-for-tests.sh --no-build
       - name: Relay E2E tests
         run: |
-          cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_project -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
         env:

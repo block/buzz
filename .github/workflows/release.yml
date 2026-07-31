@@ -948,5 +948,5 @@ jobs:
         run: gh release edit "desktop-v${VERSION}" --draft=false
 
       - name: Upload latest.json to rolling release last
-        if: ${{ env.already_published != 'true' && !contains(needs.setup.outputs.version, '-') }}
+        if: ${{ !contains(needs.setup.outputs.version, '-') }}
         run: gh release upload buzz-desktop-latest latest.json --clobber

@@ -10,6 +10,7 @@
   <a href="VISION_PROJECTS.md">Forge</a> ·
   <a href="VISION_AGENT.md">Agents</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="RELEASING.md">Releasing</a> ·
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
@@ -118,6 +119,14 @@ New to Buzz? Pick the path that matches you.
 Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest) — macOS (`.dmg`), Linux (`.AppImage` / `.deb`), or Windows (`.exe`). Install it like any other app.
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
+
+### I want my own hosted relay
+
+To run a relay for your team without managing servers, you can deploy one to Railway in a click:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz-relay-block)
+
+See [here](https://engineering.block.xyz/blog/run-your-own-buzz-relay) for details.
 
 ### I work at Block
 
