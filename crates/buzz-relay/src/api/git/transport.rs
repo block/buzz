@@ -15,19 +15,17 @@ use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
-    error_handling::HandleErrorLayer,
     extract::{Path as AxumPath, Query, State},
     http::{header, StatusCode},
+    middleware::{from_fn, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    BoxError,
     Router,
 };
 use base64::Engine;
 use hex;
 use serde::Deserialize;
 use tokio::process::Command;
-use tower::ServiceBuilder;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
@@ -2126,33 +2124,36 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
         .merge(super::settings::router())
-        .layer(
-            ServiceBuilder::new()
-                .layer(HandleErrorLayer::new(move |err: BoxError| async move {
-                    git_body_limit_response(err, max_bytes)
-                }))
-                .layer(RequestBodyLimitLayer::new(body_limit)),
-        )
+        .layer(from_fn(move |req, next| {
+            rewrite_git_body_limit_413(req, next, max_bytes)
+        }))
+        .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
 }
 
-fn git_body_limit_response(err: BoxError, max_bytes: u64) -> Response {
-    let msg = err.to_string();
-    if msg.contains("length limit") || msg.contains("LengthLimitError") {
+/// `RequestBodyLimitLayer` returns a bare 413; rewrite the body so operators
+/// see which env var to raise (and so proxies don't look like TLS aborts).
+async fn rewrite_git_body_limit_413(
+    req: axum::extract::Request,
+    next: Next,
+    max_bytes: u64,
+) -> Response {
+    let response = next.run(req).await;
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "git pack body exceeds relay limit ({max_bytes} bytes; \
-                 self-hosted relays: BUZZ_GIT_MAX_PACK_BYTES)"
-            ),
+            git_body_limit_message(max_bytes),
         )
             .into_response();
     }
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "failed to read git request body",
+    response
+}
+
+fn git_body_limit_message(max_bytes: u64) -> String {
+    format!(
+        "git pack body exceeds relay limit ({max_bytes} bytes; \
+         self-hosted relays: BUZZ_GIT_MAX_PACK_BYTES)"
     )
-        .into_response()
 }
 
 #[cfg(test)]
@@ -2742,12 +2743,10 @@ mod track_c_tests {
     }
 
     #[test]
-    fn git_body_limit_response_maps_length_errors_to_413() {
-        let response = git_body_limit_response(
-            Box::new(std::io::Error::other("LengthLimitError")),
-            5_242_880,
-        );
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    fn git_body_limit_message_names_env_var() {
+        let msg = git_body_limit_message(5_242_880);
+        assert!(msg.contains("5242880"));
+        assert!(msg.contains("BUZZ_GIT_MAX_PACK_BYTES"));
     }
 
     /// Without a gzip `Content-Encoding`, the body is passed through byte
