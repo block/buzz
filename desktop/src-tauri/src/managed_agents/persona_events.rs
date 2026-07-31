@@ -450,12 +450,12 @@ pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
 /// This is the single apply used by every snapshot-apply site: the spawn
 /// re-pin (`start_local_agent_with_preflight`), the launch backfill and
 /// restore re-snapshot (`restore.rs`), and the prospective re-snapshot inside
-/// `spawn_config_hash` — so a future `PersonaSnapshot` field addition
-/// propagates to all of them at once.
+/// `prospective_spawn_config_snapshot` — so a future `PersonaSnapshot` field
+/// addition propagates to all of them at once.
 ///
 /// Deliberately does NOT touch `updated_at`: persistence stamps are the
-/// caller's concern, and `spawn_config_hash` (which applies this to a clone)
-/// must stay pure.
+/// caller's concern, and the prospective snapshot (which applies this to a
+/// clone) must stay pure.
 pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
     let snapshot = persona_snapshot(persona);
     if let Some(prompt) = snapshot.system_prompt {
@@ -498,8 +498,9 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// paths re-pin it to its linked persona, without mutating `record` itself.
 ///
 /// Every decision made ahead of the real re-pin — the relay-mesh preflight in
-/// `start_local_agent_with_preflight`, the restart-badge hash in
-/// `spawn_config_hash` — needs to reason about spawn-time state, not
+/// `start_local_agent_with_preflight`, the restart-badge snapshot in
+/// `prospective_spawn_config_snapshot` — needs to reason about spawn-time
+/// state, not
 /// pre-snapshot bytes, so a persona edit that flips a field (e.g. `provider`
 /// to/from relay-mesh) between saves is reflected in the decision instead of
 /// the stale value the real [`apply_persona_snapshot`] is about to overwrite
@@ -507,7 +508,7 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// so the spawn-time stamp and later recomputes agree when nothing changed.
 ///
 /// Orphaned records (persona deleted) pass through unchanged: the caller's
-/// own orphan handling — refusing to spawn, hashing as `(None, None, None)`
+/// own orphan handling — refusing to spawn, snapshotting as `(None, None, None)`
 /// — runs on the real record downstream, not on this preview.
 pub fn preview_prospective_persona_snapshot(
     record: &ManagedAgentRecord,

@@ -2,6 +2,19 @@ use super::*;
 use crate::managed_agents::types::RespondTo;
 use std::collections::BTreeMap;
 
+/// Canonical projection of a prospective snapshot — the exact value the drift
+/// comparison reads, so these tests assert on drift itself rather than on a
+/// proxy for it.
+fn snapshot(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    teams: &[TeamRecord],
+    workspace_relay: &str,
+    global: &GlobalAgentConfig,
+) -> serde_json::Value {
+    prospective_spawn_config_snapshot(record, personas, teams, workspace_relay, global).canonical()
+}
+
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
         pubkey: "p".repeat(64),
@@ -86,22 +99,22 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
 }
 
 #[test]
-fn hash_is_deterministic() {
+fn snapshot_is_deterministic() {
     let rec = record();
     assert_eq!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn materializing_runtime_keeps_hash_stable() {
+fn materializing_runtime_keeps_snapshot_stable() {
     // Migration cutover invariant (Phase 1A): materializing the linked
-    // persona's runtime onto the record must NOT change the spawn hash —
+    // persona's runtime onto the record must NOT change the spawn snapshot —
     // otherwise every running persona-linked agent would show a spurious
     // restart badge right after migration. Pre-migration the command resolves
     // through the persona fallback; post-migration through record.runtime.
-    // Same persona, same runtime, same command → same hash.
+    // Same persona, same runtime, same command → equal snapshots.
     let personas = vec![persona("p1", Some("goose"), "Persona prompt.")];
 
     let mut pre = record();
@@ -111,14 +124,14 @@ fn materializing_runtime_keeps_hash_stable() {
     post.runtime = Some("goose".into());
 
     assert_eq!(
-        spawn_config_hash(
+        snapshot(
             &pre,
             &personas,
             &[],
             "wss://ws.example",
             &Default::default()
         ),
-        spawn_config_hash(
+        snapshot(
             &post,
             &personas,
             &[],
@@ -129,31 +142,31 @@ fn materializing_runtime_keeps_hash_stable() {
 }
 
 #[test]
-fn record_env_var_edit_changes_hash() {
+fn record_env_var_edit_changes_snapshot() {
     let rec = record();
     let mut edited = record();
     edited
         .env_vars
         .insert("SOME_KEY".into(), "some-value".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn record_prompt_edit_changes_hash() {
+fn record_prompt_edit_changes_snapshot() {
     let rec = record();
     let mut edited = record();
     edited.system_prompt = Some("Edited prompt.".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn persona_runtime_edit_changes_hash() {
+fn persona_runtime_edit_changes_snapshot() {
     // The harness command resolves live personas at spawn, so a persona
     // runtime change means a restart WOULD change what runs → badge trips.
     let mut rec = record();
@@ -161,13 +174,13 @@ fn persona_runtime_edit_changes_hash() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &after, &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn persona_prompt_edit_changes_hash() {
+fn persona_prompt_edit_changes_snapshot() {
     // Start/restore re-snapshot the persona prompt onto the record right
     // before spawning, so a persona prompt edit DOES apply on a plain
     // restart → the badge must trip.
@@ -176,13 +189,13 @@ fn persona_prompt_edit_changes_hash() {
     let before = [persona("pers", Some("goose"), "old prompt")];
     let after = [persona("pers", Some("goose"), "new prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &after, &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn workspace_relay_change_trips_hash_even_for_stored_record_relay() {
+fn workspace_relay_change_trips_snapshot_even_for_stored_record_relay() {
     // The legacy per-record relay pin is ignored (#2122): every record spawns
     // against the active workspace relay, so a workspace relay change means a
     // restart would change what runs — pinned records included.
@@ -192,13 +205,13 @@ fn workspace_relay_change_trips_hash_even_for_stored_record_relay() {
         "fixture should carry a legacy pin"
     );
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
-        spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
+        snapshot(&rec, &[], &[], "wss://relay-b.example", &Default::default())
     );
 }
 
 #[test]
-fn stored_record_relay_does_not_affect_hash() {
+fn stored_record_relay_does_not_affect_snapshot() {
     // Editing the (ignored) stored pin must not badge a restart: what a
     // restart would run is identical either way.
     let mut a = record();
@@ -206,20 +219,20 @@ fn stored_record_relay_does_not_affect_hash() {
     a.relay_url = String::new();
     b.relay_url = "wss://legacy-pin.example".into();
     assert_eq!(
-        spawn_config_hash(&a, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&b, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&a, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&b, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn respond_to_allowlist_edit_changes_hash() {
+fn respond_to_allowlist_edit_changes_snapshot() {
     let rec = record();
     let mut edited = record();
     edited.respond_to = RespondTo::Allowlist;
     edited.respond_to_allowlist = vec!["a".repeat(64)];
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -231,13 +244,13 @@ fn allowlist_ignored_when_mode_is_not_allowlist() {
     let mut edited = record();
     edited.respond_to_allowlist = vec!["a".repeat(64)];
     assert_eq!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn allowlist_normalization_equivalent_edits_do_not_change_hash() {
+fn allowlist_normalization_equivalent_edits_do_not_change_snapshot() {
     // The env receives the normalized list (trim/lowercase/dedup), so edits
     // that normalize to the same value must not badge.
     let mut rec = record();
@@ -249,48 +262,48 @@ fn allowlist_normalization_equivalent_edits_do_not_change_hash() {
         "a".repeat(64),                  // duplicate
     ];
     assert_eq!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn allowlist_content_edit_still_changes_hash() {
+fn allowlist_content_edit_still_changes_snapshot() {
     let mut rec = record();
     rec.respond_to = RespondTo::Allowlist;
     rec.respond_to_allowlist = vec!["a".repeat(64)];
     let mut edited = rec.clone();
     edited.respond_to_allowlist = vec!["b".repeat(64)];
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn explicit_max_turn_duration_changes_hash_from_none() {
+fn explicit_max_turn_duration_changes_snapshot_from_none() {
     let rec = record();
     let mut edited = record();
     edited.max_turn_duration_seconds = Some(7200);
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn non_default_max_turn_duration_changes_hash() {
+fn non_default_max_turn_duration_changes_snapshot() {
     let rec = record();
     let mut edited = record();
     edited.max_turn_duration_seconds = Some(42);
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
-fn non_spawn_bookkeeping_fields_do_not_change_hash() {
+fn non_spawn_bookkeeping_fields_do_not_change_snapshot() {
     // updated_at / runtime_pid / last_* are lifecycle bookkeeping, not spawn
     // inputs — routine record saves must not trip the badge.
     let rec = record();
@@ -300,17 +313,17 @@ fn non_spawn_bookkeeping_fields_do_not_change_hash() {
     edited.last_started_at = Some("later".into());
     edited.last_exit_code = Some(0);
     assert_eq!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
 #[test]
 fn resnapshot_does_not_clobber_record_quad_with_definition_absent_quad() {
-    // B5 hash row 3: the prospective re-snapshot copies ONLY
+    // B5 drift row 3: the prospective re-snapshot copies ONLY
     // prompt/model/provider/env from the linked definition. An instance
     // whose owner hand-set respond_to/allowlist/parallelism must
-    // hash identically whether or not its definition carries a quad —
+    // snapshot identically whether or not its definition carries a quad —
     // activation of the definition-level defaults must never reach through
     // spawn and overwrite instance state.
     let quadless_definition = vec![persona("p1", Some("goose"), "Persona prompt.")];
@@ -326,44 +339,44 @@ fn resnapshot_does_not_clobber_record_quad_with_definition_absent_quad() {
     definition_with_quad[0].parallelism = Some(8);
 
     assert_eq!(
-        spawn_config_hash(
+        snapshot(
             &rec,
             &quadless_definition,
             &[],
             "wss://ws.example",
             &Default::default()
         ),
-        spawn_config_hash(
+        snapshot(
             &rec,
             &definition_with_quad,
             &[],
             "wss://ws.example",
             &Default::default()
         ),
-        "definition quad must not leak into the spawn hash of an existing instance"
+        "definition quad must not leak into the spawn snapshot of an existing instance"
     );
 }
 
 #[test]
-fn empty_prompt_hashes_like_absent_prompt() {
-    // B5 hash row 2 foundation: Some("") and None spawn identically (env var
-    // absent either way), so they must hash equal — a backfilled prompt-less
+fn empty_prompt_snapshots_like_absent_prompt() {
+    // B5 drift row 2 foundation: Some("") and None spawn identically (env var
+    // absent either way), so they must snapshot equal — a backfilled prompt-less
     // record re-snapshots to Some("") and must not trip the badge.
     let mut absent = record();
     absent.system_prompt = None;
     let mut empty = record();
     empty.system_prompt = Some(String::new());
     assert_eq!(
-        spawn_config_hash(&absent, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&empty, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&absent, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&empty, &[], &[], "wss://ws.example", &Default::default()),
     );
 }
 
-/// (a) A definition-runtime edit must change spawn_config_hash for a
+/// (a) A definition-runtime edit must change the snapshot for a
 /// materialized, override-free record — the prospective re-snapshot now
-/// copies the persona's runtime onto the record before hashing.
+/// copies the persona's runtime onto the record before snapshotting.
 #[test]
-fn definition_runtime_edit_changes_hash_for_materialized_record() {
+fn definition_runtime_edit_changes_snapshot_for_materialized_record() {
     let mut rec = record();
     rec.persona_id = Some("pers".into());
     rec.runtime = Some("goose".into()); // materialized runtime on instance
@@ -371,8 +384,8 @@ fn definition_runtime_edit_changes_hash_for_materialized_record() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &after, &[], "wss://ws.example", &Default::default()),
         "definition runtime edit must badge a materialized, override-free instance"
     );
 }
@@ -389,8 +402,8 @@ fn known_runtime_pin_yields_to_definition_runtime_change() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &after, &[], "wss://ws.example", &Default::default()),
         "stale known-runtime pin must not shadow a definition runtime edit"
     );
 }
@@ -407,16 +420,16 @@ fn custom_command_override_beats_definition_runtime_change() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_eq!(
-        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &after, &[], "wss://ws.example", &Default::default()),
         "custom command override must win regardless of definition runtime change"
     );
 }
 
 /// (d) When the linked definition is absent the prospective re-snapshot is
-/// skipped entirely: the materialized runtime must still affect the hash.
+/// skipped entirely: the materialized runtime must still reach the snapshot.
 #[test]
-fn missing_definition_leaves_materialized_runtime_in_hash() {
+fn missing_definition_leaves_materialized_runtime_in_snapshot() {
     let mut rec = record();
     rec.persona_id = Some("missing".into());
     rec.runtime = Some("goose".into()); // materialized runtime
@@ -427,28 +440,28 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
     no_runtime.runtime = None;
 
     assert_ne!(
-        spawn_config_hash(
+        snapshot(
             &rec,
             no_personas,
             &[],
             "wss://ws.example",
             &Default::default()
         ),
-        spawn_config_hash(
+        snapshot(
             &no_runtime,
             no_personas,
             &[],
             "wss://ws.example",
             &Default::default()
         ),
-        "materialized runtime must still affect hash when definition is absent"
+        "materialized runtime must still reach the snapshot when definition is absent"
     );
 }
 
-// ── Global default trips hash for linked inherited agents ─────────────────
+// ── Global default trips drift for linked inherited agents ───────────────
 
 #[test]
-fn global_model_change_trips_hash_for_linked_inherited_agent() {
+fn global_model_change_trips_snapshot_for_linked_inherited_agent() {
     let mut rec = record();
     rec.persona_id = Some("p1".into());
     rec.model = Some("stale-record-model".into());
@@ -466,17 +479,17 @@ fn global_model_change_trips_hash_for_linked_inherited_agent() {
         ..Default::default()
     };
 
-    let hash_a = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_a);
-    let hash_b = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_b);
+    let snapshot_a = snapshot(&rec, &personas, &[], "wss://ws.example", &global_a);
+    let snapshot_b = snapshot(&rec, &personas, &[], "wss://ws.example", &global_b);
 
     assert_ne!(
-        hash_a, hash_b,
-        "changing the global default must trip the hash for a linked inherited agent"
+        snapshot_a, snapshot_b,
+        "changing the global default must drift a linked inherited agent"
     );
 }
 
 #[test]
-fn global_model_change_trips_hash_without_model_env_var() {
+fn global_model_change_trips_snapshot_without_model_env_var() {
     let mut rec = record();
     rec.persona_id = Some("p1".into());
     rec.agent_command = "some-harness-without-model-env".into();
@@ -497,26 +510,26 @@ fn global_model_change_trips_hash_without_model_env_var() {
         ..Default::default()
     };
 
-    let hash_a = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_a);
-    let hash_b = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_b);
+    let snapshot_a = snapshot(&rec, &personas, &[], "wss://ws.example", &global_a);
+    let snapshot_b = snapshot(&rec, &personas, &[], "wss://ws.example", &global_b);
 
     assert_ne!(
-        hash_a, hash_b,
-        "global model change must trip hash even without a model_env_var runtime"
+        snapshot_a, snapshot_b,
+        "global model change must drift even without a model_env_var runtime"
     );
 }
 
 #[test]
-fn linked_instance_stale_prompt_bytes_are_inert_at_hash_time() {
+fn linked_instance_stale_prompt_bytes_are_inert_at_snapshot_time() {
     // Regression for the split-resolve defect: prompt used to be read from
     // the record's own (possibly Phase-A-snapshot-stale) bytes while
     // model/provider were resolved live from the definition. A definition
     // edit landing between a caller's snapshot apply and spawn could hand a
-    // fresh model/provider to a stale prompt, and the hash (which already
+    // fresh model/provider to a stale prompt, and the drift check (which already
     // resolved model/provider live) would silently agree with a spawn that
     // wrote the stale prompt. Now both come from one `resolve_effective_config`
     // call, so a record whose own `system_prompt` bytes disagree with the
-    // live definition must hash exactly as if the record carried the
+    // live definition must snapshot exactly as if the record carried the
     // definition's prompt verbatim — the record's prompt bytes are inert for
     // a linked instance.
     let mut rec = record();
@@ -529,26 +542,26 @@ fn linked_instance_stale_prompt_bytes_are_inert_at_hash_time() {
     let personas = [persona("p1", Some("goose"), "live prompt")];
 
     assert_eq!(
-        spawn_config_hash(
+        snapshot(
             &rec,
             &personas,
             &[],
             "wss://ws.example",
             &Default::default()
         ),
-        spawn_config_hash(
+        snapshot(
             &matching_bytes,
             &personas,
             &[],
             "wss://ws.example",
             &Default::default()
         ),
-        "record's own system_prompt bytes must not affect the hash of a linked instance"
+        "record's own system_prompt bytes must not affect the snapshot of a linked instance"
     );
 }
 
 #[test]
-fn display_name_edit_changes_hash() {
+fn display_name_edit_changes_snapshot() {
     // The spawn writes BUZZ_ACP_SESSION_TITLE from display_name-or-name, so a
     // rename must trip the badge: the running process keeps the old title
     // until it restarts, and the operator has to be told that.
@@ -556,32 +569,32 @@ fn display_name_edit_changes_hash() {
     let mut renamed = record();
     renamed.display_name = Some("Fizz".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&renamed, &[], &[], "wss://ws.example", &Default::default()),
         "a display-name rename changes the spawned session title and must badge"
     );
 }
 
 #[test]
-fn name_edit_changes_hash_when_display_name_is_absent() {
+fn name_edit_changes_snapshot_when_display_name_is_absent() {
     // With no display_name the title falls back to the unique handle, so the
-    // handle is what the env write carries and what must be hashed.
+    // handle is what the env write carries and what must be snapshotted.
     let rec = record();
     let mut renamed = record();
     renamed.name = "agent-2".into();
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
-        "the fallback title source must reach the hash too"
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        "the fallback title source must reach the snapshot too"
     );
 }
 
 #[test]
-fn display_name_edit_does_not_change_hash_under_an_explicit_title_override() {
+fn display_name_edit_does_not_change_snapshot_under_an_explicit_title_override() {
     // User env is written AFTER the Buzz-set title (last-wins), so an explicit
     // BUZZ_ACP_SESSION_TITLE is what the child actually runs with. Renaming the
     // record changes nothing about the spawned process, so badging it would be
-    // a false restart prompt. The override itself still reaches the hash
+    // a false restart prompt. The override itself still reaches the snapshot
     // through the effective env.
     let mut rec = record();
     rec.env_vars
@@ -589,14 +602,14 @@ fn display_name_edit_does_not_change_hash_under_an_explicit_title_override() {
     let mut renamed = rec.clone();
     renamed.display_name = Some("Fizz".into());
     assert_eq!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&renamed, &[], &[], "wss://ws.example", &Default::default()),
         "a rename shadowed by an explicit title override must not badge"
     );
 }
 
 #[test]
-fn title_override_edit_changes_hash() {
+fn title_override_edit_changes_snapshot() {
     // Counterpart to the test above: the override is not inert — editing it
     // changes what the child runs with and must badge.
     let mut rec = record();
@@ -607,8 +620,8 @@ fn title_override_edit_changes_hash() {
         .env_vars
         .insert("BUZZ_ACP_SESSION_TITLE".into(), "Other Title".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&edited, &[], &[], "wss://ws.example", &Default::default()),
         "editing an explicit title override must badge"
     );
 }
@@ -616,7 +629,7 @@ fn title_override_edit_changes_hash() {
 #[test]
 fn linked_instance_prompt_model_provider_resolve_from_one_call() {
     // The prompt for a linked instance must track the definition, exactly
-    // like model/provider — a definition prompt edit trips the hash even
+    // like model/provider — a definition prompt edit drifts the snapshot even
     // though the record's own (stale) system_prompt bytes are unchanged.
     let mut rec = record();
     rec.persona_id = Some("p1".into());
@@ -626,25 +639,25 @@ fn linked_instance_prompt_model_provider_resolve_from_one_call() {
     let after = [persona("p1", Some("goose"), "new definition prompt")];
 
     assert_ne!(
-        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        snapshot(&rec, &after, &[], "wss://ws.example", &Default::default()),
         "linked instance prompt must resolve from the live definition, not stale record bytes"
     );
 }
 
-// ── I2: definition args and env reach spawn_config_hash ──────────────────────
+// ── I2: definition args and env reach the snapshot ───────────────────────────
 //
 // These tests prove that editing a custom harness definition's args or env
-// changes spawn_config_hash, which trips the "restart required" badge.
-// They would fail if spawn_config_hash used only record.agent_args without
+// change the snapshot, which trips the "restart required" badge.
+// They would fail if the snapshot used only record.agent_args without
 // falling back to definition args, or if resolve_effective_agent_env did not
 // include definition env.
 
 /// When a record has no instance args but the definition has default args,
-/// changing the definition args changes the spawn hash. This would fail if
-/// spawn_config_hash used only record.agent_args.
+/// changing the definition args changes the snapshot. This would fail if
+/// the snapshot used only record.agent_args.
 #[test]
-fn spawn_hash_changes_when_definition_default_args_change() {
+fn spawn_snapshot_changes_when_definition_default_args_change() {
     use crate::managed_agents::custom_harnesses::{
         registry_test_lock, warm_harness_registry_from_dir,
     };
@@ -652,8 +665,8 @@ fn spawn_hash_changes_when_definition_default_args_change() {
     use tempfile::tempdir;
 
     // The loaded-harness registry is process-global: a parallel test re-warming
-    // it between the two hash computations makes both resolve to no-definition
-    // and h1 == h2 (observed on Windows CI).
+    // it between the two snapshots makes both resolve to no-definition
+    // and s1 == s2 (observed on Windows CI).
     let _lock = registry_test_lock();
     let dir = tempdir().unwrap();
 
@@ -669,7 +682,7 @@ fn spawn_hash_changes_when_definition_default_args_change() {
     r.runtime = Some("my-def".into());
     r.agent_args = vec![]; // no instance args → definition args are used
 
-    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+    let s1 = snapshot(&r, &[], &[], "ws://relay", &Default::default());
 
     // Update to v2 args and re-warm (simulating save + transactional refresh).
     fs::write(
@@ -679,18 +692,18 @@ fn spawn_hash_changes_when_definition_default_args_change() {
     .unwrap();
     warm_harness_registry_from_dir(Some(dir.path()));
 
-    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+    let s2 = snapshot(&r, &[], &[], "ws://relay", &Default::default());
 
     assert_ne!(
-        h1, h2,
-        "changing definition default args must change the spawn hash"
+        s1, s2,
+        "changing definition default args must change the snapshot"
     );
 }
 
-/// When a definition has env vars, adding them changes the spawn hash. This
+/// When a definition has env vars, adding them changes the snapshot. This
 /// proves resolve_effective_agent_env includes definition env in the layering.
 #[test]
-fn spawn_hash_changes_when_definition_env_changes() {
+fn spawn_snapshot_changes_when_definition_env_changes() {
     use crate::managed_agents::custom_harnesses::{
         registry_test_lock, warm_harness_registry_from_dir,
     };
@@ -712,7 +725,7 @@ fn spawn_hash_changes_when_definition_env_changes() {
     let mut r = record();
     r.runtime = Some("env-def".into());
 
-    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+    let s1 = snapshot(&r, &[], &[], "ws://relay", &Default::default());
 
     // Update to include env and re-warm.
     fs::write(
@@ -722,16 +735,16 @@ fn spawn_hash_changes_when_definition_env_changes() {
     .unwrap();
     warm_harness_registry_from_dir(Some(dir.path()));
 
-    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+    let s2 = snapshot(&r, &[], &[], "ws://relay", &Default::default());
 
-    assert_ne!(h1, h2, "adding definition env must change the spawn hash");
+    assert_ne!(s1, s2, "adding definition env must change the snapshot");
 }
 
 /// Instance-level args win over definition default args (non-empty instance
-/// args must NOT be overridden by the definition). The hash must match a record
+/// args must NOT be overridden by the definition). The snapshot must match a record
 /// that has the same effective args from either source.
 #[test]
-fn spawn_hash_instance_args_win_over_definition_args() {
+fn spawn_snapshot_instance_args_win_over_definition_args() {
     use crate::managed_agents::custom_harnesses::{
         registry_test_lock, warm_harness_registry_from_dir,
     };
@@ -756,12 +769,12 @@ fn spawn_hash_instance_args_win_over_definition_args() {
     r_no_instance.runtime = Some("arg-def".into());
     r_no_instance.agent_args = vec![];
 
-    let h_instance = spawn_config_hash(&r_instance, &[], &[], "ws://relay", &Default::default());
-    let h_no_instance =
-        spawn_config_hash(&r_no_instance, &[], &[], "ws://relay", &Default::default());
+    let snapshot_instance = snapshot(&r_instance, &[], &[], "ws://relay", &Default::default());
+    let snapshot_no_instance =
+        snapshot(&r_no_instance, &[], &[], "ws://relay", &Default::default());
 
     assert_ne!(
-        h_instance, h_no_instance,
-        "instance args and definition args must produce different hashes"
+        snapshot_instance, snapshot_no_instance,
+        "instance args and definition args must produce different snapshots"
     );
 }
