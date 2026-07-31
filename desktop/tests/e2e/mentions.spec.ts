@@ -24,6 +24,8 @@ const ALLOWLIST_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const DELAYED_RELAY_AGENT_PUBKEY =
   "9999999999999999999999999999999999999999999999999999999999999999";
+const FOREIGN_MEMBER_AGENT_PUBKEY =
+  "7777777777777777777777777777777777777777777777777777777777777777";
 const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
@@ -209,7 +211,9 @@ test("@ trigger prioritizes channel members before runnable personas and other m
 
   const dropdown = autocomplete(page);
   await expect(dropdown).toBeVisible();
-  await expect(dropdown.getByText("alice")).toHaveCount(0);
+  // alice is a channel member AND a directory agent with respond_to
+  // "anyone" — invocable, so she stays mentionable like any other member.
+  await expect(dropdown.getByText("alice")).toBeVisible();
   await expect(dropdown.getByText("bob")).toBeVisible();
   await expect(dropdown.getByText("Fizz")).toBeVisible();
   await expect(dropdown.getByText("charlie")).toBeVisible();
@@ -847,6 +851,62 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
   await input.fill("@quinn");
 
   await expect(autocomplete(page)).toHaveCount(0);
+});
+
+test("channel-member agents owned by another user stay mentionable", async ({
+  page,
+}) => {
+  // vera is a channel member with role "bot" but is NOT in this install's
+  // managed-agent list nor the kind:10100 relay directory — exactly what an
+  // agent deployed by another community member looks like from this client.
+  await installMockBridge(page, {
+    channelBotMembers: [
+      {
+        pubkey: FOREIGN_MEMBER_AGENT_PUBKEY,
+        name: "vera",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@vera");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("vera")).toBeVisible();
+  await expect(dropdown.getByTestId("mention-agent-icon")).toBeVisible();
+
+  await input.press("Enter");
+  await page.keyboard.type(" ping");
+  await page.getByTestId("send-message").click();
+
+  const mentionChip = page
+    .getByTestId("message-row")
+    .last()
+    .locator("[data-mention].agent-mention-highlight", { hasText: "vera" });
+  await expect(mentionChip).toBeVisible();
+
+  // The mention must resolve to a real p-tag on the wire, not just render.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const events = (
+          window as Window & {
+            __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+              content: string;
+              tags: string[][];
+            }>;
+          }
+        ).__BUZZ_E2E_SIGNED_EVENTS__;
+        return (
+          events?.find((event) => event.content.includes("ping"))?.tags ?? []
+        );
+      }),
+    )
+    .toContainEqual(["p", FOREIGN_MEMBER_AGENT_PUBKEY]);
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({
