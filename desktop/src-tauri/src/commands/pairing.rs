@@ -11,7 +11,10 @@ use nostr::ToBech32;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Error as WebSocketError, Message},
+};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -103,9 +106,13 @@ pub async fn start_pairing(
     // own NIP-11 declaration of NIP-43 support rather than `auth_required`,
     // which is also true for plain NIP-42 / NIP-OA relays where the main
     // relay is reachable.
-    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
+    let pairing_relay = probe_pairing_relay(&ws_url).await;
+    let pairing_endpoint = PairingEndpoint {
+        uses_legacy_pair_path: matches!(&pairing_relay, PairingRelay::LegacyPath),
+        url: resolve_pairing_relay_url(&ws_url, pairing_relay)?,
+    };
 
-    let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
+    let (session, qr_payload) = PairingSession::new_source(pairing_endpoint.url.clone());
     let qr_uri = encode_qr(&qr_payload);
 
     let payload_json = serde_json::json!({
@@ -130,7 +137,7 @@ pub async fn start_pairing(
     let session_arc = Arc::clone(&pairing.session);
     let generation = Arc::clone(&pairing.generation);
     tauri::async_runtime::spawn(pairing_ws_task(
-        pairing_relay_url,
+        pairing_endpoint,
         session_arc,
         generation,
         task_generation,
@@ -229,7 +236,7 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
 }
 
 async fn pairing_ws_task(
-    relay_url: String,
+    pairing_endpoint: PairingEndpoint,
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     generation: Arc<AtomicU64>,
     task_generation: u64,
@@ -238,7 +245,7 @@ async fn pairing_ws_task(
     app: AppHandle,
 ) {
     if let Err(e) = pairing_ws_task_inner(
-        &relay_url,
+        &pairing_endpoint,
         &session,
         &generation,
         task_generation,
@@ -256,7 +263,7 @@ async fn pairing_ws_task(
 }
 
 async fn pairing_ws_task_inner(
-    relay_url: &str,
+    pairing_endpoint: &PairingEndpoint,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     generation: &AtomicU64,
     task_generation: u64,
@@ -264,12 +271,18 @@ async fn pairing_ws_task_inner(
     outbound_rx: &mut mpsc::Receiver<String>,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let (ws, _) = connect_async(relay_url)
+    let (ws, _) = connect_async(&pairing_endpoint.url)
         .await
-        .map_err(|e| format!("WebSocket connection failed: {e}"))?;
+        .map_err(|error| {
+            pairing_connection_error(
+                &pairing_endpoint.url,
+                pairing_endpoint.uses_legacy_pair_path,
+                &error,
+            )
+        })?;
     let (mut write, mut read) = ws.split();
 
-    handle_nip42_auth(&mut read, &mut write, session, relay_url).await?;
+    handle_nip42_auth(&mut read, &mut write, session, &pairing_endpoint.url).await?;
 
     let our_pk = {
         let guard = session.lock().await;
@@ -476,6 +489,38 @@ enum PairingRelay {
     MainRelay,
 }
 
+struct PairingEndpoint {
+    url: String,
+    uses_legacy_pair_path: bool,
+}
+
+fn pairing_connection_error(
+    relay_url: &str,
+    uses_legacy_pair_path: bool,
+    error: &WebSocketError,
+) -> String {
+    if uses_legacy_pair_path {
+        if let WebSocketError::Http(response) = error {
+            if response.status() == tokio_tungstenite::tungstenite::http::StatusCode::NOT_FOUND {
+                let endpoint = url::Url::parse(relay_url)
+                    .map(|mut url| {
+                        url.set_query(None);
+                        url.set_fragment(None);
+                        url.to_string()
+                    })
+                    .unwrap_or_else(|_| "/pair".to_string());
+                return format!(
+                    "Pairing endpoint {endpoint} returned 404. This relay advertises NIP-43 \
+                     without a pairing_relay_url, but nothing serves /pair. Set \
+                     BUZZ_PAIRING_RELAY_URL or route /pair to buzz-pair-relay, then try again."
+                );
+            }
+        }
+    }
+
+    format!("WebSocket connection failed: {error}")
+}
+
 /// Prefer the relay-advertised dedicated pairing URL. The legacy `/pair`
 /// convention remains as a compatibility fallback for NIP-43 relays that do
 /// not advertise the extension yet.
@@ -626,9 +671,20 @@ mod pairing_generation_tests {
 #[cfg(test)]
 mod pairing_relay_tests {
     use super::{
-        pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+        pairing_connection_error, pairing_relay_from_nip11, probe_pairing_relay,
+        resolve_pairing_relay_url, PairingRelay,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::{http::Response, Error as WebSocketError};
+
+    fn websocket_http_error(status: u16) -> WebSocketError {
+        WebSocketError::Http(Box::new(
+            Response::builder()
+                .status(status)
+                .body(None)
+                .expect("build test HTTP response"),
+        ))
+    }
 
     #[tokio::test]
     async fn live_nip11_probe_discovers_configured_pairing_relay() {
@@ -728,5 +784,33 @@ mod pairing_relay_tests {
         .expect("resolve main pairing relay");
 
         assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
+    }
+
+    #[test]
+    fn legacy_pairing_404_explains_the_missing_pairing_service() {
+        let error = websocket_http_error(404);
+        let message = pairing_connection_error(
+            "wss://relay.example.com/pair?token=do-not-display#fragment",
+            true,
+            &error,
+        );
+
+        assert_eq!(
+            message,
+            "Pairing endpoint wss://relay.example.com/pair returned 404. This relay advertises \
+             NIP-43 without a pairing_relay_url, but nothing serves /pair. Set \
+             BUZZ_PAIRING_RELAY_URL or route /pair to buzz-pair-relay, then try again."
+        );
+        assert!(!message.contains("do-not-display"));
+    }
+
+    #[test]
+    fn non_legacy_pairing_404_keeps_the_generic_connection_error() {
+        let error = websocket_http_error(404);
+
+        assert_eq!(
+            pairing_connection_error("wss://pairing.example.com", false, &error),
+            "WebSocket connection failed: HTTP error: 404 Not Found"
+        );
     }
 }
