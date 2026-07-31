@@ -1,6 +1,7 @@
 import {
   BellOff,
   BellRing,
+  Bookmark,
   Clock,
   Copy,
   CornerUpLeft,
@@ -377,6 +378,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onReactionSelect,
   onRemindLater,
   onReply,
+  onBookmark,
+  isBookmarked = false,
   onUnfollowThread,
   reactionErrorMessage = null,
   reactions,
@@ -396,6 +399,10 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onReactionSelect?: (emoji: string) => Promise<void>;
   onRemindLater?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  /** Toggle the message's saved/bookmarked state. Hidden when omitted. */
+  onBookmark?: (message: TimelineMessage) => void;
+  /** Whether the message is currently saved — drives the filled icon + label. */
+  isBookmarked?: boolean;
   onUnfollowThread?: (message: TimelineMessage) => void;
   reactionErrorMessage?: string | null;
   reactions: TimelineReaction[];
@@ -422,6 +429,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   );
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
+  const hasBookmarkAction = Boolean(onBookmark);
 
   const hasMoreMenuActions =
     Boolean(onEdit) ||
@@ -544,6 +552,37 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                 />
               </PopoverContent>
             </Popover>
+          ) : null}
+
+          {hasBookmarkAction ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={
+                    isBookmarked ? "Remove bookmark" : "Save for later"
+                  }
+                  aria-pressed={isBookmarked}
+                  className={ACTION_BUTTON_CLASS}
+                  data-testid={`bookmark-message-${message.id}`}
+                  onClick={() => {
+                    onBookmark?.(message);
+                  }}
+                  size="sm"
+                  type="button"
+                  variant={isBookmarked ? "secondary" : "ghost"}
+                >
+                  <Bookmark
+                    className={cn(
+                      ACTION_ICON_CLASS,
+                      isBookmarked && "fill-current",
+                    )}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {isBookmarked ? "Remove bookmark" : "Save for later"}
+              </TooltipContent>
+            </Tooltip>
           ) : null}
 
           {hasReplyAction ? (
