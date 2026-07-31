@@ -30,6 +30,7 @@ import {
   useDevRouteSync,
 } from "@/features/dev-mode/lib/useDevRouteSync";
 import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActions";
+import { useCardSelectionShortcuts } from "@/features/dev-mode/lib/useCardSelectionShortcuts";
 import { useDevModeShortcuts } from "@/features/dev-mode/lib/useDevModeShortcuts";
 import { useMessageEditing } from "@/features/dev-mode/lib/useMessageEditing";
 import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
@@ -701,43 +702,15 @@ export function DevModeShell({
     !(threadOpen && activePane === "thread") &&
     !cardSelectionActive;
 
-  React.useEffect(() => {
-    if (!cardSelectionActive || paletteOpen || shortcutsOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      // A focused input owns its own keys (e.g. a click landed in one).
-      if (
-        event.target instanceof HTMLElement &&
-        event.target.matches("textarea, input, [contenteditable='true']")
-      ) {
-        return;
-      }
-      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-        event.preventDefault();
-        navigateCards(event.key === "ArrowUp" ? -1 : 1);
-      } else if (event.key === "Enter") {
-        event.preventDefault();
-        if (selectedRootId) handleOpenThread(selectedRootId);
-      } else if (event.key === "e") {
-        event.preventDefault();
-        startEditingSelected();
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        handleEscape();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    cardSelectionActive,
-    handleEscape,
-    handleOpenThread,
-    navigateCards,
-    paletteOpen,
-    selectedRootId,
-    shortcutsOpen,
-    startEditingSelected,
-  ]);
+  useCardSelectionShortcuts({
+    active: cardSelectionActive && !paletteOpen && !shortcutsOpen,
+    onEditSelected: startEditingSelected,
+    onEscape: handleEscape,
+    onNavigate: navigateCards,
+    onOpenSelected: React.useCallback(() => {
+      if (selectedRootId) handleOpenThread(selectedRootId);
+    }, [handleOpenThread, selectedRootId]),
+  });
 
   const transcriptFor = (
     channel: NonNullable<typeof activeChannel>,
