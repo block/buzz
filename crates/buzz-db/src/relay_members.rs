@@ -651,11 +651,11 @@ async fn remove_guest_channel_memberships(
 
 /// Revoke one channel grant from an active relay guest.
 ///
-/// The relay-member row is locked before the grant is removed so concurrent
-/// relay-level removal and channel-level removal cannot leave an orphaned
-/// authority row. When the revoked channel was the guest's last grant, the
-/// relay-member row is deleted as well; a guest without a channel must never
-/// retain community admission.
+/// The target identity's invite-claim lock is taken before the relay-member
+/// row is locked. This matches guest claims and channel-level removals, so
+/// concurrent revocations cannot invert their row-lock order. When the revoked
+/// channel was the guest's last grant, the relay-member row is deleted as well;
+/// a guest without a channel must never retain community admission.
 ///
 /// Returns `true` when a guest grant was removed and `false` when the target is
 /// not a guest or no matching grant exists.
@@ -666,6 +666,14 @@ pub async fn revoke_guest_channel(
     channel_id: uuid::Uuid,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{pubkey}",
+            community.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
+
     let role: Option<String> = sqlx::query_scalar(
         "SELECT role FROM relay_members \
          WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
