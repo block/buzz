@@ -82,6 +82,9 @@ bytes = "1"
 futures-util = "0.3"
 opus = "0.3"
 neteq = { version = "0.8", default-features = false }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["api-24", "ndarray", "std"] }
+ort-sys = { version = "=2.0.0-rc.12", features = ["disable-linking"] }
+rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -125,6 +128,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 zip = "8"
 flate2 = "1"
 sherpa-onnx = "1.12"
+sentencepiece-model = "0.1"
 regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 axum = "0.8"
@@ -135,6 +139,7 @@ audioadapter-buffers = "3.0"
 tempfile = "3"
 strip-ansi-escapes = "0.2"
 tracing = "0.1"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay
