@@ -64,6 +64,39 @@ test("absent target or pubkey resolves to null", () => {
   );
 });
 
+test("never resolves when the parent author is the current viewer", () => {
+  // Even an agent-flagged parent must not resolve when it is the viewer's
+  // own identity — replying to yourself must not @-mention yourself.
+  assert.equal(
+    resolveReplyTargetAgent(
+      { id: "evt1", pubkey: agentPubkey, author: "Fizz", isAgent: true },
+      new Set([agentPubkey]),
+      undefined,
+      agentPubkey,
+    ),
+    null,
+  );
+  assert.equal(
+    resolveReplyTargetAgent(
+      { id: "evt1", pubkey: agentPubkey, author: "Fizz", isAgent: true },
+      emptySet,
+      undefined,
+      agentPubkey.toUpperCase(),
+    ),
+    null,
+  );
+  // A different viewer still resolves normally.
+  assert.deepEqual(
+    resolveReplyTargetAgent(
+      { id: "evt1", pubkey: agentPubkey, author: "Fizz", isAgent: true },
+      emptySet,
+      undefined,
+      humanPubkey,
+    ),
+    { targetId: "evt1", pubkey: agentPubkey, displayName: "Fizz" },
+  );
+});
+
 test("normalizes uppercase pubkeys before matching", () => {
   assert.deepEqual(
     resolveReplyTargetAgent(

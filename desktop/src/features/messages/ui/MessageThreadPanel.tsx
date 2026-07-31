@@ -324,8 +324,9 @@ export function MessageThreadPanel({
         effectiveReplyTarget,
         knownAgentPubkeys,
         profiles,
+        currentPubkey,
       ),
-    [effectiveReplyTarget, knownAgentPubkeys, profiles],
+    [currentPubkey, effectiveReplyTarget, knownAgentPubkeys, profiles],
   );
 
   const deferredThreadReplies = React.useDeferredValue(

@@ -17,6 +17,10 @@ export type ReplyTargetAgent = {
  * when the target is absent, human-authored, or unresolvable. Agent detection
  * is layered the same way the thread panel already does it: the message's own
  * `isAgent` flag, the known-agent pubkey set, then the profile flag.
+ *
+ * A parent authored by the current viewer never resolves — replying to your
+ * own message must not @-mention yourself, even when the signed-in identity
+ * is itself agent-flagged (e.g. the app running under an agent key).
  */
 export function resolveReplyTargetAgent(
   target:
@@ -30,6 +34,7 @@ export function resolveReplyTargetAgent(
     | undefined,
   knownAgentPubkeys: ReadonlySet<string> | null | undefined,
   profiles?: UserProfileLookup,
+  currentPubkey?: string | null,
 ): ReplyTargetAgent | null {
   if (!target?.pubkey) {
     return null;
@@ -37,6 +42,10 @@ export function resolveReplyTargetAgent(
 
   const pubkey = normalizePubkey(target.pubkey);
   if (!pubkey) {
+    return null;
+  }
+
+  if (currentPubkey && normalizePubkey(currentPubkey) === pubkey) {
     return null;
   }
 
