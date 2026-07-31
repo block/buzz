@@ -24,6 +24,7 @@ import {
 } from "@/features/home/lib/inboxViewHelpers";
 import { resolveInboxFilterSelection } from "@/features/home/lib/inboxSelection";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
+import { useHomeInboxExplicitRead } from "@/features/home/useHomeInboxExplicitRead";
 import { useHomeInboxAutoSelection } from "@/features/home/useHomeInboxAutoSelection";
 import { useHomeInboxContextMessages } from "@/features/home/useHomeInboxContextMessages";
 import { useHomePersonalInbox } from "@/features/home/useHomePersonalInbox";
@@ -405,7 +406,8 @@ export function HomeView({
       undoDoneLocal: undoDone,
       undoUnreadLocal: undoUnread,
     });
-  // Resolve selection before filtering so unread-only can retain its active row.
+  // Resolve selection against the complete Inbox so representative changes
+  // can preserve the active conversation across filters.
   const selectedItemFromAll = React.useMemo(
     () =>
       selectedEventId
@@ -428,18 +430,20 @@ export function HomeView({
     return inboxItems.filter(
       (item) =>
         matchesInboxFilter(item, filter, ownedAgentPubkeys) &&
-        (!unreadOnly ||
-          !effectiveDoneSet.has(item.id) ||
-          item.conversationId === selectedConversationId),
+        (!unreadOnly || !effectiveDoneSet.has(item.id)),
     );
-  }, [
-    effectiveDoneSet,
-    filter,
+  }, [effectiveDoneSet, filter, inboxItems, ownedAgentPubkeys, unreadOnly]);
+  const handleMarkItemRead = useHomeInboxExplicitRead({
+    applyInboxSearchPatch,
+    filteredItems,
     inboxItems,
-    ownedAgentPubkeys,
+    isNarrowHomeViewport,
+    markItemRead,
     selectedConversationId,
+    setAutoSelectedEventId,
+    setUnreadBoundary,
     unreadOnly,
-  ]);
+  });
   // A filter change may only retain detail for a conversation that remains
   // visible. The filter handler selects the next valid row in the same update,
   // so the detail pane never renders a stale conversation between states.
@@ -530,9 +534,7 @@ export function HomeView({
       const nextItems = inboxItems.filter(
         (item) =>
           matchesInboxFilter(item, nextFilter, ownedAgentPubkeys) &&
-          (!unreadOnly ||
-            !effectiveDoneSet.has(item.id) ||
-            item.conversationId === selectedConversationId),
+          (!unreadOnly || !effectiveDoneSet.has(item.id)),
       );
       const selection = resolveInboxFilterSelection({
         isNarrow: isNarrowHomeViewport,
@@ -694,7 +696,7 @@ export function HomeView({
               items={filteredItems}
               onDeleteDraft={handleDeleteDraft}
               onFilterChange={handleFilterChange}
-              onMarkRead={markItemRead}
+              onMarkRead={handleMarkItemRead}
               onMarkUnread={markItemUnread}
               onOpenDirect={(item) => {
                 const channelId = item.item.channelId;
@@ -732,7 +734,6 @@ export function HomeView({
                 setSelectedDraftKey(null);
                 setSelectedReminderId(null);
                 handleUserSelectItem(itemId);
-                markItemRead(itemId);
               }}
               onSelectDraft={(draftKey) => {
                 setUnreadBoundary(null);
