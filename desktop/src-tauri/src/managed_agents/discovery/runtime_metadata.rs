@@ -109,7 +109,7 @@ pub(crate) const OPENCODE_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
     default_env: &[],
     config_file_path: Some("~/.config/opencode/opencode.json"),
     config_file_format: Some("json"),
-    supports_acp_native_config: true,
+    supports_acp_native_config: false,
     thinking_env_var: None,
     max_tokens_env_var: None,
     context_limit_env_var: None,
@@ -183,6 +183,7 @@ mod tests {
         );
         assert!(opencode.supports_acp_model_switching);
         assert!(opencode.supports_account_connection);
+        assert!(!opencode.supports_acp_native_config);
         assert!(opencode.adapter_install_commands.is_empty());
         assert!(opencode.auth_probe_args.is_none());
     }
