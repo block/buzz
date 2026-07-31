@@ -471,11 +471,13 @@ class _AttachmentStrip extends StatelessWidget {
   final List<BlobDescriptor> attachments;
   final int uploadingCount;
   final void Function(String url) onRemove;
+  final VoidCallback? onCancelUpload;
 
   const _AttachmentStrip({
     required this.attachments,
     required this.uploadingCount,
     required this.onRemove,
+    this.onCancelUpload,
   });
 
   @override
@@ -535,6 +537,33 @@ class _AttachmentStrip extends StatelessWidget {
                             style: context.textTheme.labelSmall?.copyWith(
                               color: context.colors.onPrimary,
                               fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (onCancelUpload != null)
+                      PositionedDirectional(
+                        top: 0,
+                        end: 0,
+                        child: Semantics(
+                          button: true,
+                          label: 'Cancel upload',
+                          child: Material(
+                            color: context.colors.surface.withValues(
+                              alpha: 0.92,
+                            ),
+                            shape: const CircleBorder(),
+                            clipBehavior: Clip.antiAlias,
+                            child: InkWell(
+                              onTap: onCancelUpload,
+                              child: Padding(
+                                padding: const EdgeInsets.all(4),
+                                child: Icon(
+                                  LucideIcons.x,
+                                  size: 14,
+                                  color: context.colors.onSurfaceVariant,
+                                ),
+                              ),
                             ),
                           ),
                         ),

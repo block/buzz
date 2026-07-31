@@ -5,6 +5,8 @@ class _ComposeBarLayout extends StatelessWidget {
   final int uploadingCount;
   final ValueChanged<String> onRemoveAttachment;
   final String? uploadError;
+  final VoidCallback? onDismissUploadError;
+  final VoidCallback? onCancelUpload;
   final bool isExpanded;
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -33,6 +35,8 @@ class _ComposeBarLayout extends StatelessWidget {
     required this.uploadingCount,
     required this.onRemoveAttachment,
     required this.uploadError,
+    this.onDismissUploadError,
+    this.onCancelUpload,
     required this.isExpanded,
     required this.controller,
     required this.focusNode,
@@ -81,18 +85,42 @@ class _ComposeBarLayout extends StatelessWidget {
               attachments: attachments,
               uploadingCount: uploadingCount,
               onRemove: onRemoveAttachment,
+              onCancelUpload: onCancelUpload,
             ),
             const SizedBox(height: Grid.xxs),
           ],
           if (uploadError case final error?) ...[
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                error,
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.error,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    error,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.error,
+                    ),
+                  ),
                 ),
-              ),
+                if (onDismissUploadError != null)
+                  Semantics(
+                    button: true,
+                    label: 'Dismiss upload error',
+                    child: IconButton(
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 32,
+                        minHeight: 32,
+                      ),
+                      onPressed: onDismissUploadError,
+                      icon: Icon(
+                        LucideIcons.x,
+                        size: 16,
+                        color: context.colors.error,
+                      ),
+                    ),
+                  ),
+              ],
             ),
             const SizedBox(height: Grid.xxs),
           ],

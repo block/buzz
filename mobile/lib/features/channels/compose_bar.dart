@@ -546,7 +546,7 @@ class ComposeBar extends HookConsumerWidget {
           attachments.value = [...attachments.value, uploaded];
         }
       } catch (error) {
-        if (context.mounted) {
+        if (context.mounted && _shouldSurfaceUploadError(error)) {
           uploadError.value = _formatUploadError(error);
         }
       } finally {
@@ -566,10 +566,16 @@ class ComposeBar extends HookConsumerWidget {
         if (picked == null || !context.mounted) return;
         await pickAndUpload(() => upload(picked));
       } catch (error) {
-        if (context.mounted) {
+        if (context.mounted && _shouldSurfaceUploadError(error)) {
           uploadError.value = _formatUploadError(error);
         }
       }
+    }
+
+    void cancelPendingUploads() {
+      ref.read(mediaUploadServiceProvider).cancelActiveUploads();
+      uploadingCount.value = 0;
+      uploadError.value = null;
     }
 
     Future<void> uploadImages(List<XFile> images) async {
@@ -617,7 +623,7 @@ class ComposeBar extends HookConsumerWidget {
             .map((result) => result.error)
             .whereType<Object>()
             .firstOrNull;
-        if (firstError != null) {
+        if (firstError != null && _shouldSurfaceUploadError(firstError)) {
           uploadError.value = _formatUploadError(firstError);
         }
       } finally {
@@ -727,7 +733,7 @@ class ComposeBar extends HookConsumerWidget {
         try {
           await choose();
         } catch (error) {
-          if (context.mounted) {
+          if (context.mounted && _shouldSurfaceUploadError(error)) {
             uploadError.value = errorMessage ?? _formatUploadError(error);
           }
         }
@@ -951,6 +957,8 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount: uploadingCount.value,
           onRemoveAttachment: removeAttachment,
           uploadError: uploadError.value,
+          onDismissUploadError: () => uploadError.value = null,
+          onCancelUpload: hasPendingUploads ? cancelPendingUploads : null,
           isExpanded: isComposerExpanded.value,
           controller: controller,
           focusNode: focusNode,
