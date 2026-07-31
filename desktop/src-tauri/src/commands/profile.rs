@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use buzz_core_pkg::PresenceStatus;
+use nostr::PublicKey;
 use serde_json::Value;
 use tauri::State;
 
@@ -261,6 +262,17 @@ fn build_user_search_filter(query: &str, limit: usize, page: u32) -> serde_json:
     })
 }
 
+fn parse_exact_pubkey_query(query: &str) -> Option<PublicKey> {
+    let trimmed = query.trim();
+    let is_hex = trimmed.len() == 64 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let is_npub = trimmed.to_ascii_lowercase().starts_with("npub1");
+    if !is_hex && !is_npub {
+        return None;
+    }
+
+    PublicKey::parse(trimmed).ok()
+}
+
 #[tauri::command]
 pub async fn search_users(
     query: String,
@@ -304,6 +316,32 @@ pub async fn search_users(
             response.next_cursor = Some((page + 1).to_string());
         }
         return Ok(response);
+    }
+
+    if let Some(target) = parse_exact_pubkey_query(trimmed) {
+        let target_hex = target.to_hex();
+        let events = query_relay(
+            &state,
+            &[
+                serde_json::json!({
+                    "kinds": [0],
+                    "authors": [target_hex],
+                    "limit": 1
+                }),
+                serde_json::json!({
+                    "kinds": [13534],
+                    "limit": 1
+                }),
+            ],
+        )
+        .await?;
+        let users = nostr_convert::exact_user_search_result(&events, &target)
+            .into_iter()
+            .collect();
+        return Ok(SearchUsersResponse {
+            users,
+            next_cursor: None,
+        });
     }
 
     // NIP-50 full-text search on kind:0 profiles. The relay's HTTP bridge
@@ -417,6 +455,7 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::ToBech32;
 
     #[test]
     fn deferred_profile_signer_is_captured_and_rejects_wrong_identity() {
@@ -480,5 +519,24 @@ mod tests {
         assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
         assert_eq!(filter["limit"], serde_json::json!(25));
         assert_eq!(filter["page"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn exact_pubkey_query_accepts_hex_and_npub() {
+        let public_key = nostr::Keys::generate().public_key();
+        let hex = public_key.to_hex();
+        let npub = public_key.to_bech32().expect("encode npub");
+
+        assert_eq!(parse_exact_pubkey_query(&hex), Some(public_key));
+        assert_eq!(parse_exact_pubkey_query(&npub), Some(public_key));
+    }
+
+    #[test]
+    fn exact_pubkey_query_rejects_prefixes_and_other_text() {
+        let public_key = nostr::Keys::generate().public_key().to_hex();
+
+        assert_eq!(parse_exact_pubkey_query(&public_key[..16]), None);
+        assert_eq!(parse_exact_pubkey_query("alice"), None);
+        assert_eq!(parse_exact_pubkey_query("note1invalid"), None);
     }
 }

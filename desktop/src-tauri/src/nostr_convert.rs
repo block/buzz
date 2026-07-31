@@ -16,8 +16,8 @@ use crate::models::*;
 
 mod user_search;
 pub use user_search::{
-    list_user_search_results, rank_user_search_results, search_users_from_events,
-    user_search_result_from_event,
+    exact_user_search_result, list_user_search_results, rank_user_search_results,
+    search_users_from_events, user_search_result_from_event,
 };
 
 // ── Tag helpers ─────────────────────────────────────────────────────────────
