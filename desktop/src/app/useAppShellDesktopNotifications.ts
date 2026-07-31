@@ -19,8 +19,10 @@ import {
 } from "@/features/notifications/lib/notificationFormat";
 import {
   playNotificationSound,
-  resolveSlotSound,
+  resolveEventSound,
 } from "@/features/notifications/lib/sound";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
 export function useAppShellDesktopNotifications({
@@ -40,6 +42,10 @@ export function useAppShellDesktopNotifications({
   ) => Promise<unknown>;
   pubkey?: string;
 }) {
+  const knownAgentPubkeys = useKnownAgentPubkeys();
+  const isAgentSender = (senderPubkey: string) =>
+    knownAgentPubkeys.has(normalizePubkey(senderPubkey));
+
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
       if (!shouldBounceForChannelNotification(event.tags)) return;
@@ -76,7 +82,13 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend) return;
-        playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
+        playNotificationSound(
+          resolveEventSound(
+            notificationSettings,
+            "dm",
+            isAgentSender(event.pubkey),
+          ),
+        );
         void requestDockBounce();
       });
     },
@@ -122,7 +134,11 @@ export function useAppShellDesktopNotifications({
       }).then((didSend) => {
         if (!didSend) return;
         playNotificationSound(
-          resolveSlotSound(notificationSettings, "thread_reply"),
+          resolveEventSound(
+            notificationSettings,
+            "thread_reply",
+            isAgentSender(event.pubkey),
+          ),
         );
         void requestDockBounce();
       });

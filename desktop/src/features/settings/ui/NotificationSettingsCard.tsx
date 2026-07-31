@@ -7,10 +7,16 @@ import type {
 } from "@/features/notifications/hooks";
 import {
   COMING_SOON_SLOTS,
+  DEFAULT_SENDER_SOUNDS,
   RECOMMENDED_SOUND_BY_SLOT,
+  SENDER_DESCRIPTIONS,
+  SENDER_KINDS,
+  SENDER_LABELS,
+  SENDER_SOUND_SLOTS,
   SLOT_DESCRIPTIONS,
   SLOT_LABELS,
   SOUND_SLOTS,
+  type SenderKind,
   type SoundName,
   type SoundSlot,
 } from "@/features/notifications/lib/sound";
@@ -32,6 +38,7 @@ export function NotificationSettingsCard({
   onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
   onSetSoundForSlot,
+  onSetSenderSound,
 }: {
   isUpdatingDesktopNotifications: boolean;
   notificationErrorMessage: string | null;
@@ -43,6 +50,7 @@ export function NotificationSettingsCard({
   onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
+  onSetSenderSound: (kind: SenderKind, name: SoundName) => void;
 }) {
   const permissionBlocked =
     notificationPermission === "denied" ||
@@ -142,10 +150,11 @@ export function NotificationSettingsCard({
                     className="text-sm font-medium"
                     htmlFor="notification-sound-switch"
                   >
-                    Sound
+                    Event alerts
                   </label>
                   <p className="text-sm font-normal text-muted-foreground">
-                    Alert with a sound for the events below.
+                    Show a notification and play a sound for the events below.
+                    Turning this off silences all of them.
                   </p>
                 </div>
                 <Switch
@@ -161,6 +170,26 @@ export function NotificationSettingsCard({
 
             {anyAlertsOn ? (
               <>
+                <SettingsOptionGroup>
+                  {SENDER_KINDS.map((kind) => (
+                    <SettingsOptionRow key={kind}>
+                      <div className="min-w-0">
+                        <span className="text-sm font-medium">
+                          {SENDER_LABELS[kind]}
+                        </span>
+                        <p className="text-sm font-normal text-muted-foreground">
+                          {SENDER_DESCRIPTIONS[kind]}
+                        </p>
+                      </div>
+                      <SoundPicker
+                        onChange={(next) => onSetSenderSound(kind, next)}
+                        recommended={DEFAULT_SENDER_SOUNDS[kind]}
+                        value={notificationSettings.senderSounds[kind]}
+                      />
+                    </SettingsOptionRow>
+                  ))}
+                </SettingsOptionGroup>
+
                 <SettingsOptionGroup>
                   {visibleSlots.map((slot) => {
                     const comingSoon = COMING_SOON_SLOTS.has(slot);
@@ -188,19 +217,23 @@ export function NotificationSettingsCard({
                           </p>
                         </div>
                         <span className="flex items-center gap-3">
-                          <span
-                            className={cn(
-                              "transition-opacity duration-200",
-                              !alertsOn && "pointer-events-none opacity-40",
-                            )}
-                          >
-                            <SoundPicker
-                              disabled={comingSoon || !alertsOn}
-                              onChange={(next) => onSetSoundForSlot(slot, next)}
-                              recommended={RECOMMENDED_SOUND_BY_SLOT[slot]}
-                              value={notificationSettings.sounds[slot]}
-                            />
-                          </span>
+                          {SENDER_SOUND_SLOTS.has(slot) ? null : (
+                            <span
+                              className={cn(
+                                "transition-opacity duration-200",
+                                !alertsOn && "pointer-events-none opacity-40",
+                              )}
+                            >
+                              <SoundPicker
+                                disabled={comingSoon || !alertsOn}
+                                onChange={(next) =>
+                                  onSetSoundForSlot(slot, next)
+                                }
+                                recommended={RECOMMENDED_SOUND_BY_SLOT[slot]}
+                                value={notificationSettings.sounds[slot]}
+                              />
+                            </span>
+                          )}
                           <Switch
                             checked={alertsOn && !comingSoon}
                             data-testid={`notifications-alerts-enabled-${slot}`}

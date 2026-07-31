@@ -8,6 +8,7 @@ import {
 import type { FeedItemCategory } from "@/shared/api/types";
 
 export const SOUND_NAMES = [
+  "amp",
   "bong",
   "boo",
   "dng",
@@ -79,6 +80,37 @@ export const RECOMMENDED_SOUND_BY_SLOT: Record<SoundSlot, SoundName> = {
   job_error: "oh-no",
 };
 
+/**
+ * Message-like slots resolve their sound by who sent the message (human vs
+ * agent) rather than by the per-slot picks. Non-message slots (needs_action,
+ * job_*) keep per-slot sounds.
+ */
+export const SENDER_SOUND_SLOTS: ReadonlySet<SoundSlot> = new Set([
+  "dm",
+  "mention",
+  "thread_reply",
+]);
+
+export const SENDER_KINDS = ["human", "agent"] as const;
+export type SenderKind = (typeof SENDER_KINDS)[number];
+
+export type SenderSounds = Record<SenderKind, SoundName>;
+
+export const SENDER_LABELS: Record<SenderKind, string> = {
+  human: "Human senders",
+  agent: "Agent senders",
+};
+
+export const SENDER_DESCRIPTIONS: Record<SenderKind, string> = {
+  human: "Messages, mentions, and replies sent by people.",
+  agent: "Messages, mentions, and replies sent by agents.",
+};
+
+export const DEFAULT_SENDER_SOUNDS: SenderSounds = {
+  human: "ping",
+  agent: "amp",
+};
+
 export type SlotSounds = Record<SoundSlot, SoundName>;
 
 export const DEFAULT_SLOT_SOUNDS: SlotSounds = {
@@ -106,12 +138,28 @@ export const DEFAULT_SLOT_ALERTS_ENABLED: Record<SoundSlot, boolean> = {
 
 export type SoundPreferences = {
   sounds: SlotSounds;
+  senderSounds: SenderSounds;
 };
 
 export function resolveSlotSound(
   prefs: SoundPreferences,
   slot: SoundSlot,
 ): SoundName {
+  return prefs.sounds[slot];
+}
+
+/**
+ * Sound for a notification event: message-like slots pick by sender kind,
+ * everything else falls back to the per-slot sound.
+ */
+export function resolveEventSound(
+  prefs: SoundPreferences,
+  slot: SoundSlot,
+  isAgentSender: boolean,
+): SoundName {
+  if (SENDER_SOUND_SLOTS.has(slot)) {
+    return prefs.senderSounds[isAgentSender ? "agent" : "human"];
+  }
   return prefs.sounds[slot];
 }
 

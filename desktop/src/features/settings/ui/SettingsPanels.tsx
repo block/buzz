@@ -29,7 +29,11 @@ import type {
   DesktopNotificationPermissionState,
   NotificationSettings,
 } from "@/features/notifications/hooks";
-import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
+import type {
+  SenderKind,
+  SoundName,
+  SoundSlot,
+} from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
@@ -158,6 +162,7 @@ export type SettingsPanelProps = {
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
+  onSetSenderSound: (kind: SenderKind, name: SoundName) => void;
 };
 
 export const settingsSections: SettingsSectionDescriptor[] = [
@@ -855,6 +860,7 @@ export function renderSettingsSection(
           onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
           onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
           onSetSoundForSlot={props.onSetSoundForSlot}
+          onSetSenderSound={props.onSetSenderSound}
         />
       );
     case "voice":

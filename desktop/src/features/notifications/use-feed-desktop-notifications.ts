@@ -1,6 +1,7 @@
 import * as React from "react";
 
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -21,7 +22,7 @@ import {
 } from "./lib/desktop";
 import {
   playNotificationSound,
-  resolveSlotSound,
+  resolveEventSound,
   slotForFeedKind,
 } from "./lib/sound";
 import type { NotificationSettings } from "./hooks";
@@ -78,6 +79,7 @@ export function useFeedDesktopNotifications(
   channels: readonly NotificationChannel[] = [],
 ) {
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
+  const knownAgentPubkeys = useKnownAgentPubkeys();
   const seenItemIdsRef = React.useRef<Set<string>>(
     new Set(readStoredSeenFeedIds(normalizedPubkey)),
   );
@@ -127,7 +129,11 @@ export function useFeedDesktopNotifications(
 
       if (didSend) {
         const slot = slotForFeedKind(item.kind, item.category);
-        playNotificationSound(resolveSlotSound(settings, slot));
+        const senderPubkey = normalizePubkey(item.pubkey);
+        const isAgentSender =
+          knownAgentPubkeys.has(senderPubkey) ||
+          profiles?.[senderPubkey]?.isAgent === true;
+        playNotificationSound(resolveEventSound(settings, slot, isAgentSender));
       }
     },
   );

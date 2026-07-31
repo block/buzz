@@ -781,6 +781,9 @@ export function AppShell() {
                               onSetSoundForSlot={
                                 notificationSettings.setSoundForSlot
                               }
+                              onSetSenderSound={
+                                notificationSettings.setSenderSound
+                              }
                               section={settingsSection}
                             />
                           </React.Suspense>
