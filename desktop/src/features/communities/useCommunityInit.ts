@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { isMacPlatform } from "@/shared/lib/platform";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
@@ -8,6 +10,7 @@ import {
   getDefaultRelayUrl,
 } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
 import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
@@ -53,6 +56,9 @@ function resetCommunityState({
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
+  if (isTauri() && isMacPlatform()) {
+    void clearTrayAgentActivity();
+  }
   if (resetAvatarState) {
     resetAvatarProfileSync();
     resetAvatarPresentations();

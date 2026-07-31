@@ -298,6 +298,36 @@ void main() {
     unsubscribeSecond();
   });
 
+  test('flushes replay events before a post-EOSE query can begin', () async {
+    final session = RelaySessionNotifier();
+    final deliveryPhases = <bool>[];
+    var queryHasBegun = false;
+    const filter = NostrFilter(
+      kinds: EventKind.channelEventKinds,
+      tags: {
+        '#h': [_channelId],
+      },
+      limit: 50,
+    );
+
+    final subscribe = session.subscribe(
+      filter,
+      (_) => deliveryPhases.add(queryHasBegun),
+    );
+    final replayEvent = _event();
+    session.debugHandleMessage(['EVENT', 'l-1', replayEvent.toJson()]);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+
+    final unsubscribe = await subscribe;
+    queryHasBegun = true;
+    // The original batch timer must not deliver the replay event after the
+    // caller has advanced to its query phase.
+    session.debugFlushEventBuffer();
+
+    expect(deliveryPhases, [false]);
+    unsubscribe();
+  });
+
   test('live subscribe fails when relay closes before ready', () async {
     final session = RelaySessionNotifier();
     const filter = NostrFilter(kinds: [EventKind.agentObserverFrame], limit: 0);

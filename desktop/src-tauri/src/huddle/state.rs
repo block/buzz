@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 
@@ -80,6 +80,15 @@ pub struct HuddleState {
     pub tts_enabled: bool,
     /// Whether STT transcript posting is enabled for this huddle.
     pub transcription_enabled: bool,
+    /// Whether the user has explicitly used the transcription control in this
+    /// huddle. Agent presence may auto-enable transcription only while this is
+    /// false, so membership refreshes never undo an explicit user choice.
+    ///
+    /// This is backend-only session state: keeping it in `HuddleState` makes it
+    /// survive frontend remounts and audio reconnects, while huddle teardown
+    /// resets it for the next session.
+    #[serde(skip)]
+    pub transcription_user_controlled: bool,
     /// Shared flag: true while TTS is playing audio.
     /// Shared with the STT pipeline for barge-in / echo gating.
     #[serde(skip)]
@@ -103,6 +112,10 @@ pub struct HuddleState {
     /// Used to throttle the refresh in check_pipeline_hotstart to every 15 s.
     #[serde(skip)]
     pub last_agent_refresh: Option<std::time::Instant>,
+    /// Monotonic identity for a local huddle lifetime. Unlike transcript
+    /// generation, this changes only when a new start/join attempt begins.
+    #[serde(skip)]
+    pub huddle_generation: u64,
     /// Session generation — incremented on every teardown. The transcription
     /// task captures this at spawn time and checks before each POST. If the
     /// generation has changed, the task silently drops the transcript.
@@ -157,11 +170,13 @@ impl Clone for HuddleState {
             is_creator: self.is_creator,
             tts_enabled: self.tts_enabled,
             transcription_enabled: self.transcription_enabled,
+            transcription_user_controlled: self.transcription_user_controlled,
             tts_active: Arc::clone(&self.tts_active),
             tts_cancel: Arc::clone(&self.tts_cancel),
             tts_starting: Arc::clone(&self.tts_starting),
             stt_starting: Arc::clone(&self.stt_starting),
             last_agent_refresh: self.last_agent_refresh,
+            huddle_generation: self.huddle_generation,
             session_generation: Arc::clone(&self.session_generation),
             voice_input_mode: self.voice_input_mode.clone(),
             ptt_active: Arc::clone(&self.ptt_active),
@@ -184,11 +199,13 @@ impl Default for HuddleState {
             is_creator: false,
             tts_enabled: true,
             transcription_enabled: false,
+            transcription_user_controlled: false,
             tts_active: Arc::new(AtomicBool::new(false)),
             tts_cancel: Arc::new(AtomicBool::new(false)),
             tts_starting: Arc::new(AtomicBool::new(false)),
             stt_starting: Arc::new(AtomicBool::new(false)),
             last_agent_refresh: None,
+            huddle_generation: 0,
             session_generation: Arc::new(AtomicU64::new(0)),
             voice_input_mode: VoiceInputMode::default(),
             ptt_active: Arc::new(AtomicBool::new(false)),
@@ -197,13 +214,233 @@ impl Default for HuddleState {
 }
 
 impl HuddleState {
+    /// Begin a new local huddle lifetime and return its identity.
+    pub(crate) fn begin_huddle_lifetime(&mut self) -> u64 {
+        self.huddle_generation = self.huddle_generation.wrapping_add(1);
+        self.huddle_generation
+    }
+
+    pub(crate) fn owns_huddle_lifetime(&self, huddle_generation: u64, phase: HuddlePhase) -> bool {
+        self.huddle_generation == huddle_generation && self.phase == phase
+    }
+
+    /// Whether an async result still belongs to the active huddle that
+    /// initiated it. The channel id is the huddle-session identity; transcript
+    /// generation changes within the same huddle must not invalidate it.
+    pub(crate) fn is_current_huddle(
+        &self,
+        ephemeral_channel_id: &str,
+        huddle_generation: u64,
+    ) -> bool {
+        matches!(self.phase, HuddlePhase::Connected | HuddlePhase::Active)
+            && self.ephemeral_channel_id.as_deref() == Some(ephemeral_channel_id)
+            && self.huddle_generation == huddle_generation
+    }
+
+    /// Whether an STT construction still belongs to the current transcript
+    /// generation within the active huddle.
+    pub(crate) fn is_current_transcription_generation(
+        &self,
+        ephemeral_channel_id: &str,
+        huddle_generation: u64,
+        session_generation: u64,
+    ) -> bool {
+        self.is_current_huddle(ephemeral_channel_id, huddle_generation)
+            && self.session_generation.load(Ordering::Acquire) == session_generation
+    }
+
+    /// Invalidate in-flight transcription work and give the next constructor a
+    /// fresh sentinel that stale constructors cannot clear.
+    pub(crate) fn invalidate_transcription_pipeline(&mut self) {
+        self.session_generation.fetch_add(1, Ordering::Release);
+        self.stt_starting = Arc::new(AtomicBool::new(false));
+    }
+
+    /// Record an explicit transcription choice made through the existing user
+    /// control. Later agent membership refreshes must preserve this choice.
+    pub(crate) fn set_transcription_enabled_by_user(&mut self, enabled: bool) {
+        self.transcription_enabled = enabled;
+        self.transcription_user_controlled = true;
+    }
+
+    /// Enable transcription when an agent is present and the user has not
+    /// explicitly chosen a transcription state for this huddle.
+    ///
+    /// Returns true only for the transition from disabled to enabled, allowing
+    /// callers to start models/pipelines and emit state exactly once. Removing
+    /// the last agent deliberately leaves the current state unchanged.
+    pub(crate) fn maybe_auto_enable_transcription_for_agents(&mut self) -> bool {
+        let has_agent = !self
+            .agent_pubkeys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
+        if has_agent && !self.transcription_user_controlled && !self.transcription_enabled {
+            self.transcription_enabled = true;
+            return true;
+        }
+        false
+    }
+
     /// Reset to default state while preserving the session generation counter.
     /// Used by start_huddle rollback, join_huddle rollback, and teardown_huddle
     /// to invalidate in-flight transcription tasks without losing the generation.
     pub(crate) fn reset_preserving_generation(&mut self) {
         let gen = Arc::clone(&self.session_generation);
+        let huddle_generation = self.huddle_generation;
         *self = Self::default();
         self.session_generation = gen;
+        self.huddle_generation = huddle_generation;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::HuddleState;
+
+    fn set_agents(state: &HuddleState, agents: &[&str]) {
+        *state
+            .agent_pubkeys
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            agents.iter().map(|agent| (*agent).to_owned()).collect();
+    }
+
+    #[test]
+    fn first_agent_auto_enables_transcription_once() {
+        let mut state = HuddleState::default();
+        set_agents(&state, &["agent"]);
+
+        assert!(state.maybe_auto_enable_transcription_for_agents());
+        assert!(state.transcription_enabled);
+        assert!(!state.maybe_auto_enable_transcription_for_agents());
+    }
+
+    #[test]
+    fn explicit_user_disable_is_not_undone_by_agent_presence() {
+        let mut state = HuddleState::default();
+        set_agents(&state, &["agent"]);
+        assert!(state.maybe_auto_enable_transcription_for_agents());
+
+        state.set_transcription_enabled_by_user(false);
+
+        assert!(!state.maybe_auto_enable_transcription_for_agents());
+        assert!(!state.transcription_enabled);
+    }
+
+    #[test]
+    fn last_agent_leaving_preserves_current_transcription_state() {
+        let mut state = HuddleState::default();
+        set_agents(&state, &["agent"]);
+        assert!(state.maybe_auto_enable_transcription_for_agents());
+
+        set_agents(&state, &[]);
+
+        assert!(!state.maybe_auto_enable_transcription_for_agents());
+        assert!(state.transcription_enabled);
+    }
+
+    #[test]
+    fn clone_preserves_user_control_across_frontend_state_reads() {
+        let mut state = HuddleState::default();
+        state.set_transcription_enabled_by_user(false);
+
+        let mut clone = state.clone();
+        set_agents(&clone, &["agent"]);
+
+        assert!(clone.transcription_user_controlled);
+        assert!(!clone.maybe_auto_enable_transcription_for_agents());
+    }
+
+    #[test]
+    fn stale_huddle_identity_is_rejected_after_replacement() {
+        let mut state = HuddleState {
+            phase: super::HuddlePhase::Active,
+            ephemeral_channel_id: Some("huddle-a".to_owned()),
+            ..HuddleState::default()
+        };
+        let huddle_generation = state.begin_huddle_lifetime();
+        let generation = state.session_generation.load(Ordering::Acquire);
+        assert!(state.is_current_huddle("huddle-a", huddle_generation));
+        assert!(state.is_current_transcription_generation(
+            "huddle-a",
+            huddle_generation,
+            generation
+        ));
+
+        state.session_generation.fetch_add(1, Ordering::Release);
+        assert!(state.is_current_huddle("huddle-a", huddle_generation));
+        assert!(!state.is_current_transcription_generation(
+            "huddle-a",
+            huddle_generation,
+            generation
+        ));
+
+        state.ephemeral_channel_id = Some("huddle-b".to_owned());
+
+        assert!(!state.is_current_huddle("huddle-a", huddle_generation));
+    }
+
+    #[test]
+    fn same_channel_rejoin_gets_a_new_huddle_lifetime() {
+        let mut state = HuddleState {
+            phase: super::HuddlePhase::Active,
+            ephemeral_channel_id: Some("huddle".to_owned()),
+            ..HuddleState::default()
+        };
+        let first_generation = state.begin_huddle_lifetime();
+        state.reset_preserving_generation();
+        state.phase = super::HuddlePhase::Active;
+        state.ephemeral_channel_id = Some("huddle".to_owned());
+        let second_generation = state.begin_huddle_lifetime();
+
+        assert_ne!(first_generation, second_generation);
+        assert!(!state.is_current_huddle("huddle", first_generation));
+        assert!(state.is_current_huddle("huddle", second_generation));
+    }
+
+    #[test]
+    fn superseded_create_cannot_commit_or_reset_replacement_lifetime() {
+        let mut state = HuddleState::default();
+        let first_generation = state.begin_huddle_lifetime();
+        state.phase = super::HuddlePhase::Creating;
+        assert!(state.owns_huddle_lifetime(first_generation, super::HuddlePhase::Creating));
+
+        state.reset_preserving_generation();
+        let replacement_generation = state.begin_huddle_lifetime();
+        state.phase = super::HuddlePhase::Creating;
+
+        assert!(!state.owns_huddle_lifetime(first_generation, super::HuddlePhase::Creating));
+        assert!(state.owns_huddle_lifetime(replacement_generation, super::HuddlePhase::Creating));
+    }
+
+    #[test]
+    fn superseded_join_cannot_commit_replacement_lifetime() {
+        let mut state = HuddleState::default();
+        let first_generation = state.begin_huddle_lifetime();
+        state.phase = super::HuddlePhase::Connecting;
+
+        state.reset_preserving_generation();
+        let replacement_generation = state.begin_huddle_lifetime();
+        state.phase = super::HuddlePhase::Connecting;
+
+        assert!(!state.owns_huddle_lifetime(first_generation, super::HuddlePhase::Connecting));
+        assert!(state.owns_huddle_lifetime(replacement_generation, super::HuddlePhase::Connecting));
+    }
+
+    #[test]
+    fn stale_constructor_cannot_clear_replacement_sentinel() {
+        let mut state = HuddleState::default();
+        let stale_sentinel = std::sync::Arc::clone(&state.stt_starting);
+        stale_sentinel.store(true, Ordering::Release);
+
+        state.invalidate_transcription_pipeline();
+        state.stt_starting.store(true, Ordering::Release);
+        stale_sentinel.store(false, Ordering::Release);
+
+        assert!(state.stt_starting.load(Ordering::Acquire));
     }
 }
 

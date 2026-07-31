@@ -73,9 +73,8 @@ const SYNTH_STEPS: usize = 1;
 ///
 /// Applied only at the *end* of each synthesised sentence to eliminate the
 /// click that would otherwise occur when a non-zero waveform terminates
-/// abruptly. **No fade-in is applied** — see `apply_fade_out` for the
-/// rationale and `examples/pocket_onset_probe.rs` for the measurement that
-/// motivated removing the leading fade.
+/// abruptly. **No fade-in is applied** — see `apply_fade_out` for why preserving
+/// the leading waveform is important.
 const FADE_OUT_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
 
 /// Length of the zero-sample cushion prepended before each synthesized
@@ -101,13 +100,9 @@ const SENTENCE_LEAD_IN_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.020) as usize;
 /// names chunk stitching as the reliability lever). Our previous
 /// sentence-per-call path created ~2–4× more seams than upstream.
 ///
-/// We don't ship the SentencePiece tokenizer, so 50 tokens is approximated
-/// with a character budget. The bundled 4k-entry vocab averages ~4 chars per
-/// token, but usage-weighted English text leans on short common tokens, so
-/// the effective ratio is ~2–4 chars/token and 200 chars ≈ 60–100 tokens —
-/// modestly above upstream's 50, deliberately: erring large means fewer
-/// seams, and even ~100 tokens is far below the model's 500-LM-step (~40 s)
-/// ceiling. Do not shrink this budget to chase an exact 50-token match.
+/// This character budget performs only coarse sentence packing. The April
+/// engine applies its SentencePiece tokenizer afterward and refines every
+/// result at the bundle's exact 50-token boundary.
 const MAX_CHUNK_CHARS: usize = 200;
 
 /// Silence inserted between sentences by the TTS pipeline (seconds).
@@ -493,18 +488,17 @@ fn tts_worker(
 
         // Split into sentences, then group into synthesis chunks: the first
         // sentence stays alone (fast time-to-first-audio), the rest pack
-        // greedily up to MAX_CHUNK_CHARS. Each chunk is one `generate()`
-        // call; playback of chunk N overlaps synthesis of chunk N+1
-        // (lookahead pipelining). Grouping matches upstream's ~50-token
-        // chunking and halves the exposed prosody seams on multi-sentence
-        // replies — see MAX_CHUNK_CHARS.
+        // greedily up to MAX_CHUNK_CHARS. Playback of each model unit overlaps
+        // synthesis of the next one. The Pocket engine applies its exact
+        // 50-token split; keeping those units within one playback chunk avoids
+        // adding fades and pauses at token-only boundaries.
         let sentences: Vec<String> = split_sentences(&text)
             .into_iter()
             .filter(|s| !s.trim().is_empty())
             .collect();
         let chunks = group_sentences_into_chunks(&sentences, MAX_CHUNK_CHARS);
 
-        for chunk in &chunks {
+        'playback_chunks: for chunk in &chunks {
             if handle_cancel_or_shutdown(
                 &cancel,
                 &shutdown,
@@ -521,51 +515,76 @@ fn tts_worker(
                 continue;
             }
 
-            match engine.synth_chunk(text, "en", &style, SYNTH_STEPS) {
-                Ok(samples) if !samples.is_empty() => {
-                    let mut audio = clamp_to_full_scale(samples);
-                    // Fade-out only — fading-in would attenuate the consonant
-                    // onset (see `apply_fade_out` docstring + the
-                    // 2026-05-18 "first little sound is missing" regression).
-                    apply_fade_out(&mut audio);
+            let model_chunks = match engine.split_text_into_chunks(text) {
+                Ok(model_chunks) => model_chunks,
+                Err(error) => {
+                    eprintln!("buzz-desktop: TTS chunking failed: {error}");
+                    break;
+                }
+            };
+            let model_chunk_count = model_chunks.len();
+            for (model_chunk_index, model_chunk) in model_chunks.iter().enumerate() {
+                if handle_cancel_or_shutdown(
+                    &cancel,
+                    &shutdown,
+                    &tts_active,
+                    &text_rx,
+                    Some((&player, &player_ops)),
+                ) {
+                    first_append = true;
+                    break 'playback_chunks;
+                }
 
-                    // Build one contiguous buffer per synthesized sentence:
-                    // lead-in cushion + audio + trailing gap. Keeping this as
-                    // a single rodio source preserves the original queue/drain
-                    // semantics (one append per sentence) while still giving
-                    // every chunk a quiet device warm-up window.
-                    let buf =
-                        build_sentence_append_buffer(&mut first_append, audio, silence_buf_len);
+                let ends_playback_chunk = model_chunk_index + 1 == model_chunk_count;
+                match engine.synth_chunk(model_chunk, "en", &style, SYNTH_STEPS) {
+                    Ok(samples) if !samples.is_empty() => {
+                        let mut audio = clamp_to_full_scale(samples);
+                        if ends_playback_chunk {
+                            // Fade only at the playback-chunk boundary. Applying
+                            // it at the model's internal token boundary would
+                            // create an audible dip between contiguous units.
+                            apply_fade_out(&mut audio);
+                        }
 
-                    // Check-and-append under `player_ops`, serialized with
-                    // the monitor: a barge-in may have arrived during
-                    // synthesis (the blocking window the monitor thread
-                    // exists for). Don't append the now-stale sentence — the
-                    // human interrupted; speaking it anyway would talk over
-                    // them. Holding the lock for the check + append means the
-                    // monitor can never clear between our check passing and
-                    // the buffer landing. The flag is deliberately NOT
-                    // consumed here: the loop-top handle_cancel_or_shutdown
-                    // does the full consume (drain queue, reset lead-in) on
-                    // the next iteration.
-                    let _ops = lock_player_ops(&player_ops);
-                    if cancel.load(Ordering::Acquire) {
-                        // Nothing appended; the loop-top consume re-arms
-                        // `first_append` (the flag is still set — the worker
-                        // is its only consumer).
+                        let buf = build_sentence_append_buffer(
+                            &mut first_append,
+                            audio,
+                            silence_buf_len,
+                            model_chunk_index == 0 || player.empty(),
+                            ends_playback_chunk,
+                        );
+
+                        // Check-and-append under `player_ops`, serialized with
+                        // the monitor: a barge-in may have arrived during
+                        // synthesis (the blocking window the monitor thread
+                        // exists for). Don't append the now-stale sentence — the
+                        // human interrupted; speaking it anyway would talk over
+                        // them. Holding the lock for the check + append means the
+                        // monitor can never clear between our check passing and
+                        // the buffer landing. The flag is deliberately NOT
+                        // consumed here: the loop-top handle_cancel_or_shutdown
+                        // does the full consume (drain queue, reset lead-in) on
+                        // the next iteration.
+                        let _ops = lock_player_ops(&player_ops);
+                        if cancel.load(Ordering::Acquire) {
+                            // Nothing appended; the loop-top consume re-arms
+                            // `first_append` (the flag is still set — the worker
+                            // is its only consumer).
+                            break;
+                        }
+                        player.append(SamplesBuffer::new(channels, rate, buf));
+                        // NOTE: tts_active is set AFTER player.append(), not
+                        // before. Setting it before synthesis would cause STT to
+                        // discard user speech during the synthesis window as
+                        // "echo" even though no audio is actually playing yet.
+                        // See crossfire review C3.
+                        tts_active.store(true, Ordering::Release);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("buzz-desktop: TTS synth failed: {e}");
                         break;
                     }
-                    player.append(SamplesBuffer::new(channels, rate, buf));
-                    // NOTE: tts_active is set AFTER player.append(), not
-                    // before. Setting it before synthesis would cause STT to
-                    // discard user speech during the synthesis window as
-                    // "echo" even though no audio is actually playing yet.
-                    // See crossfire review C3.
-                    tts_active.store(true, Ordering::Release);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("buzz-desktop: TTS synth failed: {e}");
                 }
             }
         }
@@ -646,15 +665,10 @@ fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
 
 /// Hard-clamp samples to ±1.0 full scale.
 ///
-/// No gain is applied: Pocket TTS already emits speech-level audio
-/// (peaks 0.4–0.97, RMS ≈ −20 dBFS across varied sentences — measured by
-/// `examples/pocket_clip_probe`), matching the kyutai reference pipeline,
-/// which applies no output scaling. Two earlier gain stages were both
-/// regressions against that baseline: per-sentence peak normalization caused
-/// level pumping between sentences, and the fixed 9.3× gain that replaced it
-/// was calibrated on a single anomalously-quiet bench utterance (peak 0.076)
-/// and clipped 13–34% of samples on real speech ("blown out", 2026-06-12).
-/// The clamp alone remains as the safety net against outlier transients.
+/// No gain is applied because Pocket TTS already emits speech-level audio and
+/// the reference pipeline applies no output scaling. Normalizing each sentence
+/// would cause level pumping between chunks. The clamp remains only as a safety
+/// net against outlier transients.
 fn clamp_to_full_scale(samples: Vec<f32>) -> Vec<f32> {
     samples.into_iter().map(|s| s.clamp(-1.0, 1.0)).collect()
 }
@@ -667,14 +681,10 @@ fn clamp_to_full_scale(samples: Vec<f32>) -> Vec<f32> {
 ///
 /// # Why no fade-in
 ///
-/// An earlier revision (pre 2026-05) symmetrically faded *in* over the same
-/// 8 ms window. That swallowed the leading consonant attack on every
-/// sentence — Pocket TTS produces real audio energy inside the first
-/// millisecond (RMS ≈ 0.02, peak ≈ 0.03 measured across four prompts in
-/// `examples/pocket_onset_probe.rs`), and a linear 0→1 ramp over 192 samples
-/// scales those onset samples by ≤50 % for the first ~4 ms. The result was
-/// the "first little sound or two is missing" regression heard on
-/// 2026-05-18.
+/// A symmetric fade-in would attenuate the leading consonant attack because
+/// Pocket TTS produces real audio energy inside the first millisecond. A
+/// linear 0→1 ramp over 192 samples scales those onset samples by ≤50% for the
+/// first ~4 ms, which can make the first phoneme sound clipped.
 ///
 /// The first sample of Pocket output measures ≈ 0.0018 (≈ −54 dBFS) — well
 /// below the threshold at which a DC-jump would be audible as a click — so
@@ -689,13 +699,12 @@ fn apply_fade_out(samples: &mut [f32]) {
     }
 }
 
-/// Build the single buffer appended to the rodio `Player` for one synthesised
-/// sentence.
+/// Build one buffer appended to the rodio `Player` for a synthesis unit.
 ///
-/// Every sentence chunk gets a short lead-in pad immediately before its audio.
-/// This matters for chunks that start with soft first phonemes (`I'm`, `I've`):
-/// the synthesized buffer can begin with speech within the first millisecond,
-/// so the playback layer must provide the device/mixer cushion.
+/// Every playback boundary gets a short lead-in pad immediately before its
+/// audio. This matters for chunks that start with soft first phonemes (`I'm`,
+/// `I've`): the synthesized buffer can begin with speech within the first
+/// millisecond, so the playback layer must provide the device/mixer cushion.
 /// To keep the audible gap unchanged, the trailing silence after this chunk is
 /// shortened by the same amount (`silence_buf_len - SENTENCE_LEAD_IN_SAMPLES`):
 /// sentence N contributes 80 ms of post-speech silence and sentence N+1
@@ -706,6 +715,11 @@ fn apply_fade_out(samples: &mut [f32]) {
 /// tracked source per synthesized sentence, avoiding source-boundary/drain
 /// regressions from enqueueing the lead-in, audio, and tail as separate sounds.
 ///
+/// A playback chunk may contain several model-sized synthesis units. Only the
+/// first unit receives the onset cushion and only the last receives the
+/// remaining gap. If playback underruns while the next unit is synthesized,
+/// that unit becomes a new playback boundary and receives a fresh cushion.
+///
 /// `first_append` is flipped on the first call after the player goes idle.
 /// The worker uses it in the idle branch of the main loop to distinguish
 /// "never queued anything since last drain" from "drained after speaking",
@@ -714,14 +728,25 @@ fn build_sentence_append_buffer(
     first_append: &mut bool,
     audio: Vec<f32>,
     silence_buf_len: usize,
+    starts_playback_chunk: bool,
+    ends_playback_chunk: bool,
 ) -> Vec<f32> {
     if *first_append {
         *first_append = false;
     }
 
-    let trailing_silence_len = silence_buf_len.saturating_sub(SENTENCE_LEAD_IN_SAMPLES);
-    let mut buf = Vec::with_capacity(SENTENCE_LEAD_IN_SAMPLES + audio.len() + trailing_silence_len);
-    buf.extend(std::iter::repeat_n(0.0_f32, SENTENCE_LEAD_IN_SAMPLES));
+    let lead_in_len = if starts_playback_chunk {
+        SENTENCE_LEAD_IN_SAMPLES
+    } else {
+        0
+    };
+    let trailing_silence_len = if ends_playback_chunk {
+        silence_buf_len.saturating_sub(SENTENCE_LEAD_IN_SAMPLES)
+    } else {
+        0
+    };
+    let mut buf = Vec::with_capacity(lead_in_len + audio.len() + trailing_silence_len);
+    buf.extend(std::iter::repeat_n(0.0_f32, lead_in_len));
     buf.extend(audio);
     buf.extend(std::iter::repeat_n(0.0_f32, trailing_silence_len));
     buf
@@ -734,9 +759,8 @@ fn build_sentence_append_buffer(
 /// single-sentence cost. Subsequent sentences pack greedily: a sentence
 /// joins the current chunk while the combined length stays within
 /// `max_chars`; otherwise it starts a new chunk. A single sentence longer
-/// than `max_chars` becomes its own chunk unsplit — Pocket TTS handles long
-/// single sentences fine (the ceiling is the 500-LM-step default), it's the
-/// *seams* we're minimizing.
+/// than `max_chars` becomes its own chunk here, then the Pocket engine splits
+/// it at the April bundle's exact token limit before synthesis.
 ///
 /// Sentences within a chunk are joined with a single space; sentence-ending
 /// punctuation is preserved by `split_sentences`, so the model sees natural

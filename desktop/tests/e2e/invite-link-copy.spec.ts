@@ -35,6 +35,9 @@ test("copies a freshly minted invite link without showing a URL or QR code", asy
   await expect(page.getByTestId("settings-community-members")).toBeVisible();
 
   await page.getByTestId("community-invite-dialog-trigger").click();
+  await expect(page.getByTestId("member-pubkey-input")).toBeVisible();
+  await expect(page.getByTestId("member-role")).toHaveCount(0);
+  await expect(page.getByTestId("confirm-add-member")).toHaveCount(0);
   await expect(page.getByTestId("invite-link-url")).toHaveCount(0);
   await expect(page.getByTestId("invite-link-qr-code")).toHaveCount(0);
   await expect(page.getByTestId("invite-link-max-uses-trigger")).toHaveText(

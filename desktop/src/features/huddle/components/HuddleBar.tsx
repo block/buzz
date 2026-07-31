@@ -242,7 +242,10 @@ export function HuddleBar({
 
     // Primary: listen for Rust-emitted state change events
     listen<HuddleState>("huddle-state-changed", (event) => {
-      if (!cancelled) applyIncomingState(event.payload);
+      if (!cancelled) {
+        stateGenerationRef.current += 1;
+        applyIncomingState(event.payload);
+      }
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -757,14 +760,11 @@ export function HuddleBar({
                   transcriptionEnabled ? "Stop transcript" : "Start transcript"
                 }
                 aria-pressed={transcriptionEnabled}
-                className={cn(
-                  "buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md",
-                  transcriptionEnabled && "text-foreground",
-                )}
+                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
                 onClick={() => void handleToggleTranscript()}
                 size="icon"
                 type="button"
-                variant={transcriptionEnabled ? "secondary" : "ghost"}
+                variant="ghost"
               >
                 <Captions className="h-4 w-4" />
               </Button>

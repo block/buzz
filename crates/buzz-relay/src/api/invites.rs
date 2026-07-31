@@ -571,6 +571,19 @@ pub async fn claim_invite(
                             "failed to publish NIP-43 membership list after v2 claim: {e}"
                         );
                     }
+
+                    // The claimer may already have a WebSocket authenticated
+                    // with guest (or non-member) access. The database promotion
+                    // is authoritative, but that socket's AuthContext is not.
+                    // Force every pod to reconnect the identity so the next
+                    // session is built from the new full-member role.
+                    state.invalidate_all_accessible_channels(&tenant);
+                    state.disconnect_pubkey_clusterwide(
+                        &tenant,
+                        &pubkey.to_bytes(),
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                        "restricted: relay membership changed; reconnect to refresh access",
+                    );
                 }
                 Ok(Json(serde_json::json!({
                     "status": "joined",

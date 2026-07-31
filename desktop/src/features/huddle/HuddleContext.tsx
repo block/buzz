@@ -339,6 +339,28 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  /**
+   * Clean up only this provider's media after its start token is superseded.
+   * The action that changed the token owns backend teardown; issuing a global
+   * leave here could terminate a replacement huddle started by a new provider.
+   */
+  const cleanupSupersededStart = React.useCallback(
+    (worklet: AudioWorkletHandle | null) => {
+      try {
+        worklet?.stop();
+      } catch {
+        /* best-effort */
+      }
+      workletRef.current = null;
+      rustActiveRef.current = false;
+      setLocalAudioTrack(null);
+      setMicConnected(false);
+      setEphemeralChannelId(null);
+      setActiveSpeakers([]);
+    },
+    [],
+  );
+
   /** Shared media setup: get mic, setup AudioWorklet, confirm active.
    *  Used by both startHuddle and joinHuddle after the Rust backend call succeeds. */
   const connectAndSetupMedia = React.useCallback(
@@ -443,7 +465,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
           await connectAndSetupMedia(joinInfo, myToken);
         } catch (e) {
           if (e instanceof Error && e.message === "superseded") {
-            await cleanupFailedStart(workletRef.current, true);
+            cleanupSupersededStart(workletRef.current);
             return;
           }
           throw e;
@@ -466,7 +488,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         busyRef.current = false;
       }
     },
-    [cleanupFailedStart, connectAndSetupMedia],
+    [cleanupFailedStart, cleanupSupersededStart, connectAndSetupMedia],
   );
 
   const joinHuddle = React.useCallback(
@@ -489,7 +511,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
           await connectAndSetupMedia(joinInfo, myToken);
         } catch (e) {
           if (e instanceof Error && e.message === "superseded") {
-            await cleanupFailedStart(workletRef.current, false);
+            cleanupSupersededStart(workletRef.current);
             return;
           }
           throw e;
@@ -512,7 +534,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         busyRef.current = false;
       }
     },
-    [cleanupFailedStart, connectAndSetupMedia],
+    [cleanupFailedStart, cleanupSupersededStart, connectAndSetupMedia],
   );
 
   useTtsSubscription(ephemeralChannelId, selfPubkeyRef);

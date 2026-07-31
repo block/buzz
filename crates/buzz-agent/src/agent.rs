@@ -21,6 +21,80 @@ use crate::wire::{self, WireSender};
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
 
+/// Maximum reply reminders emitted per prompt when `require_reply` is on.
+///
+/// After this many, the turn is allowed to end whether or not anything was
+/// published: the guard exists to catch accidental omission, not to compel
+/// speech. The shared `stop_max_rejections` budget can cut this lower — see
+/// [`Config::require_reply`](crate::config::Config::require_reply).
+const MAX_REPLY_NAGS: u32 = 2;
+
+/// Server label on the synthetic reply-guard objection.
+///
+/// Not a real MCP server. It rides the same tool-result path as `_Stop` hook
+/// output, so the model sees `{hook, server, text}` attribution naming the
+/// in-process guard rather than an MCP server that could be impersonated.
+const REPLY_GUARD_SERVER: &str = "buzz-agent";
+
+/// Reminder text emitted when a turn is about to end with nothing published.
+///
+/// Explicitly licenses silence. The base prompt tells agents that publishing is
+/// optional and "silence is usually correct"; a reminder that argued otherwise
+/// would fight that instruction and make agents chattier.
+const REPLY_GUARD_NAG: &str = "You are about to end this turn without calling `buzz messages send`. \
+Your assistant text and reasoning are never shown to anyone — if you did work, found an answer, \
+or hit a blocker that someone is waiting on, it exists only if you publish it. \
+If you already posted, or if silence is genuinely correct for this turn, ignore this and end your turn.";
+
+/// Whether `call` is a recognized attempt to publish a reply to Buzz.
+///
+/// Recognizes an *attempt*, not a successful publish: the command text is
+/// inspected, never the exit status. That is deliberate — a send that fails
+/// already returns a non-zero exit and error JSON to the model, which is louder
+/// feedback than the reminder this gates.
+///
+/// `has` + `!is_hook` are the same checks the dispatcher uses to accept a call
+/// (see `execute_calls`), so a hallucinated `fake__shell` — rejected at preflight
+/// and never executed — cannot disarm the guard. They must stay *before*
+/// [`is_reply_shaped`]: together with them, and only with them, the `__shell`
+/// suffix is exactly equivalent to "the bare tool name is `shell`".
+fn is_buzz_reply_call(call: &ToolCall, mcp: &McpRegistry) -> bool {
+    mcp.has(&call.name) && !mcp.is_hook(&call.name) && is_reply_shaped(&call.name, &call.arguments)
+}
+
+/// Whether a tool name and arguments have the shape of a Buzz publish command.
+///
+/// Split from [`is_buzz_reply_call`] only so the matcher is testable without a
+/// live [`McpRegistry`]; callers must apply the registry checks first.
+///
+/// On the name: `ends_with("__shell")` is exact rather than approximate *given*
+/// those checks. Registration rejects `__` in both server names and bare tool
+/// names, and qualified names are `{server}__{bare}`, so a trailing `__shell` can
+/// only straddle the separator if the bare name starts with `_` — which `is_hook`
+/// already excludes. Dropping the separator would not be exact: `powershell` and
+/// `noshell` both end in `shell`.
+///
+/// On the command: a deliberately coarse substring test, scoped to the structured
+/// `command` field so unrelated metadata — a `description` that quotes a send —
+/// cannot suppress the guard, and a non-string `command` is rejected rather than
+/// coerced. Known limits, both accepted: a command assembled at runtime (`$CMD`)
+/// or hidden in a wrapper script is missed, and text that merely quotes a send
+/// (`echo "buzz messages send"`) matches. Missing a real post is the expensive
+/// direction, and substring matching is the more forgiving one there.
+fn is_reply_shaped(name: &str, arguments: &serde_json::Value) -> bool {
+    name.ends_with("__shell")
+        && arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|cmd| {
+                // `messages send` also covers `messages send-diff`. `reactions
+                // add` counts because the base prompt directs agents to react
+                // rather than post a bare acknowledgement, so nagging an agent
+                // that reacted would punish documented-correct behavior.
+                cmd.contains("messages send") || cmd.contains("reactions add")
+            })
+}
+
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
     /// Effective model for this session. Usually equals `cfg.model`; overridden
@@ -102,6 +176,14 @@ impl RunCtx<'_> {
         // session) so a stubborn exchange can't permanently disable the stop
         // guard for a long-lived session; `max_rounds` still caps the loop.
         let mut stop_rejections = 0u32;
+        // Reply-guard state for this prompt. `prompt()` *is* the turn, so
+        // locals here are per-turn by construction — same shape as
+        // `stop_rejections` above.
+        //
+        // Named for what it proves: a *recognized attempt* to publish, not a
+        // successful publish. See `is_buzz_reply_call`.
+        let mut buzz_reply_call_seen = false;
+        let mut reply_nags = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -264,7 +346,7 @@ impl RunCtx<'_> {
                     if stop_rejections >= self.cfg.stop_max_rejections {
                         return Ok(stop);
                     }
-                    let objections = self
+                    let mut objections = self
                         .mcp
                         .call_hooks(
                             "_Stop",
@@ -273,6 +355,17 @@ impl RunCtx<'_> {
                             &self.cfg.hook_servers,
                         )
                         .await;
+                    // Reply guard shares this gate and this budget, so a round
+                    // carrying both a hook objection and a reply reminder costs
+                    // one rejection and delivers both texts.
+                    if self.cfg.require_reply
+                        && !buzz_reply_call_seen
+                        && reply_nags < MAX_REPLY_NAGS
+                    {
+                        reply_nags += 1;
+                        objections
+                            .push((REPLY_GUARD_SERVER.to_string(), REPLY_GUARD_NAG.to_string()));
+                    }
                     if !objections.is_empty() {
                         stop_rejections = stop_rejections.saturating_add(1);
                         push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
@@ -289,6 +382,11 @@ impl RunCtx<'_> {
                     calls.len()
                 );
                 calls.truncate(MAX_TOOL_CALLS_PER_TURN);
+            }
+            // Deliberately after truncation: a publish-shaped call that was
+            // discarded never runs, so it must not suppress the reminder.
+            if self.cfg.require_reply && !buzz_reply_call_seen {
+                buzz_reply_call_seen = calls.iter().any(|c| is_buzz_reply_call(c, self.mcp));
             }
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
@@ -798,6 +896,88 @@ fn map_stop(p: ProviderStop) -> StopReason {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The shapes the guard must recognize as a publish attempt. Callers apply
+    /// the registry checks first; these cover the name suffix and command text.
+    #[test]
+    fn reply_shape_matches_documented_send_forms() {
+        for cmd in [
+            "buzz messages send --channel X --content Y",
+            "buzz --relay wss://r messages send --channel X --content Y",
+            "/abs/path/buzz messages send",
+            "printf 'hi' | buzz messages send --content -",
+            "buzz messages send-diff --diff -",
+            "buzz reactions add --event E --emoji +",
+            // Assembled through another shell: rev 3's tokenizer missed this.
+            r#"sh -c "buzz messages send --channel X""#,
+        ] {
+            assert!(
+                is_reply_shaped("dev__shell", &json!({ "command": cmd })),
+                "expected {cmd:?} to count as a publish attempt"
+            );
+        }
+    }
+
+    /// Commands that do real work but do not reply in the originating
+    /// conversation must still be nagged.
+    #[test]
+    fn reply_shape_rejects_non_reply_commands() {
+        for cmd in [
+            "buzz messages get --channel X",
+            "buzz channels list",
+            "buzz reactions remove --event E",
+            "buzz pr open --title T",
+            "buzz social publish --content hi",
+            "buzz notes set --name n",
+            "cargo test -p buzz-agent",
+        ] {
+            assert!(
+                !is_reply_shaped("dev__shell", &json!({ "command": cmd })),
+                "expected {cmd:?} not to count as a publish attempt"
+            );
+        }
+    }
+
+    /// The `__` separator is load-bearing: `ends_with("shell")` alone would
+    /// accept any registered tool whose name merely ends in those letters, and
+    /// `has()` proves registration, not the bare name.
+    #[test]
+    fn reply_shape_requires_the_qname_separator() {
+        let args = json!({ "command": "buzz messages send --channel X" });
+        for name in [
+            "dev__powershell",
+            "dev__noshell",
+            "shell",
+            "dev__send_message",
+        ] {
+            assert!(
+                !is_reply_shaped(name, &args),
+                "{name} must not satisfy the shell-tool check"
+            );
+        }
+        assert!(is_reply_shaped("dev__shell", &args));
+        assert!(is_reply_shaped("buzz-dev-mcp__shell", &args));
+    }
+
+    /// Only the field that carries the executable command counts. Searching
+    /// serialized arguments instead would let arbitrary metadata disarm the
+    /// guard, turning a description into an attempted send.
+    #[test]
+    fn reply_shape_reads_only_the_command_field() {
+        assert!(!is_reply_shaped(
+            "dev__shell",
+            &json!({ "description": "buzz messages send --channel X" })
+        ));
+        assert!(!is_reply_shaped(
+            "dev__shell",
+            &json!({ "workdir": "buzz messages send" })
+        ));
+        // Malformed `command` is rejected, not coerced — and must not panic.
+        assert!(!is_reply_shaped("dev__shell", &json!({ "command": 42 })));
+        assert!(!is_reply_shaped("dev__shell", &json!({ "command": null })));
+        assert!(!is_reply_shaped("dev__shell", &json!({})));
+        assert!(!is_reply_shaped("dev__shell", &json!("not an object")));
+    }
 
     /// A9 regression: `reasoning_details` contributes real bytes to
     /// `estimated_bytes` (see `types.rs::HistoryItem::size_with`), so a

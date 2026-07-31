@@ -1296,6 +1296,9 @@ mod tests {
         community: CommunityId,
         creator_hex: &str,
     ) -> Uuid {
+        crate::relay_members::add_relay_member(pool, community, creator_hex, "owner", None)
+            .await
+            .expect("add relay owner for channel invite tests");
         let creator = hex::decode(creator_hex).expect("creator hex");
         crate::channel::create_channel(
             pool,
@@ -2409,6 +2412,9 @@ mod tests {
         let invite = mint_relay_invite(&pool, community, &creator, 3600, Some(1), Some(channel_id))
             .await
             .expect("mint guest invite");
+        let unused = mint_relay_invite(&pool, community, &creator, 3600, Some(1), Some(channel_id))
+            .await
+            .expect("mint second guest invite");
         claim_relay_invite(&pool, community, &hash_v2_code(&invite.code), &guest, None)
             .await
             .expect("claim guest invite");
@@ -2441,6 +2447,56 @@ mod tests {
                 .is_none(),
             "the last channel grant must also remove relay admission"
         );
+        assert_eq!(
+            claim_relay_invite(&pool, community, &hash_v2_code(&unused.code), &guest, None,)
+                .await
+                .expect("claim second bearer after administrative removal"),
+            ClaimOutcome::RelayAccessRemoved,
+            "an administrator-removed guest must not recreate admission with another link"
+        );
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn voluntary_guest_leave_does_not_block_a_fresh_invite() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let creator = test_pubkey();
+        let guest = test_pubkey();
+        let guest_bytes = hex::decode(&guest).expect("guest hex");
+        let channel_id = make_private_channel(&pool, community, &creator).await;
+        let first = mint_relay_invite(&pool, community, &creator, 3600, Some(1), Some(channel_id))
+            .await
+            .expect("mint first guest invite");
+        let second = mint_relay_invite(&pool, community, &creator, 3600, Some(1), Some(channel_id))
+            .await
+            .expect("mint second guest invite");
+
+        claim_relay_invite(&pool, community, &hash_v2_code(&first.code), &guest, None)
+            .await
+            .expect("claim first guest invite");
+        crate::channel::remove_member(&pool, community, channel_id, &guest_bytes, &guest_bytes)
+            .await
+            .expect("guest leaves voluntarily");
+
+        assert!(matches!(
+            claim_relay_invite(
+                &pool,
+                community,
+                &hash_v2_code(&second.code),
+                &guest,
+                None,
+            )
+            .await
+            .expect("claim fresh invite after voluntary leave"),
+            ClaimOutcome::Joined {
+                role,
+                channel_id: Some(id),
+                ..
+            } if role == "guest" && id == channel_id
+        ));
 
         delete_test_community(&pool, community).await;
     }

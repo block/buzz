@@ -541,11 +541,10 @@ pub async fn add_member(
 ///
 /// Returns `Err(DbError::MemberNotFound)` if the target is not an active member.
 ///
-/// The per-channel membership lock is the transaction's first statement, so the
-/// actor's role check, the last-owner count, and the UPDATE are all serialized
-/// against concurrent membership writes — otherwise a concurrent demotion of the
-/// actor could commit after their role was read and this removal would proceed on
-/// a stale elevated role.
+/// The transaction first takes the target identity's invite-claim lock, then
+/// the per-channel membership lock. That ordering matches guest invite claims
+/// and serializes the actor-role check, last-owner count, removal, and guest
+/// tombstone against concurrent membership and invite writes.
 ///
 /// The `is_agent_owner` lookup deliberately runs *before* the transaction opens:
 /// it borrows a second connection from `pool`, and issuing it while holding the
@@ -573,9 +572,21 @@ pub async fn remove_member(
 
     let mut tx = pool.begin().await?;
 
-    // First statement: serialize the actor-role check, the last-owner count and
-    // the UPDATE against concurrent membership writes on this channel (same key
-    // as `add_member`).
+    // Invite claims serialize by identity before taking the channel-membership
+    // lock. Use the same order here so an administrative guest removal cannot
+    // race a claim through another unconsumed link and recreate the grant.
+    let guest_pubkey = hex::encode(pubkey);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{guest_pubkey}",
+            community_id.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
+
+    // Serialize the actor-role check, the last-owner count and the UPDATE
+    // against concurrent membership writes on this channel (same key as
+    // `add_member`).
     acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
 
     if !is_self_remove {
@@ -634,7 +645,6 @@ pub async fn remove_member(
     // A relay guest's roster row and channel grant are one capability. Revoke
     // both in this transaction so an explicit removal cannot leave a durable
     // grant that a later invite retry could use to restore access.
-    let guest_pubkey = hex::encode(pubkey);
     let guest_role: Option<String> = sqlx::query_scalar(
         "SELECT role FROM relay_members \
          WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
@@ -644,6 +654,21 @@ pub async fn remove_member(
     .fetch_optional(&mut *tx)
     .await?;
     if guest_role.as_deref() == Some("guest") {
+        if !is_self_remove {
+            // An administrator removed this identity, so a second unconsumed
+            // bearer must not silently restore community admission. Explicit
+            // relay-member re-addition clears this tombstone. Voluntary leave
+            // intentionally remains reclaimable.
+            sqlx::query(
+                "INSERT INTO relay_member_invite_blocks (community_id, pubkey) \
+                 VALUES ($1, $2) \
+                 ON CONFLICT (community_id, pubkey) DO UPDATE SET removed_at = now()",
+            )
+            .bind(community_id.as_uuid())
+            .bind(&guest_pubkey)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query(
             "DELETE FROM relay_guest_channels \
              WHERE community_id = $1 AND guest_pubkey = $2 AND channel_id = $3",
@@ -1587,13 +1612,17 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
         let mut tx = pool.begin().await?;
         acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
         let updated = sqlx::query(
-            "UPDATE channels SET archived_at = NOW(), \
-                 guest_invite_generation = guest_invite_generation + 1 \
-             WHERE community_id = $1 AND id = $2 \
-               AND ttl_seconds IS NOT NULL \
-               AND ttl_deadline < NOW() \
-               AND archived_at IS NULL \
-               AND deleted_at IS NULL",
+            "UPDATE channels ch SET archived_at = NOW(), \
+                 guest_invite_generation = ch.guest_invite_generation + 1 \
+             WHERE ch.community_id = $1 AND ch.id = $2 \
+               AND ch.ttl_seconds IS NOT NULL \
+               AND ch.ttl_deadline < NOW() \
+               AND ch.archived_at IS NULL \
+               AND ch.deleted_at IS NULL \
+               AND EXISTS ( \
+                   SELECT 1 FROM communities c \
+                   WHERE c.id = ch.community_id AND c.archived_at IS NULL \
+               )",
         )
         .bind(community_id.as_uuid())
         .bind(channel_id)
@@ -1989,6 +2018,81 @@ mod tests {
             }),
             "reaper should carry the archived row's community id and host"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaper_rechecks_community_archival_after_candidate_selection() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner_pk = random_pubkey();
+        ensure_user(&pool, community, &owner_pk)
+            .await
+            .expect("ensure owner");
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "test-reaper-community-race",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner_pk,
+            Some(60),
+        )
+        .await
+        .expect("create ephemeral channel");
+        sqlx::query(
+            "UPDATE channels SET ttl_deadline = NOW() - interval '1 second' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("expire channel");
+
+        // Hold the lock after the reaper's candidate scan but before its
+        // authoritative UPDATE. This makes the archive race deterministic.
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        acquire_channel_membership_lock(&mut holder, community, channel.id)
+            .await
+            .expect("hold channel lock");
+        let reaper_pool = pool.clone();
+        let mut reaper =
+            tokio::spawn(async move { reap_expired_ephemeral_channels(&reaper_pool).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), &mut reaper)
+                .await
+                .is_err(),
+            "reaper must wait at the channel lock after selecting the candidate"
+        );
+
+        sqlx::query("UPDATE communities SET archived_at = NOW() WHERE id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("archive community while reaper waits");
+        holder.rollback().await.expect("release channel lock");
+
+        let reaped = tokio::time::timeout(std::time::Duration::from_secs(10), reaper)
+            .await
+            .expect("reaper completes after lock release")
+            .expect("reaper task panicked")
+            .expect("reaper succeeds");
+        assert!(
+            !reaped.iter().any(|row| row.channel_id == channel.id),
+            "the authoritative update must skip channels whose community was archived"
+        );
+        let archived_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read channel archival state");
+        assert!(archived_at.is_none(), "channel must remain unarchived");
     }
 
     #[tokio::test]
