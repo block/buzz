@@ -58,8 +58,9 @@ class ChannelActionsSheet extends ConsumerWidget {
         ref.watch(channelMutesProvider).store.channels[channel.id]?.muted ==
         true;
     final isStarred =
+        !channel.isDm &&
         ref.watch(channelStarsProvider).store.channels[channel.id]?.starred ==
-        true;
+            true;
     final membersAsync = channel.isDm
         ? const AsyncValue<List<ChannelMember>>.data([])
         : ref.watch(channelMembersProvider(channel.id));
@@ -86,6 +87,7 @@ class ChannelActionsSheet extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             _ChannelQuickActionsRow(
+              showStarAction: !channel.isDm,
               isStarred: isStarred,
               isUnread: isUnread,
               onToggleStar: () {
@@ -278,12 +280,14 @@ class ChannelActionsSheet extends ConsumerWidget {
 
 class _ChannelQuickActionsRow extends StatelessWidget {
   const _ChannelQuickActionsRow({
+    required this.showStarAction,
     required this.isStarred,
     required this.isUnread,
     required this.onToggleStar,
     required this.onToggleRead,
   });
 
+  final bool showStarAction;
   final bool isStarred;
   final bool isUnread;
   final VoidCallback onToggleStar;
@@ -293,11 +297,12 @@ class _ChannelQuickActionsRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
     children: [
-      _ChannelQuickAction(
-        icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
-        label: isStarred ? 'Unstar' : 'Star',
-        onTap: onToggleStar,
-      ),
+      if (showStarAction)
+        _ChannelQuickAction(
+          icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
+          label: isStarred ? 'Unstar' : 'Star',
+          onTap: onToggleStar,
+        ),
       _ChannelQuickAction(
         icon: isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
         label: isUnread ? 'Read' : 'Unread',
