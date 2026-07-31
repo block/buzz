@@ -7,6 +7,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
+import 'edit_profile_sheet.dart';
 import 'profile_provider.dart';
 import 'set_status_sheet.dart';
 import 'user_status_provider.dart';
@@ -58,6 +59,11 @@ class SettingsProfileHeader extends ConsumerWidget {
             profile?.label ?? 'Your profile',
             style: context.textTheme.titleMedium,
             textAlign: TextAlign.center,
+          ),
+          TextButton.icon(
+            onPressed: () => showEditProfileSheet(context, profile: profile),
+            icon: const Icon(LucideIcons.pencil, size: 16),
+            label: const Text('Edit profile'),
           ),
           // No placeholder copy — the badge is the affordance, so this line
           // appears only once there is an actual status to show.
