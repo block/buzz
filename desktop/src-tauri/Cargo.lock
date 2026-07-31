@@ -1049,6 +1049,7 @@ dependencies = [
  "buzz-media",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-voice",
  "bytes",
  "bzip2 0.6.1",
  "chrono",
@@ -1078,11 +1079,8 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "opus",
- "ort",
- "ort-sys",
  "plist",
  "png 0.18.1",
- "rand 0.10.2",
  "regex",
  "reqwest 0.13.4",
  "rodio",
@@ -1090,7 +1088,6 @@ dependencies = [
  "rusqlite",
  "rustls",
  "security-framework 3.7.0",
- "sentencepiece-model",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1110,7 +1107,6 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tempfile",
- "tokenizers",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
@@ -1176,6 +1172,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "buzz-voice"
+version = "0.1.0"
+dependencies = [
+ "ort",
+ "ort-sys",
+ "rand 0.10.2",
+ "sentencepiece-model",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "tokenizers",
 ]
 
 [[package]]

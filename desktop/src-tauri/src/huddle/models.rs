@@ -27,6 +27,10 @@ use sha2::{Digest, Sha256};
 use super::pocket::{
     april_model_info, PocketModelArtifact, APRIL_BUNDLE_ID, APRIL_MODEL_ID, APRIL_MODEL_REVISION,
 };
+use super::tts_voice_registry::POCKET_VOICES;
+
+#[path = "models_voice_upgrade.rs"]
+mod voice_upgrade;
 
 // ── Integrity verification ────────────────────────────────────────────────────
 //
@@ -91,8 +95,8 @@ const TTS_REFERENCE_ARTIFACT: PocketModelArtifact = PocketModelArtifact {
 /// honest (each version tag identifies one specific set of model bytes).
 const STT_MODEL_VERSION: &str = "2";
 
-/// Identifies the exact April INT8 asset set expected by readiness checks.
-const TTS_MODEL_VERSION: &str = "4";
+/// Identifies the April INT8 asset set plus the official VCTK presets.
+const TTS_MODEL_VERSION: &str = "5";
 
 /// Filename for the version manifest written alongside model files.
 const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
@@ -160,39 +164,6 @@ const TTS_MODEL_DIR_NAME: &str = "pocket-tts";
 /// Attribution sidecar written next to the Pocket TTS model files.
 const TTS_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
 
-/// CC-BY-4.0 §3(a)(1) attribution block for Pocket TTS, its ONNX packaging,
-/// and the bundled reference voice WAV.
-const TTS_LICENSE_TEXT: &str = "\
-Pocket TTS
-© Kyutai.
-
-Licensed under the Creative Commons Attribution 4.0 International License
-(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
-
-Original model by Kyutai: https://huggingface.co/kyutai/pocket-tts
-Paper: Charles, Roebel, et al., Pocket TTS (arXiv:2509.06926).
-Mimi neural codec by Kyutai is bundled as part of the model.
-
-April 2026 ONNX export by KevinAHM:
-https://huggingface.co/KevinAHM/pocket-tts-onnx
-Pinned revision: 58a6d00cf13d239b6748cb0769f35c580a8f606c
-
-Bundled reference voice (reference_sample.wav):
-\"Mary (f, conversation)\" preset from the Kyutai TTS demo voice catalogue
-(https://kyutai.org/tts), distributed via
-https://huggingface.co/kyutai/tts-voices as `vctk/p333_023_enhanced.wav`.
-Original recording from the Voice Cloning Toolkit (VCTK) corpus, speaker p333:
-https://datashare.ed.ac.uk/handle/10283/3443 (CC-BY-4.0).
-Recording enhancement (denoise/dereverb) by ai-coustics:
-https://ai-coustics.com/
-
-Buzz ships all ONNX/model artifacts and the reference voice WAV unmodified,
-renamed only by placement in the local model directory.
-
-Provided \"AS IS\", without warranty of any kind, express or implied. See the
-license text for full warranty disclaimer.
-";
-
 /// All files that must be present for Pocket TTS to be considered ready.
 const TTS_EXPECTED_FILES: &[&str] = &[
     "bundle.json",
@@ -205,6 +176,17 @@ const TTS_EXPECTED_FILES: &[&str] = &[
     "tokenizer.model",
     "LICENSE",
     "reference_sample.wav",
+    "anna.wav",
+    "vera.wav",
+    "fantine.wav",
+    "charles.wav",
+    "paul.wav",
+    "eponine.wav",
+    "azelma.wav",
+    "george.wav",
+    "jane.wav",
+    "michael.wav",
+    "eve.wav",
     TTS_LICENSE_FILE_NAME,
 ];
 
@@ -705,6 +687,9 @@ impl ModelManager {
 
     /// Start a background Pocket TTS download. No-op if already ready or downloading.
     pub fn start_tts_download(&self, http_client: reqwest::Client) {
+        if let Err(error) = voice_upgrade::install_vctk_presets_into_v4_model(&self.models_dir) {
+            eprintln!("buzz-desktop: could not upgrade existing Pocket voices in place: {error}");
+        }
         let manager = self.clone();
         self.tts.start_download(
             &self.models_dir,
@@ -822,7 +807,7 @@ impl ModelManager {
     ///   - five ONNX sessions selected by the April INT8 bundle
     ///   - bundle metadata, SentencePiece tokenizer, and learned voice BOS
     ///   - upstream `LICENSE` plus Buzz's `MODEL_LICENSE.txt` attribution sidecar
-    ///   - `reference_sample.wav` as the bundled default voice
+    ///   - `reference_sample.wav` plus the embedded official VCTK presets
     ///
     /// Files are written to a temp directory first, then moved atomically.
     async fn download_tts_model(&self, http_client: reqwest::Client) -> Result<(), String> {
@@ -904,9 +889,20 @@ impl ModelManager {
             });
         }
 
-        tokio::fs::write(temp_dir.join(TTS_LICENSE_FILE_NAME), TTS_LICENSE_TEXT)
-            .await
-            .map_err(|e| format!("write TTS model license sidecar: {e}"))?;
+        tokio::fs::write(
+            temp_dir.join(TTS_LICENSE_FILE_NAME),
+            voice_upgrade::TTS_LICENSE_TEXT,
+        )
+        .await
+        .map_err(|e| format!("write TTS model license sidecar: {e}"))?;
+        for voice in POCKET_VOICES {
+            let Some(bytes) = voice.bytes else {
+                continue;
+            };
+            tokio::fs::write(temp_dir.join(voice.reference_file), bytes)
+                .await
+                .map_err(|e| format!("install bundled {} voice: {e}", voice.display_name))?;
+        }
 
         self.tts.set_status(ModelStatus::Downloading {
             progress_percent: 90,
