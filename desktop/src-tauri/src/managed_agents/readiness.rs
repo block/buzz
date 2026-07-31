@@ -136,6 +136,14 @@ pub(crate) fn resolve_effective_harness_descriptor(
     // was set directly to a preset's command (e.g. `"opencode"`) without also
     // recording a `runtime` id — otherwise such agents silently lose the
     // preset's default args (e.g. OpenCode's required `acp` subcommand).
+    //
+    // An explicit `runtime` id always wins over a disagreeing command match —
+    // it is never overridden, only filled in when it resolves to nothing. If
+    // the id resolves to a *different* command than what's actually being
+    // launched, that mismatched definition's args/env still apply, which can
+    // silently strip a required subcommand (e.g. OpenCode's `acp`) without
+    // any error — the agent simply hangs at the ACP handshake. Warn so this
+    // is visible in the agent's log instead of a bare timeout.
     let harness_def = {
         let runtime_id = record
             .runtime
@@ -149,13 +157,26 @@ pub(crate) fn resolve_effective_harness_descriptor(
                 })
             })
             .unwrap_or("");
-        crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id).or_else(
-            || {
-                crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_command(
-                    &effective_command,
-                )
-            },
-        )
+        match crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id) {
+            Some(def) => {
+                if def.command != effective_command {
+                    tracing::warn!(
+                        agent = %record.pubkey,
+                        runtime_id,
+                        harness_command = %def.command,
+                        effective_command = %effective_command,
+                        "runtime id names a harness whose command differs from the \
+                         agent's effective command; the id's args/env apply anyway \
+                         (id always wins over a command match) — this may silently \
+                         drop args the effective command needs (e.g. an ACP subcommand)"
+                    );
+                }
+                Some(def)
+            }
+            None => crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_command(
+                &effective_command,
+            ),
+        }
     };
 
     // Args: explicit non-empty instance args win; otherwise use definition args.
