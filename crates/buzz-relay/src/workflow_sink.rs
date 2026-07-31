@@ -640,6 +640,7 @@ mod integration_tests {
                 ChannelType::Stream,
                 ChannelVisibility::Open,
                 None,
+                None,
                 &author.public_key().to_bytes(),
                 None,
             )

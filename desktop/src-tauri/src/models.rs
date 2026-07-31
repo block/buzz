@@ -118,6 +118,7 @@ pub struct ChannelInfo {
     pub description: String,
     pub topic: Option<String>,
     pub purpose: Option<String>,
+    pub avatar_url: Option<String>,
     pub member_count: i64,
     #[serde(default)]
     pub member_pubkeys: Vec<String>,
@@ -145,6 +146,7 @@ pub struct ChannelDetailInfo {
     pub topic_set_by: Option<String>,
     pub topic_set_at: Option<String>,
     pub purpose: Option<String>,
+    pub avatar_url: Option<String>,
     pub purpose_set_by: Option<String>,
     pub purpose_set_at: Option<String>,
     pub created_by: String,

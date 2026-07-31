@@ -318,9 +318,16 @@ pub async fn cmd_create_channel(
         "forum" => buzz_sdk::ChannelKind::Forum,
         _ => unreachable!(),
     };
-    let builder =
-        buzz_sdk::build_create_channel(channel_uuid, name, Some(vis), Some(ct), description, ttl)
-            .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
+    let builder = buzz_sdk::build_create_channel(
+        channel_uuid,
+        name,
+        Some(vis),
+        Some(ct),
+        description,
+        None,
+        ttl,
+    )
+    .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -714,6 +721,7 @@ pub async fn cmd_create_channel_from_template(
         Some(vis),
         Some(ct),
         effective_description,
+        None,
         ttl,
     )
     .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
@@ -852,8 +860,9 @@ pub async fn cmd_update_channel(
     }
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_update_channel(channel_uuid, name, description, None, ttl_change)
-        .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+    let builder =
+        buzz_sdk::build_update_channel(channel_uuid, name, description, None, None, ttl_change)
+            .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;

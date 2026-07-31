@@ -8,6 +8,7 @@ import { getChannelDescription } from "@/features/channels/lib/channelDescriptio
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { ChannelAvatar } from "@/features/channels/ui/ChannelAvatar";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -148,6 +149,15 @@ export function ChannelScreenHeader({
               testId="chat-header-dm-avatar"
             />
           )
+        ) : activeChannel ? (
+          <ChannelAvatar
+            avatarUrl={activeChannel.avatarUrl}
+            channelType={activeChannel.channelType}
+            className="mr-1.5 h-8 w-8 shadow-none"
+            name={activeChannelTitle}
+            testId="chat-header-channel-avatar"
+            visibility={activeChannel.visibility}
+          />
         ) : undefined
       }
       statusBadge={

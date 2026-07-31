@@ -31,6 +31,8 @@ pub struct ChannelRecord {
     pub description: Option<String>,
     /// Optional canvas (rich document) content.
     pub canvas: Option<String>,
+    /// Optional channel avatar/icon URL.
+    pub avatar_url: Option<String>,
     /// Compressed public key bytes of the channel creator.
     pub created_by: Vec<u8>,
     /// When the channel was created.
@@ -91,6 +93,7 @@ pub async fn create_channel(
     channel_type: ChannelType,
     visibility: ChannelVisibility,
     description: Option<&str>,
+    avatar_url: Option<&str>,
     created_by: &[u8],
     ttl_seconds: Option<i32>,
 ) -> Result<ChannelRecord> {
@@ -112,9 +115,9 @@ pub async fn create_channel(
 
     sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
-        VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, avatar_url, created_by, ttl_seconds, ttl_deadline)
+        VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8, $9,
+                CASE WHEN $9 IS NOT NULL THEN NOW() + ($9 || ' seconds')::interval ELSE NULL END)
         "#,
     )
     .bind(id)
@@ -123,6 +126,7 @@ pub async fn create_channel(
     .bind(channel_type.as_str())
     .bind(visibility.as_str())
     .bind(description)
+    .bind(avatar_url)
     .bind(created_by)
     .bind(ttl_seconds)
     .execute(&mut *tx)
@@ -148,7 +152,7 @@ pub async fn create_channel(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, canvas, avatar_url,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -180,6 +184,7 @@ pub async fn create_channel_with_id(
     channel_type: ChannelType,
     visibility: ChannelVisibility,
     description: Option<&str>,
+    avatar_url: Option<&str>,
     created_by: &[u8],
     ttl_seconds: Option<i32>,
 ) -> Result<(ChannelRecord, bool)> {
@@ -205,9 +210,9 @@ pub async fn create_channel_with_id(
 
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
-        VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, avatar_url, created_by, ttl_seconds, ttl_deadline)
+        VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8, $9,
+                CASE WHEN $9 IS NOT NULL THEN NOW() + ($9 || ' seconds')::interval ELSE NULL END)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -217,6 +222,7 @@ pub async fn create_channel_with_id(
     .bind(channel_type.as_str())
     .bind(visibility.as_str())
     .bind(description)
+    .bind(avatar_url)
     .bind(created_by)
     .bind(ttl_seconds)
     .execute(&mut *tx)
@@ -248,7 +254,7 @@ pub async fn create_channel_with_id(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, canvas, avatar_url,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -276,7 +282,7 @@ pub async fn get_channel(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, canvas, avatar_url,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -783,7 +789,7 @@ pub async fn list_channels(
         sqlx::query(
             r#"
             SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-                   description, canvas,
+                   description, canvas, avatar_url,
                    created_by, created_at, updated_at, archived_at, deleted_at,
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
@@ -803,7 +809,7 @@ pub async fn list_channels(
         sqlx::query(
             r#"
             SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-                   description, canvas,
+                   description, canvas, avatar_url,
                    created_by, created_at, updated_at, archived_at, deleted_at,
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
@@ -851,7 +857,7 @@ async fn get_channel_tx(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, canvas, avatar_url,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -1103,6 +1109,7 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         visibility: row.try_get("visibility")?,
         description: row.try_get("description")?,
         canvas: row.try_get("canvas")?,
+        avatar_url: row.try_get("avatar_url").unwrap_or(None),
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -1145,6 +1152,8 @@ pub struct ChannelUpdate {
     pub description: Option<String>,
     /// New visibility (`"open"`/`"private"`), or `None` to leave unchanged.
     pub visibility: Option<String>,
+    /// Channel avatar URL change: outer `None` leaves unchanged, `Some(None)` clears.
+    pub avatar_url: Option<Option<String>>,
     /// TTL change: outer `None` leaves it unchanged, `Some(None)` clears the
     /// ephemeral TTL (channel becomes permanent), `Some(Some(secs))` sets it.
     /// On any change the `ttl_deadline` is reset to `NOW() + ttl_seconds`.
@@ -1164,6 +1173,7 @@ pub async fn update_channel(
     if updates.name.is_none()
         && updates.description.is_none()
         && updates.visibility.is_none()
+        && updates.avatar_url.is_none()
         && updates.ttl_seconds.is_none()
     {
         return Err(DbError::InvalidData(
@@ -1194,6 +1204,10 @@ pub async fn update_channel(
         set_parts.push(format!("visibility = ${param_idx}::channel_visibility"));
         param_idx += 1;
     }
+    if updates.avatar_url.is_some() {
+        set_parts.push(format!("avatar_url = ${param_idx}"));
+        param_idx += 1;
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         // Set ttl_seconds, then reset the deadline from now (or clear both).
         set_parts.push(format!("ttl_seconds = ${param_idx}"));
@@ -1221,6 +1235,9 @@ pub async fn update_channel(
     }
     if let Some(ref vis) = updates.visibility {
         q = q.bind(vis);
+    }
+    if let Some(ref avatar_url) = updates.avatar_url {
+        q = q.bind(avatar_url);
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
@@ -1527,7 +1544,7 @@ mod tests {
     use crate::user::{ensure_user, set_agent_owner};
     use nostr::Keys;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         PgPool::connect(TEST_DB_URL)

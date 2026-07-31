@@ -46,6 +46,7 @@ import {
   type CreateChannelInput,
   useCreateChannelForm,
 } from "@/features/sidebar/lib/useCreateChannelForm";
+import { ChannelAvatar } from "@/features/channels/ui/ChannelAvatar";
 import {
   CREATE_CHANNEL_FORM_ID,
   CreateChannelFormFields,
@@ -780,6 +781,14 @@ function ChannelCard({
       }
       data-testid={`browse-channel-${channel.name}`}
     >
+      <ChannelAvatar
+        avatarUrl={channel.avatarUrl}
+        channelType={channel.channelType}
+        className="h-9 w-9"
+        name={channel.name}
+        testId={`browse-channel-icon-${channel.name}`}
+        visibility={channel.visibility}
+      />
       <button
         className="min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-foreground outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
         onClick={(event) => {
@@ -790,9 +799,6 @@ function ChannelCard({
       >
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-1.5">
-            <span className="shrink-0 text-sm font-normal text-muted-foreground">
-              #
-            </span>
             <p className="min-w-0 truncate text-base font-medium tracking-tight">
               {channel.name}
             </p>

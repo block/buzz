@@ -1,30 +1,10 @@
-//! Signed-event builders for desktop write operations.
-//!
-//! Mirrors the buzz-sdk builder patterns but uses nostr 0.37 API
-//! (the desktop is excluded from the workspace which pins nostr 0.36).
-//!
-//! Mental model:
-//!   caller params → build_*() → EventBuilder → submit_event() signs + POSTs
-//!
-//! Each function validates inputs and returns a nostr::EventBuilder.
-//! Signing and submission happen in relay::submit_event.
-
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
-/// Maximum content size — matches buzz-sdk (64 KiB).
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
-
-/// Maximum mention count — matches buzz-sdk.
 const MAX_MENTIONS: usize = 50;
-
-/// Maximum emoji length in characters — matches buzz-sdk.
 const MAX_EMOJI_CHARS: usize = 64;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn tag(parts: Vec<&str>) -> Result<Tag, String> {
     Tag::parse(parts).map_err(|e| format!("invalid tag: {e}"))
@@ -146,6 +126,7 @@ pub fn build_create_channel(
     visibility: &str,
     channel_type: &str,
     about: Option<&str>,
+    picture: Option<&str>,
     ttl_seconds: Option<i32>,
 ) -> Result<EventBuilder, String> {
     let name = buzz_sdk_pkg::canonical_channel_name(name);
@@ -160,6 +141,9 @@ pub fn build_create_channel(
     ];
     if let Some(a) = about {
         tags.push(tag(vec!["about", a])?);
+    }
+    if let Some(p) = picture {
+        tags.push(tag(vec!["picture", p])?);
     }
     if let Some(ttl) = ttl_seconds {
         tags.push(tag(vec!["ttl", &ttl.to_string()])?);
@@ -179,8 +163,10 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Kind 9002 — update channel name/description/visibility/ttl.
+/// Kind 9002 — update channel metadata.
 ///
+/// `picture`: outer `None` leaves it unchanged; `Some(Some(url))` sets it;
+/// `Some(None)` clears it (emits `["picture", ""]`).
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
 pub fn build_update_channel(
@@ -188,10 +174,18 @@ pub fn build_update_channel(
     name: Option<&str>,
     about: Option<&str>,
     visibility: Option<&str>,
+    picture: Option<Option<&str>>,
     ttl: Option<Option<i32>>,
 ) -> Result<EventBuilder, String> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
-        return Err("at least one of name, about, visibility, or ttl must be provided".into());
+    if name.is_none()
+        && about.is_none()
+        && visibility.is_none()
+        && picture.is_none()
+        && ttl.is_none()
+    {
+        return Err(
+            "at least one of name, about, visibility, picture, or ttl must be provided".into(),
+        );
     }
     if let Some(v) = visibility {
         if v != "open" && v != "private" {
@@ -211,6 +205,9 @@ pub fn build_update_channel(
     }
     if let Some(v) = visibility {
         tags.push(tag(vec!["visibility", v])?);
+    }
+    if let Some(picture) = picture {
+        tags.push(tag(vec!["picture", picture.unwrap_or("")])?);
     }
     if let Some(ttl) = ttl {
         match ttl {
@@ -853,8 +850,10 @@ mod tests {
     #[test]
     fn channel_builders_reject_hash_only_names() {
         let channel_id = Uuid::new_v4();
-        assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
-        assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
+        assert!(
+            build_create_channel(channel_id, "###", "open", "stream", None, None, None).is_err()
+        );
+        assert!(build_update_channel(channel_id, Some("###"), None, None, None, None).is_err());
     }
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.

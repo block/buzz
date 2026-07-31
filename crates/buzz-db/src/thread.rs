@@ -865,7 +865,7 @@ mod tests {
     };
     use nostr::{EventBuilder, Keys, Kind};
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -906,6 +906,7 @@ mod tests {
         channel_type: ChannelType,
         visibility: ChannelVisibility,
         description: Option<&str>,
+        avatar_url: Option<&str>,
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> crate::error::Result<(crate::channel::ChannelRecord, buzz_core::CommunityId)> {
@@ -915,10 +916,10 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO channels
-                (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
+                (id, community_id, name, channel_type, visibility, description, avatar_url, created_by, ttl_seconds, ttl_deadline)
             VALUES
-                ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                 CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+                ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8, $9,
+                 CASE WHEN $9 IS NOT NULL THEN NOW() + ($9 || ' seconds')::interval ELSE NULL END)
             "#,
         )
         .bind(id)
@@ -927,6 +928,7 @@ mod tests {
         .bind(channel_type.as_str())
         .bind(visibility.as_str())
         .bind(description)
+        .bind(avatar_url)
         .bind(created_by)
         .bind(ttl_seconds)
         .execute(pool)
@@ -971,6 +973,7 @@ mod tests {
             ChannelType::Stream,
             ChannelVisibility::Open,
             None,
+            None,
             author.public_key().to_bytes().as_slice(),
             None,
         )
@@ -983,6 +986,7 @@ mod tests {
             &format!("thread-collision-b-{channel_id}"),
             ChannelType::Stream,
             ChannelVisibility::Open,
+            None,
             None,
             author.public_key().to_bytes().as_slice(),
             None,
@@ -1057,6 +1061,7 @@ mod tests {
             ChannelType::Stream,
             ChannelVisibility::Open,
             None,
+            None,
             author.public_key().to_bytes().as_slice(),
             None,
         )
@@ -1121,6 +1126,7 @@ mod tests {
             &format!("thread-ties-{}", Uuid::new_v4()),
             ChannelType::Stream,
             ChannelVisibility::Open,
+            None,
             None,
             author.public_key().to_bytes().as_slice(),
             None,
@@ -1236,6 +1242,7 @@ mod tests {
             ChannelType::Stream,
             ChannelVisibility::Open,
             None,
+            None,
             author.public_key().to_bytes().as_slice(),
             None,
         )
@@ -1341,6 +1348,7 @@ mod tests {
             ChannelType::Stream,
             ChannelVisibility::Open,
             None,
+            None,
             author.public_key().to_bytes().as_slice(),
             None,
         )
@@ -1403,6 +1411,7 @@ mod tests {
             &format!("thread-replies-corrupt-{}", Uuid::new_v4()),
             ChannelType::Stream,
             ChannelVisibility::Open,
+            None,
             None,
             author.public_key().to_bytes().as_slice(),
             None,
@@ -1559,6 +1568,7 @@ mod tests {
             ChannelType::Stream,
             ChannelVisibility::Open,
             None,
+            None,
             author.public_key().to_bytes().as_slice(),
             None,
         )
@@ -1624,6 +1634,7 @@ mod tests {
             ChannelType::Stream,
             ChannelVisibility::Open,
             None,
+            None,
             author.public_key().to_bytes().as_slice(),
             None,
         )
@@ -1683,6 +1694,7 @@ mod tests {
             ChannelType::Stream,
             ChannelVisibility::Open,
             None,
+            None,
             author.public_key().to_bytes().as_slice(),
             None,
         )
@@ -1727,6 +1739,7 @@ mod tests {
             &format!("window-summaries-{}", Uuid::new_v4()),
             ChannelType::Stream,
             ChannelVisibility::Open,
+            None,
             None,
             author.public_key().to_bytes().as_slice(),
             None,

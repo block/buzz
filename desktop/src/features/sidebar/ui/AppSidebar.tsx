@@ -58,12 +58,12 @@ import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCa
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type {
   Channel,
-  ChannelVisibility,
   PresenceStatus,
   Profile,
   SearchHit,
   UserStatus,
 } from "@/shared/api/types";
+import type { CreateChannelInput } from "@/features/sidebar/lib/useCreateChannelForm";
 import {
   Sidebar,
   SidebarContent,
@@ -111,20 +111,8 @@ type AppSidebarProps = {
   communities: Community[];
   onAddCommunity: (community: Community) => void;
   onAddCommunityOpenChange?: (open: boolean) => void;
-  onCreateChannel: (input: {
-    name: string;
-    description?: string;
-    visibility: ChannelVisibility;
-    ttlSeconds?: number;
-    templateId?: string;
-  }) => Promise<void>;
-  onCreateForum: (input: {
-    name: string;
-    description?: string;
-    visibility: ChannelVisibility;
-    ttlSeconds?: number;
-    templateId?: string;
-  }) => Promise<void>;
+  onCreateChannel: (input: CreateChannelInput) => Promise<void>;
+  onCreateForum: (input: CreateChannelInput) => Promise<void>;
   onOpenAddCommunity: () => void;
   onSendFeedback?: () => void;
   onHideDm: (channelId: string) => void;
@@ -517,13 +505,7 @@ export function AppSidebar({
         : false;
 
   const handleCreateFromDialog = React.useCallback(
-    async (input: {
-      name: string;
-      description?: string;
-      visibility: ChannelVisibility;
-      ttlSeconds?: number;
-      templateId?: string;
-    }) => {
+    async (input: CreateChannelInput) => {
       if (createDialogKind === "stream") {
         await onCreateChannel(input);
       } else if (createDialogKind === "forum") {

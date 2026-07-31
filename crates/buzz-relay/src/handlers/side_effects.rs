@@ -500,6 +500,7 @@ pub async fn validate_admin_event(
                 "purpose",
                 "visibility",
                 "ttl",
+                "picture",
             ];
             let has_recognized = event
                 .tags
@@ -507,7 +508,7 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, picture)"
                 ));
             }
 
@@ -586,11 +587,30 @@ pub async fn validate_admin_event(
                 }
             }
 
-            // name/about/archived/visibility/ttl require owner/admin;
+            // Validate picture values before storage. Empty clears the picture;
+            // otherwise use compact http(s) URLs from the media upload flow.
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "picture" {
+                    let Some(value) = t.content() else {
+                        return Err(anyhow::anyhow!(
+                            "picture tag must have a value (URL, or empty string to clear)"
+                        ));
+                    };
+                    super::validate_channel_picture_url(value)
+                        .map_err(|e| anyhow::anyhow!("invalid picture value: {e}"))?;
+                }
+            }
+
+            // name/about/archived/visibility/ttl/picture require owner/admin;
             // topic/purpose allow any member.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
-                k == "name" || k == "about" || k == "archived" || k == "visibility" || k == "ttl"
+                k == "name"
+                    || k == "about"
+                    || k == "archived"
+                    || k == "visibility"
+                    || k == "ttl"
+                    || k == "picture"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -612,7 +632,7 @@ pub async fn validate_admin_event(
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/picture changes"
                         ))
                     }
                 }
@@ -1061,6 +1081,11 @@ pub async fn emit_group_discovery_events(
                 tags.push(Tag::parse(["about", desc])?);
             }
         }
+        if let Some(ref avatar_url) = channel.avatar_url {
+            if !avatar_url.is_empty() {
+                tags.push(Tag::parse(["picture", avatar_url])?);
+            }
+        }
         if channel.visibility == "private" {
             tags.push(Tag::parse(["private"])?);
         } else {
@@ -1468,6 +1493,24 @@ async fn handle_edit_metadata(
                         )
                         .await?;
                 }
+                "picture" => {
+                    let avatar_url = if val.is_empty() {
+                        None
+                    } else {
+                        Some(val.to_string())
+                    };
+                    state
+                        .db
+                        .update_channel(
+                            tenant.community(),
+                            channel_id,
+                            buzz_db::channel::ChannelUpdate {
+                                avatar_url: Some(avatar_url),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                }
                 "topic" => {
                     state
                         .db
@@ -1774,6 +1817,12 @@ async fn handle_create_group(
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
     let description = extract_tag_value(event, "about");
+    let picture = extract_tag_value(event, "picture");
+    if let Some(ref value) = picture {
+        super::validate_channel_picture_url(value)
+            .map_err(|e| anyhow::anyhow!("invalid picture value: {e}"))?;
+    }
+    let picture = picture.filter(|value| !value.is_empty());
     let ttl_seconds = super::resolve_ttl(event, state.config.ephemeral_ttl_override);
 
     // If the event has an h-tag UUID, ingest_event() already created the channel
@@ -1801,6 +1850,7 @@ async fn handle_create_group(
                         channel_type,
                         visibility,
                         description.as_deref(),
+                        picture.as_deref(),
                         &actor_bytes,
                         ttl_seconds,
                     )
@@ -1823,6 +1873,7 @@ async fn handle_create_group(
                 channel_type,
                 visibility,
                 description.as_deref(),
+                picture.as_deref(),
                 &actor_bytes,
                 ttl_seconds,
             )

@@ -549,6 +549,7 @@ pub async fn create_channel(
     channel_type: String,
     visibility: String,
     description: Option<String>,
+    avatar_url: Option<String>,
     ttl_seconds: Option<i32>,
     state: State<'_, AppState>,
 ) -> Result<ChannelInfo, String> {
@@ -569,6 +570,7 @@ pub async fn create_channel(
         vis,
         ct,
         description.as_deref(),
+        avatar_url.as_deref(),
         ttl_seconds,
     )?;
 
@@ -637,6 +639,7 @@ pub async fn ensure_starter_channels(
             "stream",
             Some(spec.description),
             None,
+            None,
         )?;
 
         match submit_event_with_keys(builder, &state, &creator_keys, None).await {
@@ -692,6 +695,9 @@ pub struct UpdateChannelInput {
     pub description: Option<String>,
     #[serde(default)]
     pub visibility: Option<String>,
+    /// Absent = leave unchanged, `null` = clear, string = set.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub avatar_url: Option<Option<String>>,
     /// Absent = leave unchanged, `null` = clear (permanent), seconds = set.
     #[serde(default, deserialize_with = "crate::util::double_option")]
     pub ttl_seconds: Option<Option<i32>>,
@@ -708,6 +714,7 @@ pub async fn update_channel(
         input.name.as_deref(),
         input.description.as_deref(),
         input.visibility.as_deref(),
+        input.avatar_url.as_ref().map(|value| value.as_deref()),
         input.ttl_seconds,
     )?;
     submit_event(builder, &state).await?;
