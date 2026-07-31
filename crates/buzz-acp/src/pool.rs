@@ -903,6 +903,66 @@ async fn resolve_new_session_channel_context(
 /// On error from `session_new_full()`, returns the `AcpError` — caller handles
 /// error reporting. Model-switch failures are logged and gracefully ignored
 /// (the agent proceeds with its default model).
+/// The MCP server set a channel should run with: the desired set when the
+/// channel is managed, otherwise the harness-wide set from the prompt context.
+fn effective_mcp_servers<'a>(agent: &'a OwnedAgent, ctx: &'a PromptContext) -> &'a Vec<McpServer> {
+    agent.desired_mcp.as_ref().unwrap_or(&ctx.mcp_servers)
+}
+
+/// Reconcile a channel's live session against its desired MCP set, at the turn
+/// boundary and before the session is used.
+///
+/// The desired set is stamped onto the agent by `dispatch_pending`;
+/// `applied_mcp` records what the live session was actually built with. On a
+/// mismatch this reconfigures the session in place — same session ID, full
+/// transcript preserved by the adapter's resume, new tool set. When in-place
+/// reconfiguration is impossible or fails, the channel's session is dropped so
+/// the caller's existing creation path builds a fresh one with the desired set.
+///
+/// A no-op when the sets already match or the channel has no live session.
+async fn reconcile_channel_mcp(agent: &mut OwnedAgent, ctx: &PromptContext, cid: &Uuid) {
+    let Some(sid) = agent.state.sessions.get(cid).cloned() else {
+        return;
+    };
+    let desired = effective_mcp_servers(agent, ctx).clone();
+    if agent.state.applied_mcp.get(cid) == Some(&desired) {
+        return;
+    }
+
+    if !agent.acp.resume_supported() {
+        tracing::info!(
+            target: "pool::session",
+            "agent does not support session/resume; rotating channel {cid} to apply its MCP set"
+        );
+        agent.state.invalidate_channel(cid);
+        return;
+    }
+
+    match agent
+        .acp
+        .session_resume(&sid, &ctx.cwd, desired.clone())
+        .await
+    {
+        Ok(_) => {
+            agent.state.applied_mcp.insert(*cid, desired);
+            tracing::info!(
+                target: "pool::session",
+                "resumed session {sid} for channel {cid} with a new MCP set"
+            );
+        }
+        Err(error) => {
+            // Never fail the turn over a tool grant: drop the session so the
+            // caller creates a fresh one with the desired set. Conversation
+            // continuity is lost, which is strictly better than a lost turn.
+            tracing::warn!(
+                target: "pool::session",
+                "session/resume failed for channel {cid} ({error}); rotating instead"
+            );
+            agent.state.invalidate_channel(cid);
+        }
+    }
+}
+
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
@@ -933,11 +993,17 @@ async fn create_session_and_apply_model(
         .as_deref()
         .map(|agent_name| compose_session_title(agent_name, channel_name));
 
+    // Resolve before the mutable borrow below: passing
+    // `effective_mcp_servers(agent, ctx)` inline as an argument would mix an
+    // immutable borrow of `agent` with the mutable receiver borrow of
+    // `agent.acp` in one expression.
+    let mcp_servers = effective_mcp_servers(agent, ctx).clone();
+
     let resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
-            ctx.mcp_servers.clone(),
+            mcp_servers,
             session_new_system_prompt(
                 is_goose,
                 agent.protocol_version,
@@ -1578,6 +1644,11 @@ pub async fn run_prompt_task(
 
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
+            // Turn-boundary MCP application. Either the live session is resumed
+            // in place with the new set, or it is dropped and the creation path
+            // below rebuilds it. Never disturbs an in-flight turn.
+            reconcile_channel_mcp(&mut agent, &ctx, cid).await;
+
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
             } else {
@@ -1599,7 +1670,13 @@ pub async fn run_prompt_task(
                             target: "pool::session",
                             "created session {sid} for channel {cid}"
                         );
+                        // Hoist the resolve before the mutable borrow: calling
+                        // `effective_mcp_servers(&agent, ..)` inline as an argument to
+                        // `agent.state.applied_mcp.insert(..)` mixes an immutable and a
+                        // mutable borrow of `agent` in one expression. Do not inline it.
+                        let applied = effective_mcp_servers(&agent, &ctx).clone();
                         agent.state.sessions.insert(*cid, sid.clone());
+                        agent.state.applied_mcp.insert(*cid, applied);
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
@@ -4039,6 +4116,93 @@ mod tests {
 
         assert_eq!(pool.desired_mcp_for(&cid), Some(&servers));
         assert_eq!(pool.desired_mcp_for(&Uuid::new_v4()), None);
+    }
+
+    /// A minimal agent over a sleeping subprocess — enough to read the plain
+    /// fields. Mirrors the `OwnedAgent` literals in the steer tests below.
+    async fn test_owned_agent() -> OwnedAgent {
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            desired_mcp: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_mcp_servers_prefers_the_desired_set() {
+        let ctx_servers = vec![McpServer {
+            name: "buzz-dev-mcp".into(),
+            command: "/usr/local/bin/buzz-dev-mcp".into(),
+            args: vec![],
+            env: vec![],
+        }];
+        let desired = test_mcp_servers();
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.mcp_servers = ctx_servers.clone();
+        let mut agent = test_owned_agent().await;
+
+        agent.desired_mcp = None;
+        assert_eq!(
+            effective_mcp_servers(&agent, &ctx),
+            &ctx_servers,
+            "unmanaged channel must keep legacy behaviour"
+        );
+
+        agent.desired_mcp = Some(desired.clone());
+        assert_eq!(
+            effective_mcp_servers(&agent, &ctx),
+            &desired,
+            "a managed channel must use exactly the desired set"
+        );
+    }
+
+    #[test]
+    fn identical_sets_do_not_trigger_a_resume() {
+        // Guards against gratuitous subprocess respawns: the desired set
+        // equalling the applied set must be a no-op, not a resume.
+        let servers = vec![McpServer {
+            name: "razorpay".into(),
+            command: "/usr/bin/rzp".into(),
+            args: vec!["--stdio".into()],
+            env: vec![],
+        }];
+        let cid = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.applied_mcp.insert(cid, servers.clone());
+
+        assert_eq!(
+            state.applied_mcp.get(&cid),
+            Some(&servers),
+            "equality must hold for identical sets so no resume is issued"
+        );
+
+        let reordered_args = vec![McpServer {
+            name: "razorpay".into(),
+            command: "/usr/bin/rzp".into(),
+            args: vec!["--other".into()],
+            env: vec![],
+        }];
+        assert_ne!(
+            state.applied_mcp.get(&cid),
+            Some(&reordered_args),
+            "an args change must be detected — the adapter fingerprints args too"
+        );
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):

@@ -699,7 +699,6 @@ impl AcpClient {
     /// `session/update` notifications before responding, which risks the
     /// request timeout on long conversations. Reconfiguration semantics are
     /// identical.
-    #[allow(dead_code)] // Wired up by the turn-boundary reconfigure path (Task 4).
     pub async fn session_resume(
         &mut self,
         session_id: &str,
@@ -893,7 +892,6 @@ impl AcpClient {
     }
 
     /// Whether the connected agent supports `session/resume`.
-    #[allow(dead_code)] // Read by the turn-boundary reconfigure gate (Task 4).
     pub fn resume_supported(&self) -> bool {
         self.resume_supported
     }
