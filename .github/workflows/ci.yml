@@ -494,7 +494,7 @@ jobs:
           docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -qtA -c "
           INSERT INTO communities (id, host)
-          VALUES ('00000000-0000-4000-8000-00000000c0de', '127.0.0.1:3000')
+          VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
       - name: Start relay
@@ -654,7 +654,7 @@ jobs:
           docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -qtA -c "
           INSERT INTO communities (id, host)
-          VALUES ('00000000-0000-4000-8000-00000000c0de', '127.0.0.1:3000')
+          VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
       - name: Start relay

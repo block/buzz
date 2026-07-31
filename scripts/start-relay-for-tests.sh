@@ -118,7 +118,7 @@ ok "Schema applied"
 # The unique index is on lower(host), so ON CONFLICT must target that expression.
 # psql is not on PATH in the hermit env; postgres runs as the buzz-postgres
 # docker container, so exec into it (same fallback as setup-desktop-test-data.sh).
-log "Seeding deployment community (host=127.0.0.1:3000)..."
+log "Seeding deployment community (host=localhost:3000)..."
 if command -v psql >/dev/null 2>&1; then
   seed_psql() { PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" -qtA "$@"; }
 else
@@ -126,7 +126,7 @@ else
 fi
 seed_psql -c "
 INSERT INTO communities (id, host)
-VALUES ('00000000-0000-4000-8000-00000000c0de', '127.0.0.1:3000')
+VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
 ON CONFLICT (lower(host)) DO NOTHING
 ;
 "
