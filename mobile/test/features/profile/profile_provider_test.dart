@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
@@ -6,10 +7,12 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
 
 void main() {
   test('signs kind:0, preserves metadata, and refreshes both caches', () async {
     final keys = nostr.Keys.generate();
+    final owner = nostr.Keys.generate();
     final previous = _profileEvent(
       keys,
       content: {
@@ -20,8 +23,9 @@ void main() {
         'nip05': 'old@example.com',
         'custom': {'keep': true},
       },
-      tags: const [
-        ['x', 'keep'],
+      tags: [
+        const ['x', 'keep'],
+        _authTag(owner, keys.public),
       ],
     );
     final session = _FakeRelaySession(events: [previous]);
@@ -52,8 +56,36 @@ void main() {
 
     expect(saved.displayName, 'New Name');
     expect(saved.avatarUrl, avatar);
+    expect(saved.ownerPubkey, owner.public);
     expect(container.read(profileProvider).value, saved);
     expect(container.read(userCacheProvider)[keys.public], saved);
+    expect(
+      container.read(userCacheProvider)[keys.public]?.ownerPubkey,
+      owner.public,
+    );
+  });
+
+  test('uses the lowest event id when timestamps are equal', () async {
+    final keys = nostr.Keys.generate();
+    final first = _profileEvent(
+      keys,
+      content: {'display_name': 'First'},
+      createdAt: 1700000000,
+    );
+    final second = _profileEvent(
+      keys,
+      content: {'display_name': 'Second'},
+      createdAt: 1700000000,
+    );
+    final lower = first.id.compareTo(second.id) < 0 ? first : second;
+    final higher = identical(lower, first) ? second : first;
+    final session = _FakeRelaySession(events: [higher, lower]);
+    final container = _container(session: session, nsec: keys.nsec);
+    addTearDown(container.dispose);
+
+    final loaded = await container.read(profileProvider.future);
+
+    expect(loaded?.displayName, lower.id == first.id ? 'First' : 'Second');
   });
 
   test('keeps the loaded profile when relay publication fails', () async {
@@ -117,16 +149,29 @@ NostrEvent _profileEvent(
   nostr.Keys keys, {
   required Map<String, dynamic> content,
   List<List<String>> tags = const [],
+  int? createdAt,
 }) {
   final event = nostr.Event.from(
     kind: EventKind.metadata,
     content: jsonEncode(content),
     tags: tags,
     secretKey: nostr.Nip19.decode(payload: keys.nsec).data,
-    createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 10,
+    createdAt: createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000 - 10,
     verify: false,
   );
   return NostrEvent.fromJson(event.toMap());
+}
+
+List<String> _authTag(nostr.Keys owner, String agentPubkey) {
+  final input = utf8.encode('nostr:agent-auth:$agentPubkey:');
+  final digest = SHA256Digest().process(Uint8List.fromList(input));
+  final message = digest.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return [
+    'auth',
+    owner.public,
+    '',
+    nostr.Schnorr.sign(secretKey: owner.secret, message: message),
+  ];
 }
 
 class _FakeRelaySession extends RelaySessionNotifier {

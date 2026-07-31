@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
 import 'user_cache_provider.dart';
 import 'user_profile.dart';
@@ -95,8 +96,12 @@ final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(
   ProfileNotifier.new,
 );
 
-NostrEvent _latest(List<NostrEvent> events) =>
-    events.reduce((a, b) => a.createdAt >= b.createdAt ? a : b);
+NostrEvent _latest(List<NostrEvent> events) => events.reduce((a, b) {
+  if (a.createdAt != b.createdAt) {
+    return a.createdAt > b.createdAt ? a : b;
+  }
+  return a.id.compareTo(b.id) <= 0 ? a : b;
+});
 
 Map<String, dynamic> _metadataFrom(NostrEvent? event) {
   if (event == null) return {};
@@ -121,6 +126,7 @@ UserProfile _userProfileFromEvent(NostrEvent event) {
     avatarUrl: data.avatarUrl,
     about: data.about,
     nip05Handle: data.nip05,
+    ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
   );
 }
 
