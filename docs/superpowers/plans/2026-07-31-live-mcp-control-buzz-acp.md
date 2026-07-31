@@ -1157,14 +1157,16 @@ git commit -s -m "feat(acp): opt-in strictMcpConfig for managed channels"
 
 ### Task 7: Grant-landed verification
 
-> **⚠️ DECISION REQUIRED BEFORE STARTING THIS TASK.** The spec (§5.4) and the kickoff both make this non-negotiable: *"verify the grant actually landed (observe the next turn's advertised tool list); do not trust the resume success response."* Verification of the shipped adapter found **that surface does not exist**. `acp-agent.js:1601-1614` consumes the SDK's `system`/`init` message internally (it latches `msgLifecycleV1` and syncs fast-mode state) and never forwards `tools[]` or `mcp_servers[{name,status}]` to the ACP client, even though the SDK carries both (`sdk.d.ts:4418-4424`). `session/resume` returns only `{sessionId, modes, configOptions}`. So there is nothing on the ACP wire to observe today.
+> **✅ DECIDED 2026-07-31 (Moni): option 1 below — honest status + opportunistic verification.** Build this task as written; no upstream dependency, no blocking.
 >
-> Options, in the order I'd pick them:
-> 1. **Ship honest status, verify opportunistically (recommended).** Treat `pending_next_turn` → `applied_unverified` on a successful resume, and promote to `verified` only when a tool call whose name matches a granted server is seen in a later `session/update`. Cheap, truthful, no upstream dependency; a grant that silently fails shows as `applied_unverified` forever rather than as a false green.
-> 2. **Land the mechanism upstream first.** Open a small PR against `@agentclientprotocol/claude-agent-acp` to surface `mcp_servers` status (via `_meta` on the resume response or a `session/update`), then consume it here. Correct, but blocks this PR on another repo's review.
-> 3. **Drop the requirement for v1** and document the gap in the PR description.
+> Background. The spec (§5.4) and the kickoff both make this non-negotiable: *"verify the grant actually landed (observe the next turn's advertised tool list); do not trust the resume success response."* Verification of the shipped adapter found **that surface does not exist**. `acp-agent.js:1601-1614` consumes the SDK's `system`/`init` message internally (it latches `msgLifecycleV1` and syncs fast-mode state) and never forwards `tools[]` or `mcp_servers[{name,status}]` to the ACP client, even though the SDK carries both (`sdk.d.ts:4418-4424`). `session/resume` returns only `{sessionId, modes, configOptions}`. So there is nothing on the ACP wire to observe today.
 >
-> This plan assumes **option 1**. If Moni picks 2 or 3, this task changes shape — do not start it until confirmed.
+> Options considered:
+> 1. **← CHOSEN. Ship honest status, verify opportunistically.** Treat `pending_next_turn` → `applied_unverified` on a successful resume, and promote to `verified` only when a tool call whose name matches a granted server is seen in a later `session/update`. Cheap, truthful, no upstream dependency; a grant that silently fails shows as `applied_unverified` forever rather than as a false green.
+> 2. *Rejected:* land the mechanism upstream first — a PR against `@agentclientprotocol/claude-agent-acp` to surface `mcp_servers` status. Correct, but blocks this PR on another repo's review.
+> 3. *Rejected:* drop the requirement for v1. The spec explicitly warns reconfigure-on-resume is adapter behaviour, not an ACP contract — trusting the success response is exactly the failure mode §9 guards against.
+>
+> Option 2 remains the right long-term fix and should be noted in the PR body as a follow-up: `applied_unverified` is a workaround for a missing ACP surface, not a permanent design.
 
 **Files:**
 - Modify: `crates/buzz-acp/src/pool.rs` (record grant state; observe tool-call updates)
