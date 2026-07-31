@@ -10,5 +10,5 @@ pub(crate) mod trusted_lan;
 
 #[cfg(test)]
 mod planning_import_tests;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod trusted_lan_tests;
