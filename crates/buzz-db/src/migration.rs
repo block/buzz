@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -919,6 +919,15 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
+
+        // Sticker curation pins an exact pack revision per community.
+        // Renumbered to 0027 after 0025_relay_invites and 0026_replica_heartbeat
+        // landed on main.
+        assert_eq!(migrations[26].version, 27);
+        let sticker_catalog = migrations[26].sql.as_str();
+        assert!(sticker_catalog.contains("CREATE TABLE sticker_catalog_approvals"));
+        assert!(sticker_catalog.contains("PRIMARY KEY (community_id, coordinate)"));
+        assert!(sticker_catalog.contains("approved_event_id BYTEA"));
     }
 
     #[test]

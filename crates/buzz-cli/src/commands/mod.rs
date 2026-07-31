@@ -15,6 +15,7 @@ pub mod pr;
 pub mod reactions;
 pub mod repos;
 pub mod social;
+pub mod stickers;
 pub mod upload;
 pub mod users;
 pub mod workflows;

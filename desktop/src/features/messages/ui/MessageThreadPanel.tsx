@@ -43,6 +43,7 @@ import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
+import { parseStickerReference } from "@/shared/api/stickers";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
@@ -581,6 +582,7 @@ export function MessageThreadPanel({
               }
               onEdit={
                 onEdit &&
+                !parseStickerReference(threadHead.tags) &&
                 canManageMessageForCurrentUser(
                   threadHead,
                   currentPubkey,
@@ -744,6 +746,7 @@ export function MessageThreadPanel({
                         }
                         onEdit={
                           onEdit &&
+                          !parseStickerReference(entry.message.tags) &&
                           canManageMessageForCurrentUser(
                             entry.message,
                             currentPubkey,

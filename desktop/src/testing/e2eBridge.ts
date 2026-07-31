@@ -350,8 +350,9 @@ type E2eConfig = {
     /** Delay EOSE for membership snapshots after delivering the event. */
     relayMembershipEoseDelayMs?: number;
     relayRole?: "owner" | "admin" | "member" | null;
-    // Descriptors returned by the mocked `pick_and_upload_media` /
-    // `upload_media_bytes` commands. Lets a spec drive the attachment flow
+    // Descriptors returned by the mocked `pick_and_upload_media`,
+    // `pick_and_upload_sticker_image`, and `upload_media_bytes` commands.
+    // Lets a spec drive the attachment or sticker-authoring flow
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     uploadDelayMs?: number;
@@ -8659,6 +8660,8 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    mentionTags?: string[][] | null;
+    stickerTags?: string[][] | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8678,8 +8681,15 @@ async function handleSendChannelMessage(
   // relay echoes them back on the stored event too, so mirror that here so the
   // emoji renderer keeps resolving `:shortcode:` after the round-trip.
   const emojiTags = args.emojiTags ?? [];
+  const mentionTags = args.mentionTags ?? [];
+  const stickerTags = args.stickerTags ?? [];
   // Both kinds end up on the stored event's tag set, just like the real relay.
-  const extraTags = [...mediaTags, ...emojiTags];
+  const extraTags = [
+    ...mediaTags,
+    ...emojiTags,
+    ...mentionTags,
+    ...stickerTags,
+  ];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);
@@ -11786,6 +11796,22 @@ export function maybeInstallE2eTauriMocks() {
         return await resolveMockUploadDescriptors(activeConfig);
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
+      case "pick_and_upload_sticker_image":
+        return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
+      case "import_signal_sticker_pack":
+        return {
+          identifier: "mock-signal-pack",
+          title: "Mock Signal Pack",
+          stickers: [],
+          skippedStickerIds: [],
+        };
+      case "import_nostr_sticker_pack":
+        return {
+          identifier: "mock-nostr-pack",
+          title: "Mock Nostr Pack",
+          stickers: [],
+          skippedStickerIds: [],
+        };
       case "upload_media_bytes":
         return resolveMockUploadDescriptorForBytes(
           payload as { data: number[]; filename?: string | null },

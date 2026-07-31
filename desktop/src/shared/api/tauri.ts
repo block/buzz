@@ -314,6 +314,18 @@ export async function invokeTauri<T>(
   }
 }
 
+// Implemented in `./pairing` (file-size ceiling); re-exported here so the
+// long-standing `@/shared/api/tauri` import path keeps working. The cycle is
+// function-level only — `pairing.ts` calls `invokeTauri` at call time, not at
+// module-evaluation time.
+export {
+  cancelPairing,
+  confirmPairingSas,
+  nip44DecryptFromSelf,
+  nip44EncryptToSelf,
+  startPairing,
+} from "./pairing";
+
 export function fromRawFeedItem(item: RawFeedItem) {
   return {
     id: item.id,
@@ -548,6 +560,7 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  stickerTags?: string[][],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -558,6 +571,7 @@ export async function sendChannelMessage(
       mediaTags: mediaTags ?? null,
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,
+      stickerTags: stickerTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
@@ -1114,32 +1128,6 @@ export async function probeBackendProvider(
   return invokeTauri<BackendProviderProbeResult>("probe_backend_provider", {
     binaryPath,
   });
-}
-
-// ── NIP-44 encrypt-to-self ───────────────────────────────────────────────────
-
-export async function nip44EncryptToSelf(plaintext: string): Promise<string> {
-  return invokeTauri<string>("nip44_encrypt_to_self", { plaintext });
-}
-
-export async function nip44DecryptFromSelf(
-  ciphertext: string,
-): Promise<string> {
-  return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
-}
-
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
-
-export async function startPairing(): Promise<string> {
-  return invokeTauri<string>("start_pairing");
-}
-
-export async function confirmPairingSas(): Promise<void> {
-  await invokeTauri("confirm_pairing_sas");
-}
-
-export async function cancelPairing(): Promise<void> {
-  await invokeTauri("cancel_pairing");
 }
 
 export async function applyCommunity(

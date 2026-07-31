@@ -1027,6 +1027,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sonar-stickers",
  "subtle",
  "thiserror 2.0.18",
  "url",
@@ -1050,6 +1051,7 @@ dependencies = [
  "buzz-persona",
  "buzz-sdk",
  "buzz-voice",
+ "buzz-ws-client",
  "bytes",
  "bzip2 0.6.1",
  "chrono",
@@ -1093,6 +1095,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.11.0",
  "sherpa-onnx",
+ "sonar-stickers",
  "strip-ansi-escapes",
  "tar",
  "tauri",
@@ -1170,6 +1173,7 @@ dependencies = [
  "nostr",
  "serde",
  "serde_json",
+ "sonar-stickers",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -1190,6 +1194,20 @@ dependencies = [
  "sherpa-onnx",
  "symphonia",
  "tokenizers",
+]
+
+[[package]]
+name = "buzz-ws-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "nostr",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3874,6 +3892,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -8320,6 +8339,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -9566,6 +9586,26 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sonar-stickers"
+version = "0.1.0"
+source = "git+https://github.com/hedwig-corp/bitchat-to-sonar?rev=eea8ada304517d6a3ea6c81d6ffa57ce00504bcd#eea8ada304517d6a3ea6c81d6ffa57ce00504bcd"
+dependencies = [
+ "aes 0.8.4",
+ "base64 0.22.1",
+ "cbc",
+ "hex",
+ "hkdf",
+ "hmac 0.12.1",
+ "nostr",
+ "prost 0.13.5",
+ "reqwest 0.12.28",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]

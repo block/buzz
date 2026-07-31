@@ -8,6 +8,7 @@ mod egress_guard;
 mod event_sync;
 mod events;
 mod huddle;
+mod identity_archive_events;
 mod identity_storage;
 mod key_backup;
 mod linux_media;
@@ -31,6 +32,7 @@ mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod sticker_events;
 mod templates;
 #[cfg(target_os = "macos")]
 mod tray_menu;
@@ -161,10 +163,8 @@ pub fn run() {
             // Keep the runtime alive for the process lifetime; dropping it
             // would shut down the workers Tauri now depends on.
             std::mem::forget(runtime);
-            eprintln!(
-                "buzz-mesh: installed tokio runtime with {} MiB worker stacks",
-                crate::mesh_llm::MESH_WORKER_STACK_SIZE / (1024 * 1024)
-            );
+            let stack_mib = crate::mesh_llm::MESH_WORKER_STACK_SIZE / (1024 * 1024);
+            eprintln!("buzz-mesh: installed tokio runtime with {stack_mib} MiB worker stacks");
         }
         Err(error) => {
             // Fall back to Tauri's default runtime: the app still works,
@@ -780,6 +780,9 @@ pub fn run() {
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
+            pick_and_upload_sticker_image,
+            import_signal_sticker_pack,
+            import_nostr_sticker_pack,
             upload_media_bytes,
             download_image,
             save_png_data_url,
