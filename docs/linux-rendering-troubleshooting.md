@@ -8,6 +8,7 @@ This guide covers the most common rendering failures on Linux and how to resolve
 |---------|-------------|-----|
 | Blank or transparent window, then `SIGABRT` with `colrv1_configure_skpaint` in the output | COLRv1 color emoji font (AppImage only) | Upgrade to the latest AppImage (v0.5.2+) |
 | Blank window on startup, no crash output | dmabuf renderer incompatibility (NVIDIA or AppImage) | `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Buzz.AppImage` or `--safe-rendering` |
+| SEGV when switching communities; `gst_value_set_int_range_step` | GStreamer/WebKit media teardown on remount (#3488) | Prefer `.deb`/`.rpm`; `--safe-rendering`; clear `~/.cache/gstreamer-1.0` |
 | Blank window on any hardware, no crash output | Unknown GPU/driver combination | `--safe-rendering` flag (see below) |
 
 ---
