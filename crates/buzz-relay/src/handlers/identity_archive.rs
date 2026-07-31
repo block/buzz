@@ -577,4 +577,65 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    // Regression for block/buzz#3848: rapid NIP-IA archive operations within
+    // one wall-clock second must produce kind:13535 snapshots with strictly
+    // increasing created_at. NIP-01 resolves same-second replaceable events by
+    // lowest event id (randomly signed), so without a monotonic timestamp
+    // guard an intermediate snapshot can win over a newer accepted delta.
+    #[tokio::test]
+    async fn nipia_archival_list_snapshots_are_monotonic_through_same_second() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        if sqlx::query("SELECT 1 FROM archived_identities LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_test_community(&pool).await;
+
+        // Six rapid snapshots in one wall-clock second; the wal race must not
+        // strand an intermediate snapshot in the authoritative slot.
+        for _ in 0..6 {
+            publish_nipia_archival_list(&tenant, &state)
+                .await
+                .expect("publish NIP-IA archival list snapshot");
+        }
+
+        let snapshots = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("query NIP-IA archival list snapshots");
+
+        let mut timestamps: Vec<i64> = snapshots
+            .iter()
+            .map(|e| e.event.created_at.as_secs() as i64)
+            .collect();
+        timestamps.sort_unstable();
+
+        // Six same-second publishes must yield six distinct, strictly
+        // increasing created_at values (T..=T+5), never a tie an intermediate
+        // snapshot could win by lowest-id.
+        let mut unique = timestamps.clone();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            6,
+            "expected six distinct monotonically increasing snapshot timestamps, got {unique:?}"
+        );
+        for window in unique.windows(2) {
+            assert!(window[1] > window[0], "timestamps not strictly increasing: {unique:?}");
+        }
+    }
 }
