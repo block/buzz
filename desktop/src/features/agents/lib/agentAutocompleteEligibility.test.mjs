@@ -352,3 +352,74 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
+
+test("relayAgentIsSharedWithUser: channel membership beats a stale directory entry", () => {
+  // The agent joined a channel we are in, but its host has not republished the
+  // directory entry yet — the common case right after creating an agent.
+  const staleAgent = {
+    pubkey: PUB_A,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      staleAgent,
+      new Set(["general"]),
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      staleAgent,
+      new Set(["general"]),
+      CURRENT_PUBKEY,
+      new Set([PUB_A]),
+    ),
+    true,
+  );
+});
+
+test("relayAgentIsSharedWithUser: presence does not override owner-only", () => {
+  const ownerOnly = {
+    pubkey: PUB_A,
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      ownerOnly,
+      new Set(["general"]),
+      CURRENT_PUBKEY,
+      new Set([PUB_A]),
+    ),
+    false,
+  );
+});
+
+test("getMentionableAgentPubkeys: includes agents present in the open channel", () => {
+  const result = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: [],
+    relayAgents: [
+      {
+        pubkey: PUB_A,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: [],
+      },
+      {
+        pubkey: PUB_B,
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+        channelIds: [],
+      },
+    ],
+    sharedChannelIds: new Set(["general"]),
+    presentChannelPubkeys: new Set([PUB_A, PUB_B]),
+  });
+  assert.deepEqual(result, new Set([PUB_A]));
+});

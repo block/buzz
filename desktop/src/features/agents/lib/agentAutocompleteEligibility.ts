@@ -9,10 +9,36 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   );
 }
 
+/**
+ * Whether this client may @-mention `agent`.
+ *
+ * `allowlist` is decided by the list alone — it is channel-independent.
+ *
+ * `anyone` means "any member of a channel I am in", which is true as soon as
+ * the agent and the reader share a channel. Two independent signals establish
+ * that, and either is sufficient:
+ *
+ * 1. `presentChannelPubkeys` — the agent appears in the membership of a
+ *    channel we are in. This comes from data the client already holds and is
+ *    correct the moment the agent joins.
+ * 2. `agent.channelIds` — the agent's own directory entry. Only the machine
+ *    holding the agent's key can update it, so it lags whenever someone else
+ *    changes the agent's channels, and is empty for an agent that has not
+ *    republished since starting.
+ *
+ * Relying on (2) alone made an agent's visibility depend on whether its host
+ * happened to refresh in time, which is not something a reader can observe or
+ * influence. (1) is authoritative for the reader's own channels; (2) still
+ * covers shared channels whose membership we have not loaded.
+ */
 export function relayAgentIsSharedWithUser(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "channelIds" | "pubkey" | "respondTo" | "respondToAllowlist"
+  >,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
+  presentChannelPubkeys?: ReadonlySet<string>,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
@@ -24,8 +50,12 @@ export function relayAgentIsSharedWithUser(
       .includes(normalizedCurrentPubkey);
   }
 
+  if (agent.respondTo !== "anyone") {
+    return false;
+  }
+
   return (
-    agent.respondTo === "anyone" &&
+    presentChannelPubkeys?.has(normalizePubkey(agent.pubkey)) === true ||
     agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
   );
 }
@@ -35,18 +65,32 @@ export function getMentionableAgentPubkeys({
   managedAgentPubkeys,
   relayAgents,
   sharedChannelIds,
+  presentChannelPubkeys,
 }: {
   currentPubkey?: string | null;
   managedAgentPubkeys: Iterable<string>;
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
+  /**
+   * Pubkeys the client can see in the membership of channels it is in —
+   * typically the open channel's member list. See
+   * {@link relayAgentIsSharedWithUser} for why this outranks the directory.
+   */
+  presentChannelPubkeys?: ReadonlySet<string>;
 }) {
   const pubkeys = new Set(
     [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
   );
 
   for (const agent of relayAgents ?? []) {
-    if (relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)) {
+    if (
+      relayAgentIsSharedWithUser(
+        agent,
+        sharedChannelIds,
+        currentPubkey,
+        presentChannelPubkeys,
+      )
+    ) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
   }
