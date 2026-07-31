@@ -8,6 +8,7 @@ mod egress_guard;
 mod event_sync;
 mod events;
 mod huddle;
+mod identity_storage;
 mod key_backup;
 mod linux_media;
 mod managed_agents;

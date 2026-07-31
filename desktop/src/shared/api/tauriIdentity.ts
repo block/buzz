@@ -1,9 +1,10 @@
 import { invokeTauri } from "@/shared/api/tauri";
-import type { Identity } from "@/shared/api/types";
+import type { Identity, IdentityStorage } from "@/shared/api/types";
 
 type RawIdentity = {
   pubkey: string;
   display_name: string;
+  storage?: IdentityStorage;
   lost?: boolean;
   locked?: boolean;
   reset_failed?: boolean;
@@ -13,6 +14,7 @@ function fromRawIdentity(raw: RawIdentity): Identity {
   return {
     pubkey: raw.pubkey,
     displayName: raw.display_name,
+    storage: raw.storage,
     lost: raw.lost === true,
     locked: raw.locked === true,
     resetFailed: raw.reset_failed === true,
@@ -27,9 +29,12 @@ export async function getNsec(): Promise<string> {
   return invokeTauri<string>("get_nsec");
 }
 
-export async function importIdentity(nsec: string): Promise<Identity> {
+export async function importIdentity(
+  nsec: string,
+  password?: string,
+): Promise<Identity> {
   return fromRawIdentity(
-    await invokeTauri<RawIdentity>("import_identity", { nsec }),
+    await invokeTauri<RawIdentity>("import_identity", { nsec, password }),
   );
 }
 
