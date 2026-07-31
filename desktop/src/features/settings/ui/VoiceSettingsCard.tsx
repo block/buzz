@@ -1,9 +1,19 @@
 import * as React from "react";
-import { ChevronDown, Play, Volume2 } from "lucide-react";
+import { ChevronDown, Play, Trash2, Upload, Volume2 } from "lucide-react";
 
 import { invokeTauri } from "@/shared/api/tauri";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,11 +37,18 @@ export type TtsSettings = {
   voicePreferences: string[];
 };
 
+type TtsVoiceMutation = {
+  settings: TtsSettings;
+  registry: VoiceRegistryEntry[];
+};
+
 export function VoiceSettingsCard() {
   const [settings, setSettings] = React.useState<TtsSettings | null>(null);
   const [registry, setRegistry] = React.useState<VoiceRegistryEntry[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [previewing, setPreviewing] = React.useState(false);
+  const [deleteCandidate, setDeleteCandidate] =
+    React.useState<VoiceRegistryEntry | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -105,6 +122,50 @@ export function VoiceSettingsCard() {
         saveError instanceof Error
           ? saveError.message
           : "Voice settings could not be saved.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const importPocketVoice = React.useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await invokeTauri<TtsVoiceMutation | null>(
+        "import_pocket_voice",
+      );
+      if (result) {
+        setSettings(result.settings);
+        setRegistry(result.registry);
+      }
+    } catch (importError) {
+      setError(
+        importError instanceof Error
+          ? importError.message
+          : "Voice could not be imported.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const deletePocketVoice = React.useCallback(async (voiceKey: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await invokeTauri<TtsVoiceMutation>(
+        "delete_pocket_voice",
+        { voiceKey },
+      );
+      setSettings(result.settings);
+      setRegistry(result.registry);
+      setDeleteCandidate(null);
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "Voice could not be deleted.",
       );
     } finally {
       setBusy(false);
@@ -236,6 +297,28 @@ export function VoiceSettingsCard() {
                   )}
                   Preview
                 </Button>
+                <Button
+                  data-testid="pocket-voice-import"
+                  disabled={controlsDisabled}
+                  onClick={() => void importPocketVoice()}
+                  size="sm"
+                  variant="outline"
+                >
+                  <Upload className="h-4 w-4" />
+                  Add voice
+                </Button>
+                {selectedVoice?.key.startsWith("pocket:imported:") && (
+                  <Button
+                    aria-label={`Delete ${selectedVoice.displayName}`}
+                    data-testid="pocket-voice-delete"
+                    disabled={controlsDisabled}
+                    onClick={() => setDeleteCandidate(selectedVoice)}
+                    size="icon"
+                    variant="ghost"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
             </SettingsOptionRow>
           </SettingsOptionGroup>
@@ -251,6 +334,41 @@ export function VoiceSettingsCard() {
           </p>
         )}
       </div>
+      <AlertDialog
+        onOpenChange={(open) => {
+          if (!open) setDeleteCandidate(null);
+        }}
+        open={deleteCandidate !== null}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete imported voice?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteCandidate
+                ? `${deleteCandidate.displayName} and its local audio file will be removed.`
+                : "This imported voice and its local audio file will be removed."}
+              {selectedVoice?.key === deleteCandidate?.key &&
+                " Mary will be selected instead."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-testid="confirm-pocket-voice-delete"
+              disabled={busy || !deleteCandidate}
+              onClick={(event) => {
+                event.preventDefault();
+                if (deleteCandidate) {
+                  void deletePocketVoice(deleteCandidate.key);
+                }
+              }}
+            >
+              Delete voice
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

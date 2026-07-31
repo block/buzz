@@ -392,6 +392,40 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         None => return Ok(false),
     };
 
+    // Avoid resolving and hashing imported voice files on every hot-start poll
+    // when TTS is already disabled or running. The guarded claim below repeats
+    // these checks after the fallible work to close the race.
+    {
+        let huddle = state.huddle()?;
+        if huddle.tts_pipeline.is_some() || !huddle.tts_enabled {
+            return Ok(false);
+        }
+    }
+
+    // Resolve all fallible construction inputs before claiming the sentinel so
+    // an unreadable optional voice registry cannot wedge future start attempts.
+    let output_device = state
+        .huddle_audio
+        .output_device
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let app = state
+        .app_handle
+        .lock()
+        .map_err(|error| format!("app handle lock poisoned: {error}"))?
+        .clone();
+    let voice_preferences = state
+        .huddle_audio
+        .tts
+        .lock()
+        .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))
+        .map(|settings| settings.voice_preferences.clone())?;
+    let initial_voice = match app {
+        Some(app) => super::tts_settings::pocket_voice_reference(&app, &voice_preferences)?,
+        None => super::tts_settings::bundled_pocket_voice_reference(&voice_preferences),
+    };
+
     // Atomically check preconditions and claim the construction slot.
     // The sentinel prevents a second caller from starting construction
     // while we're building outside the lock.
@@ -416,20 +450,6 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
 
     // Construct outside the lock — this spawns the TTS worker thread and
     // loads ONNX sessions (~200ms). If this fails, clear the sentinel.
-    let output_device = state
-        .huddle_audio
-        .output_device
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let initial_voice = state
-        .huddle_audio
-        .tts
-        .lock()
-        .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))
-        .map(|settings| {
-            super::tts_settings::pocket_voice_name(&settings.voice_preferences).to_string()
-        })?;
     let constructed_voice = initial_voice.clone();
     let constructed = tokio::task::spawn_blocking(move || {
         tts::TtsPipeline::new_with_voice(
@@ -513,14 +533,21 @@ fn finalize_tts_pipeline_start(
     {
         return Ok(false);
     }
-    let voice = state
+    let app = state
+        .app_handle
+        .lock()
+        .map_err(|error| format!("app handle lock poisoned: {error}"))?
+        .clone();
+    let preferences = state
         .huddle_audio
         .tts
         .lock()
         .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))
-        .map(|settings| {
-            super::tts_settings::pocket_voice_name(&settings.voice_preferences).to_string()
-        })?;
+        .map(|settings| settings.voice_preferences.clone())?;
+    let voice = match app {
+        Some(app) => super::tts_settings::pocket_voice_reference(&app, &preferences)?,
+        None => super::tts_settings::bundled_pocket_voice_reference(&preferences),
+    };
     publish(&voice, &mut huddle);
     Ok(true)
 }

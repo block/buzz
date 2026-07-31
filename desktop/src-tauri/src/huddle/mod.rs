@@ -39,6 +39,7 @@ pub mod stt;
 pub mod transcription;
 pub mod tts;
 pub mod tts_settings;
+mod tts_voice_import;
 mod tts_voice_registry;
 pub mod wire;
 

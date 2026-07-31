@@ -1178,13 +1178,17 @@ dependencies = [
 name = "buzz-voice"
 version = "0.1.0"
 dependencies = [
+ "atomic-write-file",
+ "hex",
  "ort",
  "ort-sys",
  "rand 0.10.2",
  "sentencepiece-model",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sherpa-onnx",
+ "symphonia",
  "tokenizers",
 ]
 
@@ -9778,6 +9782,7 @@ dependencies = [
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
  "symphonia-codec-aac",
+ "symphonia-codec-alac",
  "symphonia-codec-pcm",
  "symphonia-codec-vorbis",
  "symphonia-core",
@@ -9818,6 +9823,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c263845aa86881416849c1729a54c7f55164f8b96111dba59de46849e73a790"
 dependencies = [
  "lazy_static",
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-alac"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8413fa754942ac16a73634c9dfd1500ed5c61430956b33728567f667fdd393ab"
+dependencies = [
  "log",
  "symphonia-core",
 ]

@@ -893,6 +893,8 @@ pub fn run() {
             huddle::tts_settings::list_voice_registry,
             huddle::tts_settings::set_pocket_voice,
             huddle::tts_settings::preview_pocket_voice,
+            huddle::tts_settings::import_pocket_voice,
+            huddle::tts_settings::delete_pocket_voice,
             speak_agent_message,
             add_agent_to_huddle,
             check_pipeline_hotstart,

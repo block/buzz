@@ -120,7 +120,7 @@ pub(super) fn reconcile_selected_voice(
         return true;
     }
 
-    let requested_path = model_dir.join(format!("{requested_voice}.{VOICE_FILE_EXT}"));
+    let requested_path = voice_path(model_dir, &requested_voice);
     match load_voice_style(&requested_path) {
         Ok(requested_style) => {
             *style = requested_style;
@@ -148,6 +148,15 @@ pub(super) fn reconcile_selected_voice(
                 }
             }
         }
+    }
+}
+
+pub(super) fn voice_path(model_dir: &Path, voice: &str) -> std::path::PathBuf {
+    let path = Path::new(voice);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        model_dir.join(format!("{voice}.{VOICE_FILE_EXT}"))
     }
 }
 
