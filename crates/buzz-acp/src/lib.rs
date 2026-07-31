@@ -4376,6 +4376,35 @@ mod owner_control_command_tests {
     }
 
     #[test]
+    fn control_notice_lands_in_the_thread_the_command_was_typed_in() {
+        // A command typed in a thread must be answered in that thread. Posting
+        // the notice at channel level instead would surface an unrelated root
+        // message, which is how the owner loses track of what it answers.
+        let keys = Keys::generate();
+        let root = "11".repeat(32);
+        let reply = "22".repeat(32);
+        let threaded = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "!rotate")
+            .tags([
+                Tag::parse(["e", &root, "", "root"]).expect("root tag"),
+                Tag::parse(["e", &reply, "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let thread_ref = pool::thread_ref_from_tags(&queue::parse_thread_tags(&threaded))
+            .expect("a threaded command yields a thread ref");
+        assert_eq!(thread_ref.root_event_id.to_hex(), root);
+        assert_eq!(thread_ref.parent_event_id.to_hex(), reply);
+
+        // Conversely, a command typed at channel level must NOT be threaded, or
+        // the notice would attach itself to whatever root it inherited.
+        let bare = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "!rotate")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(pool::thread_ref_from_tags(&queue::parse_thread_tags(&bare)).is_none());
+    }
+
+    #[test]
     fn rotate_idle_notice_distinguishes_a_rotation_from_a_no_op() {
         // The no-op is the case worth wording carefully: nothing was cached, so
         // the command changed nothing, and the notice has to say that rather

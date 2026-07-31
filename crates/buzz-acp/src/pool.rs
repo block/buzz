@@ -3615,6 +3615,26 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
+/// Resolve the NIP-10 thread a notice must land in, from the tags of the event
+/// that triggered it.
+///
+/// `None` when the trigger carried no thread tags — the notice then posts at
+/// channel level. This is what keeps a notice in the thread the owner was
+/// typing in instead of surfacing as an unrelated root message.
+pub(crate) fn thread_ref_from_tags(thread_tags: &ThreadTags) -> Option<buzz_sdk::ThreadRef> {
+    let root = thread_tags.root_event_id.as_deref()?;
+    let root_id = nostr::EventId::from_hex(root).ok()?;
+    let parent_id = thread_tags
+        .parent_event_id
+        .as_deref()
+        .and_then(|p| nostr::EventId::from_hex(p).ok())
+        .unwrap_or(root_id);
+    Some(buzz_sdk::ThreadRef {
+        root_event_id: root_id,
+        parent_event_id: parent_id,
+    })
+}
+
 /// Best-effort: post a visible notice (kind:9) to a channel — a dead-letter
 /// warning, or the outcome of a consumed owner control command. Replies into
 /// the thread of `thread_tags` when the triggering event was threaded. Errors
@@ -3625,18 +3645,7 @@ pub(crate) async fn post_notice(
     thread_tags: &ThreadTags,
     content: &str,
 ) {
-    let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
-        let root_id = nostr::EventId::from_hex(root).ok()?;
-        let parent_id = thread_tags
-            .parent_event_id
-            .as_deref()
-            .and_then(|p| nostr::EventId::from_hex(p).ok())
-            .unwrap_or(root_id);
-        Some(buzz_sdk::ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: parent_id,
-        })
-    });
+    let thread_ref = thread_ref_from_tags(thread_tags);
     let builder =
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
             Ok(b) => b,
