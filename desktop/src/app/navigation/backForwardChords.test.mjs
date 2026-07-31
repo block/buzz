@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  matchBackForwardChord,
-  matchBackForwardMouseButton,
-} from "./backForwardChords.ts";
+import { matchBackForwardChord } from "./backForwardChords.ts";
 
 function chord(overrides = {}) {
   return {
@@ -138,21 +135,5 @@ test("plain bracket / arrow keys without the platform modifier never match", () 
     for (const key of ["[", "]", "ArrowLeft", "ArrowRight", "a", "Enter"]) {
       assert.equal(matchBackForwardChord(chord({ key }), isMac), null);
     }
-  }
-});
-
-// ── Mouse back/forward buttons (X1/X2) ───────────────────────────────────────
-
-test("mouse: button 3 (X1) matches back", () => {
-  assert.equal(matchBackForwardMouseButton({ button: 3 }), "back");
-});
-
-test("mouse: button 4 (X2) matches forward", () => {
-  assert.equal(matchBackForwardMouseButton({ button: 4 }), "forward");
-});
-
-test("mouse: left/middle/right buttons never match", () => {
-  for (const button of [0, 1, 2]) {
-    assert.equal(matchBackForwardMouseButton({ button }), null);
   }
 });

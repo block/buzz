@@ -7,10 +7,7 @@ import {
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import {
-  matchBackForwardChord,
-  matchBackForwardMouseButton,
-} from "@/app/navigation/backForwardChords";
+import { matchBackForwardChord } from "@/app/navigation/backForwardChords";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 
@@ -95,24 +92,6 @@ export function useBackForwardControls() {
     }
   });
 
-  const handleMouseUp = React.useEffectEvent((event: MouseEvent) => {
-    // Mouse X1/X2 (back/forward) buttons, matching browser behavior.
-    // WebKit does not navigate on these natively, so this is the only
-    // handler; fires regardless of focus for the same reason as the chords.
-    const direction = matchBackForwardMouseButton(event);
-
-    if (direction === "back") {
-      event.preventDefault();
-      goBack();
-      return;
-    }
-
-    if (direction === "forward") {
-      event.preventDefault();
-      goForward();
-    }
-  });
-
   const handleMouseNav = React.useEffectEvent((direction: string) => {
     if (direction === "back") {
       goBack();
@@ -126,23 +105,14 @@ export function useBackForwardControls() {
 
   React.useEffect(() => {
     window.addEventListener("keydown", handleKeyDown);
-    // Only listen for mouse buttons inside Tauri: in a plain browser
-    // context (dev server, e2e) the browser itself navigates on X1/X2, so
-    // this listener would double-fire the navigation.
-    if (isTauri()) {
-      window.addEventListener("mouseup", handleMouseUp);
-    }
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("mouseup", handleMouseUp);
     };
   }, []);
 
   // macOS: WKWebView never delivers X1/X2 button events or horizontal
   // swipe gestures to the DOM, so the native layer catches them
-  // (`mouse_nav.rs`) and forwards them as a Tauri event. On Windows/Linux
-  // the DOM `mouseup` listener above handles the buttons, and the native
-  // side emits nothing, so the paths never double-fire.
+  // (`mouse_nav.rs`) and forwards them as a Tauri event.
   React.useEffect(() => {
     if (!isTauri()) {
       return;

@@ -18,8 +18,8 @@
 //!   handle — that path (`ScrollWheel` + `trackSwipeEventWithOptions:`,
 //!   which also needs scroll-edge detection) is a follow-up.
 //!
-//! Windows/Linux are unaffected: WebView2 and WebKitGTK deliver X1/X2 as
-//! ordinary DOM mouse events, which the frontend `mouseup` listener handles.
+//! This module is a no-op on non-macOS targets; their mouse-button behavior
+//! is intentionally left to the underlying webview.
 
 /// Maps an `otherMouseUp` button number to a navigation direction.
 /// Buttons 3 and 4 are X1 (back) and X2 (forward).
