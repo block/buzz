@@ -85,7 +85,11 @@ fn numbat_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn numbat_findings_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, String> {
     validate_agent_pubkey(agent_pubkey)?;
-    Ok(numbat_dir(app)?.join("live.ndjson"))
+    Ok(numbat_dir(app)?.join(format!("{agent_pubkey}.ndjson")))
+}
+
+fn numbat_findings_template(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(numbat_dir(app)?.join("${BUZZ_MANAGED_AGENT_PUBKEY}.ndjson"))
 }
 
 fn health_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, String> {
@@ -149,10 +153,12 @@ fn project_finding(
         _ => return None,
     };
     let rule_id = safe_identifier(record.rule_id)?;
-    let source_agent = safe_identifier(record.source_agent)?;
-    if source_agent != expected_agent_pubkey {
-        return None;
-    }
+    // Numbat's source_agent identifies the runtime (for example, `codex`), not
+    // the managed Buzz agent. Agent attribution is instead established by the
+    // trusted per-agent output path selected from BUZZ_MANAGED_AGENT_PUBKEY.
+    // Still validate the upstream field before accepting the record, but never
+    // mistake it for a Buzz identity.
+    safe_identifier(record.source_agent)?;
 
     let session_id = record.session_id.and_then(safe_identifier)?;
     if session_id != expected_session_id {
@@ -171,7 +177,7 @@ fn project_finding(
         rule_id,
         severity,
         detected_at: safe_timestamp(record.detected_at)?,
-        source_agent,
+        source_agent: expected_agent_pubkey.to_string(),
         session_id: Some(session_id),
         channel_id: Some(channel_id),
         turn_id: Some(turn_id),
@@ -398,12 +404,12 @@ fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str)
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("failed to create Guardian storage: {error}"))?;
         set_private_permissions(&dir, 0o700)?;
-        let findings = dir.join("live.ndjson");
+        let findings = numbat_findings_path(app, agent_pubkey)?;
         if findings
             .metadata()
             .is_ok_and(|meta| meta.len() > MAX_LOCAL_RECORD_BYTES)
         {
-            let previous = dir.join("live.previous.ndjson");
+            let previous = dir.join(format!("{agent_pubkey}.previous.ndjson"));
             if previous.exists() {
                 std::fs::remove_file(&previous)
                     .map_err(|error| format!("failed to rotate Guardian storage: {error}"))?;
@@ -427,13 +433,14 @@ fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str)
         let _guard = lock
             .lock()
             .map_err(|_| "Numbat installation lock is unavailable".to_string())?;
-        run_numbat_install(&binary, runtime, &findings, NUMBAT_INSTALL_TIMEOUT)
+        let findings_template = numbat_findings_template(app)?;
+        run_numbat_install(&binary, runtime, &findings_template, NUMBAT_INSTALL_TIMEOUT)
     })();
     let health = match result {
         Ok(()) => NumbatGuardianHealth {
             state: "configured".into(),
             detail: format!(
-                "{runtime} monitoring is configured in detection-only mode; callback activity and managed-agent identity are not yet verified."
+                "{runtime} monitoring is configured in detection-only mode with findings isolated to this managed agent."
             ),
         },
         Err(detail) => NumbatGuardianHealth {
@@ -495,7 +502,7 @@ mod tests {
             "title": "Secret access followed by network egress",
             "severity": "high",
             "detected_at": "2026-07-30T14:40:00Z",
-            "source_agent": TEST_AGENT,
+            "source_agent": "codex",
             "session_id": "session-safe-01",
             "buzz_context": {
                 "channel_id": "channel-safe-01",
@@ -539,6 +546,7 @@ mod tests {
 
         assert_eq!(projected.severity, "high");
         assert_eq!(projected.evidence_count, 2);
+        assert_eq!(projected.source_agent, TEST_AGENT);
         assert_eq!(projected.channel_id.as_deref(), Some("channel-safe-01"));
         assert_eq!(projected.turn_id.as_deref(), Some("turn-safe-01"));
         for forbidden in [
@@ -595,6 +603,20 @@ mod tests {
         assert!(validate_agent_pubkey(&"a".repeat(64)).is_ok());
         assert!(validate_agent_pubkey("../../records").is_err());
         assert!(validate_agent_pubkey(&"g".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn runtime_label_is_not_treated_as_managed_agent_identity() {
+        let projected = project_finding(
+            finding_json(serde_json::json!({"source_agent": "claude-code"})).as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
+        )
+        .expect("finding from agent-scoped file");
+
+        assert_eq!(projected.source_agent, TEST_AGENT);
     }
 
     #[test]
@@ -711,7 +733,7 @@ mod tests {
         .is_none());
 
         assert!(project_finding(
-            finding_json(serde_json::json!({"source_agent": "codex"})).as_bytes(),
+            finding_json(serde_json::json!({"source_agent": "bad source"})).as_bytes(),
             TEST_AGENT,
             "session-safe-01",
             "channel-safe-01",
