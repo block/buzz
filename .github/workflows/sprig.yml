@@ -139,12 +139,11 @@ jobs:
           TITLE="Sprig (rolling)"
           NOTES="Rolling Linux build of Sprig (all-in-one buzz-acp + buzz-agent + buzz-dev-mcp), tracking \`main\` (\`${SHA}\`)."
 
-          gh release create "$TAG" \
+          gh release edit "$TAG" \
             --prerelease \
             --title "$TITLE" \
-            --notes "$NOTES" \
-            dist/* || \
-          (gh release edit "$TAG" --prerelease --title "$TITLE" --notes "$NOTES" && gh release upload "$TAG" dist/* --clobber)
+            --notes "$NOTES"
+          gh release upload "$TAG" dist/* --clobber
 
   publish-tag:
     name: Publish tagged release
