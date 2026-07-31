@@ -115,10 +115,33 @@ class ThreadDetailPage extends HookConsumerWidget {
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final didJumpToInitialMessage = useRef(false);
+    final followsThreadTail = useRef(false);
+    final pendingTailAlignment = useRef<double?>(null);
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
     int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
+
+    bool threadTailIsVisible() {
+      final lastIndex = replies.isEmpty
+          ? headIndex
+          : indexForReply(replies.length - 1);
+      return itemPositionsListener.itemPositions.value.any(
+        (position) =>
+            position.index == lastIndex && position.itemTrailingEdge <= 1.001,
+      );
+    }
+
+    useEffect(() {
+      void onPositionsChanged() {
+        if (threadTailIsVisible()) followsThreadTail.value = true;
+      }
+
+      itemPositionsListener.itemPositions.addListener(onPositionsChanged);
+      return () => itemPositionsListener.itemPositions.removeListener(
+        onPositionsChanged,
+      );
+    }, [itemPositionsListener, replies.length]);
 
     useEffect(() {
       final messageId = initialMessageId;
@@ -229,6 +252,39 @@ class ThreadDetailPage extends HookConsumerWidget {
     // itself a root message its rootId is null, so fall back to its own id.
     final effectiveRootId = threadHead.rootId ?? threadHead.id;
 
+    void updateComposerDockHeight(double height) {
+      final previousHeight = composerDockHeight.value;
+      final heightDelta = height - previousHeight;
+      if (heightDelta.abs() < 0.5) return;
+
+      final shouldFollowTail = followsThreadTail.value || threadTailIsVisible();
+      if (shouldFollowTail) followsThreadTail.value = true;
+      composerDockHeight.value = height;
+      if (heightDelta <= 0 || !shouldFollowTail) {
+        pendingTailAlignment.value = null;
+        return;
+      }
+      final lastIndex = replies.isEmpty
+          ? headIndex
+          : indexForReply(replies.length - 1);
+      final lastPosition = itemPositionsListener.itemPositions.value
+          .where((position) => position.index == lastIndex)
+          .firstOrNull;
+      if (lastPosition == null) return;
+      final targetAlignment =
+          (pendingTailAlignment.value ?? lastPosition.itemLeadingEdge) -
+          (heightDelta / MediaQuery.sizeOf(context).height);
+      pendingTailAlignment.value = targetAlignment;
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        itemScrollController.jumpTo(
+          index: lastIndex,
+          alignment: targetAlignment,
+        );
+      });
+    }
+
     // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
     final channelNamesMap = <String, String>{};
@@ -250,6 +306,10 @@ class ThreadDetailPage extends HookConsumerWidget {
             children: [
               Expanded(
                 child: KeyboardDismissOnDrag(
+                  onUserScrollStart: () {
+                    followsThreadTail.value = false;
+                    pendingTailAlignment.value = null;
+                  },
                   child: ScrollablePositionedList.builder(
                     key: const ValueKey('thread-message-list'),
                     itemScrollController: itemScrollController,
@@ -408,10 +468,7 @@ class ThreadDetailPage extends HookConsumerWidget {
               alignment: Alignment.bottomCenter,
               child: ComposerDockSizeReporter(
                 key: const ValueKey('thread-composer-dock'),
-                onHeightChanged: (height) {
-                  if ((composerDockHeight.value - height).abs() < 0.5) return;
-                  composerDockHeight.value = height;
-                },
+                onHeightChanged: updateComposerDockHeight,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [

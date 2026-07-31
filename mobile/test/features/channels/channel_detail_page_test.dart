@@ -752,6 +752,53 @@ void main() {
       );
     });
 
+    testWidgets('clears the composer inset when membership is revoked', (
+      tester,
+    ) async {
+      final channelsNotifier = _FakeChannelsNotifier([_testChannel]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Hello',
+              createdAt: 1000,
+            ),
+          ],
+          channelsNotifier: channelsNotifier,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final messageListFinder = find.byKey(
+        const ValueKey('channel-message-list'),
+      );
+      expect(
+        tester
+            .widget<ScrollablePositionedList>(messageListFinder)
+            .padding!
+            .bottom,
+        greaterThan(0),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-composer-dock')),
+        findsOneWidget,
+      );
+
+      channelsNotifier.setChannels([_testChannel.copyWith(isMember: false)]);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('channel-composer-dock')), findsNothing);
+      expect(
+        tester
+            .widget<ScrollablePositionedList>(messageListFinder)
+            .padding!
+            .bottom,
+        0,
+      );
+    });
+
     testWidgets('updates detail page state after joining a channel', (
       tester,
     ) async {
@@ -2623,6 +2670,84 @@ void main() {
           .dy;
       expect(headY, lessThan(oldestReplyY));
       expect(oldestReplyY, lessThan(newestReplyY));
+    });
+
+    testWidgets('thread keeps its tail above a growing composer dock', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 20; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'reply-19',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final dock = find.byKey(const ValueKey('thread-composer-dock'));
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-19'),
+      );
+      final composerSurface = find.byKey(const ValueKey('composer-surface'));
+      final compactDockHeight = tester.getSize(dock).height;
+      expect(latestReply, findsOneWidget);
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
+
+      await tester.tap(find.text('Reply in thread…').hitTestable());
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(dock).height, greaterThan(compactDockHeight));
+      expect(latestReply, findsOneWidget);
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
     });
 
     testWidgets(
