@@ -91,7 +91,7 @@ jobs:
             echo "enabled=true"
             echo "tag=${TAG_PREFIX}${VERSION}"
             if [[ "$TAG_PREFIX" == desktop-v ]]; then
-              echo "target_sha=${{ github.event.pull_request.head.sha }}"
+              echo "target_sha=${{ github.event.pull_request.merge_commit_sha }}"
               echo "desktop=true"
             else
               echo "target_sha=$GITHUB_SHA"
@@ -111,7 +111,7 @@ jobs:
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_PUSHER: ${{ github.event.pull_request.head.user.login }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           VERSION="${VERSION#desktop-v}"

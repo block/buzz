@@ -75,6 +75,15 @@
     );
   }
 
+  .buzz-huddle-drawer .buzz-huddle-control-button[aria-pressed="true"] {
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-control-button[aria-pressed="true"]:hover {
+    background: hsl(var(--primary) / 90%);
+  }
+
   .buzz-huddle-drawer .buzz-huddle-split-chevron {
     background: hsl(var(--huddle-control-chevron-surface, var(--secondary)));
   }

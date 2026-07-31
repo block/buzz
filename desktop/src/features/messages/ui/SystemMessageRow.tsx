@@ -28,6 +28,10 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  describeChannelTextFieldChange,
+  toInlineName,
+} from "../lib/systemEventCopy";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
@@ -178,6 +182,29 @@ function resolveDisplayLabel(
   profiles: UserProfileLookup | undefined,
 ): string {
   return resolveLabel(pubkey, currentPubkey, profiles);
+}
+
+function isSelfPubkey(
+  pubkey: string | undefined,
+  currentPubkey: string | undefined,
+): boolean {
+  return Boolean(
+    pubkey &&
+      currentPubkey &&
+      normalizePubkey(pubkey) === normalizePubkey(currentPubkey),
+  );
+}
+
+/** Same label as `resolveDisplayLabel`, adjusted for mid-sentence use. */
+function resolveInlineDisplayLabel(
+  pubkey: string | undefined,
+  currentPubkey: string | undefined,
+  profiles: UserProfileLookup | undefined,
+): string {
+  return toInlineName(
+    resolveLabel(pubkey, currentPubkey, profiles),
+    isSelfPubkey(pubkey, currentPubkey),
+  );
 }
 
 function isKnownAgentPubkey(
@@ -386,7 +413,7 @@ function MembershipPersonName({
       pubkey={pubkey}
       underlineOnHover
     >
-      {resolveDisplayLabel(pubkey, currentPubkey, profiles)}
+      {resolveInlineDisplayLabel(pubkey, currentPubkey, profiles)}
     </ProfileName>
   );
 }
@@ -497,12 +524,17 @@ function describeSystemEvent(
     currentPubkey,
     profiles,
   );
+  const inlineTargetLabel = resolveInlineDisplayLabel(
+    payload.target,
+    currentPubkey,
+    profiles,
+  );
   const actorName = (
     <ProfileName pubkey={payload.actor}>{actorLabel}</ProfileName>
   );
   const targetName = (
     <ProfileName highlight isAgent={isTargetAgent} pubkey={payload.target}>
-      {targetLabel}
+      {inlineTargetLabel}
     </ProfileName>
   );
   const membershipTitle = (
@@ -522,9 +554,13 @@ function describeSystemEvent(
         title: membershipTitle,
         action: (
           <>
-            was added by{" "}
+            added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
-              {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
+              {resolveInlineDisplayLabel(
+                payload.actor,
+                currentPubkey,
+                profiles,
+              )}
             </ProfileName>
             , along with{" "}
             <MemberNamesInlineList
@@ -566,9 +602,13 @@ function describeSystemEvent(
         title: membershipTitle,
         action: (
           <>
-            was added by{" "}
+            added by{" "}
             <ProfileName pubkey={payload.actor} underlineOnHover>
-              {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
+              {resolveInlineDisplayLabel(
+                payload.actor,
+                currentPubkey,
+                profiles,
+              )}
             </ProfileName>
           </>
         ),
@@ -587,12 +627,12 @@ function describeSystemEvent(
     case "topic_changed":
       return {
         title: actorName,
-        action: <>changed the topic to &ldquo;{payload.topic}&rdquo;</>,
+        action: describeChannelTextFieldChange("topic", payload.topic),
       };
     case "purpose_changed":
       return {
         title: actorName,
-        action: <>changed the purpose to &ldquo;{payload.purpose}&rdquo;</>,
+        action: describeChannelTextFieldChange("purpose", payload.purpose),
       };
     case "channel_created":
       return {

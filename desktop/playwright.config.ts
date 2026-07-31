@@ -49,6 +49,7 @@ export default defineConfig({
         "**/activity-scope-label-screenshots.spec.ts",
         "**/welcome-agent-modal-screenshots.spec.ts",
         "**/local-archive-screenshots.spec.ts",
+        "**/voice-settings.spec.ts",
         "**/agent-readiness-screenshots.spec.ts",
         "**/agent-error-state-screenshots.spec.ts",
         "**/edit-agent.spec.ts",
@@ -95,6 +96,7 @@ export default defineConfig({
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
+        "**/empty-edit-delete.spec.ts",
         "**/reaction-order.spec.ts",
         "**/reaction-names.spec.ts",
         "**/inbox-reactions.spec.ts",
@@ -130,6 +132,7 @@ export default defineConfig({
         "**/harness-management.spec.ts",
         "**/harness-catalog-screenshots.spec.ts",
         "**/inline-custom-harness.spec.ts",
+        "**/huddle-transcription.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

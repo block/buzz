@@ -71,7 +71,7 @@ cat >"$body" <<EOF
 - **Previous desktop release:** \`$previous_tag\`
 - **Proposed immutable tag:** \`desktop-v$version\`
 
-This PR must be merged with **Create a merge commit**. Squash/rebase, stale-head approval, incomplete notes, or a candidate mismatch produce no tag.
+This PR must be **squash merged** only after the Desktop Release Candidate check passes. The branch must remain based directly on current `main`; stale base, payload drift, incomplete notes, or an unauthorized merge produce no tag.
 
 The checked-in changelog accounts for every non-merge commit in the release range. Publication remains bound to the immutable candidate tag.
 EOF
