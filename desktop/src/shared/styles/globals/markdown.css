@@ -12,6 +12,27 @@
   --agent-icon-gap: 0.125rem;
 }
 
+/* Let every text block pick its own direction from its first strong
+   character. The app root is `ltr`, so without this an RTL message (Hebrew,
+   Arabic, …) is laid out as an LTR paragraph: it stays left-aligned, and any
+   sentence long enough to wrap breaks into the wrong visual reading order.
+
+   `unicode-bidi: plaintext` is the CSS equivalent of `dir="auto"` — it runs
+   the UAX9 P2/P3 heuristic per bidi paragraph — and `text-align: start`
+   resolves against that same per-paragraph direction, so an English
+   paragraph quoted inside an RTL message keeps its own alignment. Doing it
+   here rather than per-element also covers the composer and search preview,
+   which share `.message-markdown`.
+
+   Lists and blockquotes additionally carry `dir="auto"` in markdown.tsx:
+   `unicode-bidi` does not change the `direction` property, and the blocks
+   whose chrome flanks the text — list markers, the quote bar, and their
+   `padding-inline-start` — follow `direction`, not the bidi paragraph. */
+.message-markdown :is(p, h1, h2, h3, h4, h5, h6, li, blockquote, td, th) {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
 .message-markdown p:empty {
   display: none;
 }
