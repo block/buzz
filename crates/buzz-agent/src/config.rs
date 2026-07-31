@@ -673,6 +673,10 @@ pub enum Provider {
     DatabricksV2,
     /// OpenRouter multi-provider gateway. Routes to `{base_url}/chat/completions` with bearer auth. Wire format is OpenAI-chat-compatible.
     OpenRouter,
+    /// AWS Bedrock. Routes through Bedrock's Converse API with SigV4 signing.
+    /// Supports region selection, cross-region inference profiles, and
+    /// credential sources (IAM role, SSO profile, access keys).
+    Bedrock,
 }
 
 /// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
@@ -811,6 +815,22 @@ impl Config {
                 env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
                 OpenAiApi::Chat, // OpenRouter uses Chat Completions only
             ),
+            Provider::Bedrock => {
+                let region = env("AWS_REGION")
+                    .or_else(|| env("AWS_DEFAULT_REGION"))
+                    .ok_or_else(|| "config: AWS_REGION required (or AWS_DEFAULT_REGION)".to_string())?;
+                let base_url = format!("https://bedrock-runtime.{region}.amazonaws.com");
+                (
+                    String::new(), // api_key unused — SigV4 replaces bearer
+                    resolve_model(
+                        buzz_agent_model.as_deref(),
+                        env("BEDROCK_MODEL").as_deref(),
+                    )
+                    .ok_or_else(|| "config: BEDROCK_MODEL required".to_string())?,
+                    base_url,
+                    OpenAiApi::Chat, // Bedrock uses its own Converse API
+                )
+            }
         };
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
@@ -1034,6 +1054,7 @@ fn resolve_provider(
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
                 "openrouter" if present_nonempty(openrouter_key) => Ok(Provider::OpenRouter),
                 "openrouter" => Err("config: OPENROUTER_API_KEY required".into()),
+                "bedrock" => Ok(Provider::Bedrock),
                 _ => Err(format!(
                     "config: BUZZ_AGENT_PROVIDER={raw} not supported"
                 )),
