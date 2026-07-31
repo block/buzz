@@ -34,6 +34,7 @@ export function usePersistentAgentMentionHydration({
   const isSubmittingRef = React.useRef(false);
   const cancelHydrationAutocompleteRef = React.useRef(false);
   const hydratedRef = React.useRef(false);
+  const hydrationOnlyDraftContentRef = React.useRef<string | null>(null);
 
   const hydrate = React.useCallback(() => {
     const capturedScope = audienceScope;
@@ -48,6 +49,8 @@ export function usePersistentAgentMentionHydration({
     }
     isRestoringRef.current = true;
     const current = richText.getPlainTextAndCursor().text;
+    const startedWithoutDraftContent =
+      richText.getMarkdown().trim().length === 0;
     const targets = audience.pubkeys
       .map((pubkey) => ({
         pubkey,
@@ -86,6 +89,13 @@ export function usePersistentAgentMentionHydration({
     }
     hydratedRef.current = scopeRef.current === capturedScope;
     isRestoringRef.current = false;
+    if (
+      hydrationOnlyDraftContentRef.current === null &&
+      startedWithoutDraftContent &&
+      hydratedRef.current
+    ) {
+      hydrationOnlyDraftContentRef.current = richText.getMarkdown();
+    }
     if (cancelHydrationAutocompleteRef.current) {
       cancelHydrationAutocompleteRef.current = false;
       // Hydration is a programmatic transition, not an authored query. Cancel
@@ -124,9 +134,19 @@ export function usePersistentAgentMentionHydration({
   React.useEffect(() => {
     void hydrationKey;
     hydratedRef.current = false;
+    hydrationOnlyDraftContentRef.current = null;
     const frame = scheduleHydration();
     return () => cancelAnimationFrame(frame);
   }, [hydrationKey, scheduleHydration]);
+
+  const resolveDraftContentForPersistence = React.useCallback(
+    (content: string) =>
+      hydrationOnlyDraftContentRef.current !== null &&
+      content === hydrationOnlyDraftContentRef.current
+        ? ""
+        : content,
+    [],
+  );
 
   const resolvePostSendContent = React.useCallback(
     (explicitAgentPubkeys: string[]) => {
@@ -151,10 +171,11 @@ export function usePersistentAgentMentionHydration({
       }
       isRestoringRef.current = true;
       hydratedRef.current = true;
-      return (
+      const postSendContent =
         targets.map((target) => `@${target.displayName}`).join(" ") +
-        (targets.length > 0 ? " " : "")
-      );
+        (targets.length > 0 ? " " : "");
+      hydrationOnlyDraftContentRef.current = postSendContent;
+      return postSendContent;
     },
     [audience.enabled, audience.pubkeys, audienceScope, mentions],
   );
@@ -169,6 +190,7 @@ export function usePersistentAgentMentionHydration({
       scheduleHydration(true);
     },
     reconcile,
+    resolveDraftContentForPersistence,
     resolvePostSendContent,
     scheduleHydration,
   };

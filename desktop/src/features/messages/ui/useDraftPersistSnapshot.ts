@@ -58,6 +58,10 @@ type UseDraftPersistLifecycleParams = {
    * closure to capture the latest text before the effect fires.
    */
   syncComposerContentFromEditor: () => string;
+  /** Resolver for editor-only state that should not become authored content. */
+  draftContentResolverRef?: React.RefObject<{
+    resolveDraftContentForPersistence: (content: string) => string;
+  } | null>;
 };
 
 /**
@@ -104,6 +108,7 @@ export function useDraftPersistLifecycle({
   setSpoileredAttachmentUrls,
   spoileredAttachmentUrlsRef,
   syncComposerContentFromEditor,
+  draftContentResolverRef,
 }: UseDraftPersistLifecycleParams): void {
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
   const restoredQueuedAttachmentsRef = React.useRef<QueuedMediaAttachment[]>(
@@ -160,7 +165,11 @@ export function useDraftPersistLifecycle({
         if (queuedAttachments.length > 0) {
           saveQueuedAttachmentsForDraft?.(effectiveDraftKey, queuedAttachments);
         }
-        const content = syncComposerContentFromEditor();
+        const editorContent = syncComposerContentFromEditor();
+        const content =
+          draftContentResolverRef?.current?.resolveDraftContentForPersistence(
+            editorContent,
+          ) ?? editorContent;
         persistDraft(
           effectiveDraftKey,
           content,
