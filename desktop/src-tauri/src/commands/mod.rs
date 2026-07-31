@@ -16,6 +16,7 @@ mod channel_window;
 mod channels;
 mod clipboard;
 mod dms;
+mod edit_overlay;
 mod engrams;
 mod export_util;
 mod global_agent_config;

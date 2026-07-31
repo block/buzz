@@ -232,17 +232,38 @@ pub async fn get_forum_thread(
                 "#e": [event_id.clone()],
                 "#h": [channel_id.clone()],
             }),
+            // Edits targeting the root. Without these a surface posted to a
+            // forum thread renders its original spec forever — its whole
+            // update model is a full-spec replacement via kind:40003.
+            serde_json::json!({
+                "kinds": [buzz_core_pkg::kind::KIND_STREAM_MESSAGE_EDIT],
+                "#e": [event_id.clone()],
+                "#h": [channel_id.clone()],
+            }),
         ],
     )
     .await?;
 
+    let latest_edit = crate::commands::edit_overlay::latest_edit_by_target(&events);
+
     let mut root: Option<ForumMessageInfo> = None;
     let mut replies: Vec<ForumThreadReplyInfo> = Vec::new();
     for ev in &events {
+        if u32::from(ev.kind.as_u16()) == buzz_core_pkg::kind::KIND_STREAM_MESSAGE_EDIT {
+            continue;
+        }
         if ev.id.to_hex() == event_id {
-            root = Some(forum_message_from_event(ev, &channel_id));
+            let mut info = forum_message_from_event(ev, &channel_id);
+            if let Some(content) = latest_edit.get(&info.event_id) {
+                info.content = content.clone();
+            }
+            root = Some(info);
         } else {
-            replies.push(forum_reply_from_event(ev, &channel_id, &event_id));
+            let mut info = forum_reply_from_event(ev, &channel_id, &event_id);
+            if let Some(content) = latest_edit.get(&info.event_id) {
+                info.content = content.clone();
+            }
+            replies.push(info);
         }
     }
     let total_replies = replies.len() as u32;

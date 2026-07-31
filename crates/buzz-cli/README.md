@@ -221,8 +221,10 @@ everywhere: `default | success | warning | danger | info`.
 
 Surface content is JSON, so there is no `@name` text to parse — mention people
 explicitly with repeatable `--mention` (pubkey hex, npub, or display name).
-Mentioned users get the card in their Home feed and notifications, exactly like
-a mention in a normal message.
+Mentions must be current channel members; the response echoes the resolved
+`mention_pubkeys` so you can verify delivery rather than assume it. Mentioned
+users get the card in their Home feed, unread state, and desktop notifications
+while the app is open. Background push (NIP-PL) does not carry surfaces yet.
 
 **Save the returned `event_id`** — it is required to update the card:
 

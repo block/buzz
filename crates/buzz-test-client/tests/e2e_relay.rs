@@ -3321,9 +3321,12 @@ async fn test_surface_excluded_from_fts() {
     client.disconnect().await.expect("disconnect");
 }
 
-/// A surface carrying a `p` tag is delivered by a `#p` mention subscription —
-/// the path Home feeds, notifications, and agent mention filters all read.
-/// Without this, an agent can publish a card but can never notify a person.
+/// A surface carrying a `p` tag actually reaches the mentioned person.
+///
+/// The recipient is added to the (private) channel and does the read on their
+/// OWN authenticated connection — the path Home feeds, notifications and agent
+/// mention filters use. Querying on the author's connection would pass even if
+/// the recipient could never see the event, so this test deliberately does not.
 #[tokio::test]
 #[ignore]
 async fn test_surface_mention_is_deliverable() {
@@ -3332,10 +3335,16 @@ async fn test_surface_mention_is_deliverable() {
     let mentioned = Keys::generate();
     let mentioned_hex = mentioned.public_key().to_hex();
 
-    let mut client = BuzzTestClient::connect(&url, &author)
+    let mut author_client = BuzzTestClient::connect(&url, &author)
         .await
-        .expect("connect");
-    let channel_id = create_private_channel_ws(&mut client, &author).await;
+        .expect("connect as author");
+    let channel_id = create_private_channel_ws(&mut author_client, &author).await;
+
+    // The recipient must be a channel member — a p tag alone does not grant
+    // read access to a private channel.
+    let (accepted, msg) =
+        add_member_ws(&mut author_client, &channel_id, &mentioned_hex, &author).await;
+    assert!(accepted, "add mentioned member: {msg}");
 
     let marker = format!("mention-{}", uuid::Uuid::new_v4());
     let event = EventBuilder::new(
@@ -3348,10 +3357,13 @@ async fn test_surface_mention_is_deliverable() {
     ])
     .sign_with_keys(&author)
     .unwrap();
-    let ok = client.send_event(event).await.expect("publish");
+    let ok = author_client.send_event(event).await.expect("publish");
     assert!(ok.accepted, "mention surface rejected: {}", ok.message);
 
-    // Read it back the way a mention feed does: kind + #p.
+    // Read as the RECIPIENT, on their own connection.
+    let mut recipient_client = BuzzTestClient::connect(&url, &mentioned)
+        .await
+        .expect("connect as mentioned user");
     let sid = sub_id("surface-mention");
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_SURFACE_U16))
@@ -3359,19 +3371,25 @@ async fn test_surface_mention_is_deliverable() {
             SingleLetterTag::lowercase(Alphabet::P),
             [mentioned_hex.as_str()],
         );
-    client
+    recipient_client
         .subscribe(&sid, vec![filter])
         .await
         .expect("subscribe");
-    let events = client
+    let events = recipient_client
         .collect_until_eose(&sid, Duration::from_secs(5))
         .await
         .expect("EOSE");
 
     assert!(
         events.iter().any(|e| e.content.contains(&marker)),
-        "a p-tagged surface must be reachable through a #p mention query"
+        "the mentioned user must receive the card through their own #p query; \
+         got {} events",
+        events.len()
     );
 
-    client.disconnect().await.expect("disconnect");
+    author_client.disconnect().await.expect("disconnect author");
+    recipient_client
+        .disconnect()
+        .await
+        .expect("disconnect recipient");
 }

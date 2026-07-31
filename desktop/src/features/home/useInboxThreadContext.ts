@@ -4,7 +4,10 @@ import { isInboxThreadContextEvent } from "@/features/home/lib/inboxViewHelpers"
 import { relayEventFromFeedItem } from "@/features/home/lib/inbox";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
-import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
+import {
+  buildChannelReactionAuxFilter,
+  buildChannelStructuralAuxFilter,
+} from "@/shared/api/relayChannelFilters";
 import { getEventById } from "@/shared/api/tauri";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
 import {
@@ -250,8 +253,12 @@ export function useInboxThreadContext(
     selectedThreadRootId,
   ]);
 
-  // Reactions carry only an `#e` reference, so the channel-window cache never
-  // has them for thread replies — fetch them for the rendered context messages.
+  // Reactions AND structural aux (edits/deletions) carry only an `#e`
+  // reference, so the channel-window cache never has them for thread replies —
+  // fetch both for the rendered context messages. Edits matter especially for
+  // surface cards, whose whole update model is a full-spec replacement: without
+  // this backfill the Inbox renders the original card forever. Mirrors the
+  // structural-aux backfill the main thread reader documents.
   const [reactionEvents, setReactionEvents] = React.useState<RelayEvent[]>([]);
   const contextEventIdsKey = React.useMemo(
     () =>
@@ -271,14 +278,22 @@ export function useInboxThreadContext(
     }
 
     try {
-      return await relayClient.fetchAuxEventsByReference(
-        selectedChannelId,
-        eventIds,
-        buildChannelReactionAuxFilter,
-      );
+      const [reactions, structural] = await Promise.all([
+        relayClient.fetchAuxEventsByReference(
+          selectedChannelId,
+          eventIds,
+          buildChannelReactionAuxFilter,
+        ),
+        relayClient.fetchAuxEventsByReference(
+          selectedChannelId,
+          eventIds,
+          buildChannelStructuralAuxFilter,
+        ),
+      ]);
+      return [...reactions, ...structural];
     } catch (error) {
       console.error(
-        "Failed to hydrate reactions for Inbox context messages",
+        "Failed to hydrate auxiliaries for Inbox context messages",
         selectedChannelId,
         error,
       );

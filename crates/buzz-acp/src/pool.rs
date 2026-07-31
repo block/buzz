@@ -2848,6 +2848,14 @@ where
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit.saturating_add(1) as usize);
     let agent_reply_filter = replies_filter.clone().author(agent_pubkey).limit(1);
+    // Edits (kind:40003) for anything in this thread — without them a surface
+    // card in the thread reads as its original spec forever.
+    let edits_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16,
+        ))
+        .custom_tags(h_tag, [ch_str.as_str()])
+        .limit(limit.saturating_add(1) as usize);
 
     let context = fetch_with_retry(|| async {
         match timeout(
@@ -2856,6 +2864,7 @@ where
                 root_filter.clone(),
                 replies_filter.clone(),
                 agent_reply_filter.clone(),
+                edits_filter.clone(),
             ]),
         )
         .await
@@ -2964,11 +2973,14 @@ async fn fetch_dm_context(
     let ch_str = channel_id.to_string();
     let filter = nostr::Filter::new()
         // Conversational kinds — surfaces are context an agent must read, not
-        // just publish.
+        // just publish — plus edits, which carry the current content of any
+        // message that has been updated (a surface card's whole update model).
         .kinds(
             buzz_core::kind::CONVERSATIONAL_KINDS
                 .iter()
-                .map(|k| nostr::Kind::Custom(*k as u16)),
+                .copied()
+                .chain(std::iter::once(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT))
+                .map(|k| nostr::Kind::Custom(k as u16)),
         )
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit as usize);
@@ -3073,6 +3085,63 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
     })
 }
 
+/// Map of `target event id -> replacement content` from `kind:40003` edits.
+///
+/// An edit carries the full replacement content for the event its `e` tag
+/// points at. Without applying these, an agent reads the ORIGINAL content
+/// forever — merely stale for a normal message, but wrong for a surface card,
+/// whose whole update model is full-spec replacement.
+///
+/// `created_at` is second-precision, so ties break on event id
+/// lexicographically — the same rule desktop clients use, so agent and human
+/// converge on one state.
+fn latest_edits_by_target(events: &[serde_json::Value]) -> HashMap<String, String> {
+    let mut best: HashMap<String, (u64, String, String)> = HashMap::new();
+    for ev in events {
+        if ev.get("kind").and_then(|v| v.as_u64())
+            != Some(u64::from(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT))
+        {
+            continue;
+        }
+        let Some(target) = ev.get("tags").and_then(|t| t.as_array()).and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let parts = tag.as_array()?;
+                (parts.first()?.as_str()? == "e")
+                    .then(|| parts.get(1)?.as_str().map(str::to_string))
+                    .flatten()
+            })
+        }) else {
+            continue;
+        };
+        let created_at = ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = ev
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let content = ev
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let wins = best.get(&target).is_none_or(|(at, existing_id, _)| {
+            created_at > *at || (created_at == *at && id > *existing_id)
+        });
+        if wins {
+            best.insert(target, (created_at, id, content));
+        }
+    }
+    best.into_iter()
+        .map(|(target, (_, _, content))| (target, content))
+        .collect()
+}
+
+/// True when the event is an edit overlay rather than a message of its own.
+fn is_edit_event(ev: &serde_json::Value) -> bool {
+    ev.get("kind").and_then(|v| v.as_u64())
+        == Some(u64::from(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT))
+}
+
 /// Extract a `ContextMessage` from a JSON message object.
 ///
 /// Works with both thread reply objects and channel message objects.
@@ -3138,9 +3207,17 @@ fn parse_nostr_thread_response_with_meta(
     let mut reply_msgs = Vec::new();
     let mut seen_reply_ids = HashSet::new();
 
+    let edits = latest_edits_by_target(events);
+
     for ev in events {
+        if is_edit_event(ev) {
+            continue;
+        }
         let ev_id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(msg) = json_to_context_message(ev) {
+        if let Some(mut msg) = json_to_context_message(ev) {
+            if let Some(content) = edits.get(ev_id) {
+                msg.content = content.clone();
+            }
             if ev_id == root_event_id {
                 root_msg = Some(msg);
             } else if seen_reply_ids.insert(ev_id.to_string()) {
@@ -3218,11 +3295,20 @@ fn parse_nostr_thread_response_with_meta(
 fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<ConversationContext> {
     let events = json.as_array()?;
 
+    let edits = latest_edits_by_target(events);
     let mut messages: Vec<(u64, ContextMessage)> = events
         .iter()
+        .filter(|ev| !is_edit_event(ev))
         .filter_map(|ev| {
             let ts = ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
-            json_to_context_message(ev).map(|msg| (ts, msg))
+            json_to_context_message(ev).map(|mut msg| {
+                if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
+                    if let Some(content) = edits.get(id) {
+                        msg.content = content.clone();
+                    }
+                }
+                (ts, msg)
+            })
         })
         .collect();
 
@@ -4927,8 +5013,8 @@ mod tests {
     ) {
         assert_eq!(
             filters.len(),
-            3,
-            "root, recent replies, and agent reply filters"
+            4,
+            "root, recent replies, agent reply, and edit-overlay filters"
         );
 
         let root = serde_json::to_value(&filters[0]).expect("serialize root filter");
@@ -4945,6 +5031,14 @@ mod tests {
         assert_eq!(replies.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(replies.get("limit"), Some(&json!(reply_limit)));
         assert!(replies.get("authors").is_none());
+
+        let edits = serde_json::to_value(&filters[3]).expect("serialize edits filter");
+        assert_eq!(
+            edits.get("kinds"),
+            Some(&json!([buzz_core::kind::KIND_STREAM_MESSAGE_EDIT])),
+            "thread context must fetch edits, or an updated card reads as its original spec"
+        );
+        assert_eq!(edits.get("#h"), Some(&json!([channel_id.to_string()])));
 
         let agent = serde_json::to_value(&filters[2]).expect("serialize agent filter");
         assert_eq!(

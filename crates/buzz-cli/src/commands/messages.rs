@@ -834,6 +834,114 @@ pub async fn cmd_edit_message(
     Ok(())
 }
 
+/// Resolve `--mention` values for a surface against the channel's membership.
+///
+/// Surface content is canonical JSON, so there is no `@name` text to parse —
+/// mentions are explicit. They still get the same guarantees the normal send
+/// path gives: a mention must be a *current channel member* (a `p` tag for a
+/// non-member is a notification the recipient can never read), values are
+/// deduplicated, and the total is capped at [`MENTION_CAP`].
+///
+/// Accepts pubkey hex, npub, or a member's display name.
+async fn resolve_surface_mentions(
+    client: &BuzzClient,
+    channel_id: &str,
+    mentions: &[String],
+) -> Result<Vec<String>, CliError> {
+    if mentions.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let members_filter = serde_json::json!({
+        "kinds": [39002],
+        "#d": [channel_id],
+        "limit": 1,
+    });
+    let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
+        .await
+        .ok_or_else(|| {
+            CliError::Other("could not load channel membership for mention preflight".into())
+        })?;
+
+    // Display-name lookup, built from the members' own profiles.
+    let profiles_filter = serde_json::json!({
+        "kinds": [0],
+        "authors": member_pubkeys,
+        "limit": member_pubkeys.len(),
+    });
+    let profile_events = fetch_events(client, &profiles_filter)
+        .await
+        .unwrap_or_default();
+    let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in &profile_events {
+        let (Some(pubkey), Some(content_json)) = (
+            e.get("pubkey").and_then(|v| v.as_str()),
+            e.get("content").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(content_json) else {
+            continue;
+        };
+        if let Some(name) = v
+            .get("display_name")
+            .or_else(|| v.get("name"))
+            .and_then(|n| n.as_str())
+            .filter(|n| !n.is_empty())
+        {
+            name_to_pubkeys
+                .entry(name.to_ascii_lowercase())
+                .or_default()
+                .push(pubkey.to_string());
+        }
+    }
+
+    let mut resolved: Vec<String> = Vec::new();
+    for value in mentions {
+        let raw = value.trim();
+        let hex = match PublicKey::parse(raw) {
+            Ok(pubkey) => pubkey.to_hex(),
+            Err(_) => match name_to_pubkeys
+                .get(&raw.to_ascii_lowercase())
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                [pubkey] => pubkey.clone(),
+                [] => {
+                    return Err(CliError::Usage(format!(
+                        "--mention '{raw}' does not match a current channel member; \
+                         retry with --mention <pubkey>"
+                    )))
+                }
+                candidates => {
+                    return Err(CliError::Usage(format!(
+                        "--mention '{raw}' is ambiguous; candidates: {}. \
+                         Retry with --mention <pubkey>",
+                        candidates.join(", ")
+                    )))
+                }
+            },
+        };
+        if !member_pubkeys.contains(&hex) {
+            return Err(CliError::Usage(format!(
+                "--mention {hex} is not a member of this channel; \
+                 a p tag for a non-member cannot be delivered"
+            )));
+        }
+        if !resolved.contains(&hex) {
+            resolved.push(hex);
+        }
+    }
+
+    if resolved.len() > MENTION_CAP {
+        return Err(CliError::Usage(format!(
+            "too many --mention values (max {MENTION_CAP})"
+        )));
+    }
+    Ok(resolved)
+}
+
 /// Read a `--spec` argument: `-` for stdin, an existing file path, or inline JSON.
 fn read_spec_arg(value: &str) -> Result<String, CliError> {
     if value == "-" {
@@ -890,19 +998,22 @@ pub async fn cmd_send_surface(
         Some(r) => Some(resolve_thread_ref(client, r).await?),
         None => None,
     };
-    // A surface's content is JSON, so there is no @-mention text to parse —
-    // mentions are explicit. Accept hex, npub, or a display name.
-    let mut mention_pubkeys = Vec::with_capacity(mentions.len());
-    for mention in mentions {
-        mention_pubkeys.push(resolve_author(client, mention).await?);
-    }
+    let mention_pubkeys = resolve_surface_mentions(client, channel_id, mentions).await?;
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
     let builder = buzz_sdk::build_surface(channel_uuid, &spec, thread_ref.as_ref(), &mention_refs)
         .map_err(crate::validate::sdk_err)?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
+
+    // Report who was actually p-tagged so the caller (usually an agent) can
+    // verify delivery instead of assuming it.
+    let mut out: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("mention_pubkeys".into(), serde_json::json!(mention_pubkeys));
+    }
+    println!("{out}");
     Ok(())
 }
 
