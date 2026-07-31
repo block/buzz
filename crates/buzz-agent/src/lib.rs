@@ -407,9 +407,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                             error = %error,
                             "Databricks model catalog unavailable; using configured model"
                         );
+                        let configured_model = app.cfg.model.trim().to_string();
                         vec![ModelEntry {
-                            id: app.cfg.model.clone(),
-                            name: app.cfg.model.clone(),
+                            id: configured_model.clone(),
+                            name: configured_model,
                         }]
                     }
                 };

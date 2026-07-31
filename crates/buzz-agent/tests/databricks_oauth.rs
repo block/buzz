@@ -1015,7 +1015,8 @@ async fn non_auth_discovery_failure_uses_configured_model_without_caching_fallba
         let _ = axum::serve(listener, app).await;
     });
 
-    let configured_model = "configured-model";
+    let configured_model = "  configured-model  ";
+    let normalized_configured_model = configured_model.trim();
     let mut h =
         AgentHarness::spawn_provider_with_max_sessions("databricks_v2", &host, configured_model, 2)
             .await;
@@ -1038,7 +1039,7 @@ async fn non_auth_discovery_failure_uses_configured_model_without_caching_fallba
         );
         assert_eq!(
             response["result"]["models"]["availableModels"],
-            json!([{"modelId": configured_model, "name": configured_model}])
+            json!([{"modelId": normalized_configured_model, "name": normalized_configured_model}])
         );
         assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
     }

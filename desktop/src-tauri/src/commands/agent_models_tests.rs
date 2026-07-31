@@ -578,9 +578,25 @@ fn is_databricks_provider_matches_both_variants() {
 
 #[test]
 fn databricks_interactive_auth_requires_explicit_intent_and_no_static_token() {
-    assert!(should_start_interactive_auth("", true));
-    assert!(!should_start_interactive_auth("", false));
-    assert!(!should_start_interactive_auth("static-token", true));
+    assert!(should_start_interactive_auth(
+        "",
+        DatabricksAuthIntent::InteractiveModelPicker
+    ));
+    assert!(!should_start_interactive_auth(
+        "",
+        DatabricksAuthIntent::PassiveDraftDiscovery
+    ));
+    assert!(!should_start_interactive_auth(
+        "static-token",
+        DatabricksAuthIntent::InteractiveModelPicker
+    ));
+}
+
+#[test]
+fn databricks_passive_auth_error_has_reachable_create_flow_guidance() {
+    let error = databricks_sign_in_required_error();
+    assert!(error.contains("save this agent, then open its model picker"));
+    assert!(error.contains("buzz-agent auth databricks"));
 }
 
 #[test]

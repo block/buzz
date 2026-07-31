@@ -41,8 +41,30 @@ pub(super) fn databricks_static_token_error(
     format!("Databricks rejected DATABRICKS_TOKEN; update it in agent settings: {message}")
 }
 
-pub(super) fn should_start_interactive_auth(api_key: &str, allow_interactive_auth: bool) -> bool {
-    api_key.is_empty() && allow_interactive_auth
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DatabricksAuthIntent {
+    /// A saved agent's model picker was opened by the user.
+    InteractiveModelPicker,
+    /// Discovery was triggered automatically from unsaved form state.
+    PassiveDraftDiscovery,
+}
+
+impl DatabricksAuthIntent {
+    fn allows_interactive_auth(self) -> bool {
+        matches!(self, Self::InteractiveModelPicker)
+    }
+}
+
+pub(super) fn databricks_sign_in_required_error() -> String {
+    "Databricks sign-in is required; save this agent, then open its model picker to sign in, or run `buzz-agent auth databricks`"
+        .to_string()
+}
+
+pub(super) fn should_start_interactive_auth(
+    api_key: &str,
+    auth_intent: DatabricksAuthIntent,
+) -> bool {
+    api_key.is_empty() && auth_intent.allows_interactive_auth()
 }
 
 pub(super) async fn discover_databricks_models(
@@ -50,7 +72,7 @@ pub(super) async fn discover_databricks_models(
     provider: &DiscoveryProvider,
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
-    allow_interactive_auth: bool,
+    auth_intent: DatabricksAuthIntent,
 ) -> Result<Option<AgentModelsResponse>, String> {
     let provider_name = match provider.as_deref() {
         Some(provider_name) if is_databricks_provider(Some(provider_name)) => provider_name,
@@ -72,7 +94,7 @@ pub(super) async fn discover_databricks_models(
     let entries = match buzz_agent_pkg::discover_databricks_models(&config).await {
         Ok(entries) => entries,
         Err(buzz_agent_pkg::AgentError::LlmAuth(_))
-            if should_start_interactive_auth(&api_key, allow_interactive_auth) =>
+            if should_start_interactive_auth(&api_key, auth_intent) =>
         {
             let _auth = AUTH_GATE.lock().await;
             match buzz_agent_pkg::discover_databricks_models(&config).await {
@@ -110,9 +132,7 @@ pub(super) async fn discover_databricks_models(
             return Err(databricks_static_token_error(&error, &redaction_env));
         }
         Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
-            return Err(
-                "Databricks sign-in is required; open the model picker to sign in".to_string(),
-            );
+            return Err(databricks_sign_in_required_error());
         }
         Err(error) => {
             return Err(format_redacted_error(
