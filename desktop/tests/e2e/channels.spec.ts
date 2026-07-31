@@ -2607,10 +2607,18 @@ test("canvas shows an empty revision history before the first save", async ({
   const canvasSection = page.getByTestId("channel-canvas-section");
   await expect(
     canvasSection.getByTestId("channel-canvas-history-empty"),
-  ).toHaveText("No revision history yet — save the canvas to start tracking changes.");
+  ).toHaveText(
+    "No revision history yet — save the canvas to start tracking changes.",
+  );
   await expect(canvasSection.getByTestId("channel-canvas-edit")).toContainText(
     "Create canvas",
   );
+  if (process.env.BUZZ_CANVAS_HISTORY_SCREENSHOTS === "1") {
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: "test-results/canvas-revision-history-empty.png",
+    });
+  }
 });
 
 async function seedHomeInboxMention(
