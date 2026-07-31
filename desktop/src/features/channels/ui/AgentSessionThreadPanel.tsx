@@ -258,12 +258,17 @@ export function AgentSessionThreadPanel({
   const animateActivity = useTranscriptAnimationEnabled();
   const showTimestamps = useTranscriptTimestampsEnabled();
   async function handleInterruptTurn() {
-    if (!channel) {
+    if (!channel || !activeSessionId || !latestTurnId) {
       return;
     }
 
     try {
-      await cancelManagedAgentTurn(agent.pubkey, channel.id);
+      await cancelManagedAgentTurn(
+        agent.pubkey,
+        channel.id,
+        activeSessionId,
+        latestTurnId,
+      );
       toast.success(
         `Stop signal sent to ${agent.name}. It may take a moment to respond.`,
       );
@@ -483,6 +488,13 @@ export function AgentSessionThreadPanel({
             error={numbatFindings.error}
             findings={numbatFindings.findings}
             health={numbatFindings.health}
+            onCancelTurn={
+              canStopCurrentTurn && activeSessionId && latestTurnId
+                ? () => {
+                    void handleInterruptTurn();
+                  }
+                : undefined
+            }
           />
           <ManagedAgentSessionPanel
             agent={agent}
