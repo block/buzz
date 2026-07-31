@@ -68,6 +68,7 @@ export default defineConfig({
         "**/relay-reconnect.spec.ts",
         "**/relay-reconnect-affordance.spec.ts",
         "**/workflows.spec.ts",
+        "**/workflow-run-status-badges.spec.ts",
         "**/identity-archive.spec.ts",
         "**/identity-archive-hide.spec.ts",
         "**/relay-connectivity.spec.ts",
