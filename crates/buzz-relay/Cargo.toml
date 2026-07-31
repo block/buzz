@@ -84,8 +84,8 @@ async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
 buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev"] }
 reqwest = { workspace = true }

@@ -23,6 +23,13 @@ test("estimateRowHeight: short text is near the floor", () => {
   assert.ok(h >= 60 && h < 120, `expected small, got ${h}`);
 });
 
+test("estimateRowHeight: continuation reserves its uniform padding", () => {
+  const h = estimateRowHeight(msg({ body: "hello" }), {
+    isContinuation: true,
+  });
+  assert.equal(h, 28);
+});
+
 test("estimateRowHeight: many lines reserve more", () => {
   const tall = estimateRowHeight(
     msg({ body: Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n") }),

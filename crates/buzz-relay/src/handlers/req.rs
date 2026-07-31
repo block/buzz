@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_persona_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, KIND_PERSONA, P_GATED_KINDS, RESULT_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
+    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -22,7 +22,6 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_HISTORICAL_LIMIT: i64 = 2_000;
 const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// Maximum `query_events` calls in flight per multi-filter REQ / bridge query.
@@ -290,11 +289,11 @@ pub async fn handle_req(
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
             apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
-            // Persona visibility pushdown: set reader bytes so query_events appends
-            // the SQL visibility clause before ORDER/LIMIT, preventing newer private
-            // personas from starving older shared ones off the page.
-            if filter_can_match_persona_shared_kinds(filter) {
-                params.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown: set reader bytes so query_events
+            // appends the SQL visibility clause before ORDER/LIMIT, preventing
+            // newer private events from starving older shared ones off the page.
+            if filter_can_match_shared_gated_kinds(filter) {
+                params.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             (idx, per_filter_channel, params)
         })
@@ -416,10 +415,24 @@ pub async fn handle_req(
     );
 }
 
-/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
-/// Search subscriptions are one-shot — no persistent subscription is registered.
+/// FTS candidate hits fetched per page. Pages are always full regardless of
+/// the requested limit — post-filtering discards an unpredictable share of
+/// hits, so the scan fetches candidates in full pages rather than sizing
+/// pages to the request.
+const SEARCH_PAGE_SIZE: u32 = 100;
+
 /// Maximum FTS pages to fetch per filter (prevents unbounded loops).
-const MAX_SEARCH_PAGES: u32 = 10;
+///
+/// Derived from the advertised page ceiling rather than fixed: the scan
+/// budget is a resource policy — at most one advertised page ceiling's worth
+/// of candidates per filter — and deriving it keeps the budget tracking the
+/// ceiling if the ceiling ever moves. This bounds candidates *scanned*, not
+/// events *emitted*: post-filtering (NIP-01 match, channel access, reader
+/// visibility, dedup) can discard any number of candidates, so a result
+/// smaller than the requested limit remains possible and is not a NIP-11
+/// violation — `max_limit` promises a clamp on the request, not a count in
+/// the response.
+const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(SEARCH_PAGE_SIZE);
 
 /// Resolve request-local channel access, repairing a stale cache-negative.
 ///
@@ -501,6 +514,8 @@ pub(crate) fn build_search_channel_scope_filter(
     })
 }
 
+/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
+/// Search subscriptions are one-shot — no persistent subscription is registered.
 #[allow(clippy::too_many_arguments)]
 async fn handle_search_req(
     sub_id: &str,
@@ -535,8 +550,8 @@ async fn handle_search_req(
 
         let limit = filter
             .limit
-            .map(|l| (l as u32).min(MAX_HISTORICAL_LIMIT as u32))
-            .unwrap_or(MAX_HISTORICAL_LIMIT as u32);
+            .map(|l| (l as u32).min(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32))
+            .unwrap_or(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32);
 
         if limit == 0 {
             continue; // NIP-01: limit 0 means "no results from this filter"
@@ -583,13 +598,11 @@ async fn handle_search_req(
         let since = filter.since.map(|s| s.as_secs() as i64);
         let until = filter.until.map(|u| u.as_secs() as i64);
 
-        // Paginate: keep fetching pages until we've emitted `limit` results
-        // or exhausted the search result set. This ensures post-filtering
-        // doesn't silently reduce the result count below the requested limit.
+        // Paginate: keep fetching pages until we've emitted `limit` results or
+        // exhausted the search result set. Post-filtering discards an unpredictable
+        // share of each page, so continuing past short yields gives the scan a
+        // chance — not a guarantee — of filling the requested limit.
         let mut emitted: u32 = 0;
-        // Always fetch full pages (100) regardless of limit — post-filtering
-        // may discard many hits, so we need headroom to fill the requested limit.
-        let per_page: u32 = 100;
 
         for page in 1..=MAX_SEARCH_PAGES {
             if emitted >= limit {
@@ -605,7 +618,7 @@ async fn handle_search_req(
                 since,
                 until,
                 page,
-                per_page,
+                per_page: SEARCH_PAGE_SIZE,
                 mode: buzz_search::SearchMode::FullText,
             };
 
@@ -617,9 +630,9 @@ async fn handle_search_req(
                 }
             };
 
-            // A short page is the last page: FTS returns up to `per_page` hits,
-            // so fewer than that means the result set is exhausted.
-            let exhausted = search_result.hits.len() < per_page as usize;
+            // A short page is the last page: FTS returns up to a full page of
+            // hits, so fewer than that means the result set is exhausted.
+            let exhausted = search_result.hits.len() < SEARCH_PAGE_SIZE as usize;
             let page_empty = search_result.hits.is_empty();
 
             let hit_ids: Vec<[u8; 32]> =
@@ -878,8 +891,8 @@ fn filter_to_query_params(
         .and_then(|u| chrono::DateTime::from_timestamp(u.as_secs() as i64, 0));
     let limit = filter
         .limit
-        .map(|l| (l as i64).min(MAX_HISTORICAL_LIMIT))
-        .unwrap_or(MAX_HISTORICAL_LIMIT);
+        .map(|l| (l as i64).min(buzz_db::DEFAULT_MAX_PAGE_LIMIT))
+        .unwrap_or(buzz_db::DEFAULT_MAX_PAGE_LIMIT);
 
     // Push author filter into SQL. Single-author uses the indexed `pubkey` column;
     // multi-author uses the `authors` IN-list pushdown added in the pure-nostr PR.
@@ -1137,19 +1150,20 @@ pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
     })
 }
 
-/// Returns `true` if the filter CAN match kind 30175 (persona) — meaning it
-/// either has no `kinds` constraint (wildcard) or explicitly includes 30175.
+/// Returns `true` if the filter CAN match any kind in [`SHARED_GATED_KINDS`] —
+/// meaning it either has no `kinds` constraint (wildcard) or explicitly includes
+/// one of them.
 ///
 /// Used by the COUNT handler to force the per-event fallback path, which calls
-/// `is_unshared_persona_event` on each row. The fast SQL `count_events()` path
+/// `is_unshared_gated_event` on each row. The fast SQL `count_events()` path
 /// has no per-event access check, so it would over-count foreign unshared
-/// persona events — leaking the existence of persona activity even without
-/// returning content.
-pub(crate) fn filter_can_match_persona_shared_kinds(filter: &Filter) -> bool {
-    filter
-        .kinds
-        .as_ref()
-        .is_none_or(|ks| ks.iter().any(|k| k.as_u16() as u32 == KIND_PERSONA))
+/// events — leaking the existence of private persona/team-catalog activity even
+/// without returning content.
+pub(crate) fn filter_can_match_shared_gated_kinds(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_none_or(|ks| {
+        ks.iter()
+            .any(|k| SHARED_GATED_KINDS.contains(&(k.as_u16() as u32)))
+    })
 }
 
 /// Returns `true` if the filter CAN match result-gated kinds — meaning it
@@ -1208,8 +1222,9 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 ///
 /// 1. **Author-only kinds** (`AUTHOR_ONLY_KINDS`, e.g. kind 30300/30350): only
 ///    the author may read their own events.
-/// 2. **Persona shared-gate** (kind 30175 without `["shared","true"]`): the
-///    event is only visible to the author unless explicitly opted into sharing.
+/// 2. **Shared-gate** (`SHARED_GATED_KINDS`, e.g. kind 30175/30178 without
+///    `["shared","true"]`): the event is only visible to the author unless
+///    explicitly opted into sharing.
 /// 3. **Result-gated kinds** (kind 44200/30622 etc.): `reader_authorized_for_event`
 ///    carries the per-event ownership check.
 ///
@@ -1223,7 +1238,7 @@ pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_byt
     if is_author_only_event(event, requester_pubkey_bytes) {
         return false;
     }
-    if is_unshared_persona_event(event, requester_pubkey_bytes) {
+    if is_unshared_gated_event(event, requester_pubkey_bytes) {
         return false;
     }
     let requester_pubkey_hex = hex::encode(requester_pubkey_bytes);
@@ -1414,6 +1429,83 @@ mod tests {
             SingleLetterTag::lowercase(Alphabet::H),
             channel_id.to_string(),
         )
+    }
+
+    /// NIP-11 `limitation.max_limit` as this relay actually advertises it.
+    fn advertised_max_limit() -> i64 {
+        crate::nip11::RelayInfo::build(
+            None,
+            None,
+            false,
+            crate::config::DEFAULT_MAX_FRAME_BYTES,
+            None,
+        )
+        .limitation
+        .expect("limitation")
+        .max_limit
+        .expect("max_limit") as i64
+    }
+
+    #[test]
+    fn req_filter_limit_clamps_to_advertised_nip11_max_limit() {
+        let advertised = advertised_max_limit();
+
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+
+        // A filter asking for more than the relay advertises is clamped down to
+        // exactly the advertised ceiling — the NIP-11 document is the promise,
+        // this is the enforcement.
+        let greedy = filter_to_query_params(
+            &Filter::new().limit(advertised as usize * 10),
+            None,
+            community,
+        );
+        assert_eq!(greedy.limit, Some(advertised));
+
+        // A filter with no `limit` gets the same ceiling, not something larger.
+        let unbounded = filter_to_query_params(&Filter::new(), None, community);
+        assert_eq!(unbounded.limit, Some(advertised));
+
+        // Neither sets `max_limit`, so `query_events` applies its own default
+        // clamp. That default must equal the advertised value too, or the
+        // clamp above would be undone one layer down.
+        assert_eq!(greedy.max_limit, None);
+        assert_eq!(unbounded.max_limit, None);
+        assert_eq!(buzz_db::DEFAULT_MAX_PAGE_LIMIT, advertised);
+
+        // Under-ceiling requests are honored verbatim.
+        let modest = filter_to_query_params(&Filter::new().limit(10), None, community);
+        assert_eq!(modest.limit, Some(10));
+    }
+
+    /// The NIP-50 search path clamps its emission target to the advertised
+    /// ceiling like every other REQ, but the number of candidates it will scan
+    /// is bounded a second time by the page budget. This pins the resource
+    /// policy: the budget covers exactly one advertised page ceiling's worth of
+    /// candidates — no less (a ceiling raise must not silently shrink the scan
+    /// relative to what clients may request) and no hand-tuned spare (the budget
+    /// must stay derived, not drift back into a magic number). It deliberately
+    /// does NOT claim search fills the emitted limit — post-filtering can
+    /// discard any number of candidates.
+    #[test]
+    fn search_scan_capacity_covers_advertised_nip11_max_limit() {
+        let advertised = advertised_max_limit();
+        let capacity = i64::from(MAX_SEARCH_PAGES) * i64::from(SEARCH_PAGE_SIZE);
+
+        assert!(
+            capacity >= advertised,
+            "NIP-50 scans at most {capacity} candidates ({MAX_SEARCH_PAGES} pages of \
+             {SEARCH_PAGE_SIZE}) but NIP-11 advertises {advertised} — the scan budget \
+             no longer covers the advertised ceiling"
+        );
+
+        // The budget is derived, not hand-tuned: one page under the derived
+        // count must be insufficient, or the ceiling could rise without the
+        // page count following it.
+        assert!(
+            capacity - i64::from(SEARCH_PAGE_SIZE) < advertised,
+            "scan budget has a spare page of slack — derive it from the ceiling"
+        );
     }
 
     #[test]

@@ -257,9 +257,10 @@ function ActivityCard({
   return (
     <div
       className={cn(
-        "relative block w-full rounded-xl border border-border/60 bg-card text-left transition-colors hover:bg-muted/20",
+        "relative block w-full rounded-xl border border-border/60 bg-transparent text-left transition-colors hover:bg-muted/20",
         compact ? "p-3" : "p-4",
       )}
+      data-testid="projects-activity-card"
     >
       <button
         aria-label={`Open ${item.title} in ${item.target.project.name}`}
