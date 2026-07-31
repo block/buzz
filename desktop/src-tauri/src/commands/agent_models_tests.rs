@@ -881,3 +881,21 @@ fn draft_agent_model_discovery_env_layers_all_three_tiers_in_order() {
         );
     }
 }
+
+#[test]
+fn databricks_static_token_error_redacts_echoed_token() {
+    let token = "secret-databricks-token";
+    let redaction_env = BTreeMap::from([("DATABRICKS_TOKEN".to_string(), token.to_string())]);
+
+    let error = databricks_static_token_error(
+        &format!("Databricks rejected bearer {token}"),
+        &redaction_env,
+    );
+
+    assert!(error.contains("[REDACTED]"), "got: {error}");
+    assert!(!error.contains(token), "token leaked in error: {error}");
+    assert!(
+        error.contains("update it in agent settings"),
+        "error lost its remediation: {error}"
+    );
+}

@@ -957,7 +957,7 @@ async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
             let requests = requests_for_route.clone();
             async move {
                 requests.fetch_add(1, Ordering::SeqCst);
-                (StatusCode::UNAUTHORIZED, "expired token")
+                (StatusCode::UNAUTHORIZED, "rejected bearer rejected")
             }
         }),
     );
@@ -971,6 +971,10 @@ async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
     assert!(
         error.to_string().starts_with("llm auth:"),
         "401 must retain auth semantics: {error}"
+    );
+    assert!(
+        !error.to_string().contains("rejected bearer"),
+        "auth errors must not propagate provider bodies that may echo credentials: {error}"
     );
     assert_eq!(
         requests.load(Ordering::SeqCst),

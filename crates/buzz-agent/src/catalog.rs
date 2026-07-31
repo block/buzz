@@ -32,6 +32,18 @@ pub struct ModelEntry {
 pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
     &["databricks-gpt-5-5", "databricks-claude-opus-4-7"];
 
+const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (known fallback)";
+
+fn authenticated_empty_v2_catalog() -> Vec<ModelEntry> {
+    DATABRICKS_V2_KNOWN_MODELS
+        .iter()
+        .map(|id| ModelEntry {
+            id: id.to_string(),
+            name: format!("{id}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}"),
+        })
+        .collect()
+}
+
 /// Heuristic: `true` when a v2 AI Gateway endpoint name looks like it serves
 /// chat/completions traffic.
 ///
@@ -120,9 +132,9 @@ async fn fetch_v1_models(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        if matches!(status.as_u16(), 401 | 403) {
+        if status.as_u16() == 401 {
             return Err(AgentError::LlmAuth(format!(
-                "Databricks model discovery HTTP {status}: {body}"
+                "Databricks model discovery HTTP {status}"
             )));
         }
         return Err(AgentError::Llm(format!(
@@ -240,9 +252,9 @@ async fn fetch_v2_models(
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            if matches!(status.as_u16(), 401 | 403) {
+            if status.as_u16() == 401 {
                 return Err(AgentError::LlmAuth(format!(
-                    "Databricks v2 model discovery HTTP {status}: {body}"
+                    "Databricks v2 model discovery HTTP {status}"
                 )));
             }
             return Err(AgentError::Llm(format!(
@@ -267,13 +279,7 @@ async fn fetch_v2_models(
 
     // Fall back to known-model list if the API returned nothing.
     if all_endpoints.is_empty() {
-        return Ok(DATABRICKS_V2_KNOWN_MODELS
-            .iter()
-            .map(|id| ModelEntry {
-                id: id.to_string(),
-                name: id.to_string(),
-            })
-            .collect());
+        return Ok(authenticated_empty_v2_catalog());
     }
 
     sort_v2_endpoints_newest_first(&mut all_endpoints);
@@ -553,6 +559,17 @@ mod tests {
                 "endpoint-without-timestamp",
             ]
         );
+    }
+
+    #[test]
+    fn authenticated_empty_v2_catalog_marks_fallback_provenance() {
+        let models = authenticated_empty_v2_catalog();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+
+        assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS);
+        assert!(models.iter().all(|model| {
+            model.name == format!("{}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}", model.id)
+        }));
     }
 
     #[test]

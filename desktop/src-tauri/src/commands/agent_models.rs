@@ -687,10 +687,11 @@ async fn discover_anthropic_models(
 //
 // Delegates to buzz_agent_pkg::catalog::discover_databricks_models, which
 // acquires auth in-process via build_token_source:
-//   - Static bearer (DATABRICKS_TOKEN): returned immediately.
+//   - Static bearer (DATABRICKS_TOKEN): returned immediately; rejection is
+//     surfaced as a settings error and never opens a browser.
 //   - PKCE cache hit: returned from disk without a browser flow.
-//   - No token, no cache: returns Err(LlmAuth) → we return Ok(None) and fall
-//     through to run_agent_models_command. Never hangs, never opens a browser.
+//   - Missing or rejected OAuth credentials: Desktop runs interactive PKCE
+//     sign-in once, then retries discovery.
 
 fn is_databricks_provider(provider: Option<&str>) -> bool {
     matches!(
@@ -710,6 +711,11 @@ fn databricks_agent_provider(provider: &str) -> buzz_agent_pkg::config::Provider
     } else {
         buzz_agent_pkg::config::Provider::Databricks
     }
+}
+
+fn databricks_static_token_error(error: &str, redaction_env: &BTreeMap<String, String>) -> String {
+    let msg = crate::managed_agents::redact_env_values_in(error, redaction_env);
+    format!("Databricks rejected DATABRICKS_TOKEN; update it in agent settings: {msg}")
 }
 
 async fn discover_databricks_models(
@@ -755,9 +761,7 @@ async fn discover_databricks_models(
                 })?
         }
         Err(buzz_agent_pkg::AgentError::LlmAuth(error)) => {
-            return Err(format!(
-                "Databricks rejected DATABRICKS_TOKEN; update it in agent settings: {error}"
-            ));
+            return Err(databricks_static_token_error(&error, &redaction_env));
         }
         Err(e) => {
             let msg = crate::managed_agents::redact_env_values_in(&e.to_string(), &redaction_env);
