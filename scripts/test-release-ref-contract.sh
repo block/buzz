@@ -64,24 +64,15 @@ grep -Fq 'git/refs' "$auto_tag"
 grep -Fq 'TAG_PREFIX="desktop-v"' "$auto_tag"
 grep -Fq 'target_sha=${{ github.event.pull_request.merge_commit_sha }}' "$auto_tag"
 grep -Fq 'scripts/verify-desktop-release-merge.sh' "$auto_tag"
-
-bypass_filter="$repo_root/scripts/desktop-release-bypass-authorized.jq"
-bypass_fixture="$repo_root/scripts/fixtures/desktop-release-rule-suite-bypass.json"
-jq -e --argjson ruleset_id 13596885 -f "$bypass_filter" "$bypass_fixture" >/dev/null || {
-  echo "real squash-bypass fixture was rejected" >&2
+"$repo_root/scripts/test-desktop-release-authorization.sh"
+if rg -q 'rule-suites|desktop-release-bypass-authorized|MERGED_BY' \
+  "$repo_root/scripts/verify-desktop-release-merge.sh" \
+  "$repo_root/scripts/verify-desktop-release-authorization.sh" \
+  "$auto_tag"; then
+  echo "desktop auto-tag still depends on unavailable rule-suite authorization" >&2
   exit 1
-}
-for mutation in \
-  '.result = "pass"' \
-  '(.rule_evaluations[] | select(.rule_type == "pull_request")).result = "pass"' \
-  '(.rule_evaluations[] | select(.rule_type == "pull_request")).rule_source.id = 0' \
-  '(.rule_evaluations[] | select(.rule_type == "pull_request")).enforcement = "evaluate"' \
-  'del(.rule_evaluations[] | select(.rule_type == "pull_request"))'; do
-  if jq "$mutation" "$bypass_fixture" | jq -e --argjson ruleset_id 13596885 -f "$bypass_filter" >/dev/null; then
-    echo "bypass filter accepted invalid fixture mutation: $mutation" >&2
-    exit 1
-  fi
-done
+fi
+
 review_filter="$repo_root/scripts/review-decision-approved.jq"
 for fixture in \
   '{"reviewDecision":"CHANGES_REQUESTED"}' \
