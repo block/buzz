@@ -1973,8 +1973,7 @@ test("name-only community profile save preserves an existing avatar", async ({
               command === "update_profile" ||
               command === "update_profile_at_relay",
           )
-          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl)
-          .slice(-1),
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
     .toEqual([undefined]);
