@@ -997,6 +997,9 @@ async fn create_session_and_apply_model(
     // immutable borrow of `agent` with the mutable receiver borrow of
     // `agent.acp` in one expression.
     let mcp_servers = effective_mcp_servers(agent, ctx).clone();
+    // A channel is *managed* exactly when it has a desired set. Only then may
+    // we suppress the agent's own global MCP config.
+    let strict_mcp = agent.desired_mcp.is_some();
 
     let resp = agent
         .acp
@@ -1009,6 +1012,7 @@ async fn create_session_and_apply_model(
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
+            strict_mcp,
         )
         .await?;
 

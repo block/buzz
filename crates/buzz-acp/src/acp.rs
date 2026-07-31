@@ -635,6 +635,11 @@ impl AcpClient {
     /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
     /// omitted entirely otherwise, since adapters may distinguish an absent
     /// member from a null one.
+    /// `strict_mcp` marks the session as *managed*: it rides in
+    /// `_meta.claudeCode.options.strictMcpConfig` and tells the Claude adapter
+    /// to run exactly the servers in `mcp_servers`, suppressing the agent's own
+    /// global MCP config. Opt-in per channel — passing `true` for an unmanaged
+    /// channel would silently strip the user's global servers.
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
@@ -643,6 +648,7 @@ impl AcpClient {
         mcp_servers: Vec<McpServer>,
         system_prompt: Option<&str>,
         session_title: Option<&str>,
+        strict_mcp: bool,
     ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
@@ -651,8 +657,31 @@ impl AcpClient {
         if let Some(sp) = system_prompt {
             params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
         }
+        let mut meta = serde_json::Map::new();
         if let Some(title) = session_title {
-            params["_meta"] = serde_json::json!({ "sessionTitle": title });
+            meta.insert(
+                "sessionTitle".into(),
+                serde_json::Value::String(title.to_owned()),
+            );
+        }
+        if strict_mcp {
+            // Managed channel: run exactly the servers the panel shows. Without
+            // this the agent additionally loads its own global MCP config,
+            // injecting tool schemas nobody asked for into every turn.
+            //
+            // Deliberately does NOT touch `settingSources`: `strictMcpConfig`
+            // already suppresses every other MCP source, and narrowing settings
+            // loading would drop the user's permission defaults as a side
+            // effect — a much wider blast radius than this flag is meant to have.
+            meta.insert(
+                "claudeCode".into(),
+                serde_json::json!({
+                    "options": { "strictMcpConfig": true }
+                }),
+            );
+        }
+        if !meta.is_empty() {
+            params["_meta"] = serde_json::Value::Object(meta);
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -678,7 +707,7 @@ impl AcpClient {
         session_title: Option<&str>,
     ) -> Result<String, AcpError> {
         Ok(self
-            .session_new_full(cwd, mcp_servers, system_prompt, session_title)
+            .session_new_full(cwd, mcp_servers, system_prompt, session_title, false)
             .await?
             .session_id)
     }
@@ -3317,7 +3346,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], Some("Custom system prompt"), None)
+            .session_new_full("/tmp", vec![], Some("Custom system prompt"), None, false)
             .await
             .expect("session_new_full should succeed");
 
@@ -3327,6 +3356,66 @@ mod tests {
             received["params"]["systemPrompt"].as_str(),
             Some("Custom system prompt"),
             "systemPrompt should be included in params when Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_sends_strict_mcp_config_when_managed() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full("/tmp", vec![], None, None, true)
+            .await
+            .expect("session_new_full should succeed");
+
+        let opts = &resp.raw["_receivedRequest"]["params"]["_meta"]["claudeCode"]["options"];
+        assert_eq!(
+            opts["strictMcpConfig"].as_bool(),
+            Some(true),
+            "managed channels must suppress the agent's global MCP config"
+        );
+        assert!(
+            opts["settingSources"].is_null(),
+            "settingSources must be left alone — narrowing it would drop the user's \
+             permission defaults for managed channels, which is not what this flag is for"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_omits_strict_mcp_config_when_unmanaged() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full("/tmp", vec![], None, None, false)
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert!(
+            received["params"]["_meta"]["claudeCode"].is_null(),
+            "unmanaged channels must keep legacy behaviour — never silently strip a user's global MCP servers"
         );
     }
 
@@ -3478,7 +3567,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None, None)
+            .session_new_full("/tmp", vec![], None, None, false)
             .await
             .expect("session_new_full should succeed");
 
@@ -3506,7 +3595,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None, Some("Fizz · #buzz-dev"))
+            .session_new_full("/tmp", vec![], None, Some("Fizz · #buzz-dev"), false)
             .await
             .expect("session_new_full should succeed");
 
@@ -3534,7 +3623,7 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], None, None)
+            .session_new_full("/tmp", vec![], None, None, false)
             .await
             .expect("session_new_full should succeed");
 
