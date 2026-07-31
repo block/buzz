@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -237,6 +238,32 @@ final _animatedWebpBytes = Uint8List.fromList([
 ]);
 
 const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
+
+class _CancellableTestClient extends http.BaseClient {
+  http.BaseRequest? _activeRequest;
+  Completer<void>? _wait;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    _activeRequest = request;
+    _wait = Completer<void>();
+    try {
+      await _wait!.future;
+      throw StateError('upload should have been cancelled');
+    } on http.ClientException {
+      rethrow;
+    }
+  }
+
+  @override
+  void close() {
+    final request = _activeRequest;
+    if (request != null && _wait != null && !_wait!.isCompleted) {
+      _wait!.completeError(http.ClientException('closed', request.url));
+    }
+    super.close();
+  }
+}
 
 void _setMockMediaUploadPlatformHandler(
   Future<Object?> Function(MethodCall call)? handler,
@@ -1381,6 +1408,60 @@ void main() {
       } finally {
         await dir.delete(recursive: true);
       }
+    });
+  });
+
+  group('upload cancellation and timeouts', () {
+    test('cancelActiveUploads aborts an in-flight PUT', () async {
+      final keychain = nostr.Keys.generate();
+      final client = _CancellableTestClient();
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: keychain.nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+        uploadHttpClientFactory: () => client,
+        now: () => DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000),
+      );
+      addTearDown(service.dispose);
+
+      final uploadFuture = service.uploadBytes(
+        _jpegBytes,
+        mimeType: 'image/jpeg',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      service.cancelActiveUploads();
+
+      await expectLater(
+        uploadFuture,
+        throwsA(isA<MediaUploadCancelledException>()),
+      );
+    });
+
+    test('uploadBytes surfaces MediaUploadTimeoutException', () async {
+      final keychain = nostr.Keys.generate();
+      final client = http_testing.MockClient((request) async {
+        await Future<void>.delayed(const Duration(seconds: 30));
+        return http.Response('{}', 200);
+      });
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: keychain.nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+        uploadHttpClientFactory: () => client,
+        now: () => DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000),
+      );
+      addTearDown(service.dispose);
+
+      await expectLater(
+        service.uploadBytes(
+          _jpegBytes,
+          mimeType: 'image/jpeg',
+          timeout: const Duration(milliseconds: 100),
+        ),
+        throwsA(isA<MediaUploadTimeoutException>()),
+      );
     });
   });
 }

@@ -78,6 +78,7 @@ typedef SanitizeImageBytes =
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
 typedef ReadClipboardImage = Future<Uint8List?> Function();
+typedef UploadHttpClientFactory = http.Client Function();
 
 class MediaPolicyUploadException implements Exception {
   const MediaPolicyUploadException();
@@ -209,6 +210,7 @@ class MediaUploadService {
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
+  final UploadHttpClientFactory? _uploadHttpClientFactory;
   final Set<http.Client> _activeUploadClients = {};
   final Set<http.Client> _cancelledUploadClients = {};
 
@@ -225,6 +227,7 @@ class MediaUploadService {
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
+    UploadHttpClientFactory? uploadHttpClientFactory,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
@@ -243,7 +246,8 @@ class MediaUploadService {
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
        _http = httpClient ?? http.Client(),
-       _ownsHttpClient = httpClient == null;
+       _ownsHttpClient = httpClient == null,
+       _uploadHttpClientFactory = uploadHttpClientFactory;
 
   void dispose() {
     cancelActiveUploads();
@@ -405,7 +409,7 @@ class MediaUploadService {
     }
 
     final sha256 = _sha256Hex(bytes);
-    final uploadClient = http.Client();
+    final uploadClient = (_uploadHttpClientFactory ?? http.Client.new)();
     _activeUploadClients.add(uploadClient);
     try {
       var request = _buildUploadRequest(
@@ -417,9 +421,12 @@ class MediaUploadService {
 
       var streamed = await uploadClient
           .send(request)
-          .timeout(timeout, onTimeout: () {
-            throw MediaUploadTimeoutException(timeout);
-          });
+          .timeout(
+            timeout,
+            onTimeout: () {
+              throw MediaUploadTimeoutException(timeout);
+            },
+          );
       var response = await http.Response.fromStream(streamed);
       if (response.statusCode == HttpStatus.notFound ||
           response.statusCode == HttpStatus.methodNotAllowed) {
@@ -431,9 +438,12 @@ class MediaUploadService {
         );
         streamed = await uploadClient
             .send(request)
-            .timeout(timeout, onTimeout: () {
-              throw MediaUploadTimeoutException(timeout);
-            });
+            .timeout(
+              timeout,
+              onTimeout: () {
+                throw MediaUploadTimeoutException(timeout);
+              },
+            );
         response = await http.Response.fromStream(streamed);
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
