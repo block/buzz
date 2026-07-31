@@ -54,19 +54,19 @@ run_sql "SELECT 1" >/dev/null
 # Host must match the relay's normalized bind host verbatim (non-default ports
 # are kept by normalize_host). Overridable so an isolated relay on an alternate
 # port can seed the same channels/members against its own tenant.
-COMMUNITY_HOST="${BUZZ_COMMUNITY_HOST:-localhost:3000}"
+COMMUNITY_HOST="${BUZZ_COMMUNITY_HOST:-127.0.0.1:3000}"
 COMMUNITY_HOST_SQL="${COMMUNITY_HOST//\'/\'\'}"
 
 run_sql "
-INSERT INTO communities (host)
-VALUES ('${COMMUNITY_HOST_SQL}'), ('127.0.0.1:3000'), ('localhost:3000')
+INSERT INTO communities (id, host)
+VALUES ('00000000-0000-4000-8000-00000000c0de', '${COMMUNITY_HOST_SQL}')
 ON CONFLICT (lower(host)) DO NOTHING
 ;
 "
 COMMUNITY_ID="$(run_sql "
 SELECT id
 FROM communities
-WHERE lower(host) = lower('127.0.0.1:3000') OR lower(host) = lower('${COMMUNITY_HOST_SQL}')
+WHERE lower(host) = lower('${COMMUNITY_HOST_SQL}')
 LIMIT 1
 ;
 ")"
