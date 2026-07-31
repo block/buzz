@@ -198,6 +198,10 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the agent advertised `agentCapabilities.sessionCapabilities.resume`
+    /// in its initialize response. Gates the in-place MCP reconfiguration path;
+    /// call sites fall back to session invalidation when false.
+    resume_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -548,6 +552,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            resume_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -603,6 +608,12 @@ impl AcpClient {
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // Session-level resume capability. The value is an empty object (`{}`)
+        // when supported, so presence — not truthiness — is the signal.
+        self.resume_supported = result
+            .pointer("/agentCapabilities/sessionCapabilities/resume")
+            .map(|v| !v.is_null())
             .unwrap_or(false);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
@@ -670,6 +681,37 @@ impl AcpClient {
             .session_new_full(cwd, mcp_servers, system_prompt, session_title)
             .await?
             .session_id)
+    }
+
+    /// Send `session/resume` to reconfigure a live session in place.
+    ///
+    /// The session ID is unchanged. Adapters that fingerprint the
+    /// session-defining params (`cwd` + `mcpServers`) tear down and recreate
+    /// the underlying agent process with `resume`, restoring the full
+    /// conversation transcript from disk — this is how an MCP grant lands
+    /// without losing the conversation.
+    ///
+    /// `cwd` must be an absolute path. `mcp_servers` may be empty. Gated on
+    /// [`resume_supported`](Self::resume_supported): callers must fall back to
+    /// session invalidation when the agent does not advertise the capability.
+    ///
+    /// Prefer this over `session/load` — `load` replays the whole history as
+    /// `session/update` notifications before responding, which risks the
+    /// request timeout on long conversations. Reconfiguration semantics are
+    /// identical.
+    #[allow(dead_code)] // Wired up by the turn-boundary reconfigure path (Task 4).
+    pub async fn session_resume(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<serde_json::Value, AcpError> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": mcp_servers,
+        });
+        self.send_request("session/resume", params).await
     }
 
     /// Send Goose's custom system-prompt request after `session/new`.
@@ -848,6 +890,12 @@ impl AcpClient {
     /// for the supervisor's post-initialize log line.
     pub fn steering_supported(&self) -> bool {
         self.steering_supported
+    }
+
+    /// Whether the connected agent supports `session/resume`.
+    #[allow(dead_code)] // Read by the turn-boundary reconfigure gate (Task 4).
+    pub fn resume_supported(&self) -> bool {
+        self.resume_supported
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -3281,6 +3329,82 @@ mod tests {
             received["params"]["systemPrompt"].as_str(),
             Some("Custom system prompt"),
             "systemPrompt should be included in params when Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_request_includes_session_id_cwd_and_mcp_servers() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let result = client
+            .session_resume(
+                "ses_test",
+                "/tmp",
+                vec![McpServer {
+                    name: "razorpay".into(),
+                    command: "/usr/bin/rzp".into(),
+                    args: vec!["--stdio".into()],
+                    env: vec![],
+                }],
+            )
+            .await
+            .expect("session_resume should succeed");
+
+        let received = &result["_receivedRequest"];
+        assert_eq!(received["method"].as_str(), Some("session/resume"));
+        assert_eq!(received["params"]["sessionId"].as_str(), Some("ses_test"));
+        assert_eq!(received["params"]["cwd"].as_str(), Some("/tmp"));
+        assert_eq!(
+            received["params"]["mcpServers"][0]["name"].as_str(),
+            Some("razorpay"),
+            "mcpServers must ride on the resume request — this is the whole mechanism"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_records_resume_supported_when_advertised() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(
+            client.resume_supported(),
+            "an agent advertising sessionCapabilities.resume must be detected"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_records_resume_unsupported_when_absent() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{}}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(
+            !client.resume_supported(),
+            "absent resume capability must not be treated as supported"
         );
     }
 
