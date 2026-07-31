@@ -193,10 +193,18 @@ export async function runFileSizeCheck({
   for (const baseRef of baseRefs) {
     git(["cat-file", "-e", `${baseRef}^{commit}`], repoRoot);
   }
-  const commonBaseRef =
-    baseRefs.length > 1
-      ? git(["merge-base", ...baseRefs], repoRoot).trim()
-      : null;
+  let commonBaseRef = null;
+  if (baseRefs.length > 1) {
+    try {
+      commonBaseRef = git(["merge-base", ...baseRefs], repoRoot, {
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      // A shallow CI checkout may contain both merge parents without their
+      // common ancestor. Parent limits still enforce the ratchet; only the
+      // optional allowance for independently combined growth is unavailable.
+    }
+  }
 
   const violations = [];
   const changesByPath = new Map();

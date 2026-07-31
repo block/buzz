@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
   parseChangedFiles,
   resolveBaseRef,
   resolveBaseRefs,
+  runFileSizeCheck,
 } from "./check-file-sizes-core.mjs";
 
 function git(repo, ...args) {
@@ -71,6 +72,40 @@ test("a committed merge keeps both parents as accepted file-size baselines", () 
   git(repo, "merge", "--no-ff", "upstream", "-m", "merge upstream");
 
   assert.deepEqual(resolveBaseRefs(repo, {}), [downstream, upstream]);
+});
+
+test("a shallow-style merge without a common ancestor still checks parent limits", async () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "file-size-shallow-merge-"));
+  git(repo, "init", "-b", "main");
+  git(repo, "config", "user.name", "Test");
+  git(repo, "config", "user.email", "test@example.com");
+  mkdirSync(path.join(repo, "web", "src"), { recursive: true });
+  writeFileSync(path.join(repo, "web", "src", "small.ts"), "one\ntwo\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "first parent");
+  const firstParent = git(repo, "rev-parse", "HEAD");
+  const tree = git(repo, "rev-parse", "HEAD^{tree}");
+  const secondParent = git(repo, "commit-tree", tree, "-m", "second root");
+  const merge = git(
+    repo,
+    "commit-tree",
+    tree,
+    "-p",
+    firstParent,
+    "-p",
+    secondParent,
+    "-m",
+    "merge without available ancestry",
+  );
+  git(repo, "reset", "--hard", merge);
+
+  await assert.doesNotReject(() =>
+    runFileSizeCheck({
+      projectRoot: path.join(repo, "web"),
+      rules: [{ root: "src", extensions: new Set([".ts"]), maxLines: 10 }],
+      label: "web",
+    }),
+  );
 });
 
 test("a merge accepts an oversized file already present in either parent", () => {
