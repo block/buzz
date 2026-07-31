@@ -1,4 +1,4 @@
-import { getCanvas, setCanvas } from "@/shared/api/tauri";
+import { getCanvas, setCanvas } from "@/shared/api/tauriCanvas";
 
 export const WELCOME_CANVAS_CONTENT = `# Welcome to Buzz
 

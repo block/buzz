@@ -12,6 +12,7 @@ import {
   openCreateChannelDialog,
   openNewMessagePage,
 } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
@@ -2529,6 +2530,70 @@ test("manage channel keeps canvas near the top of the sheet", async ({
   expect(canvasBox).not.toBeNull();
   expect(nameBox).not.toBeNull();
   expect(canvasBox?.y).toBeLessThan(nameBox?.y);
+});
+
+test("canvas shows signed revision history and opens earlier revisions read-only", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    canvasHistory: [
+      {
+        eventId: "canvas-current-revision",
+        content: "# Current canvas\n\nLatest signed content.",
+        updatedAt: 1_751_353_200,
+        author: TEST_IDENTITIES.alice.pubkey,
+      },
+      {
+        eventId: "canvas-earlier-revision",
+        content: "# Earlier canvas\n\nPrevious signed content.",
+        updatedAt: 1_751_266_800,
+        author: TEST_IDENTITIES.bob.pubkey,
+      },
+    ],
+  });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+
+  const canvasSection = page.getByTestId("channel-canvas-section");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-content"),
+  ).toContainText("Latest signed content.");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-current-metadata"),
+  ).toContainText("alice");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-history"),
+  ).toBeVisible();
+  if (process.env.BUZZ_CANVAS_HISTORY_SCREENSHOTS === "1") {
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: "test-results/canvas-revision-history-current.png",
+    });
+  }
+
+  await canvasSection
+    .getByTestId("channel-canvas-revision-canvas-earlier-revision")
+    .click();
+  await expect(
+    canvasSection.getByTestId("channel-canvas-content"),
+  ).toContainText("Previous signed content.");
+  await expect(
+    canvasSection.getByText("Viewing an earlier revision (read-only)."),
+  ).toBeVisible();
+  await expect(canvasSection.getByTestId("channel-canvas-edit")).toHaveCount(0);
+  if (process.env.BUZZ_CANVAS_HISTORY_SCREENSHOTS === "1") {
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: "test-results/canvas-revision-history-earlier.png",
+    });
+  }
+
+  await canvasSection.getByTestId("channel-canvas-current-revision").click();
+  await expect(
+    canvasSection.getByTestId("channel-canvas-content"),
+  ).toContainText("Latest signed content.");
+  await expect(canvasSection.getByTestId("channel-canvas-edit")).toBeVisible();
 });
 
 async function seedHomeInboxMention(

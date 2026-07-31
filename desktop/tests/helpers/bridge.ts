@@ -116,6 +116,13 @@ type MockTeamSeed = {
   personaIds: string[];
 };
 
+type MockCanvasRevisionSeed = {
+  eventId: string;
+  content: string;
+  updatedAt: number;
+  author: string;
+};
+
 export type MockEngramEntry = {
   slug: string;
   body: string;
@@ -248,6 +255,8 @@ type MockBridgeOptions = {
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Signed kind:40100 revisions returned by the mocked canvas history query. */
+  canvasHistory?: MockCanvasRevisionSeed[];
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
