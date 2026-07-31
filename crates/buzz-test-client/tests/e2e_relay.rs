@@ -2241,10 +2241,10 @@ async fn add_member_with_role_ws(
     (ok.accepted, ok.message)
 }
 
-/// Any member of a private channel can invite another user (Slack model).
+/// Only owners/admins can add another identity to a private channel.
 #[tokio::test]
 #[ignore]
-async fn test_private_channel_any_member_can_invite() {
+async fn test_private_channel_member_cannot_invite() {
     let url = relay_url();
     let owner_keys = Keys::generate();
     let member_keys = Keys::generate();
@@ -2271,7 +2271,7 @@ async fn test_private_channel_any_member_can_invite() {
         .await
         .expect("connect as member");
 
-    // Regular member invites a third user — this should succeed.
+    // Regular member tries to invite a third user.
     let (accepted, msg) = add_member_ws(
         &mut member_client,
         &channel_id,
@@ -2280,8 +2280,8 @@ async fn test_private_channel_any_member_can_invite() {
     )
     .await;
     assert!(
-        accepted,
-        "regular member should be able to invite to private channel, got: {msg}"
+        !accepted,
+        "regular member must not add another private-channel identity: {msg}"
     );
 
     owner_client.disconnect().await.expect("disconnect owner");

@@ -419,10 +419,9 @@ pub async fn add_member(
                 DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
             })?;
 
-            // Any member can invite others, but only owners/admins may grant elevated roles.
-            if role.is_elevated() && !inviter_role.is_elevated() {
+            if !inviter_role.is_elevated() && inviter != pubkey {
                 return Err(DbError::AccessDenied(
-                    "only owners/admins may grant elevated roles".to_string(),
+                    "only owners/admins may add private-channel members".to_string(),
                 ));
             }
         }
