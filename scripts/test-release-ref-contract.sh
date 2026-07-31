@@ -64,6 +64,11 @@ grep -Fq 'git/refs' "$auto_tag"
 grep -Fq 'TAG_PREFIX="desktop-v"' "$auto_tag"
 grep -Fq 'target_sha=${{ github.event.pull_request.merge_commit_sha }}' "$auto_tag"
 grep -Fq 'scripts/verify-desktop-release-merge.sh' "$auto_tag"
+grep -Fq 'current \`main\`' "$repo_root/scripts/prepare-desktop-release.sh"
+if grep -Fq 'current `main`' "$repo_root/scripts/prepare-desktop-release.sh"; then
+  echo "desktop release PR body contains executable command substitution" >&2
+  exit 1
+fi
 "$repo_root/scripts/test-desktop-release-authorization.sh"
 if rg -q 'rule-suites|desktop-release-bypass-authorized|MERGED_BY' \
   "$repo_root/scripts/verify-desktop-release-merge.sh" \
