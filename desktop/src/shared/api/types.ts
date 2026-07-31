@@ -103,25 +103,7 @@ export type AddChannelMembersResult = {
   }>;
 };
 
-export type Identity = {
-  pubkey: string;
-  displayName: string;
-  /** True when the app booted in "identity lost" recovery mode — the OS
-   *  keyring was empty despite a prior successful migration. The frontend
-   *  should route to nsec re-import instead of normal onboarding.
-   *  Mutually exclusive with `locked`. */
-  lost?: boolean;
-  /** True when the app booted with an ephemeral key because the OS keyring
-   *  holding the real identity is UNREACHABLE (e.g. GNOME Keyring / KWallet
-   *  locked). The real key still exists; no in-app recovery is possible —
-   *  the user must unlock the keyring externally and relaunch.
-   *  Mutually exclusive with `lost`. */
-  locked?: boolean;
-  /** True when the boot-time Phase 2 reset attempted a wipe but verification
-   *  failed. Identity resolution was skipped; the sentinel is preserved so
-   *  the next relaunch retries the wipe automatically. */
-  resetFailed?: boolean;
-};
+export type { Identity, IdentityStorage } from "./identityTypes";
 
 export type Profile = {
   pubkey: string;
@@ -571,22 +553,10 @@ export type AcpRuntime = AcpRuntimeCatalogEntry & {
   binaryPath: string;
 };
 
-export type InstallStepResult = {
-  step: string;
-  command: string;
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  hint?: string;
-};
-
-export type InstallRuntimeResult = {
-  success: boolean;
-  steps: InstallStepResult[];
-  restartedCount: number;
-  failedRestartCount: number;
-};
+export type {
+  InstallRuntimeResult,
+  InstallStepResult,
+} from "./installTypes";
 
 export type AcpAuthMethod = {
   id: string;

@@ -22,6 +22,8 @@
 //! which is the backend WebKitGTK media capture is reliable on.
 
 /// The origin Tauri serves the packaged app from on Linux.
+/// Consumed only by linux-gated [`enable_media_capture`]; kept compiling on all
+/// platforms so the unit tests run everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const PROD_ORIGIN: &str = "tauri://localhost";
 
@@ -35,8 +37,6 @@ const DEV_ORIGIN: &str = "http://localhost:1420";
 /// allowed to use mic/camera. Matches the origin exactly or as a path prefix so
 /// `tauri://localhost.evil.com` and `http://localhost:14200` do not slip
 /// through. Pure and platform-independent so it can be unit-tested everywhere.
-/// Outside tests, only the Linux `enable_media_capture` calls it, so non-Linux
-/// lib builds see it (and the origin constants) as dead code.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn is_trusted_media_origin(uri: &str) -> bool {
     fn matches(uri: &str, origin: &str) -> bool {

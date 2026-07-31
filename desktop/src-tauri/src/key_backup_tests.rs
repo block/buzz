@@ -79,12 +79,59 @@ fn verify_backup_blob_catches_pubkey_mismatch() {
     assert!(err.contains("does not match identity"), "{err}");
 }
 
+// ── Import key recovery ───────────────────────────────────────────────────────
+
+#[test]
+fn recover_keys_ncryptsec_happy_path() {
+    let keys = recover_keys_from_input(&format!("  {SPEC_NCRYPTSEC}\n"), Some("nostr")).unwrap();
+    assert_eq!(keys.secret_key().to_secret_hex(), SPEC_SECRET_HEX);
+}
+
+#[test]
+fn recover_keys_ncryptsec_requires_password() {
+    let err = recover_keys_from_input(SPEC_NCRYPTSEC, None).unwrap_err();
+    assert_eq!(err, "key backup requires a password");
+}
+
+#[test]
+fn recover_keys_ncryptsec_wrong_password() {
+    let err = recover_keys_from_input(SPEC_NCRYPTSEC, Some("wrong")).unwrap_err();
+    assert_eq!(err, "wrong backup password or damaged key backup");
+}
+
+#[test]
+fn recover_keys_uppercase_ncryptsec_classifies_as_encrypted() {
+    let upper = SPEC_NCRYPTSEC.to_ascii_uppercase();
+    assert_eq!(
+        recover_keys_from_input(&upper, None).unwrap_err(),
+        "key backup requires a password"
+    );
+    let keys = recover_keys_from_input(&upper, Some("nostr")).unwrap();
+    assert_eq!(keys.secret_key().to_secret_hex(), SPEC_SECRET_HEX);
+
+    let mut mixed = SPEC_NCRYPTSEC.to_string();
+    mixed.replace_range(0..1, "N");
+    let err = recover_keys_from_input(&mixed, Some("nostr")).unwrap_err();
+    assert!(err.contains("invalid ncryptsec"), "{err}");
+}
+
+#[test]
+fn recover_keys_raw_nsec_path_unchanged() {
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32().unwrap();
+    let recovered = recover_keys_from_input(&nsec, Some("ignored")).unwrap();
+    assert_eq!(recovered.public_key(), keys.public_key());
+    let recovered = recover_keys_from_input(&nsec, None).unwrap();
+    assert_eq!(recovered.public_key(), keys.public_key());
+    assert!(recover_keys_from_input("garbage", None).is_err());
+}
+
 // ── File lifecycle ────────────────────────────────────────────────────────────
 
 #[test]
 fn write_backup_file_persists_0600_and_verifies() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(BACKUP_FILE_NAME);
+    let path = backup_file_path(dir.path());
     write_backup_file(&path, SPEC_NCRYPTSEC).unwrap();
 
     let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -101,7 +148,7 @@ fn write_backup_file_persists_0600_and_verifies() {
 #[test]
 fn write_backup_file_overwrites_atomically() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(BACKUP_FILE_NAME);
+    let path = backup_file_path(dir.path());
     write_backup_file(&path, "ncryptsec1old").unwrap();
     write_backup_file(&path, SPEC_NCRYPTSEC).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), SPEC_NCRYPTSEC);
@@ -111,6 +158,34 @@ fn write_backup_file_overwrites_atomically() {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert_eq!(entries, vec![std::ffi::OsString::from(BACKUP_FILE_NAME)]);
+}
+
+#[test]
+fn delete_backup_file_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    delete_backup_file(dir.path()).unwrap();
+    let path = backup_file_path(dir.path());
+    write_backup_file(&path, SPEC_NCRYPTSEC).unwrap();
+    delete_backup_file(dir.path()).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn cleanup_stale_backup_removes_only_on_identity_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = backup_file_path(dir.path());
+    let a = Keys::generate().public_key();
+    let b = Keys::generate().public_key();
+
+    write_backup_file(&path, SPEC_NCRYPTSEC).unwrap();
+    cleanup_stale_backup(&a, &a, dir.path()).unwrap();
+    assert!(path.exists(), "same identity must keep the backup");
+
+    cleanup_stale_backup(&a, &b, dir.path()).unwrap();
+    assert!(
+        !path.exists(),
+        "identity change must remove the stale backup"
+    );
 }
 
 #[test]

@@ -33,6 +33,11 @@
 //!                            — expose a `_PostCompact` hook tool
 //!   FAKE_MCP_POSTCOMPACT_TEXT=text
 //!                            — `_PostCompact` returns this (default: "")
+//!   FAKE_MCP_SHELL_TOOL=1    — expose a tool whose bare name is `shell`
+//!                              (registered as `<server>__shell`), taking a
+//!                              `command` string. Lets a test drive the
+//!                              reply guard's recognition of a real,
+//!                              registered shell tool.
 
 use std::io::{BufRead, Write};
 
@@ -76,6 +81,7 @@ fn make_tools(
     desc: &str,
     include_stop_hook: bool,
     include_post_compact_hook: bool,
+    include_shell_tool: bool,
 ) -> Vec<Value> {
     let mut tools: Vec<Value> = (0..count)
         .map(|i| {
@@ -98,6 +104,17 @@ fn make_tools(
             "name": "_PostCompact",
             "description": "post compact hook",
             "inputSchema": { "type": "object", "properties": {} },
+        }));
+    }
+    if include_shell_tool {
+        tools.push(json!({
+            "name": "shell",
+            "description": "run a shell command",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"],
+            },
         }));
     }
     tools
@@ -136,6 +153,7 @@ fn main() {
     let stop_count_limit: usize = env_usize("FAKE_MCP_STOP_COUNT", usize::MAX);
     let mut stop_calls_seen: usize = 0;
     let post_compact_hook = env_flag("FAKE_MCP_POSTCOMPACT_HOOK");
+    let shell_tool = env_flag("FAKE_MCP_SHELL_TOOL");
     let post_compact_text = std::env::var("FAKE_MCP_POSTCOMPACT_TEXT").unwrap_or_default();
 
     // Use a channel-based stdin reader so notifications (which carry no id)
@@ -206,7 +224,13 @@ fn main() {
                 write_response(
                     id,
                     json!({
-                        "tools": make_tools(tool_count, &desc, stop_hook, post_compact_hook)
+                        "tools": make_tools(
+                            tool_count,
+                            &desc,
+                            stop_hook,
+                            post_compact_hook,
+                            shell_tool,
+                        )
                     }),
                 );
             }
