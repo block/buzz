@@ -404,7 +404,7 @@ async fn probe_agent_relay_access(
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
     let api_base = crate::relay::relay_http_base_url(&key.relay_url);
-    tokio::time::timeout(
+    let memberships = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
             state,
@@ -416,7 +416,65 @@ async fn probe_agent_relay_access(
     )
     .await
     .map_err(|_| "relay access probe timed out".to_string())??;
+
+    // The probe already carries everything the directory entry needs, so
+    // refresh it here rather than issuing a second membership query.
+    publish_agent_directory_entry(state, &record, &api_base, &keys, &memberships).await;
+
     Ok((record, key, requested_relay_url))
+}
+
+/// Refresh the agent's kind:10100 directory entry on `api_base`.
+///
+/// Other machines discover invocable agents exclusively through this kind, so
+/// without it an agent hosted here cannot be @-mentioned anywhere else. Kept
+/// best-effort: a failure is logged and never blocks the agent from starting,
+/// since the agent is fully functional locally either way.
+async fn publish_agent_directory_entry(
+    state: &AppState,
+    record: &super::ManagedAgentRecord,
+    api_base: &str,
+    keys: &nostr::Keys,
+    memberships: &[nostr::Event],
+) {
+    let channel_ids = super::agent_events::channel_ids_from_membership_events(memberships);
+    let builder = match super::agent_events::build_agent_profile_event(record, channel_ids) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(
+                agent = %record.pubkey,
+                %error,
+                "failed to build agent directory entry (kind:10100)"
+            );
+            return;
+        }
+    };
+    let event = match builder.sign_with_keys(keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(
+                agent = %record.pubkey,
+                %error,
+                "failed to sign agent directory entry (kind:10100)"
+            );
+            return;
+        }
+    };
+    if let Err(error) = crate::relay::submit_signed_event_with_keys_at(
+        &event,
+        state,
+        api_base,
+        keys,
+        record.auth_tag.as_deref(),
+    )
+    .await
+    {
+        tracing::warn!(
+            agent = %record.pubkey,
+            %error,
+            "failed to publish agent directory entry (kind:10100)"
+        );
+    }
 }
 
 /// Build the `Failed` status row for a probe failure whose requested relay URL

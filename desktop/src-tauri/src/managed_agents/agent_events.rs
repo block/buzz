@@ -22,7 +22,7 @@
 //! - any runtime field (`runtime_pid`, `last_*`, `backend_agent_id`, …) — these
 //!   mutate on every start/stop and describe transient process state.
 
-use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+use buzz_core_pkg::kind::{KIND_AGENT_PROFILE, KIND_MANAGED_AGENT};
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +116,90 @@ pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, St
     let tags =
         vec![Tag::parse(["d", record.pubkey.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
     Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content).tags(tags))
+}
+
+/// Default channel-add policy carried on the agent's kind:10100 entry.
+///
+/// The relay's `handle_agent_profile` side effect requires this field and
+/// fails the whole side effect without it, so a directory entry that omits it
+/// is stored but never applied. `owner_only` matches the relay's own default,
+/// so publishing it keeps behavior unchanged.
+const DEFAULT_CHANNEL_ADD_POLICY: &str = "owner_only";
+
+/// The agent's public directory entry (kind:10100), as clients consume it.
+///
+/// Field names are snake_case on the wire: the desktop parses them through
+/// `RelayAgentInfo` (serde, snake_case) and the frontend maps them to camelCase
+/// in `fromRawRelayAgent`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentProfileEventContent {
+    pub name: String,
+    pub display_name: String,
+    pub agent_type: String,
+    pub respond_to: RespondTo,
+    pub respond_to_allowlist: Vec<String>,
+    pub channel_ids: Vec<String>,
+    pub channels: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub status: String,
+    /// Required by the relay side effect; see [`DEFAULT_CHANNEL_ADD_POLICY`].
+    pub channel_add_policy: String,
+}
+
+/// Build the agent's kind:10100 directory entry.
+///
+/// This is what makes an agent reachable from *other* machines: clients
+/// discover invocable agents through `list_relay_agents`, which queries this
+/// kind, and `getMentionableAgentPubkeys` decides mentionability from
+/// `respond_to` plus `channel_ids`. Without it, an agent running on one
+/// machine cannot be mentioned from another.
+///
+/// Must be signed with the **agent's own keys** — consumers take the agent
+/// pubkey from the event author, not from the content.
+pub fn build_agent_profile_event(
+    record: &ManagedAgentRecord,
+    channel_ids: Vec<String>,
+) -> Result<EventBuilder, String> {
+    let content = AgentProfileEventContent {
+        name: record.name.clone(),
+        display_name: record.name.clone(),
+        agent_type: "agent".to_string(),
+        respond_to: record.respond_to,
+        respond_to_allowlist: record.respond_to_allowlist.clone(),
+        channels: channel_ids.clone(),
+        channel_ids,
+        capabilities: Vec::new(),
+        status: "online".to_string(),
+        channel_add_policy: DEFAULT_CHANNEL_ADD_POLICY.to_string(),
+    };
+    let json = serde_json::to_string(&content)
+        .map_err(|e| format!("failed to serialize agent profile content: {e}"))?;
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_AGENT_PROFILE as u16),
+        json,
+    ))
+}
+
+/// Collect channel ids from the agent's NIP-29 membership events (kind:39002).
+///
+/// Channels are carried in `h` tags (NIP-29 group tag), not `e` tags.
+/// Duplicates are removed while preserving first-seen order.
+pub fn channel_ids_from_membership_events(events: &[nostr::Event]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ids = Vec::new();
+    for event in events {
+        for tag in event.tags.iter() {
+            let slice = tag.as_slice();
+            if slice.first().map(String::as_str) == Some("h") {
+                if let Some(id) = slice.get(1).filter(|value| !value.is_empty()) {
+                    if seen.insert(id.clone()) {
+                        ids.push(id.clone());
+                    }
+                }
+            }
+        }
+    }
+    ids
 }
 
 /// Parse a kind:30177 event's content into the projection — the inbound
@@ -225,6 +309,54 @@ mod tests {
         let keys = nostr::Keys::generate();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind.as_u16() as u32, KIND_MANAGED_AGENT);
+    }
+
+    #[test]
+    fn build_agent_profile_event_produces_directory_entry() {
+        let channels = vec!["chan-a".to_string(), "chan-b".to_string()];
+        let builder = build_agent_profile_event(&sample_agent(), channels.clone()).unwrap();
+        let keys = nostr::Keys::generate();
+        let event = builder.sign_with_keys(&keys).unwrap();
+
+        assert_eq!(event.kind.as_u16() as u32, KIND_AGENT_PROFILE);
+
+        let parsed: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(parsed["agent_type"], "agent");
+        assert_eq!(parsed["channel_ids"][0], "chan-a");
+        assert_eq!(parsed["channels"][1], "chan-b");
+        // The relay side effect rejects entries without this field.
+        assert_eq!(parsed["channel_add_policy"], DEFAULT_CHANNEL_ADD_POLICY);
+        // Wire format must stay snake_case for `RelayAgentInfo`.
+        assert!(parsed.get("respond_to").is_some());
+        assert!(parsed.get("respondTo").is_none());
+    }
+
+    #[test]
+    fn channel_ids_from_membership_events_collects_h_tags_once() {
+        let keys = nostr::Keys::generate();
+        let make = |tags: Vec<Vec<&str>>| {
+            let parsed: Vec<nostr::Tag> = tags
+                .into_iter()
+                .map(|tag| nostr::Tag::parse(tag).unwrap())
+                .collect();
+            EventBuilder::new(Kind::Custom(39002), "")
+                .tags(parsed)
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+
+        let events = vec![
+            make(vec![vec!["h", "chan-a"], vec!["p", "someone"]]),
+            // Duplicate must collapse; `e` tags are not channel references.
+            make(vec![vec!["h", "chan-a"], vec!["e", "chan-ignored"]]),
+            make(vec![vec!["h", "chan-b"]]),
+            make(vec![vec!["h", ""]]),
+        ];
+
+        assert_eq!(
+            channel_ids_from_membership_events(&events),
+            vec!["chan-a".to_string(), "chan-b".to_string()]
+        );
     }
 
     #[test]

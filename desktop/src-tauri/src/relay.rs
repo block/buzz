@@ -555,9 +555,25 @@ pub async fn submit_event_with_keys(
 }
 
 /// POST an already-signed event using the same explicit identity for NIP-98.
+///
+/// Targets the currently active community. Use
+/// [`submit_signed_event_with_keys_at`] when the event belongs to a specific
+/// relay — a managed agent can run on a community other than the active one.
 pub async fn submit_signed_event_with_keys(
     event: &nostr::Event,
     state: &AppState,
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<SubmitEventResponse, String> {
+    let api_base = relay_api_base_url_with_override(state);
+    submit_signed_event_with_keys_at(event, state, &api_base, keys, auth_tag).await
+}
+
+/// POST an already-signed event to an explicit relay API base URL.
+pub async fn submit_signed_event_with_keys_at(
+    event: &nostr::Event,
+    state: &AppState,
+    api_base_url: &str,
     keys: &Keys,
     auth_tag: Option<&str>,
 ) -> Result<SubmitEventResponse, String> {
@@ -565,7 +581,7 @@ pub async fn submit_signed_event_with_keys(
         return Err("signed event does not match the publishing identity".to_string());
     }
     crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
+    let url = format!("{}/events", api_base_url);
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
