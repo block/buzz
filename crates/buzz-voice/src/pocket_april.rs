@@ -672,8 +672,16 @@ where
                     .chars()
                     .next()
                     .is_some_and(is_closing_punctuation);
-            if (!at_word_end && !at_clause_end) || token_count(&text[start..end])? > max_tokens {
+            if !at_word_end && !at_clause_end {
                 continue;
+            }
+            // Prepared token counts are monotonic in prefix length, so once a
+            // candidate overflows the limit no longer candidate can fit. Stop
+            // scanning instead of tokenizing every remaining boundary: that
+            // kept this loop superlinear in prompt length, and the cost landed
+            // before the first chunk reached synthesis.
+            if token_count(&text[start..end])? > max_tokens {
+                break;
             }
 
             word_end = Some(end);
@@ -1076,6 +1084,39 @@ mod tests {
             split_at_natural_boundaries(text, 3, true, |chunk| Ok(chunk.chars().count())).unwrap();
         assert_eq!(chunks, ["ééé", "é"]);
         assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn natural_split_stops_counting_tokens_past_the_limit() {
+        // Each boundary scan must stop at the first overflowing candidate
+        // rather than tokenizing every remaining boundary. Scanning to
+        // end-of-text makes tokenizer input grow superlinearly in prompt
+        // length, and that cost is paid before the first chunk reaches
+        // synthesis, taxing time-to-first-audio on long prompts.
+        let sentence = "The relay finished its migration and the channel list refreshed. ";
+        let tokenized_bytes = |repeats: usize| -> usize {
+            let text = sentence.repeat(repeats).trim_end().to_string();
+            let total = std::cell::Cell::new(0_usize);
+            let chunks = split_at_natural_boundaries(&text, 50, true, |chunk| {
+                total.set(total.get() + chunk.len());
+                whitespace_token_count(chunk)
+            })
+            .expect("split repeated sentences");
+            assert_eq!(chunks.concat(), text);
+            assert!(chunks.len() > 1);
+            total.get()
+        };
+
+        // Doubling the prompt must not multiply tokenizer work superlinearly.
+        // Bounded scans grow ~2x here; scanning to end-of-text grows ~5.5x.
+        let single = tokenized_bytes(12);
+        let double = tokenized_bytes(24);
+        assert!(
+            double < single * 3,
+            "doubling the prompt grew tokenizer input from {single} to {double} bytes \
+             ({:.1}x); bounded scans stay near 2x",
+            double as f64 / single as f64,
+        );
     }
 
     #[test]
