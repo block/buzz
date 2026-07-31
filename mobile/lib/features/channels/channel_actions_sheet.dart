@@ -179,14 +179,26 @@ class ChannelActionsSheet extends ConsumerWidget {
               ),
             ListTile(
               leading: const Icon(LucideIcons.copy),
-              title: const Text('Copy'),
-              onTap: () async {
-                final pageContext = Navigator.of(
-                  context,
-                  rootNavigator: true,
-                ).context;
+              title: const Text('Copy channel name'),
+              onTap: () {
                 close();
-                await _showCopyChannelSheet(pageContext, channel: channel);
+                copyToClipboard(
+                  context,
+                  channel.name,
+                  message: 'Channel name copied to clipboard',
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.hash),
+              title: const Text('Copy channel ID'),
+              onTap: () {
+                close();
+                copyToClipboard(
+                  context,
+                  channel.id,
+                  message: 'Channel ID copied to clipboard',
+                );
               },
             ),
             if (!channel.isDm) ...[
@@ -401,55 +413,6 @@ Future<void> _confirmAndRun(
       ),
     );
   }
-}
-
-Future<void> _showCopyChannelSheet(
-  BuildContext context, {
-  required Channel channel,
-}) async {
-  await showModalBottomSheet<void>(
-    context: context,
-    showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          0,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(LucideIcons.copy),
-              title: const Text('Copy channel name'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                copyToClipboard(
-                  context,
-                  channel.name,
-                  message: 'Channel name copied to clipboard',
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.hash),
-              title: const Text('Copy channel ID'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                copyToClipboard(
-                  context,
-                  channel.id,
-                  message: 'Channel ID copied to clipboard',
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
 }
 
 Future<void> _showMoveSectionSheet(

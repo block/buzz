@@ -62,7 +62,8 @@ void main() {
       'Move to section…',
       'Mute channel',
       'Manage channel',
-      'Copy',
+      'Copy channel name',
+      'Copy channel ID',
       'Leave channel',
       'Archive channel',
       'Delete channel',
@@ -73,15 +74,12 @@ void main() {
     final moveTop = tester.getTopLeft(find.text('Move to section…')).dy;
     final muteTop = tester.getTopLeft(find.text('Mute channel')).dy;
     final manageTop = tester.getTopLeft(find.text('Manage channel')).dy;
-    final copyTop = tester.getTopLeft(find.text('Copy')).dy;
+    final copyNameTop = tester.getTopLeft(find.text('Copy channel name')).dy;
+    final copyIdTop = tester.getTopLeft(find.text('Copy channel ID')).dy;
     expect(moveTop, lessThan(muteTop));
     expect(muteTop, lessThan(manageTop));
-    expect(manageTop, lessThan(copyTop));
-
-    await tester.tap(find.text('Copy'));
-    await tester.pumpAndSettle();
-    expect(find.text('Copy channel name'), findsOneWidget);
-    expect(find.text('Copy channel ID'), findsOneWidget);
+    expect(manageTop, lessThan(copyNameTop));
+    expect(copyNameTop, lessThan(copyIdTop));
   });
 
   testWidgets('admin can archive but cannot delete', (tester) async {
@@ -138,7 +136,7 @@ void main() {
     expect(find.text('Channel actions unavailable'), findsOneWidget);
   });
 
-  testWidgets('DM keeps quick star and unread, then mute and copy actions', (
+  testWidgets('DM keeps quick star and unread, then mute and copy rows', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -149,7 +147,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    for (final label in ['Star', 'Unread', 'Mute channel', 'Copy']) {
+    for (final label in [
+      'Star',
+      'Unread',
+      'Mute channel',
+      'Copy channel name',
+      'Copy channel ID',
+    ]) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
     for (final label in [
@@ -163,12 +167,9 @@ void main() {
     }
 
     final muteTop = tester.getTopLeft(find.text('Mute channel')).dy;
-    final copyTop = tester.getTopLeft(find.text('Copy')).dy;
-    expect(muteTop, lessThan(copyTop));
-
-    await tester.tap(find.text('Copy'));
-    await tester.pumpAndSettle();
-    expect(find.text('Copy channel name'), findsOneWidget);
-    expect(find.text('Copy channel ID'), findsOneWidget);
+    final copyNameTop = tester.getTopLeft(find.text('Copy channel name')).dy;
+    final copyIdTop = tester.getTopLeft(find.text('Copy channel ID')).dy;
+    expect(muteTop, lessThan(copyNameTop));
+    expect(copyNameTop, lessThan(copyIdTop));
   });
 }
