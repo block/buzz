@@ -36,6 +36,7 @@ import { DevChannelMembers } from "@/features/dev-mode/ui/DevChannelMembers";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
 import { DevChannelTabs } from "@/features/dev-mode/ui/DevChannelTabs";
 import { DevCommandPalette } from "@/features/dev-mode/ui/DevCommandPalette";
+import { DevAgentStatusLine } from "@/features/dev-mode/ui/DevAgentStatusLine";
 import { DevPromptComposer } from "@/features/dev-mode/ui/DevPromptComposer";
 import { DevShortcutsOverlay } from "@/features/dev-mode/ui/DevShortcutsOverlay";
 import { DevSplitPane } from "@/features/dev-mode/ui/DevSplitPane";
@@ -748,6 +749,14 @@ export function DevModeShell({
     </div>
   ) : null;
 
+  // Quiet agent-activity readout pinned under the transcript, above the
+  // composer — only inside a live channel (previews and the fresh view
+  // have no working context).
+  const statusLine =
+    view === "channel" && activeChannel ? (
+      <DevAgentStatusLine channel={activeChannel} />
+    ) : null;
+
   // Fixed px clearance: the native macOS traffic lights overlay this strip
   // and ignore the app's text zoom, so rem-based padding would slide the
   // title under them. The 56px community rail absorbs most of the lights'
@@ -859,6 +868,7 @@ export function DevModeShell({
                       {transcriptFor(activeChannel, {
                         markRead: activeChannel.isMember,
                       })}
+                      {statusLine}
                       {composer}
                     </>
                   }
@@ -902,6 +912,7 @@ export function DevModeShell({
               and navigator states' composer below spans the full shell. */}
             {view === "channel" && !sideChatOpen ? (
               <>
+                {statusLine}
                 {errorBar}
                 {composer}
               </>
