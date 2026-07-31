@@ -240,12 +240,12 @@ fn src_rust_files() -> Vec<std::path::PathBuf> {
 /// guard + adding an injection test for the new site.
 const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Production egress boundaries (see egress_guard.rs table):
-    ("src/relay.rs", 2, 2),                             // boundaries 2, 4
-    ("src/relay/submit.rs", 1, 1),                      // boundaries 1 + 3 (shared funnel)
-    ("src/huddle/pipeline.rs", 1, 1),                   // boundary 5
-    ("src/commands/team_snapshot.rs", 1, 1),            // boundary 6
-    ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
-    ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
+    ("src/relay.rs", 2, 2),                                 // boundaries 2, 4
+    ("src/relay/submit.rs", 1, 1),                          // boundaries 1 + 3 (shared funnel)
+    ("src/huddle/pipeline.rs", 1, 1),                       // boundary 5
+    ("src/commands/team_snapshot.rs", 1, 1),                // boundary 6
+    ("src/commands/personas/snapshot/import/mod.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
+    ("src/native_websocket.rs", 0, 2),                      // boundary 8 (WS frames; no events URL)
     // Test-only fixtures — no production egress, no guard:
     ("src/relay_admission.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
@@ -416,7 +416,7 @@ fn ncryptsec_handling_is_confined_to_allowlisted_files() {
         "src/huddle/pipeline.rs",
         "src/commands/team_snapshot.rs",
         "src/commands/team_snapshot/tests.rs",
-        "src/commands/personas/snapshot/import.rs",
+        "src/commands/personas/snapshot/import/mod.rs",
         "src/native_websocket.rs",
     ];
 

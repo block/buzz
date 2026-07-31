@@ -1012,7 +1012,7 @@ fn build_install_command(command: &str) -> Result<std::process::Command, String>
 // ── install command execution ─────────────────────────────────────────────────
 mod install_capture;
 mod install_exec;
-mod install_report;
+pub(crate) mod install_report;
 use install_exec::run_install_command_with_retry;
 use install_report::InstallReporter;
 

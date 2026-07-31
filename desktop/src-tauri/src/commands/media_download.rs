@@ -621,6 +621,8 @@ mod tests {
                 name_pool: vec![],
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
+                environment: vec![],
+                environment_values: Default::default(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Test".to_string(),
@@ -671,6 +673,8 @@ mod tests {
                 name_pool: vec![],
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
+                environment: vec![],
+                environment_values: Default::default(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Test".to_string(),
@@ -717,6 +721,8 @@ mod tests {
                 name_pool: vec![],
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
+                environment: vec![],
+                environment_values: Default::default(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Test".to_string(),

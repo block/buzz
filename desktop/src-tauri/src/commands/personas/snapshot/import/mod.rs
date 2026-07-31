@@ -72,6 +72,15 @@ pub struct AgentSnapshotImportPreview {
     pub has_source_allowlist: bool,
     /// Number of source allowlist entries.
     pub source_allowlist_count: usize,
+    /// Environment variable key names that will be pre-created on import.
+    /// Already filtered to valid, non-reserved keys. Blank entries mean the
+    /// owner fills the value in through the GUI after import.
+    pub environment_keys: Vec<String>,
+    /// Subset of `environment_keys` carrying a non-secret value hint from an
+    /// external producer (e.g. an OpenAI-compatible API route). Secret-class
+    /// key names never arrive here — their values are dropped to blank and
+    /// stay owner-supplied.
+    pub environment_prefilled: Vec<String>,
 }
 
 /// The confirmation request sent from the UI after the user reviews the preview.
@@ -196,6 +205,53 @@ pub(crate) fn resolve_snapshot_import_behavior(
     )
 }
 
+/// Resolve env-var scaffolding for an incoming snapshot.
+///
+/// Snapshots carry env var KEY NAMES only — never values (see the
+/// `agent_snapshot` module docs). Each valid, non-reserved key pre-creates a
+/// blank entry (empty value) so the owner sees exactly which variables the
+/// agent needs and fills in values through the GUI after import. Malformed or
+/// Buzz-reserved keys are dropped here — they would be stripped at spawn time
+/// anyway — so the preview shows only keys that will actually be created.
+///
+/// Extracted as a pure function so unit tests exercise the exact production
+/// logic used by both the preview and the confirmed import.
+pub(crate) fn resolve_snapshot_import_environment(
+    raw_keys: &[String],
+    raw_values: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    use crate::commands::agent_discovery::install_report::name_marks_secret;
+    use crate::managed_agents::{display_invalid_key, is_reserved_env_key, is_well_formed_env_key};
+
+    let mut resolved = std::collections::BTreeMap::new();
+    for key in raw_keys {
+        if !is_well_formed_env_key(key) {
+            eprintln!(
+                "buzz-desktop: ignoring malformed env var key `{}` from agent snapshot",
+                display_invalid_key(key)
+            );
+            continue;
+        }
+        if is_reserved_env_key(key) {
+            eprintln!("buzz-desktop: ignoring reserved env var `{key}` from agent snapshot");
+            continue;
+        }
+        let value = match raw_values.get(key) {
+            None => String::new(),
+            Some(value) if value.is_empty() => String::new(),
+            Some(_) if name_marks_secret(key) => {
+                eprintln!(
+                    "buzz-desktop: ignoring pre-filled value for secret-class env var `{key}` from agent snapshot"
+                );
+                String::new()
+            }
+            Some(value) => value.clone(),
+        };
+        resolved.insert(key.clone(), value);
+    }
+    resolved
+}
+
 const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 
 /// Decode a `buzz-agent-snapshot v1` manifest from raw bytes.
@@ -311,6 +367,17 @@ pub(crate) fn build_agent_snapshot_import_preview(
     }
     .to_string();
 
+    let resolved_env = resolve_snapshot_import_environment(
+        &snapshot.definition.environment,
+        &snapshot.definition.environment_values,
+    );
+    let environment_prefilled: Vec<String> = resolved_env
+        .iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let environment_keys: Vec<String> = resolved_env.into_keys().collect();
+
     AgentSnapshotImportPreview {
         display_name: snapshot.profile.display_name.clone(),
         is_builtin: snapshot.definition.source_is_builtin,
@@ -327,6 +394,8 @@ pub(crate) fn build_agent_snapshot_import_preview(
         memory_entry_count: snapshot.memory.entries.len(),
         source_allowlist_count: snapshot.definition.respond_to_allowlist.len(),
         has_source_allowlist: !snapshot.definition.respond_to_allowlist.is_empty(),
+        environment_keys,
+        environment_prefilled,
     }
 }
 
@@ -348,7 +417,9 @@ pub(crate) fn build_agent_snapshot_import_preview(
 ///
 /// Importing the same file twice yields two distinct agents with different
 /// keypairs. No source identity material (pubkey, nsec, auth_tag, relay_url,
-/// env_vars, backend, lineage) is consumed.
+/// env var VALUES, backend, lineage) is consumed. Env var *key names*
+/// declared in the snapshot are scaffolded as blank entries so the owner
+/// knows exactly what to configure after import.
 #[tauri::command]
 pub async fn confirm_agent_snapshot_import(
     input: AgentSnapshotImportConfirm,
@@ -371,6 +442,14 @@ pub async fn confirm_agent_snapshot_import(
         input.keep_allowlist,
     )?;
     let minted_parallelism = minted.parallelism;
+
+    // Env scaffolding: pre-create blank entries for the key names declared in
+    // the snapshot. Values never travel in snapshots — the owner fills them
+    // in through the GUI after import.
+    let imported_env = resolve_snapshot_import_environment(
+        &snapshot.definition.environment,
+        &snapshot.definition.environment_values,
+    );
 
     // Profile metadata must contain a hosted URL. Inline avatar data can be far
     // larger than the relay's kind:0 content limit, so upload imported pixels
@@ -463,7 +542,7 @@ pub async fn confirm_agent_snapshot_import(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
-            env_vars: std::collections::BTreeMap::new(),
+            env_vars: imported_env.clone(),
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             parallelism: minted_parallelism,
@@ -478,7 +557,9 @@ pub async fn confirm_agent_snapshot_import(
         super::super::pending::retain_persona_pending(&app, &state, &persona);
 
         // Build the managed agent record — no machine-local commands, no
-        // secrets, no lineage from the snapshot.
+        // secrets, no lineage from the snapshot. Env var key names declared
+        // by the snapshot are scaffolded as blank entries (values never
+        // travel in snapshots).
         let record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: display_name.clone(),
@@ -505,7 +586,7 @@ pub async fn confirm_agent_snapshot_import(
             model: snapshot.definition.model.clone(),
             provider: snapshot.definition.provider.clone(),
             persona_source_version: None,
-            env_vars: std::collections::BTreeMap::new(),
+            env_vars: imported_env,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -880,3 +961,6 @@ mod import_avatar_tests {
         assert_eq!(result.unwrap_err(), "Snapshot avatar data is malformed.");
     }
 }
+
+#[cfg(test)]
+mod tests;

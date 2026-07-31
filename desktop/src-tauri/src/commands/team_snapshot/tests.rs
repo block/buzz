@@ -24,6 +24,8 @@ fn member(name: &str) -> AgentSnapshot {
             name_pool: vec![],
             idle_timeout_seconds: None,
             max_turn_duration_seconds: None,
+            environment: vec![],
+            environment_values: Default::default(),
         },
         profile: AgentSnapshotProfile {
             display_name: name.to_string(),

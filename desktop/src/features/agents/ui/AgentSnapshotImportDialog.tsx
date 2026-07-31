@@ -200,6 +200,28 @@ function PreviewBody({
         </p>
       )}
 
+      {/* Environment section */}
+      {preview.environmentKeys.length > 0 ? (
+        <div
+          className="space-y-1.5 rounded-md border border-border p-3"
+          data-testid="agent-snapshot-import-environment-section"
+        >
+          <p className="text-sm font-medium">
+            Environment variables ({preview.environmentKeys.length})
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Blank entries will be created for these keys — secret values never
+            travel in snapshots. Fill them in under the agent&apos;s
+            environment settings after import.
+          </p>
+          <ul className="list-inside list-disc font-mono text-xs text-muted-foreground">
+            {preview.environmentKeys.map((key) => (
+              <li key={key}>{key}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {/* Allowlist section */}
       {preview.hasSourceAllowlist ? (
         <div

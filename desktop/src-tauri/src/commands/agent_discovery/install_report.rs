@@ -543,7 +543,7 @@ const SECRET_VAR_NAMES: &[&str] = &["NPM_CONFIG_KEY", "NPM_CONFIG__AUTH", "NPM_C
 /// personal access tokens match on `_PAT` as a *suffix* rather than a substring
 /// — `contains("_PAT")` would match every `*_PATH` variable on the system and
 /// scrub directory names out of the whole log.
-fn name_marks_secret(name: &str) -> bool {
+pub(crate) fn name_marks_secret(name: &str) -> bool {
     const SECRET_NAME_MARKERS: &[&str] = &[
         "TOKEN",
         "SECRET",

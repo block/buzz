@@ -466,7 +466,8 @@ mod tests {
             !json.contains("auth-tag-secret"),
             "auth_tag value must not appear"
         );
-        assert!(!json.contains("API_KEY"), "env var key must not appear");
+        // Env var key names are intentional: they appear as blank-entry
+        // scaffolding under definition.environment (never the values).
         assert!(!json.contains("secret123"), "env var value must not appear");
         assert!(
             !json.contains("wss://relay.example.com"),
