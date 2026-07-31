@@ -142,7 +142,7 @@ test("palette offers a new tab action inside a channel", async ({ page }) => {
   );
 });
 
-test("⌘[ and ⌘] cycle through a channel's tabs", async ({ page }) => {
+test("⇧⌘[ and ⇧⌘] cycle through a channel's tabs", async ({ page }) => {
   await openDevModeChannel(page, "general");
   await createChannel(page, "general--flaky-ci");
   await createChannel(page, "general--rollback-plan");
@@ -151,15 +151,15 @@ test("⌘[ and ⌘] cycle through a channel's tabs", async ({ page }) => {
   await expect(tabs).toHaveCount(3);
   await expect(tabs.nth(0)).toHaveAttribute("data-active", "true");
 
-  await page.keyboard.press("Meta+]");
+  await page.keyboard.press("Shift+Meta+BracketRight");
   await expect(tabs.nth(1)).toHaveAttribute("data-active", "true");
-  await page.keyboard.press("Meta+]");
+  await page.keyboard.press("Shift+Meta+BracketRight");
   await expect(tabs.nth(2)).toHaveAttribute("data-active", "true");
   // Wraps around past the last tab.
-  await page.keyboard.press("Meta+]");
+  await page.keyboard.press("Shift+Meta+BracketRight");
   await expect(tabs.nth(0)).toHaveAttribute("data-active", "true");
-  // ⌘[ goes the other way (wrapping back to the end).
-  await page.keyboard.press("Meta+[");
+  // ⇧⌘[ goes the other way (wrapping back to the end).
+  await page.keyboard.press("Shift+Meta+BracketLeft");
   await expect(tabs.nth(2)).toHaveAttribute("data-active", "true");
 });
 

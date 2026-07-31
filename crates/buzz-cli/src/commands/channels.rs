@@ -452,7 +452,7 @@ async fn cmd_create_sub_channel(
         .map(extract_p_tags)
         .unwrap_or_default()
         .iter()
-        .any(|member| member == &caller)
+        .any(|member| member.get("pubkey").and_then(|p| p.as_str()) == Some(caller.as_str()))
     {
         return Err(CliError::Usage(
             "sub-channel members must be members of the parent; the caller is not a parent member"
