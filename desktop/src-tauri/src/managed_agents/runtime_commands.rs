@@ -424,6 +424,59 @@ async fn probe_agent_relay_access(
     Ok((record, key, requested_relay_url))
 }
 
+/// Refresh a locally managed agent's kind:10100 directory entry after its
+/// channel membership changed.
+///
+/// The entry published at start time is necessarily channel-less: kind:39002
+/// memberships do not exist until the harness first connects, so the start-time
+/// snapshot is empty for a freshly created agent. An entry that lists no
+/// channels makes the agent non-invocable for `respond_to: anyone`, so it must
+/// be refreshed once memberships actually exist — otherwise the directory
+/// advertises the agent as unreachable.
+///
+/// No-op for pubkeys that are not locally managed agents; only this machine
+/// holds their keys and may sign on their behalf. Best-effort throughout.
+pub(crate) async fn refresh_agent_directory_entry(
+    app: &AppHandle,
+    state: &AppState,
+    agent_pubkey: &str,
+) {
+    let normalized = agent_pubkey.trim().to_lowercase();
+    let Ok(records) = load_managed_agents(app) else {
+        return;
+    };
+    let Some(record) = records
+        .into_iter()
+        .find(|record| record.pubkey.trim().to_lowercase() == normalized)
+    else {
+        return;
+    };
+    let Ok(keys) = nostr::Keys::parse(record.private_key_nsec.trim()) else {
+        return;
+    };
+    let api_base = crate::relay::relay_http_base_url(&record.relay_url);
+    let memberships = match crate::relay::query_relay_at_with_keys(
+        state,
+        &api_base,
+        &[serde_json::json!({"kinds": [39002], "#p": [record.pubkey]})],
+        &keys,
+        record.auth_tag.as_deref(),
+    )
+    .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(
+                agent = %record.pubkey,
+                %error,
+                "failed to read memberships while refreshing the agent directory entry"
+            );
+            return;
+        }
+    };
+    publish_agent_directory_entry(state, &record, &api_base, &keys, &memberships).await;
+}
+
 /// Refresh the agent's kind:10100 directory entry on `api_base`.
 ///
 /// Other machines discover invocable agents exclusively through this kind, so

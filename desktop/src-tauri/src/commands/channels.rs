@@ -786,6 +786,7 @@ pub async fn add_channel_members(
     pubkeys: Vec<String>,
     role: Option<String>,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let uuid = parse_channel_uuid(&channel_id)?;
     let role_str = match role.as_deref() {
@@ -811,6 +812,14 @@ pub async fn add_channel_members(
             Ok(_) => added.push(pubkey.clone()),
             Err(e) => errors.push(serde_json::json!({"pubkey": pubkey, "error": e})),
         }
+    }
+
+    // A managed agent's directory entry (kind:10100) lists the channels it can
+    // be reached in, and that list is empty at start time because memberships
+    // do not exist yet. Refresh it here so the agent becomes invocable from
+    // other machines as soon as it joins a channel. No-op for non-agents.
+    for pubkey in &added {
+        crate::managed_agents::refresh_agent_directory_entry(&app, &state, pubkey).await;
     }
 
     Ok(serde_json::json!({ "added": added, "errors": errors }))
