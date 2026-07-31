@@ -28,12 +28,13 @@ export function MarkdownBlockquote({
   );
 }
 
+// Deliberately no `dir` here: `dir="auto"` on the list skips any descendant
+// that carries its own `dir`, so marking items too leaves the list with no
+// strong character to read and it falls back to `ltr` — markers and indent
+// stranded on the left. Items still get their own text direction from the
+// `unicode-bidi: plaintext` rule; the list owns the marker side for all of them.
 export function MarkdownListItem({ children }: { children?: React.ReactNode }) {
-  return (
-    <li dir="auto" className={ITEM_CLASS}>
-      {children}
-    </li>
-  );
+  return <li className={ITEM_CLASS}>{children}</li>;
 }
 
 export function MarkdownOrderedList({
