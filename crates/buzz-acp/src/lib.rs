@@ -3025,7 +3025,9 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     let acp::AcpError::AgentError { message, .. } = error else {
         return false;
     };
-    message.contains("Re-authenticate") || message.contains("API Error: 401")
+    message.contains("Re-authenticate")
+        || message.contains("API Error: 401")
+        || message.contains("Authentication required")
 }
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
@@ -6223,6 +6225,23 @@ mod error_outcome_emission_tests {
         assert!(
             is_auth_error(&e),
             "API Error: 401 variant must be classified as auth error"
+        );
+    }
+
+    #[test]
+    fn is_auth_error_matches_authentication_required_message() {
+        // Reporter-observed subprocess message (claude-agent-acp 0.63.0, buzz
+        // #3831): expired subscription credential surfaces as a bare
+        // "Authentication required" with code -32000. Without this variant the
+        // immediate dead-letter + re-auth notice never fires and every mention
+        // burns ~10 retries before dead-lettering.
+        let e = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Authentication required".to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "Authentication required variant must be classified as auth error"
         );
     }
 
