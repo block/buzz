@@ -744,11 +744,13 @@ with:
                         .await
                         {
                             Ok(sid) => {
+                                // Hoist the resolve before the mutable borrow: calling
+                                // `effective_mcp_servers(&agent, ..)` inline as an argument to
+                                // `agent.state.applied_mcp.insert(..)` mixes an immutable and a
+                                // mutable borrow of `agent` in one expression. Do not inline it.
+                                let applied = effective_mcp_servers(&agent, &ctx).clone();
                                 agent.state.sessions.insert(*cid, sid.clone());
-                                agent
-                                    .state
-                                    .applied_mcp
-                                    .insert(*cid, effective_mcp_servers(&agent, &ctx).clone());
+                                agent.state.applied_mcp.insert(*cid, applied);
                                 (sid, true)
                             }
                             Err(AcpError::AgentExited) => {
@@ -780,13 +782,12 @@ with:
             } else {
 ```
 
-In the pre-existing "no session yet" arm below, add the same `applied_mcp` record immediately after `agent.state.sessions.insert(*cid, sid.clone());`:
+In the pre-existing "no session yet" arm below, add the same `applied_mcp` record around `agent.state.sessions.insert(*cid, sid.clone());` — again resolving *before* the mutable borrow:
 
 ```rust
-                        agent
-                            .state
-                            .applied_mcp
-                            .insert(*cid, effective_mcp_servers(&agent, &ctx).clone());
+                        let applied = effective_mcp_servers(&agent, &ctx).clone();
+                        agent.state.sessions.insert(*cid, sid.clone());
+                        agent.state.applied_mcp.insert(*cid, applied);
 ```
 
 > If the duplicated creation block reads badly once written, extract both call sites into a single local `async fn create_and_record(...)` helper — but only after the tests are green.
@@ -1004,7 +1005,9 @@ git commit -s -m "feat(acp): update_mcp_servers control frame for live per-chann
 - Consumes: `effective_mcp_servers` / `OwnedAgent.desired_mcp` (Tasks 3–4) to decide *managed vs unmanaged*.
 - Produces: `session_new_full(..., strict_mcp: bool)` — when true, sends `_meta.claudeCode.options = {"strictMcpConfig": true, "settingSources": ["project"]}`.
 
-**Verified behaviour this depends on:** the Claude adapter spreads `_meta.claudeCode.options` straight into the SDK options object (`acp-agent.js:4103` reads it, `:4157` spreads it). `strictMcpConfig` is a real SDK option (`sdk.d.ts:1959`, "Maps to the CLI `--strict-mcp-config` flag") that suppresses project `.mcp.json`, user settings, plugin, and agent-frontmatter MCP. `settingSources` must still include `"project"` or CLAUDE.md files stop loading (`sdk.d.ts:1908`).
+**Verified behaviour this depends on:** the Claude adapter spreads `_meta.claudeCode.options` straight into the SDK options object (`acp-agent.js:4103` reads it, `:4157` spreads it). `strictMcpConfig` is a real SDK option (`sdk.d.ts:1959`, "Maps to the CLI `--strict-mcp-config` flag") that suppresses project `.mcp.json`, user settings, plugin, and agent-frontmatter MCP.
+
+**Review correction — do NOT send `settingSources`.** The spec pairs `strictMcpConfig` with `settingSources: ["project"]`. That is unnecessary and actively risky. `strictMcpConfig` alone already suppresses *every* other MCP source (`sdk.d.ts:1955-1957` enumerates them). `settingSources` is a much broader lever governing which settings files load at all — narrowing the adapter's default `["user","project","local"]` (`acp-agent.js:4156`) down to `["project"]` would silently drop the user's permission defaults and local settings for managed channels, changing behaviour far beyond MCP. Send `strictMcpConfig` only; leave `settingSources` at the adapter default.
 
 **The adapter never names `strictMcpConfig`** — it rides the generic spread, so a typo silently no-ops with no error. The assertion in Step 1 is the only thing standing between a typo and a silent 64k-token regression.
 
@@ -1034,10 +1037,10 @@ async fn session_new_full_sends_strict_mcp_config_when_managed() {
         Some(true),
         "managed channels must suppress the agent's global MCP config"
     );
-    assert_eq!(
-        opts["settingSources"][0].as_str(),
-        Some("project"),
-        "project settings must stay loaded so CLAUDE.md still applies"
+    assert!(
+        opts["settingSources"].is_null(),
+        "settingSources must be left alone — narrowing it would drop the user's \
+         permission defaults for managed channels, which is not what this flag is for"
     );
 }
 
@@ -1102,14 +1105,15 @@ Add the parameter and merge into `_meta` without clobbering `sessionTitle`:
             // Managed channel: run exactly the servers the panel shows. Without
             // this the agent additionally loads its own global MCP config,
             // injecting tool schemas nobody asked for into every turn.
-            // `settingSources` keeps `project` so CLAUDE.md still loads.
+            //
+            // Deliberately does NOT touch `settingSources`: `strictMcpConfig`
+            // already suppresses every other MCP source, and narrowing settings
+            // loading would drop the user's permission defaults as a side
+            // effect — a much wider blast radius than this flag is meant to have.
             meta.insert(
                 "claudeCode".into(),
                 serde_json::json!({
-                    "options": {
-                        "strictMcpConfig": true,
-                        "settingSources": ["project"],
-                    }
+                    "options": { "strictMcpConfig": true }
                 }),
             );
         }
@@ -1250,13 +1254,13 @@ fn note_tool_call_for_verification(state: &mut SessionState, channel_id: &Uuid, 
     let Some(servers) = state.applied_mcp.get(channel_id) else {
         return;
     };
-    let Some(server) = tool_name
-        .strip_prefix("mcp__")
-        .and_then(|rest| rest.split("__").next())
-    else {
-        return;
-    };
-    if servers.iter().any(|s| s.name == server) {
+    // Match the full `mcp__<server>__` prefix rather than splitting on `__`:
+    // a server name may itself contain a double underscore, and splitting would
+    // silently attribute its tool calls to the wrong server (or to none).
+    let landed = servers
+        .iter()
+        .any(|s| tool_name.starts_with(&format!("mcp__{}__", s.name)));
+    if landed {
         state.mcp_verified.insert(*channel_id);
     }
 }
