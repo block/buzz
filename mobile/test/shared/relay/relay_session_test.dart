@@ -245,6 +245,96 @@ void main() {
     expect(session.state.status, SessionStatus.connected);
   });
 
+  test('publishes once after a replacement socket authenticates', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final config = _FakeRelayConfigNotifier(
+      baseUrl: 'https://old.example',
+      nsec: keychain.nsec,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(() => config),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+
+    final published = session.publish(
+      _event(),
+      timeout: const Duration(seconds: 1),
+    );
+    expect(sockets.single.sent, isEmpty);
+
+    config.update(baseUrl: 'https://new.example', nsec: keychain.nsec);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(2));
+
+    sockets.first.connectSuccessfully();
+    expect(sockets.first.sent, isEmpty);
+    expect(sockets.last.sent, isEmpty);
+
+    sockets.last.connectSuccessfully();
+    expect(sockets.last.sent, [
+      ['EVENT', _event().toJson()],
+    ]);
+
+    sockets.last.receive(['OK', _event().id, true, '']);
+    expect((await published).id, _event().id);
+  });
+
+  test('queued publish fails explicitly when app pauses', () async {
+    final session = RelaySessionNotifier();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    final published = session.publish(
+      _event(),
+      timeout: const Duration(seconds: 1),
+    );
+    final expectation = expectLater(
+      published,
+      throwsA(
+        isA<Exception>().having(
+          (error) => error.toString(),
+          'message',
+          contains('background'),
+        ),
+      ),
+    );
+
+    session.debugPauseNow();
+    await expectation;
+  });
+
   test('does not schedule reconnects after background disconnect', () {
     final session = RelaySessionNotifier();
     final container = ProviderContainer(
@@ -402,6 +492,9 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 class _ControlledRelaySocket extends RelaySocket {
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
+  final void Function(List<dynamic> message) _message;
+  final List<List<dynamic>> sent = [];
+  SocketState _fakeState = SocketState.disconnected;
 
   _ControlledRelaySocket({
     required super.wsUrl,
@@ -410,17 +503,36 @@ class _ControlledRelaySocket extends RelaySocket {
     required super.onConnected,
     required super.onDisconnected,
   }) : _connected = onConnected,
-       _disconnected = onDisconnected;
+       _disconnected = onDisconnected,
+       _message = onMessage;
+
+  @override
+  SocketState get state => _fakeState;
 
   @override
   Future<void> connect() async {}
 
   @override
+  bool trySend(List<dynamic> payload) {
+    if (_fakeState != SocketState.connected) return false;
+    sent.add(payload);
+    return true;
+  }
+
+  @override
   void dispose() {}
 
-  void connectSuccessfully() => _connected();
+  void connectSuccessfully() {
+    _fakeState = SocketState.connected;
+    _connected();
+  }
 
-  void disconnectWith(Object? error) => _disconnected(error);
+  void disconnectWith(Object? error) {
+    _fakeState = SocketState.disconnected;
+    _disconnected(error);
+  }
+
+  void receive(List<dynamic> message) => _message(message);
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';

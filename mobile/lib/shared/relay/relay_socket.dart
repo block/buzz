@@ -118,7 +118,18 @@ class RelaySocket {
 
   /// Send a raw JSON array over the websocket.
   void send(List<dynamic> payload) {
-    _channel?.sink.add(jsonEncode(payload));
+    trySend(payload);
+  }
+
+  /// Send only when a channel is available.
+  ///
+  /// Required-delivery callers use the result to wait for the next
+  /// authenticated connection instead of silently dropping the payload.
+  bool trySend(List<dynamic> payload) {
+    final channel = _channel;
+    if (channel == null) return false;
+    channel.sink.add(jsonEncode(payload));
+    return true;
   }
 
   /// Gracefully close the connection.
