@@ -3,14 +3,10 @@ set -euo pipefail
 
 : "${PR_HEAD_SHA:?}"
 : "${MERGE_SHA:?}"
-: "${MERGED_BY:?}"
 : "${VERSION:?}"
 : "${PR_NUMBER:?}"
 : "${GH_TOKEN:?}"
 
-# This ID is the release-authority policy anchor. A bypass of another ruleset
-# must never authorize a desktop release.
-readonly DEFAULT_RULESET_ID=13596885
 required_checks=(
   "Desktop E2E Integration"
   "Desktop"
@@ -47,41 +43,7 @@ git merge-base --is-ancestor "$MERGE_SHA" origin/main || { echo "squash commit i
 git checkout --detach "$PR_HEAD_SHA"
 scripts/desktop_release.py validate --candidate "$PR_HEAD_SHA" --version "$VERSION" --repo "$GITHUB_REPOSITORY"
 
-review="$(gh api graphql -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewDecision}}}' -F owner="${GITHUB_REPOSITORY%/*}" -F repo="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" --jq '.data.repository.pullRequest')"
-reviews="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100")"
-valid_approvals="$(jq --arg sha "$PR_HEAD_SHA" '[.[][] | select(.state == "APPROVED" and .commit_id == $sha and (.author_association == "MEMBER" or .author_association == "OWNER" or .author_association == "COLLABORATOR"))] | length' <<<"$reviews")"
-review_authorized=false
-if jq -e -f scripts/review-decision-approved.jq <<<"$review" >/dev/null && [[ "$valid_approvals" -gt 0 ]]; then
-  review_authorized=true
-fi
-
-# Rule suites are GitHub's durable record that a permitted bypass actor landed
-# this exact main update. The suite does not identify the matching bypass grant,
-# so the Default ruleset's bypass list is itself the release-authority policy.
-bypass_authorized=false
-for attempt in {1..5}; do
-  suites="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/rulesets/rule-suites?ref=refs/heads/main&per_page=100")"
-  mapfile -t suite_ids < <(jq -r --arg before "$base_sha" --arg after "$MERGE_SHA" --arg actor "$MERGED_BY" '
-    .[][] | select(.ref == "refs/heads/main" and .before_sha == $before and .after_sha == $after and .actor_name == $actor and .result == "bypass") | .id
-  ' <<<"$suites")
-  if [[ "${#suite_ids[@]}" -gt 1 ]]; then
-    echo "multiple rule suites matched the release landing" >&2
-    exit 1
-  fi
-  if [[ "${#suite_ids[@]}" -eq 1 ]]; then
-    suite="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/rule-suites/${suite_ids[0]}")"
-    if jq -e --argjson ruleset_id "$DEFAULT_RULESET_ID" -f scripts/desktop-release-bypass-authorized.jq <<<"$suite" >/dev/null; then
-      bypass_authorized=true
-    fi
-    break
-  fi
-  [[ "$attempt" -eq 5 ]] || sleep "$attempt"
-done
-
-[[ "$review_authorized" == true || "$bypass_authorized" == true ]] || {
-  echo "release lacks an exact-head approval or authorized Default-ruleset bypass" >&2
-  exit 1
-}
+scripts/verify-desktop-release-authorization.sh
 
 checks="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$PR_HEAD_SHA/check-runs?per_page=100")"
 for required in "${required_checks[@]}"; do
