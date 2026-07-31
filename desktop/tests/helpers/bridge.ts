@@ -159,6 +159,13 @@ type MockInstallRuntimeResult = {
 };
 
 type MockBridgeOptions = {
+  ttsSettings?: {
+    version: number;
+    agentTextToSpeech: boolean;
+    voicePreferences: string[];
+  };
+  /** Native picker boundary result for Pocket voice import tests. */
+  pocketVoiceImportResult?: "success" | "cancel" | "invalid";
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
