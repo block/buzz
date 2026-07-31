@@ -5,6 +5,8 @@ import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { useFeatureEnabled } from "@/shared/features/useFeatureEnabled";
+import { ComposerDictationButton } from "./ComposerDictationButton";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
@@ -52,6 +54,8 @@ export const MessageComposerToolbar = React.memo(
     onPaperclip: () => void;
     sendDisabled: boolean;
   }) {
+    const isDictationEnabled = useFeatureEnabled("dictation");
+
     return (
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
         <SelectionFormattingTray
@@ -192,6 +196,13 @@ export const MessageComposerToolbar = React.memo(
                   </TooltipTrigger>
                   <TooltipContent>Attach image</TooltipContent>
                 </Tooltip>
+                {isDictationEnabled ? (
+                  <ComposerDictationButton
+                    disabled={composerDisabled}
+                    editor={editor}
+                    onMouseDown={onCaptureSelection}
+                  />
+                ) : null}
                 <ComposerEmojiPicker
                   disabled={composerDisabled}
                   onClose={() => editor?.commands.focus()}

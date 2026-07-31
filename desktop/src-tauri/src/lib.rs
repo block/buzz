@@ -370,6 +370,7 @@ pub fn run() {
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
+        .manage(commands::DictationState::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -871,6 +872,10 @@ pub fn run() {
             end_huddle,
             get_huddle_state,
             push_audio_pcm,
+            is_dictation_available,
+            start_dictation,
+            stop_dictation,
+            push_dictation_pcm,
             reconnect_huddle_audio,
             start_stt_pipeline,
             set_huddle_transcription_enabled,

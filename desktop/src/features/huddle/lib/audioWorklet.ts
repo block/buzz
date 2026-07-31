@@ -47,11 +47,21 @@ export type AudioWorkletHandle = {
  *
  * @param audioTrack - Mic track from LiveKit
  * @param initialTransmitting - Initial PTT state. true=open mic (VAD), false=muted until PTT press.
+ * @param options - Sink and PTT overrides. Composer dictation reuses this
+ *   whole audio path but targets its own Rust command and opts out of PTT:
+ *   the mic button is the gate, so Ctrl+Space must not mute it.
  */
 export async function setupAudioWorklet(
   audioTrack: MediaStreamTrack,
   initialTransmitting = true,
+  options: {
+    /** Tauri command receiving raw PCM batches. */
+    command?: string;
+    /** Subscribe to Rust "ptt-state" events. */
+    enablePtt?: boolean;
+  } = {},
 ): Promise<AudioWorkletHandle> {
+  const { command = "push_audio_pcm", enablePtt = true } = options;
   const audioContext = new AudioContext({ sampleRate: 48000 });
 
   // Resume after user gesture (required by autoplay policy)
@@ -89,7 +99,7 @@ export async function setupAudioWorklet(
     // Create a zero-copy Uint8Array view over the same underlying buffer.
     // Rust reinterprets the bytes as f32 on the other side.
     invokeRawBinary(
-      "push_audio_pcm",
+      command,
       new Uint8Array(float32.buffer, float32.byteOffset, float32.byteLength),
     ).catch(() => {
       /* silently drop — Rust handles backpressure */
@@ -106,18 +116,20 @@ export async function setupAudioWorklet(
   // Listen for PTT state from Rust global shortcut (Ctrl+Space press/release).
   // Direction: Rust→main→worklet. The Tauri event carries a boolean payload.
   let pttUnlisten: UnlistenFn | null = null;
-  try {
-    pttUnlisten = await listen<boolean>("ptt-state", (event) => {
-      // Only forward PTT events to the worklet when in PTT mode.
-      // In VAD mode, Ctrl+Space is ignored — the worklet stays open.
-      if (currentMode === "push_to_talk") {
-        workletNode.port.postMessage({ type: "ptt", active: event.payload });
-      }
-    });
-  } catch {
-    // PTT events not available — worklet stays in current transmit mode.
-    // This is fine for VAD mode (always transmitting) and degrades gracefully
-    // for PTT mode (user won't be able to transmit, but audio won't leak).
+  if (enablePtt) {
+    try {
+      pttUnlisten = await listen<boolean>("ptt-state", (event) => {
+        // Only forward PTT events to the worklet when in PTT mode.
+        // In VAD mode, Ctrl+Space is ignored — the worklet stays open.
+        if (currentMode === "push_to_talk") {
+          workletNode.port.postMessage({ type: "ptt", active: event.payload });
+        }
+      });
+    } catch {
+      // PTT events not available — worklet stays in current transmit mode.
+      // This is fine for VAD mode (always transmitting) and degrades gracefully
+      // for PTT mode (user won't be able to transmit, but audio won't leak).
+    }
   }
 
   return {
