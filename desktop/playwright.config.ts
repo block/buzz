@@ -40,6 +40,7 @@ export default defineConfig({
         "**/dev-mode-media.spec.ts",
         "**/dev-mode-edit.spec.ts",
         "**/dev-mode-reactions.spec.ts",
+        "**/dev-mode-status-line.spec.ts",
         "**/badge.spec.ts",
         "**/channel-browser.spec.ts",
         "**/channel-add-screenshots.spec.ts",
