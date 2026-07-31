@@ -476,6 +476,7 @@ impl AgentHarness {
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "2")
+            .env("BUZZ_AGENT_MAX_SESSIONS", "1")
             .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -981,4 +982,58 @@ async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
         1,
         "a static token cannot refresh, so discovery must not issue a duplicate request"
     );
+}
+
+#[tokio::test]
+async fn failed_discovery_does_not_consume_session_capacity() {
+    use axum::http::StatusCode;
+
+    let attempts = Arc::new(AtomicU64::new(0));
+    let attempts_for_route = attempts.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/api/ai-gateway/v2/endpoints",
+        get(move || {
+            let attempts = attempts_for_route.clone();
+            async move {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err((StatusCode::UNAUTHORIZED, "rejected"))
+                } else {
+                    Ok(Json(json!({
+                        "endpoints": [{"name": "discovered-model"}],
+                        "next_page_token": null,
+                    })))
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let mut h = AgentHarness::spawn_provider("databricks_v2", &host, "discovered-model").await;
+    let initialize = h
+        .send(
+            "initialize",
+            json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+        )
+        .await;
+    assert!(h.recv_for(initialize).await.get("result").is_some());
+
+    let failed = h
+        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let failed_response = h.recv_for(failed).await;
+    assert!(failed_response.get("error").is_some(), "{failed_response}");
+
+    let retry = h
+        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let retry_response = h.recv_for(retry).await;
+    assert!(
+        retry_response["result"]["sessionId"].is_string(),
+        "failed discovery consumed the sole session slot: {retry_response}"
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }

@@ -10,9 +10,12 @@
 //! - PKCE cache empty / no token: returns `Err(AgentError::LlmAuth)` — the
 //!   caller degrades gracefully; no browser, no hang.
 
+use std::sync::Arc;
+
 use reqwest::Client;
 
 use crate::{
+    auth::TokenSource,
     config::{Config, Provider},
     llm::build_token_source,
     types::AgentError,
@@ -79,7 +82,13 @@ pub(crate) fn is_chat_capable_endpoint(name: &str) -> bool {
 /// # Panics
 /// Never panics.
 pub async fn discover_databricks_models(cfg: &Config) -> Result<Vec<ModelEntry>, AgentError> {
-    let token_source = build_token_source(cfg)?;
+    discover_databricks_models_with_token_source(cfg, build_token_source(cfg)?).await
+}
+
+async fn discover_databricks_models_with_token_source(
+    cfg: &Config,
+    token_source: Arc<dyn TokenSource>,
+) -> Result<Vec<ModelEntry>, AgentError> {
     let mut bearer = token_source.bearer_no_browser().await?;
     let http = Client::new();
     let host = cfg.base_url.trim_end_matches('/');
@@ -383,6 +392,77 @@ pub(crate) fn parse_v2_endpoints_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RefreshingTestTokenSource {
+        refreshes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TokenSource for RefreshingTestTokenSource {
+        async fn bearer(&self) -> Result<String, AgentError> {
+            Ok("rejected".into())
+        }
+
+        async fn refresh_now(&self, rejected: &str) -> Result<String, AgentError> {
+            assert_eq!(rejected, "rejected");
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            Ok("fresh".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_refreshes_rejected_bearer_once_then_retries_successfully() {
+        use axum::{
+            extract::Query,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Json, Router,
+        };
+        use std::collections::HashMap;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_route = requests.clone();
+        let app = Router::new().route(
+            "/api/ai-gateway/v2/endpoints",
+            get(
+                move |headers: HeaderMap, Query(_query): Query<HashMap<String, String>>| {
+                    let requests = requests_for_route.clone();
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        match headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                        {
+                            Some("Bearer fresh") => Ok(Json(serde_json::json!({
+                                "endpoints": [{"name": "discovered-model"}],
+                                "next_page_token": null,
+                            }))),
+                            _ => Err((StatusCode::UNAUTHORIZED, "rejected")),
+                        }
+                    }
+                },
+            ),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let source = Arc::new(RefreshingTestTokenSource {
+            refreshes: AtomicUsize::new(0),
+        });
+        let cfg = Config::for_discovery(Provider::DatabricksV2, String::new(), host);
+        let models = discover_databricks_models_with_token_source(&cfg, source.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(models[0].id, "discovered-model");
+        assert_eq!(source.refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn v1_parse_filters_ready_chat_endpoints() {

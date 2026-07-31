@@ -136,17 +136,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
-    let pkce = auth::PkceOAuthConfig {
-        discovery_url: format!(
-            "{}/oidc/.well-known/oauth-authorization-server",
-            host.trim_end_matches('/')
-        ),
-        client_id: "databricks-cli".into(),
-        scopes: vec!["all-apis".into(), "offline_access".into()],
-        cache_namespace: "databricks".into(),
-        cache_dir_override: None,
-    };
-    auth::PkceOAuthTokenSource::new(pkce)?
+    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(host))?
         .interactive_login()
         .await
 }
@@ -394,6 +384,34 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         }
         Arc::from(prompt)
     };
+    // Resolve the model catalog before spawning MCP servers or registering a
+    // session. Discovery is part of session construction: if it fails, no
+    // resource owned by a session that was never returned may survive.
+    let available_models: Vec<Value> = {
+        use crate::config::Provider;
+        match app.cfg.provider {
+            Provider::Databricks | Provider::DatabricksV2 => {
+                let models = match resolve_models_catalog(
+                    &app.models_cache,
+                    discover_databricks_models(&app.cfg),
+                )
+                .await
+                {
+                    Ok(models) => models,
+                    Err(error) => {
+                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
+                            .await;
+                    }
+                };
+                models
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
+        }
+    };
+
     let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {
         Ok(m) => Arc::new(m),
         Err(e) => return reject(wire_tx, id, e.json_rpc_code(), &e.to_string()).await,
@@ -438,41 +456,6 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         },
     );
     drop(sessions);
-
-    // Build a models catalog for the `session/new` response. For Databricks
-    // providers this advertises available models so the desktop ModelPicker and
-    // pool can resolve `session/set_model` switches. For Anthropic/OpenAI we
-    // report only the configured model — live switching on those providers
-    // effectively requires respawn.
-    //
-    // `models_cache` caches only a successful discovery result (`get_or_try_init`
-    // leaves the cell empty on error so the next `session/new` call retries).
-    // Discovery failures reject `session/new`; they must not masquerade as a
-    // selectable hardcoded catalog.
-    let available_models: Vec<Value> = {
-        use crate::config::Provider;
-        match app.cfg.provider {
-            Provider::Databricks | Provider::DatabricksV2 => {
-                let models = match resolve_models_catalog(
-                    &app.models_cache,
-                    discover_databricks_models(&app.cfg),
-                )
-                .await
-                {
-                    Ok(models) => models,
-                    Err(error) => {
-                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
-                            .await;
-                    }
-                };
-                models
-                    .iter()
-                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
-                    .collect()
-            }
-            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
-        }
-    };
 
     wire::send(
         wire_tx,

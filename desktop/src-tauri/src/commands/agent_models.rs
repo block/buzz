@@ -134,6 +134,7 @@ pub async fn get_agent_models(
 
     if let Some(models) = discover_databricks_models(
         &state.http_client,
+        &state,
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
@@ -307,9 +308,14 @@ pub async fn discover_agent_models(
         return Ok(models);
     }
 
-    if let Some(models) =
-        discover_databricks_models(&state.http_client, &effective_provider, &merged_env, None)
-            .await?
+    if let Some(models) = discover_databricks_models(
+        &state.http_client,
+        &state,
+        &effective_provider,
+        &merged_env,
+        None,
+    )
+    .await?
     {
         return Ok(models);
     }
@@ -720,6 +726,7 @@ fn databricks_static_token_error(error: &str, redaction_env: &BTreeMap<String, S
 
 async fn discover_databricks_models(
     _client: &reqwest::Client,
+    state: &AppState,
     provider: &DiscoveryProvider,
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
@@ -751,14 +758,38 @@ async fn discover_databricks_models(
     let entries = match buzz_agent_pkg::discover_databricks_models(&cfg).await {
         Ok(entries) => entries,
         Err(buzz_agent_pkg::AgentError::LlmAuth(_)) if api_key.is_empty() => {
-            buzz_agent_pkg::authenticate_databricks(&host)
-                .await
-                .map_err(|error| format!("Databricks sign-in failed: {error}"))?;
-            buzz_agent_pkg::discover_databricks_models(&cfg)
-                .await
-                .map_err(|error| {
-                    format!("Databricks model discovery failed after sign-in: {error}")
-                })?
+            let _auth = state.databricks_auth.lock().await;
+            // Another dialog may have completed sign-in while this call waited.
+            match buzz_agent_pkg::discover_databricks_models(&cfg).await {
+                Ok(entries) => entries,
+                Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
+                    buzz_agent_pkg::authenticate_databricks(&host)
+                        .await
+                        .map_err(|error| {
+                            let msg = crate::managed_agents::redact_env_values_in(
+                                &error.to_string(),
+                                &redaction_env,
+                            );
+                            format!("Databricks sign-in failed: {msg}")
+                        })?;
+                    buzz_agent_pkg::discover_databricks_models(&cfg)
+                        .await
+                        .map_err(|error| {
+                            let msg = crate::managed_agents::redact_env_values_in(
+                                &error.to_string(),
+                                &redaction_env,
+                            );
+                            format!("Databricks model discovery failed after sign-in: {msg}")
+                        })?
+                }
+                Err(error) => {
+                    let msg = crate::managed_agents::redact_env_values_in(
+                        &error.to_string(),
+                        &redaction_env,
+                    );
+                    return Err(format!("Databricks model discovery failed: {msg}"));
+                }
+            }
         }
         Err(buzz_agent_pkg::AgentError::LlmAuth(error)) => {
             return Err(databricks_static_token_error(&error, &redaction_env));
