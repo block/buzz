@@ -159,4 +159,9 @@ Segmentation fault (core dumped)
 
 **Related fixes in flight / shipped:** AppImage GStreamer registry path (#2694 / #2560), Linux notification sound as mp3 (#2804), earlier AppImage GStreamer host fixes (#2176).
 
+### When reporting #3488-style crashes
+
+Include: package type (AppImage vs deb/rpm), Buzz version, distro, whether
+`--safe-rendering` changes the outcome, and whether any channel had video/voice
+UI open. Attach the `GStreamer-CRITICAL` lines if present.
 
