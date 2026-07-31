@@ -445,6 +445,17 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+/// The relay URL a spawned agent actually connects to.
+///
+/// Authority-preserving by contract: only whitespace and a trailing root slash
+/// are trimmed. The host is never rewritten, because the relay derives each
+/// connection's tenant from the request authority. See the call site in
+/// `spawn_agent_child` for why the canonical (normalized) pair URL must not be
+/// used here.
+fn agent_connect_relay_url(workspace_relay_url: &str) -> String {
+    workspace_relay_url.trim().trim_end_matches('/').to_string()
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -545,9 +556,23 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // The caller supplies the explicit pair relay. This is the only relay this
+    // child may connect to, regardless of the record/workspace default.
+    //
+    // Deliberately NOT `runtime_key.relay_url`: that field is canonicalized by
+    // `normalize_relay_url`, which folds every loopback host to `127.0.0.1` so a
+    // pair spelled `localhost` and one spelled `127.0.0.1` collapse to a single
+    // runtime identity. Tenant host-binding resolves the community from the
+    // request authority, where `localhost:3000` and `127.0.0.1:3000` are
+    // distinct communities — so handing the canonical form to the child makes
+    // every managed agent on a local relay authenticate into a different tenant
+    // than its owner, discover zero channels, and sit idle looking healthy.
+    // `relay::relay_http_base_url` already guards this for HTTP; the guard is
+    // useless if the value reaching it was rewritten here first.
+    //
+    // Identity stays canonical (dedup, `runtime_id`, log paths); the connection
+    // keeps the caller's authority.
+    let effective_relay_url = agent_connect_relay_url(relay_url);
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink

@@ -1314,3 +1314,59 @@ fn restart_eligible_false_when_orphan_has_no_drift() {
 fn restart_eligible_false_when_non_orphan_has_no_drift() {
     assert!(!super::restart_eligible(false, false, false));
 }
+
+// ── agent_connect_relay_url tests ───────────────────────────────────────
+//
+// Tenant host-binding resolves a community from the request authority, so
+// `localhost:3000` and `127.0.0.1:3000` are different communities. The URL
+// handed to a spawned agent must therefore preserve the authority the
+// workspace uses. `ManagedAgentRuntimeKey` canonicalizes loopback hosts to
+// `127.0.0.1` for identity/dedup; feeding that canonical form to the child
+// stranded every managed agent on a local relay in an empty tenant, where it
+// discovered zero channels and idled while looking healthy.
+
+#[test]
+fn connect_url_preserves_localhost_authority() {
+    // The regression: must NOT come back as ws://127.0.0.1:3000.
+    assert_eq!(
+        super::agent_connect_relay_url("ws://localhost:3000"),
+        "ws://localhost:3000"
+    );
+}
+
+#[test]
+fn connect_url_preserves_ipv4_loopback_authority() {
+    assert_eq!(
+        super::agent_connect_relay_url("ws://127.0.0.1:3000"),
+        "ws://127.0.0.1:3000"
+    );
+}
+
+#[test]
+fn connect_url_differs_from_canonical_key_for_localhost() {
+    // Pins the actual invariant: identity canonicalizes, connection does not.
+    let key =
+        crate::managed_agents::ManagedAgentRuntimeKey::new("a".repeat(64), "ws://localhost:3000")
+            .expect("valid key");
+    assert_eq!(key.relay_url, "ws://127.0.0.1:3000");
+    assert_ne!(
+        super::agent_connect_relay_url("ws://localhost:3000"),
+        key.relay_url
+    );
+}
+
+#[test]
+fn connect_url_trims_whitespace_and_trailing_slash() {
+    assert_eq!(
+        super::agent_connect_relay_url("  ws://localhost:3000/  "),
+        "ws://localhost:3000"
+    );
+}
+
+#[test]
+fn connect_url_leaves_remote_host_untouched() {
+    assert_eq!(
+        super::agent_connect_relay_url("wss://relay.example.com"),
+        "wss://relay.example.com"
+    );
+}
