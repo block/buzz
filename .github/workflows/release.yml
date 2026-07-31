@@ -890,11 +890,23 @@ jobs:
           set -euo pipefail
           BASE="https://github.com/block/buzz/releases/download/desktop-v${VERSION}"
           TRIPLES=()
+          ARCHIVE_NAMES=()
 
           add_triple() {
             local result="$1" platform="$2" archive="$3"
             if [[ "$result" == "success" ]]; then
               [[ -n "$archive" ]] || { echo "::error::Missing archive name for successful platform: $platform"; exit 1; }
+              # macOS used to publish both arches as Buzz.app.tar.gz; the second
+              # upload clobbered the first and left latest.json with one binary
+              # and two incompatible signatures. Refuse that class of channel.
+              for existing in "${ARCHIVE_NAMES[@]+"${ARCHIVE_NAMES[@]}"}"; do
+                if [[ "$existing" == "$archive" ]]; then
+                  echo "::error::updater archive basename collision for $platform: $archive"
+                  echo "::error::each platform needs a unique archive name before latest.json is published"
+                  exit 1
+                fi
+              done
+              ARCHIVE_NAMES+=("$archive")
               TRIPLES+=("${platform}:/tmp/sigs/${platform}.sig:${BASE}/${archive}")
             fi
           }
