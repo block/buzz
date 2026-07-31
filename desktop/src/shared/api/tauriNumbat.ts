@@ -20,7 +20,7 @@ export type NumbatFindingBatch = {
   reset: boolean;
   rejectedRecords: number;
   health: {
-    state: "configured" | "disconnected" | "unsupported" | "stale";
+    state: "active" | "configured" | "disconnected" | "unsupported" | "stale";
     detail: string;
   };
   findings: NumbatFinding[];

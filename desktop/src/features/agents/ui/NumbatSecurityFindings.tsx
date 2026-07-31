@@ -14,7 +14,7 @@ export function NumbatSecurityFindings({
   error: string | null;
   findings: NumbatFinding[];
   health: {
-    state: "configured" | "disconnected" | "unsupported" | "stale";
+    state: "active" | "configured" | "disconnected" | "unsupported" | "stale";
     detail: string;
   } | null;
   onCancelTurn?: () => void;

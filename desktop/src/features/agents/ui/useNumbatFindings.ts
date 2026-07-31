@@ -17,7 +17,7 @@ export function useNumbatFindings(
   const [findings, setFindings] = React.useState<NumbatFinding[]>([]);
   const [error, setError] = React.useState<string | null>(null);
   const [health, setHealth] = React.useState<{
-    state: "configured" | "disconnected" | "unsupported" | "stale";
+    state: "active" | "configured" | "disconnected" | "unsupported" | "stale";
     detail: string;
   } | null>(null);
 
