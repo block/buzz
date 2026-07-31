@@ -349,7 +349,7 @@ fn apple_selection_rejects_unknown_keys_duplicates_relative_files_and_bad_bounds
         "calendar_ids": ["calendar-command"],
         "reminder_list_ids": ["reminders-command"],
         "note_folder_ids": ["Notes"],
-        "file_paths": ["/Users/command/brief.txt"],
+        "file_paths": [TEST_APPLE_FILE_PATH],
         "maximum_records_per_source": 25
     });
     for mutation in [
@@ -393,7 +393,7 @@ fn apple_selection_loads_only_from_a_protected_native_config_file() {
             "calendar_ids": ["calendar-command"],
             "reminder_list_ids": ["reminders-command"],
             "note_folder_ids": ["Notes"],
-            "file_paths": ["/Users/command/brief.txt"],
+            "file_paths": [TEST_APPLE_FILE_PATH],
             "maximum_records_per_source": 25
         }))
         .expect("encode config"),

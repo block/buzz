@@ -27,6 +27,10 @@ const SNAPSHOT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const OBSERVED_AT: &str = "2026-07-25T06:00:00+10:00";
 const RUN_A: &str = "brief-run:alpha";
 const RUN_B: &str = "brief-run:bravo";
+#[cfg(not(windows))]
+const TEST_APPLE_FILE_PATH: &str = "/Users/command/brief.txt";
+#[cfg(windows)]
+const TEST_APPLE_FILE_PATH: &str = r"C:\Users\command\brief.txt";
 
 #[derive(Default)]
 struct FakeState {
@@ -219,7 +223,7 @@ fn selection() -> AppleBriefSelection {
         "calendar_ids": ["calendar-command"],
         "reminder_list_ids": ["reminders-command"],
         "note_folder_ids": ["Notes"],
-        "file_paths": ["/Users/command/brief.txt"],
+        "file_paths": [TEST_APPLE_FILE_PATH],
         "maximum_records_per_source": 25
     }))
     .expect("valid protected selection")
@@ -547,7 +551,7 @@ fn note_record() -> Value {
 
 fn file_record() -> Value {
     json!({
-        "path": "/Users/command/brief.txt",
+        "path": TEST_APPLE_FILE_PATH,
         "contents": "Approved local routine file.",
         "device": "1",
         "inode": "2"
@@ -709,7 +713,7 @@ fn apple_requests_use_current_day_window_and_protected_allowlists() {
     );
     assert_eq!(
         apple[3]["request"]["arguments"]["paths"],
-        json!(["/Users/command/brief.txt"])
+        json!([TEST_APPLE_FILE_PATH])
     );
 }
 
