@@ -15,16 +15,19 @@ use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
+    error_handling::HandleErrorLayer,
     extract::{Path as AxumPath, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
+    BoxError,
     Router,
 };
 use base64::Engine;
 use hex;
 use serde::Deserialize;
 use tokio::process::Command;
+use tower::ServiceBuilder;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
@@ -439,10 +442,13 @@ fn acquire_git_permit(
 /// via `Ok(None)` from [`hydrate_for_read`] and never reaches this fn.
 fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Response {
     error!(error = %err, owner = %owner, repo = %repo, "hydrate failed");
-    if matches!(err, HydrateError::ResourceLimit(_)) {
+    if let HydrateError::ResourceLimit(detail) = &err {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            "repository exceeds relay resource limits",
+            format!(
+                "repository exceeds relay resource limits ({detail}; \
+                 self-hosted relays: raise BUZZ_GIT_MAX_PACK_BYTES / BUZZ_GIT_MAX_REPO_BYTES)"
+            ),
         )
             .into_response();
     }
@@ -2113,14 +2119,40 @@ async fn finalize_push_inner(
 /// Mounted at `/git/{owner}/{repo}/...` with a configurable max pack size.
 pub fn git_router(state: Arc<AppState>) -> Router {
     let body_limit = state.config.git_max_pack_bytes as usize;
+    let max_bytes = state.config.git_max_pack_bytes;
 
     Router::new()
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
         .merge(super::settings::router())
-        .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(move |err: BoxError| async move {
+                    git_body_limit_response(err, max_bytes)
+                }))
+                .layer(RequestBodyLimitLayer::new(body_limit)),
+        )
         .with_state(state)
+}
+
+fn git_body_limit_response(err: BoxError, max_bytes: u64) -> Response {
+    let msg = err.to_string();
+    if msg.contains("length limit") || msg.contains("LengthLimitError") {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "git pack body exceeds relay limit ({max_bytes} bytes; \
+                 self-hosted relays: BUZZ_GIT_MAX_PACK_BYTES)"
+            ),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "failed to read git request body",
+    )
+        .into_response()
 }
 
 #[cfg(test)]
