@@ -125,6 +125,10 @@ struct SessionState {
     /// `None` when the session has never emitted a provider total (Unseen) or
     /// when any prior turn lacked one (poisoned).
     last_total: Option<u64>,
+    /// Cumulative cache-read input tokens at the end of the LAST PUBLISHED turn.
+    /// Field-local: a decrease in this counter taints only the cache-read delta,
+    /// not `delta_reliable` or the input/output deltas.
+    last_cached_input: u64,
 }
 
 /// Per-turn usage record exposed to `TurnCompletionGuard` for NIP-AM publishing.
@@ -151,6 +155,12 @@ pub struct TurnUsage {
     /// Per-turn cost delta (`current − previous`); `None` when unreliable or
     /// either snapshot is missing.
     pub turn_cost_usd: Option<f64>,
+    /// Per-turn cache-read token delta (`current − previous`); `None` when no
+    /// baseline exists, the cumulative counter decreased (field-local taint), or
+    /// the payload reported zero on both sides (indistinguishable from "no cache
+    /// activity"). Field-local: a decrease here never flips `delta_reliable` or
+    /// invalidates the input/output deltas.
+    pub turn_cache_read_tokens: Option<u64>,
     /// Session-cumulative input tokens as reported by goose at end of turn.
     pub cumulative_input_tokens: u64,
     /// Session-cumulative output tokens as reported by goose at end of turn.
@@ -160,6 +170,9 @@ pub struct TurnUsage {
     pub cumulative_total_tokens: Option<u64>,
     /// Session-cumulative estimated cost in USD; `None` if goose did not report it.
     pub cumulative_cost_usd: Option<f64>,
+    /// Session-cumulative cache-read input tokens as reported by buzz-agent.
+    /// Always present (zero when no cache hits have ever been reported).
+    pub cumulative_cache_read_tokens: u64,
     /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
     /// harness did not include the model in its usage notification.
     pub model: Option<String>,
@@ -239,6 +252,7 @@ impl UsageTracker {
         let current_output = payload.accumulated_output_tokens;
         let current_cost = payload.accumulated_cost;
         let current_total = payload.accumulated_total_tokens;
+        let current_cached_input = payload.accumulated_cached_input_tokens;
 
         // Determine whether this session is currently in-flight so we know
         // whether to set `pending`. We compute the delta regardless so that
@@ -294,6 +308,20 @@ impl UsageTracker {
             None => None, // no baseline yet
         };
 
+        // Cache-read token delta: field-local — never affects `delta_reliable`
+        // or the input/output deltas. Null when: no baseline exists, or the
+        // cumulative counter decreased (harness restart, overflow). The counter
+        // is always present on the wire (defaults to 0), so "absent on either
+        // side" is not a case here — zero is a valid and common value meaning
+        // "no cache hits this turn."
+        let turn_cache_read = match self.sessions.get(session_id) {
+            Some(prev) if current_cached_input >= prev.last_cached_input => {
+                Some(current_cached_input - prev.last_cached_input)
+            }
+            Some(_) => None, // decrease → field-local taint, like input/output
+            None => None,    // no baseline yet
+        };
+
         if is_in_flight {
             // In-flight-match: update pending with the latest cumulative values.
             // Baseline is NOT advanced here — it advances only on take().
@@ -305,10 +333,12 @@ impl UsageTracker {
                 turn_output_tokens: turn_output,
                 turn_total_tokens: turn_total,
                 turn_cost_usd: turn_cost,
+                turn_cache_read_tokens: turn_cache_read,
                 cumulative_input_tokens: current_input,
                 cumulative_output_tokens: current_output,
                 cumulative_total_tokens: current_total,
                 cumulative_cost_usd: current_cost,
+                cumulative_cache_read_tokens: current_cached_input,
                 model: payload.model.clone(),
             });
         } else if self.in_flight_session.is_none() {
@@ -327,6 +357,7 @@ impl UsageTracker {
                     last_output: current_output,
                     last_cost: current_cost,
                     last_total: current_total,
+                    last_cached_input: current_cached_input,
                 },
             );
         }
@@ -355,6 +386,7 @@ impl UsageTracker {
                 last_output: record.cumulative_output_tokens,
                 last_cost: record.cumulative_cost_usd,
                 last_total: record.cumulative_total_tokens,
+                last_cached_input: record.cumulative_cache_read_tokens,
             },
         );
         Some(record)
@@ -1131,5 +1163,143 @@ mod tests {
             "absent baseline total → turn total null even when current has a total"
         );
         assert_eq!(usage.cumulative_total_tokens, Some(250));
+    }
+
+    // ── cache-read token threading ──────────────────────────────────────────
+
+    fn payload_with_cache(input: u64, output: u64, cached_input: u64) -> UsageUpdatePayload {
+        UsageUpdatePayload {
+            used: input + output,
+            context_limit: 200_000,
+            accumulated_input_tokens: input,
+            accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: cached_input,
+            accumulated_cost: None,
+            accumulated_total_tokens: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn cache_read_first_turn_produces_none_turn_delta_and_passes_cumulative_through() {
+        // First turn has no baseline → turn cache delta must be None, but
+        // cumulative_cache_read_tokens must carry the reported value through.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c1");
+        tracker.record("sess-c1", &payload_with_cache(1000, 200, 500));
+        let usage = tracker.take().expect("pending");
+
+        assert!(
+            usage.turn_cache_read_tokens.is_none(),
+            "first turn: no baseline → cache delta must be None"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens, 500,
+            "cumulative cache read passes through on first turn"
+        );
+        assert!(!usage.delta_reliable, "first turn is unreliable");
+    }
+
+    #[test]
+    fn cache_read_second_turn_delta_computed_correctly() {
+        // Second turn: cumulative cached 500 → 1200, delta = 700.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c2");
+        tracker.record("sess-c2", &payload_with_cache(1000, 200, 500));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c2");
+        tracker.record("sess-c2", &payload_with_cache(2000, 350, 1200));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable);
+        assert_eq!(
+            usage.turn_cache_read_tokens,
+            Some(700),
+            "cache delta = 1200 - 500 = 700"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens, 1200,
+            "cumulative cache passes through"
+        );
+    }
+
+    #[test]
+    fn cache_read_decrease_nulls_turn_cache_but_leaves_delta_reliable() {
+        // Cache counter decrease → cache delta None (field-local taint), but
+        // delta_reliable and input/output deltas are NOT affected.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c3");
+        tracker.record("sess-c3", &payload_with_cache(1000, 200, 800));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c3");
+        // Cache counter decreased: 800 → 50.
+        tracker.record("sess-c3", &payload_with_cache(1500, 300, 50));
+        let usage = tracker.take().expect("pending");
+
+        assert!(
+            usage.delta_reliable,
+            "cache decrease must NOT flip delta_reliable — field-local"
+        );
+        assert_eq!(
+            usage.turn_input_tokens,
+            Some(500),
+            "input/output delta unaffected by cache decrease"
+        );
+        assert_eq!(usage.turn_output_tokens, Some(100));
+        assert!(
+            usage.turn_cache_read_tokens.is_none(),
+            "cache counter decrease → turn_cache_read_tokens None (field-local taint)"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens, 50,
+            "cumulative still passes through from payload even on decrease"
+        );
+    }
+
+    #[test]
+    fn cache_read_zero_payload_after_baseline_produces_zero_delta() {
+        // When both baseline and current are zero (e.g. goose session with no
+        // cache hits), turn_cache_read_tokens should be Some(0) — not None.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c4");
+        tracker.record("sess-c4", &payload_with_cache(1000, 200, 0));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c4");
+        tracker.record("sess-c4", &payload_with_cache(1500, 300, 0));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable);
+        assert_eq!(
+            usage.turn_cache_read_tokens,
+            Some(0),
+            "zero cached on both sides → Some(0), not None"
+        );
+        assert_eq!(usage.cumulative_cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn cache_read_threads_through_setup_notification_baseline() {
+        // A setup notification (before begin_turn) with a nonzero cache count
+        // must update the committed baseline so the first real turn gets a
+        // correct delta from that starting point.
+        let mut tracker = UsageTracker::default();
+
+        // Setup notification: cumulative cache = 300.
+        tracker.record("sess-c5", &payload_with_cache(1000, 200, 300));
+
+        tracker.begin_turn("sess-c5");
+        tracker.record("sess-c5", &payload_with_cache(1500, 350, 700));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable, "baseline from setup: reliable");
+        assert_eq!(
+            usage.turn_cache_read_tokens,
+            Some(400),
+            "cache delta from setup baseline: 700 - 300 = 400"
+        );
+        assert_eq!(usage.cumulative_cache_read_tokens, 700);
     }
 }
