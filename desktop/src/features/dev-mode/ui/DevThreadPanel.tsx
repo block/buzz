@@ -3,6 +3,10 @@ import * as React from "react";
 import { useAppShell } from "@/app/AppShellContext";
 import { useAuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { matchLeadingMention } from "@/features/dev-mode/lib/highlightContent";
+import {
+  applyMessageEdits,
+  collectMessageEdits,
+} from "@/features/dev-mode/lib/messageEdits";
 import { collectReactions } from "@/features/dev-mode/lib/messageReactions";
 import {
   byCreatedAscending,
@@ -117,9 +121,15 @@ export function DevThreadPanel({
     }
   }, [active]);
 
+  // Thread fetches include kind:40003 edit aux events (for the root too) —
+  // resolve them so edited messages render their current text.
+  const edits = React.useMemo(
+    () => collectMessageEdits(repliesQuery.data),
+    [repliesQuery.data],
+  );
   const replies = React.useMemo(
     () =>
-      (repliesQuery.data ?? [])
+      applyMessageEdits(repliesQuery.data)
         .filter((event) => DEV_MESSAGE_KINDS.has(event.kind))
         .sort(byCreatedAscending),
     [repliesQuery.data],
@@ -253,6 +263,7 @@ export function DevThreadPanel({
               <DevMessageRow
                 event={root}
                 currentPubkey={currentPubkey}
+                edited={edits.has(root.id)}
                 reactions={reactions.get(root.id)}
                 resolveColor={resolveColor}
                 resolveIsAgent={resolveIsAgent}
@@ -271,6 +282,7 @@ export function DevThreadPanel({
               key={reply.localKey ?? reply.id}
               event={reply}
               currentPubkey={currentPubkey}
+              edited={edits.has(reply.id)}
               reactions={reactions.get(reply.id)}
               resolveColor={resolveColor}
               resolveIsAgent={resolveIsAgent}

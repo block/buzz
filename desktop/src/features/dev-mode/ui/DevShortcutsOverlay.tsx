@@ -11,6 +11,7 @@ const SHORTCUT_GROUPS: {
       { keys: "⌃tab / ⌃⇧tab", action: "cycle agents" },
       { keys: "enter", action: "send · open highlighted channel or card" },
       { keys: "↑ / ↓", action: "empty input: preview channels · walk prompts" },
+      { keys: "e", action: "selected prompt: edit your message" },
       { keys: "⌥↑ / ⌥↓", action: "switch channels without leaving the box" },
       { keys: "← / →", action: "empty input: switch side-chat panes" },
       { keys: "esc", action: "back — side chat → card → navigator" },

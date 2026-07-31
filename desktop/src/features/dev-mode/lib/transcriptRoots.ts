@@ -1,3 +1,4 @@
+import { applyMessageEdits } from "@/features/dev-mode/lib/messageEdits";
 import { isThreadReply } from "@/features/messages/lib/threading";
 import type { RelayEvent } from "@/shared/api/types";
 import {
@@ -37,11 +38,11 @@ export function selectInlineVisibleCount(
   return end;
 }
 
-/** Top-level prompt messages of a channel, oldest first. */
+/** Top-level prompt messages of a channel, oldest first, edits applied. */
 export function selectRootEvents(
   events: RelayEvent[] | undefined,
 ): RelayEvent[] {
-  return (events ?? [])
+  return applyMessageEdits(events)
     .filter(
       (event) =>
         DEV_MESSAGE_KINDS.has(event.kind) && !isThreadReply(event.tags),

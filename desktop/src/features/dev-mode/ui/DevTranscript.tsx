@@ -6,6 +6,10 @@ import {
   type AuthorColorResolver,
 } from "@/features/dev-mode/lib/authorColors";
 import {
+  applyMessageEdits,
+  collectMessageEdits,
+} from "@/features/dev-mode/lib/messageEdits";
+import {
   selectMembershipEvents,
   type MembershipChange,
 } from "@/features/dev-mode/lib/membershipEvents";
@@ -78,9 +82,15 @@ function ThreadInlineReplies({
   onOpenThread: () => void;
 }) {
   const repliesQuery = useThreadReplies(channel, rootId);
+  // Thread fetches include kind:40003 edit aux events — resolve them here
+  // so edited replies render their current text.
+  const replyEdits = React.useMemo(
+    () => collectMessageEdits(repliesQuery.data),
+    [repliesQuery.data],
+  );
   const replies = React.useMemo(
     () =>
-      (repliesQuery.data ?? [])
+      applyMessageEdits(repliesQuery.data)
         .filter((event) => DEV_MESSAGE_KINDS.has(event.kind))
         .sort(byCreatedAscending),
     [repliesQuery.data],
@@ -130,6 +140,7 @@ function ThreadInlineReplies({
             key={reply.localKey ?? reply.id}
             event={reply}
             currentPubkey={currentPubkey}
+            edited={replyEdits.has(reply.id)}
             reactions={reactions.get(reply.id)}
             resolveColor={resolveColor}
             resolveIsAgent={resolveIsAgent}
@@ -217,6 +228,7 @@ function PromptCard({
   unread,
   markRead,
   selected,
+  edited,
   currentPubkey,
   resolveName,
   resolveColor,
@@ -230,6 +242,7 @@ function PromptCard({
   unread: boolean;
   markRead: boolean;
   selected: boolean;
+  edited: boolean;
   currentPubkey: string | null;
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
@@ -278,6 +291,7 @@ function PromptCard({
       <DevMessageRow
         event={root}
         currentPubkey={currentPubkey}
+        edited={edited}
         reactions={rootReactions}
         resolveColor={resolveColor}
         resolveIsAgent={resolveIsAgent}
@@ -327,6 +341,12 @@ export function DevTranscript({
 
   const roots = React.useMemo(
     () => selectRootEvents(messagesQuery.data),
+    [messagesQuery.data],
+  );
+  // Which roots carry an edit — drives the "(edited)" marker (the edited
+  // content itself is already applied inside selectRootEvents).
+  const rootEdits = React.useMemo(
+    () => collectMessageEdits(messagesQuery.data),
     [messagesQuery.data],
   );
   const memberships = React.useMemo(
@@ -480,6 +500,7 @@ export function DevTranscript({
               key={item.root.localKey ?? item.root.id}
               channel={channel}
               currentPubkey={currentPubkey}
+              edited={rootEdits.has(item.root.id)}
               markRead={markRead}
               onOpenThread={() => onOpenThread(item.root.id)}
               replyCount={replyCounts.get(item.root.id) ?? 0}

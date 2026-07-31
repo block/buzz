@@ -195,6 +195,7 @@ function DevReactions({
 export function DevMessageRow({
   event,
   currentPubkey,
+  edited = false,
   reactions,
   resolveName,
   resolveColor,
@@ -202,6 +203,8 @@ export function DevMessageRow({
 }: {
   event: RelayEvent;
   currentPubkey: string | null;
+  /** Whether a kind:40003 edit has been applied to this message's content. */
+  edited?: boolean;
   /** Emoji reacted onto this message — agents react while working, so this doubles as the loading state. */
   reactions?: MessageReaction[];
   resolveName: NameResolver;
@@ -263,6 +266,11 @@ export function DevMessageRow({
         <span className="shrink-0 select-none text-xs text-muted-foreground/50">
           {formatTime(event.created_at)}
         </span>
+        {edited ? (
+          <span className="shrink-0 select-none text-xs text-muted-foreground/40">
+            (edited)
+          </span>
+        ) : null}
         <DevReactions
           canReact={currentPubkey !== null && !event.pending}
           currentPubkey={currentPubkey}

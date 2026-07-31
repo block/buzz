@@ -31,6 +31,7 @@ import {
 } from "@/features/dev-mode/lib/useDevRouteSync";
 import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActions";
 import { useDevModeShortcuts } from "@/features/dev-mode/lib/useDevModeShortcuts";
+import { useMessageEditing } from "@/features/dev-mode/lib/useMessageEditing";
 import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
 import { DevChannelMembers } from "@/features/dev-mode/ui/DevChannelMembers";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
@@ -237,6 +238,17 @@ export function DevModeShell({
   );
   const selectedRoot = roots.find((root) => root.id === selectedRootId) ?? null;
 
+  // `e` on a selected own prompt card edits that message in the composer.
+  const { editingRootId, startEditing, stopEditing, submitEdit } =
+    useMessageEditing({
+      channel: activeChannel,
+      roots,
+      myPubkey: identityQuery.data?.pubkey ?? null,
+      setInput,
+      setBusy,
+      setError,
+    });
+
   useDevReadMarking(activeChannel, roots);
 
   // Card selection and the side chat belong to one channel's transcript.
@@ -246,7 +258,16 @@ export function DevModeShell({
     setThreadOpen(false);
     setActivePane("main");
     setSubDraftParentId(null);
+    stopEditing();
   }, [effectiveSessionId]);
+
+  // `e` on a selected card: edit your own prompt in the composer.
+  const startEditingSelected = React.useCallback(() => {
+    if (startEditing(selectedRoot, input)) {
+      setSelectedRootId(null);
+      focusComposer();
+    }
+  }, [focusComposer, input, selectedRoot, startEditing]);
 
   // Window refocus restores the last text input; dead-space clicks never
   // blur it (see useShellFocusGuards).
@@ -323,21 +344,23 @@ export function DevModeShell({
   // channel.
   const startSubChannelDraft = React.useCallback(() => {
     if (!activeMainId) return;
+    stopEditing();
     setSubDraftParentId(activeMainId);
     setSelectedRootId(null);
     setThreadOpen(false);
     setActivePane("main");
     focusComposer();
-  }, [activeMainId, focusComposer]);
+  }, [activeMainId, focusComposer, stopEditing]);
 
   const goToFresh = React.useCallback(() => {
+    stopEditing();
     setView("fresh");
     setActiveSessionId(null);
     setThreadOpen(false);
     setSelectedRootId(null);
     setSubDraftParentId(null);
     focusComposer();
-  }, [focusComposer]);
+  }, [focusComposer, stopEditing]);
 
   // Leaving/archiving a chat lands on the most recently active non-pinned
   // chat (the departed channel may still be in the cached list, so exclude
@@ -485,6 +508,13 @@ export function DevModeShell({
 
   const handleEscape = React.useCallback(() => {
     if (view === "channel") {
+      if (editingRootId) {
+        // Cancel the edit and land back on the card it came from.
+        const rootId = editingRootId;
+        stopEditing();
+        setSelectedRootId(rootId);
+        return;
+      }
       if (subDraftActive) {
         setSubDraftParentId(null);
         focusComposer();
@@ -512,9 +542,11 @@ export function DevModeShell({
     }
   }, [
     activeMainId,
+    editingRootId,
     focusComposer,
     goToFresh,
     selectedRootId,
+    stopEditing,
     subDraftActive,
     threadOpen,
     view,
@@ -534,6 +566,10 @@ export function DevModeShell({
   const handleSubmit = React.useCallback(
     (mentions: MentionRecord[] = [], media: ImetaMedia[] = []) => {
       const prompt = input.trim();
+      if (editingRootId) {
+        if (!busy) submitEdit(prompt, mentions, media);
+        return;
+      }
       // A media-only send is a real send inside a channel; elsewhere the
       // empty-input Enter keeps its navigation meaning (a fresh-composer
       // channel needs prompt text for naming anyway).
@@ -600,6 +636,7 @@ export function DevModeShell({
       busy,
       createSessionChannel,
       createSubChannel,
+      editingRootId,
       handleOpenThread,
       input,
       mode,
@@ -609,6 +646,7 @@ export function DevModeShell({
       selectedRootId,
       sendToSession,
       subDraftActive,
+      submitEdit,
       view,
     ],
   );
@@ -679,6 +717,9 @@ export function DevModeShell({
       } else if (event.key === "Enter") {
         event.preventDefault();
         if (selectedRootId) handleOpenThread(selectedRootId);
+      } else if (event.key === "e") {
+        event.preventDefault();
+        startEditingSelected();
       } else if (event.key === "Escape") {
         event.preventDefault();
         handleEscape();
@@ -694,6 +735,7 @@ export function DevModeShell({
     paletteOpen,
     selectedRootId,
     shortcutsOpen,
+    startEditingSelected,
   ]);
 
   const transcriptFor = (
@@ -719,7 +761,11 @@ export function DevModeShell({
       busy={busy}
       channelId={activeChannel?.id ?? null}
       draftLabel={
-        subDraftActive ? `new tab in # ${activeMainChannel?.name ?? ""}` : null
+        editingRootId
+          ? "editing message · enter saves"
+          : subDraftActive
+            ? `new tab in # ${activeMainChannel?.name ?? ""}`
+            : null
       }
       focusSignal={focusSignal}
       mode={mode}
