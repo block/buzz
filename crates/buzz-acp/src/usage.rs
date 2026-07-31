@@ -85,12 +85,16 @@ pub(crate) struct UsageUpdatePayload {
     pub context_limit: u64,
     pub accumulated_input_tokens: u64,
     pub accumulated_output_tokens: u64,
-    /// The cache-served subset of `accumulated_input_tokens`. Optional — goose
-    /// does not send it, and buzz-agent only reports a non-zero value when the
-    /// provider returned a cache split, so `0` legitimately means either "no
-    /// cache hits" or "provider reported none".
-    #[serde(default)]
-    pub accumulated_cached_input_tokens: u64,
+    /// The cache-served subset of `accumulated_input_tokens`.
+    ///
+    /// `None` when the harness did not include the field (e.g. goose, which
+    /// never emits it). `Some(0)` when the harness explicitly reported zero
+    /// cache hits. The distinction matters: `None` means "we don't know",
+    /// while `Some(0)` means "provider confirmed no cache was used".
+    ///
+    /// Do NOT use `#[serde(default)]` here — that would collapse the absent
+    /// case into `Some(0)` and destroy provenance in the append-only archive.
+    pub accumulated_cached_input_tokens: Option<u64>,
     pub accumulated_cost: Option<f64>,
     /// Session-cumulative genuine provider total tokens. Optional — only
     /// emitted by buzz-agent when every turn in the session so far supplied a
@@ -125,6 +129,12 @@ struct SessionState {
     /// `None` when the session has never emitted a provider total (Unseen) or
     /// when any prior turn lacked one (poisoned).
     last_total: Option<u64>,
+    /// Cumulative cache-read input tokens at the end of the LAST PUBLISHED turn.
+    /// `None` when the harness has never reported this field (e.g. goose).
+    /// `Some(n)` when at least one payload included the field. Field-local:
+    /// a decrease in this counter taints only the cache-read delta, not
+    /// `delta_reliable` or the input/output deltas.
+    last_cached_input: Option<u64>,
 }
 
 /// Per-turn usage record exposed to `TurnCompletionGuard` for NIP-AM publishing.
@@ -151,6 +161,12 @@ pub struct TurnUsage {
     /// Per-turn cost delta (`current − previous`); `None` when unreliable or
     /// either snapshot is missing.
     pub turn_cost_usd: Option<f64>,
+    /// Per-turn cache-read token delta (`current − previous`); `None` when no
+    /// baseline exists, either snapshot is `None` (harness did not report it),
+    /// or the cumulative counter decreased (field-local taint). Field-local:
+    /// a decrease here never flips `delta_reliable` or invalidates the
+    /// input/output deltas.
+    pub turn_cache_read_tokens: Option<u64>,
     /// Session-cumulative input tokens as reported by goose at end of turn.
     pub cumulative_input_tokens: u64,
     /// Session-cumulative output tokens as reported by goose at end of turn.
@@ -160,6 +176,11 @@ pub struct TurnUsage {
     pub cumulative_total_tokens: Option<u64>,
     /// Session-cumulative estimated cost in USD; `None` if goose did not report it.
     pub cumulative_cost_usd: Option<f64>,
+    /// Session-cumulative cache-read input tokens as reported by buzz-agent.
+    /// `None` when the harness has never reported this field (e.g. goose or
+    /// any harness that omits `accumulatedCachedInputTokens`).
+    /// `Some(0)` when the harness reported zero cache hits.
+    pub cumulative_cache_read_tokens: Option<u64>,
     /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
     /// harness did not include the model in its usage notification.
     pub model: Option<String>,
@@ -239,6 +260,7 @@ impl UsageTracker {
         let current_output = payload.accumulated_output_tokens;
         let current_cost = payload.accumulated_cost;
         let current_total = payload.accumulated_total_tokens;
+        let current_cached_input = payload.accumulated_cached_input_tokens;
 
         // Determine whether this session is currently in-flight so we know
         // whether to set `pending`. We compute the delta regardless so that
@@ -294,6 +316,21 @@ impl UsageTracker {
             None => None, // no baseline yet
         };
 
+        // Cache-read token delta: field-local — never affects `delta_reliable`
+        // or the input/output deltas. Null when: no baseline exists, either
+        // snapshot is None (harness did not report the field), or the cumulative
+        // counter decreased (harness restart, overflow).
+        // Some(0) is a valid result when both snapshots are Some(0) — it means
+        // the harness confirmed zero cache hits this turn, not that data is absent.
+        let turn_cache_read = match self.sessions.get(session_id) {
+            Some(prev) => match (current_cached_input, prev.last_cached_input) {
+                (Some(cur), Some(p)) if cur >= p => Some(cur - p),
+                (Some(_), Some(_)) => None, // decrease → field-local taint
+                _ => None,                  // either snapshot absent → no delta
+            },
+            None => None, // no baseline yet
+        };
+
         if is_in_flight {
             // In-flight-match: update pending with the latest cumulative values.
             // Baseline is NOT advanced here — it advances only on take().
@@ -305,10 +342,12 @@ impl UsageTracker {
                 turn_output_tokens: turn_output,
                 turn_total_tokens: turn_total,
                 turn_cost_usd: turn_cost,
+                turn_cache_read_tokens: turn_cache_read,
                 cumulative_input_tokens: current_input,
                 cumulative_output_tokens: current_output,
                 cumulative_total_tokens: current_total,
                 cumulative_cost_usd: current_cost,
+                cumulative_cache_read_tokens: current_cached_input,
                 model: payload.model.clone(),
             });
         } else if self.in_flight_session.is_none() {
@@ -327,6 +366,7 @@ impl UsageTracker {
                     last_output: current_output,
                     last_cost: current_cost,
                     last_total: current_total,
+                    last_cached_input: current_cached_input,
                 },
             );
         }
@@ -355,6 +395,7 @@ impl UsageTracker {
                 last_output: record.cumulative_output_tokens,
                 last_cost: record.cumulative_cost_usd,
                 last_total: record.cumulative_total_tokens,
+                last_cached_input: record.cumulative_cache_read_tokens,
             },
         );
         Some(record)
@@ -366,9 +407,9 @@ mod tests {
     use super::*;
 
     /// The camelCase key buzz-agent actually puts on the wire must land on the
-    /// field. A rename mismatch here would deserialize to the serde default of
-    /// 0, and every trial would price as if nothing had ever been cached — the
-    /// exact silent failure this field was added to remove.
+    /// field. A rename mismatch here would deserialize to None, and every trial
+    /// would be treated as "not reported" — the exact silent failure this field
+    /// was added to remove.
     #[test]
     fn cached_input_tokens_deserialize_from_the_wire_key() {
         let p: UsageUpdatePayload = serde_json::from_value(serde_json::json!({
@@ -379,13 +420,14 @@ mod tests {
             "accumulatedCachedInputTokens": 5_033,
         }))
         .expect("payload must deserialize");
-        assert_eq!(p.accumulated_cached_input_tokens, 5_033);
-        assert!(p.accumulated_cached_input_tokens <= p.accumulated_input_tokens);
+        assert_eq!(p.accumulated_cached_input_tokens, Some(5_033));
+        assert!(p.accumulated_cached_input_tokens.unwrap() <= p.accumulated_input_tokens);
     }
 
-    /// goose does not send the field; its payloads must still deserialize.
+    /// goose does not send the field; its payloads must deserialize with None —
+    /// not zero — so that "not reported" is preserved distinct from "reported zero".
     #[test]
-    fn a_payload_without_the_cache_field_defaults_to_zero() {
+    fn a_payload_without_the_cache_field_deserializes_as_none() {
         let p: UsageUpdatePayload = serde_json::from_value(serde_json::json!({
             "used": 500,
             "contextLimit": 200_000,
@@ -393,7 +435,28 @@ mod tests {
             "accumulatedOutputTokens": 100,
         }))
         .expect("payload must deserialize without the cache field");
-        assert_eq!(p.accumulated_cached_input_tokens, 0);
+        assert!(
+            p.accumulated_cached_input_tokens.is_none(),
+            "absent field must be None, not Some(0)"
+        );
+    }
+
+    /// A harness that explicitly reports zero cache hits must produce Some(0),
+    /// not None — so downstream analytics can distinguish "confirmed zero" from
+    /// "not reported".
+    #[test]
+    fn a_payload_with_explicit_zero_cache_field_deserializes_as_some_zero() {
+        let p: UsageUpdatePayload = serde_json::from_value(serde_json::json!({
+            "accumulatedInputTokens": 400,
+            "accumulatedOutputTokens": 100,
+            "accumulatedCachedInputTokens": 0,
+        }))
+        .expect("payload must deserialize with zero cache field");
+        assert_eq!(
+            p.accumulated_cached_input_tokens,
+            Some(0),
+            "explicit zero must be Some(0), not None"
+        );
     }
 
     fn payload(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
@@ -402,7 +465,7 @@ mod tests {
             context_limit: 200_000,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
-            accumulated_cached_input_tokens: 0,
+            accumulated_cached_input_tokens: None,
             accumulated_cost: cost,
             accumulated_total_tokens: None,
             model: None,
@@ -415,7 +478,7 @@ mod tests {
             context_limit: 0,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
-            accumulated_cached_input_tokens: 0,
+            accumulated_cached_input_tokens: None,
             accumulated_cost: cost,
             accumulated_total_tokens: None,
             model: None,
@@ -913,7 +976,7 @@ mod tests {
             context_limit: 200_000,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
-            accumulated_cached_input_tokens: 0,
+            accumulated_cached_input_tokens: None,
             accumulated_cost: cost,
             accumulated_total_tokens: None,
             model: model.map(str::to_string),
@@ -977,7 +1040,7 @@ mod tests {
             context_limit: 200_000,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
-            accumulated_cached_input_tokens: 0,
+            accumulated_cached_input_tokens: None,
             accumulated_cost: None,
             accumulated_total_tokens: total,
             model: None,
@@ -1131,5 +1194,321 @@ mod tests {
             "absent baseline total → turn total null even when current has a total"
         );
         assert_eq!(usage.cumulative_total_tokens, Some(250));
+    }
+
+    // ── cache-read token threading ──────────────────────────────────────────
+
+    fn payload_with_cache(
+        input: u64,
+        output: u64,
+        cached_input: Option<u64>,
+    ) -> UsageUpdatePayload {
+        UsageUpdatePayload {
+            used: input + output,
+            context_limit: 200_000,
+            accumulated_input_tokens: input,
+            accumulated_output_tokens: output,
+            accumulated_cached_input_tokens: cached_input,
+            accumulated_cost: None,
+            accumulated_total_tokens: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn cache_read_first_turn_produces_none_turn_delta_and_passes_cumulative_through() {
+        // First turn has no baseline → turn cache delta must be None, but
+        // cumulative_cache_read_tokens must carry the reported value through.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c1");
+        tracker.record("sess-c1", &payload_with_cache(1000, 200, Some(500)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(
+            usage.turn_cache_read_tokens.is_none(),
+            "first turn: no baseline → cache delta must be None"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens,
+            Some(500),
+            "cumulative cache read passes through on first turn"
+        );
+        assert!(!usage.delta_reliable, "first turn is unreliable");
+    }
+
+    #[test]
+    fn cache_read_second_turn_delta_computed_correctly() {
+        // Second turn: cumulative cached 500 → 1200, delta = 700.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c2");
+        tracker.record("sess-c2", &payload_with_cache(1000, 200, Some(500)));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c2");
+        tracker.record("sess-c2", &payload_with_cache(2000, 350, Some(1200)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable);
+        assert_eq!(
+            usage.turn_cache_read_tokens,
+            Some(700),
+            "cache delta = 1200 - 500 = 700"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens,
+            Some(1200),
+            "cumulative cache passes through"
+        );
+    }
+
+    #[test]
+    fn cache_read_decrease_nulls_turn_cache_but_leaves_delta_reliable() {
+        // Cache counter decrease → cache delta None (field-local taint), but
+        // delta_reliable and input/output deltas are NOT affected.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c3");
+        tracker.record("sess-c3", &payload_with_cache(1000, 200, Some(800)));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c3");
+        // Cache counter decreased: 800 → 50.
+        tracker.record("sess-c3", &payload_with_cache(1500, 300, Some(50)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(
+            usage.delta_reliable,
+            "cache decrease must NOT flip delta_reliable — field-local"
+        );
+        assert_eq!(
+            usage.turn_input_tokens,
+            Some(500),
+            "input/output delta unaffected by cache decrease"
+        );
+        assert_eq!(usage.turn_output_tokens, Some(100));
+        assert!(
+            usage.turn_cache_read_tokens.is_none(),
+            "cache counter decrease → turn_cache_read_tokens None (field-local taint)"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens,
+            Some(50),
+            "cumulative still passes through from payload even on decrease"
+        );
+    }
+
+    #[test]
+    fn cache_read_explicit_zero_payload_after_explicit_zero_baseline_produces_some_zero_delta() {
+        // When both baseline and current are Some(0), turn_cache_read_tokens must
+        // be Some(0) — confirmed zero, not absent.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c4");
+        tracker.record("sess-c4", &payload_with_cache(1000, 200, Some(0)));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c4");
+        tracker.record("sess-c4", &payload_with_cache(1500, 300, Some(0)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable);
+        assert_eq!(
+            usage.turn_cache_read_tokens,
+            Some(0),
+            "explicit zero on both sides → Some(0), not None"
+        );
+        assert_eq!(usage.cumulative_cache_read_tokens, Some(0));
+    }
+
+    #[test]
+    fn cache_read_threads_through_setup_notification_baseline() {
+        // A setup notification (before begin_turn) with a nonzero cache count
+        // must update the committed baseline so the first real turn gets a
+        // correct delta from that starting point.
+        let mut tracker = UsageTracker::default();
+
+        // Setup notification: cumulative cache = 300.
+        tracker.record("sess-c5", &payload_with_cache(1000, 200, Some(300)));
+
+        tracker.begin_turn("sess-c5");
+        tracker.record("sess-c5", &payload_with_cache(1500, 350, Some(700)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable, "baseline from setup: reliable");
+        assert_eq!(
+            usage.turn_cache_read_tokens,
+            Some(400),
+            "cache delta from setup baseline: 700 - 300 = 400"
+        );
+        assert_eq!(usage.cumulative_cache_read_tokens, Some(700));
+    }
+
+    #[test]
+    fn cache_read_omitted_field_produces_none_cumulative_and_no_turn_delta() {
+        // A harness that omits accumulatedCachedInputTokens (e.g. goose) must
+        // produce None cumulative_cache_read_tokens — not Some(0) — and the
+        // turn delta must also be None even on the second turn.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c6");
+        // payload() uses None for accumulated_cached_input_tokens.
+        tracker.record("sess-c6", &payload(1000, 200, None));
+        let t1 = tracker.take().expect("turn 1");
+
+        assert!(
+            t1.cumulative_cache_read_tokens.is_none(),
+            "goose-shaped payload: cumulative must be None, not Some(0)"
+        );
+        assert!(
+            t1.turn_cache_read_tokens.is_none(),
+            "first turn always has no turn delta"
+        );
+
+        tracker.begin_turn("sess-c6");
+        tracker.record("sess-c6", &payload(1500, 300, None));
+        let t2 = tracker.take().expect("turn 2");
+
+        assert!(
+            t2.cumulative_cache_read_tokens.is_none(),
+            "continued goose session: cumulative must remain None"
+        );
+        assert!(
+            t2.turn_cache_read_tokens.is_none(),
+            "absent field on both sides → no turn delta invented"
+        );
+        assert!(
+            t2.delta_reliable,
+            "input/output reliability unaffected by absent cache field"
+        );
+    }
+
+    #[test]
+    fn cache_read_baseline_absent_then_present_produces_no_delta() {
+        // If the first turn omits the cache field (baseline stored as None) and
+        // the second turn reports a value, no delta can be computed — we have no
+        // baseline to subtract from. The cumulative value should still pass through.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c7");
+        tracker.record("sess-c7", &payload(1000, 200, None)); // no cache field
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c7");
+        tracker.record("sess-c7", &payload_with_cache(1500, 300, Some(400)));
+        let usage = tracker.take().expect("turn 2");
+
+        assert!(
+            usage.turn_cache_read_tokens.is_none(),
+            "absent baseline → no turn delta even when current has a value"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens,
+            Some(400),
+            "cumulative from current payload passes through"
+        );
+        assert!(usage.delta_reliable, "input/output reliability unaffected");
+    }
+
+    #[test]
+    fn cache_read_baseline_present_then_absent_produces_no_delta() {
+        // If the first turn reports the cache field but the second omits it
+        // (harness switched), no delta should be produced and cumulative is None.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-c8");
+        tracker.record("sess-c8", &payload_with_cache(1000, 200, Some(300)));
+        let _ = tracker.take();
+
+        tracker.begin_turn("sess-c8");
+        tracker.record("sess-c8", &payload(1500, 300, None)); // no cache field
+        let usage = tracker.take().expect("turn 2");
+
+        assert!(
+            usage.turn_cache_read_tokens.is_none(),
+            "absent current → no turn delta"
+        );
+        assert!(
+            usage.cumulative_cache_read_tokens.is_none(),
+            "absent field: cumulative must be None"
+        );
+        assert!(usage.delta_reliable, "input/output reliability unaffected");
+    }
+
+    #[test]
+    fn pool_omitted_cache_field_publishes_no_cache_read_tokens_in_kind44200() {
+        // End-to-end: a buzz-agent or goose payload that omits the cache field
+        // must NOT publish cacheReadTokens in the kind:44200 event — neither
+        // in turn nor cumulative counts.
+        //
+        // This is the core acceptance test for Thufir's finding: the old code
+        // would publish cacheReadTokens: 0 for every harness regardless of
+        // whether the field was reported.
+        use crate::pool::build_turn_metric_counts;
+
+        let usage = TurnUsage {
+            session_id: "sess-pool-none".into(),
+            turn_seq: 2,
+            delta_reliable: true,
+            turn_input_tokens: Some(400),
+            turn_output_tokens: Some(100),
+            turn_total_tokens: None,
+            turn_cost_usd: None,
+            turn_cache_read_tokens: None,
+            cumulative_input_tokens: 700,
+            cumulative_output_tokens: 200,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None, // harness did not report the field
+            model: None,
+        };
+
+        let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
+
+        let turn = turn_counts.expect("turn counts must be present (delta reliable)");
+        assert!(
+            turn.cache_read_tokens.is_none(),
+            "omitted cache field: turn cacheReadTokens must be absent from kind:44200"
+        );
+
+        let cumulative = cumulative_counts.expect("cumulative counts always present");
+        assert!(
+            cumulative.cache_read_tokens.is_none(),
+            "omitted cache field: cumulative cacheReadTokens must be absent from kind:44200"
+        );
+    }
+
+    #[test]
+    fn pool_reported_cache_field_publishes_nonzero_cache_read_tokens_in_kind44200() {
+        // End-to-end: a buzz-agent payload with a nonzero cache count must
+        // publish cacheReadTokens in both turn and cumulative counts.
+        use crate::pool::build_turn_metric_counts;
+
+        let usage = TurnUsage {
+            session_id: "sess-pool-some".into(),
+            turn_seq: 2,
+            delta_reliable: true,
+            turn_input_tokens: Some(400),
+            turn_output_tokens: Some(100),
+            turn_total_tokens: None,
+            turn_cost_usd: None,
+            turn_cache_read_tokens: Some(300),
+            cumulative_input_tokens: 700,
+            cumulative_output_tokens: 200,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: Some(600),
+            model: None,
+        };
+
+        let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
+
+        let turn = turn_counts.expect("turn counts present");
+        assert_eq!(
+            turn.cache_read_tokens,
+            Some(300),
+            "nonzero turn cache: must appear in kind:44200 turn counts"
+        );
+
+        let cumulative = cumulative_counts.expect("cumulative counts present");
+        assert_eq!(
+            cumulative.cache_read_tokens,
+            Some(600),
+            "nonzero cumulative cache: must appear in kind:44200 cumulative counts"
+        );
     }
 }
