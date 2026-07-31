@@ -261,6 +261,13 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Additional MCP servers as a JSON array of
+    /// `{name, command, args, env:[{name,value}]}` objects. Merged with the
+    /// dev-MCP server derived from `--mcp-command`. Malformed JSON is logged
+    /// and ignored (fail open) rather than dropping the dev MCP.
+    #[arg(long, env = "BUZZ_ACP_MCP_SERVERS", default_value = "")]
+    pub mcp_servers_json: String,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -495,6 +502,7 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    pub mcp_servers_json: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1059,6 +1067,7 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            mcp_servers_json: args.mcp_servers_json,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1437,6 +1446,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            mcp_servers_json: String::new(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

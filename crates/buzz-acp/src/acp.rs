@@ -24,7 +24,7 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
 /// All four fields are **required** by the schema (`args` and `env` may be empty arrays).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpServer {
     pub name: String,
     pub command: String,
@@ -33,7 +33,7 @@ pub struct McpServer {
 }
 
 /// A single environment variable for an MCP server.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnvVar {
     pub name: String,
     pub value: String,
