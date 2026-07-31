@@ -121,6 +121,7 @@ impl AgentDefinition {
             persona_source_version: None,
             env_vars: self.env_vars,
             start_on_app_launch: false,
+            stopped_by_app_shutdown: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: BackendKind::default(),
@@ -309,6 +310,12 @@ pub struct ManagedAgentRecord {
     pub env_vars: BTreeMap<String, String>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
+    /// One-shot marker: this agent was running when the app shut down and was
+    /// stopped by `shutdown_managed_agents`. Launch restore starts such agents
+    /// even when `start_on_app_launch` is off, then clears the flag — so an
+    /// agent the user explicitly stopped before quitting stays stopped.
+    #[serde(default)]
+    pub stopped_by_app_shutdown: bool,
     /// Auto-restart this agent when its effective spawn config drifts from
     /// the running process (Chunk F). Default ON; the policy loop in the
     /// frontend only fires when the agent is idle, connected, and local.

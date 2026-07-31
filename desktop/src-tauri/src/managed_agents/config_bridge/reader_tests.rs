@@ -83,6 +83,7 @@ fn test_record() -> ManagedAgentRecord {
         model: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
+        stopped_by_app_shutdown: false,
         auto_restart_on_config_change: true,
         runtime_pid: None,
         backend: crate::managed_agents::types::BackendKind::Local,

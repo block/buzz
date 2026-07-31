@@ -181,6 +181,7 @@ fn local_agent() -> ManagedAgentRecord {
         persona_source_version: Some("local-hash".to_string()),
         env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
         start_on_app_launch: true,
+        stopped_by_app_shutdown: false,
         auto_restart_on_config_change: true,
         runtime_pid: Some(1234),
         backend: crate::managed_agents::BackendKind::Provider {

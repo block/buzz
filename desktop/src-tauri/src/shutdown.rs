@@ -238,6 +238,7 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
             record.updated_at = util::now_iso();
             record.last_exit_code = None;
             record.last_error = None;
+            record.stopped_by_app_shutdown = true;
         }
     }
 

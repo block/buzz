@@ -83,6 +83,15 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+/// A record is restored at launch when the user opted in via
+/// `start_on_app_launch`, or when the previous app shutdown stopped it while
+/// it was running (`stopped_by_app_shutdown`, a one-shot marker the caller
+/// consumes after selection). Only local agents are restorable.
+fn is_restore_candidate(record: &super::ManagedAgentRecord) -> bool {
+    (record.start_on_app_launch || record.stopped_by_app_shutdown)
+        && record.backend == BackendKind::Local
+}
+
 /// Restore managed agents that were running before the app was closed.
 ///
 /// Split into three phases to minimise lock contention with the frontend:
@@ -165,9 +174,19 @@ pub async fn restore_managed_agents_on_launch(
 
         let candidates: Vec<String> = records
             .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| is_restore_candidate(record))
             .map(|record| record.pubkey.clone())
             .collect();
+
+        // The shutdown marker is one-shot: consume it now that this launch's
+        // candidate set is decided, so a later explicit stop sticks across
+        // the next quit/relaunch cycle.
+        for record in records.iter_mut() {
+            if record.stopped_by_app_shutdown {
+                record.stopped_by_app_shutdown = false;
+                changed = true;
+            }
+        }
 
         let mut to_start = Vec::new();
         for pubkey in &candidates {
@@ -484,4 +503,61 @@ fn persist_restore_error(
     record.updated_at = util::now_iso();
     record.last_error = Some(error);
     save_managed_agents(app, &records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_restore_candidate;
+    use crate::managed_agents::ManagedAgentRecord;
+
+    fn record(start_on_app_launch: bool, stopped_by_app_shutdown: bool) -> ManagedAgentRecord {
+        serde_json::from_str(&format!(
+            r#"{{
+                "pubkey": "{}",
+                "name": "agent",
+                "relay_url": "wss://localhost:3000",
+                "acp_command": "buzz-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 320,
+                "system_prompt": null,
+                "start_on_app_launch": {start_on_app_launch},
+                "stopped_by_app_shutdown": {stopped_by_app_shutdown},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "last_started_at": null,
+                "last_stopped_at": null,
+                "last_exit_code": null,
+                "last_error": null
+            }}"#,
+            "a".repeat(64)
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn opt_in_agents_are_candidates() {
+        assert!(is_restore_candidate(&record(true, false)));
+    }
+
+    #[test]
+    fn agents_stopped_by_app_shutdown_are_candidates_despite_opt_out() {
+        assert!(is_restore_candidate(&record(false, true)));
+    }
+
+    #[test]
+    fn explicitly_stopped_opt_out_agents_are_not_candidates() {
+        assert!(!is_restore_candidate(&record(false, false)));
+    }
+
+    #[test]
+    fn remote_agents_are_never_candidates() {
+        let mut rec = record(true, true);
+        rec.backend = crate::managed_agents::BackendKind::Provider {
+            id: "blox".to_string(),
+            config: Default::default(),
+        };
+        assert!(!is_restore_candidate(&rec));
+    }
 }
