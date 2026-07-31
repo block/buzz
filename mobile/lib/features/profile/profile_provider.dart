@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
 import 'user_cache_provider.dart';
 import 'user_profile.dart';
@@ -66,14 +67,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     final session = ref.read(relaySessionProvider.notifier);
     final events = await session.fetchHistory(NostrFilters.profile(myPk));
     if (events.isEmpty) return null;
-    final data = ProfileData.fromEvent(events.first);
-    return UserProfile(
-      pubkey: data.pubkey,
-      displayName: data.displayName,
-      avatarUrl: data.avatarUrl,
-      about: data.about,
-      nip05Handle: data.nip05,
-    );
+    return _profileFromEvent(_latestProfileEvent(events));
   }
 
   Future<void> refresh() async {
@@ -93,7 +87,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 
     final session = ref.read(relaySessionProvider.notifier);
     final events = await session.fetchHistory(NostrFilters.profile(myPk));
-    final currentEvent = events.isEmpty ? null : events.first;
+    final currentEvent = events.isEmpty ? null : _latestProfileEvent(events);
     final metadata = mergeProfileMetadata(
       currentEvent?.content,
       displayName: displayName,
@@ -122,15 +116,7 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
     if (event == null) {
       throw StateError('Profile event was not signed');
     }
-    final data = ProfileData.fromEvent(event);
-    final updated = UserProfile(
-      pubkey: data.pubkey,
-      displayName: data.displayName,
-      avatarUrl: data.avatarUrl,
-      about: data.about,
-      nip05Handle: data.nip05,
-      ownerPubkey: state.value?.ownerPubkey,
-    );
+    final updated = _profileFromEvent(event);
     if (_isSameRelayIdentity(config)) {
       state = AsyncData(updated);
       ref.read(userCacheProvider.notifier).put(updated);
@@ -147,6 +133,26 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(
   ProfileNotifier.new,
 );
+
+NostrEvent _latestProfileEvent(List<NostrEvent> events) =>
+    events.reduce((a, b) {
+      if (a.createdAt != b.createdAt) {
+        return a.createdAt > b.createdAt ? a : b;
+      }
+      return a.id.compareTo(b.id) <= 0 ? a : b;
+    });
+
+UserProfile _profileFromEvent(NostrEvent event) {
+  final data = ProfileData.fromEvent(event);
+  return UserProfile(
+    pubkey: data.pubkey,
+    displayName: data.displayName,
+    avatarUrl: data.avatarUrl,
+    about: data.about,
+    nip05Handle: data.nip05,
+    ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
+  );
+}
 
 /// Presence status for the current user.
 ///

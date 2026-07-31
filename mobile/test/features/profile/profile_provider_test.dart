@@ -1,11 +1,14 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
 
 void main() {
   group('mergeProfileMetadata', () {
@@ -60,14 +63,13 @@ void main() {
     'updateProfile signs, publishes, preserves metadata, and updates state',
     () async {
       final keys = nostr.Keys.generate();
+      final owner = nostr.Keys.generate();
       final prior = _profileEvent(
         pubkey: keys.public,
         createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 10,
         content:
             '{"name":"legacy","display_name":"Old","nip05":"alice@example.com","custom":true}',
-        tags: const [
-          ['auth', 'owner'],
-        ],
+        tags: [_authTag(owner, keys.public)],
       );
       final relaySession = _RecordingRelaySession(prior: prior);
       final container = ProviderContainer(
@@ -103,9 +105,47 @@ void main() {
       expect(content['nip05'], 'alice@example.com');
       expect(content['custom'], isTrue);
       expect(updated.displayName, 'Alice');
+      expect(updated.ownerPubkey, owner.public);
       expect(container.read(profileProvider).value?.displayName, 'Alice');
+      expect(
+        container.read(userCacheProvider)[keys.public]?.ownerPubkey,
+        owner.public,
+      );
     },
   );
+
+  test('uses the lowest event id when profile timestamps are equal', () async {
+    final keys = nostr.Keys.generate();
+    final lower = _profileEvent(
+      id: 'a',
+      pubkey: keys.public,
+      createdAt: 100,
+      content: '{"display_name":"Canonical"}',
+    );
+    final higher = _profileEvent(
+      id: 'b',
+      pubkey: keys.public,
+      createdAt: 100,
+      content: '{"display_name":"Noncanonical"}',
+    );
+    final relaySession = _RecordingRelaySession(
+      prior: higher,
+      history: [higher, lower],
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(keys.nsec),
+        ),
+        relaySessionProvider.overrideWith(() => relaySession),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final profile = await container.read(profileProvider.future);
+
+    expect(profile?.displayName, 'Canonical');
+  });
 
   test(
     'publish failure leaves the previously loaded profile unchanged',
@@ -192,12 +232,13 @@ void main() {
 }
 
 NostrEvent _profileEvent({
+  String id = 'prior',
   required String pubkey,
   required int createdAt,
   required String content,
   List<List<String>> tags = const [],
 }) => NostrEvent(
-  id: 'prior',
+  id: id,
   pubkey: pubkey,
   createdAt: createdAt,
   kind: EventKind.metadata,
@@ -205,6 +246,18 @@ NostrEvent _profileEvent({
   content: content,
   sig: 'sig',
 );
+
+List<String> _authTag(nostr.Keys owner, String agentPubkey) {
+  final input = utf8.encode('nostr:agent-auth:$agentPubkey:');
+  final digest = SHA256Digest().process(Uint8List.fromList(input));
+  final message = digest.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return [
+    'auth',
+    owner.public,
+    '',
+    nostr.Schnorr.sign(secretKey: owner.secret, message: message),
+  ];
+}
 
 class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   _FakeRelayConfigNotifier(this.nsec);
@@ -219,11 +272,13 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
 class _RecordingRelaySession extends RelaySessionNotifier {
   _RecordingRelaySession({
     required this.prior,
+    this.history,
     this.publishError,
     this.onFetch,
   });
 
   final NostrEvent prior;
+  final List<NostrEvent>? history;
   final Object? publishError;
   final void Function()? onFetch;
   final List<NostrEvent> published = [];
@@ -237,7 +292,7 @@ class _RecordingRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     onFetch?.call();
-    return [prior];
+    return history ?? [prior];
   }
 
   @override
