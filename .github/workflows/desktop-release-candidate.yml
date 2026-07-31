@@ -1,0 +1,26 @@
+name: Desktop Release Candidate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Desktop Release Candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable desktop candidate
+        if: startsWith(github.event.pull_request.head.ref, 'version-bump/')
+        env:
+          VERSION: ${{ github.event.pull_request.head.ref }}
+        run: |
+          VERSION="${VERSION#version-bump/}"
+          scripts/desktop_release.py validate --candidate HEAD --version "$VERSION" --repo "$GITHUB_REPOSITORY"
