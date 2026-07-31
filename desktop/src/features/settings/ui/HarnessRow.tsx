@@ -1,6 +1,6 @@
 import * as React from "react";
 import { EllipsisVertical, ExternalLink } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 
 import {
   useAcpAuthMethodsQuery,
@@ -136,14 +136,14 @@ function RuntimeOverflowMenu({
           </DropdownMenuItem>
         ))}
         {runtime.nodeRequired ? (
-          <DropdownMenuItem onSelect={() => void openUrl("https://nodejs.org")}>
+          <DropdownMenuItem onSelect={() => void openExternalUrl("https://nodejs.org")}>
             <ExternalLink className="h-4 w-4" />
             Install Node.js
           </DropdownMenuItem>
         ) : null}
         {hasInstructions ? (
           <DropdownMenuItem
-            onSelect={() => void openUrl(runtime.installInstructionsUrl)}
+            onSelect={() => void openExternalUrl(runtime.installInstructionsUrl)}
           >
             <ExternalLink className="h-4 w-4" />
             {runtimeInstallGuideLabel(runtime)}
@@ -462,7 +462,7 @@ export function HarnessRow({
             {runtime.installInstructionsUrl.trim().length > 0 ? (
               <button
                 className="inline-flex shrink-0 items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
-                onClick={() => void openUrl(runtime.installInstructionsUrl)}
+                onClick={() => void openExternalUrl(runtime.installInstructionsUrl)}
                 type="button"
               >
                 <ExternalLink className="h-4 w-4" />
