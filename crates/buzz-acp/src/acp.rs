@@ -206,11 +206,12 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
-    /// Usage tracker — accumulates cumulative token counts from
-    /// `_goose/unstable/session/update` notifications and computes per-turn
-    /// deltas. Both goose and buzz-agent emit this notification; goose gates
-    /// on client capability advertisement, buzz-agent emits unconditionally.
-    goose_usage: UsageTracker,
+    /// Usage tracker — accumulates cumulative counters from `usage_update`
+    /// notifications and computes per-turn deltas. Fed by both wire formats:
+    /// `_goose/unstable/session/update` (goose gates on client capability
+    /// advertisement, buzz-agent emits unconditionally) and the core ACP
+    /// `session/update` (claude-agent-acp, codex-acp).
+    usage: UsageTracker,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -549,7 +550,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
-            goose_usage: UsageTracker::default(),
+            usage: UsageTracker::default(),
         })
     }
 
@@ -758,7 +759,7 @@ impl AcpClient {
         // Mark the usage tracker as in-flight for this turn BEFORE sending the
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
-        self.goose_usage.begin_turn(session_id);
+        self.usage.begin_turn(session_id);
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -851,17 +852,17 @@ impl AcpClient {
     }
 
     /// Consume and return the per-turn usage record computed from the most
-    /// recent `_goose/unstable/session/update` notification.
+    /// recent `usage_update` notification, in either wire format.
     ///
-    /// Returns `None` if no usage update arrived since the last call (i.e.
-    /// the harness did not emit one for this turn, or this is not a goose
-    /// agent). Must be called at most once per turn; subsequent calls return
-    /// `None` until the next `usage_update` notification is recorded.
+    /// Returns `None` if no usage update arrived since the last call — the
+    /// harness did not emit one for this turn, or the ones it emitted carried
+    /// no counter NIP-AM can publish. Must be called at most once per turn;
+    /// subsequent calls return `None` until the next notification is recorded.
     ///
     /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
-        self.goose_usage.take()
+        self.usage.take()
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1215,6 +1216,7 @@ impl AcpClient {
             if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
                 match method {
                     "session/update" => {
+                        self.handle_acp_usage_update(&msg);
                         let _ = self.handle_session_update(&msg);
                     }
                     "_goose/unstable/session/update" => {
@@ -1654,6 +1656,7 @@ impl AcpClient {
                     if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
                         match method {
                             "session/update" => {
+                                self.handle_acp_usage_update(&msg);
                                 if self.handle_session_update(&msg) {
                                     let activity_now = Instant::now();
                                     idle_deadline = activity_now + idle_timeout;
@@ -1815,7 +1818,9 @@ impl AcpClient {
     /// notification is best-effort observability data, not a protocol
     /// requirement. Failures are logged at debug level.
     fn handle_goose_usage_update(&mut self, msg: &serde_json::Value) {
-        use crate::usage::{GooseSessionUpdateNotification, GooseSessionUpdateVariant};
+        use crate::usage::{
+            GooseSessionUpdateNotification, GooseSessionUpdateVariant, UsageSnapshot,
+        };
         let params = match msg.get("params") {
             Some(p) => p,
             None => {
@@ -1841,13 +1846,60 @@ impl AcpClient {
                         cached = payload.accumulated_cached_input_tokens,
                         "goose usage update"
                     );
-                    self.goose_usage.record(&notif.session_id, payload);
+                    self.usage
+                        .record(&notif.session_id, &UsageSnapshot::from(payload));
                 }
             }
             Err(e) => {
                 tracing::debug!(
                     target: "acp::usage",
                     "_goose/unstable/session/update: deserialization error: {e}"
+                );
+            }
+        }
+    }
+
+    /// Parse a standard ACP `session/update` notification and, when it carries
+    /// the `usage_update` variant, record the usage snapshot in the per-session
+    /// tracker.
+    ///
+    /// This is the counterpart to [`Self::handle_goose_usage_update`] for the
+    /// harnesses that speak only core ACP (claude-agent-acp, codex-acp). Without
+    /// it their usage notifications are parsed for display and then dropped, so
+    /// `UsageTracker::take` returns `None` at turn completion and no kind 44200
+    /// metric is ever published.
+    ///
+    /// The standard payload has no cumulative token split, so only the
+    /// cumulative cost survives into the snapshot; harnesses that report neither
+    /// (codex-acp sends a bare `{used, size}`) are dropped by `record`.
+    ///
+    /// Silently ignores malformed input and non-`usage_update` variants — every
+    /// other `session/update` flows through `handle_session_update`, and this
+    /// path must never interfere with it.
+    fn handle_acp_usage_update(&mut self, msg: &serde_json::Value) {
+        use crate::usage::{AcpSessionUpdateNotification, AcpSessionUpdateVariant, UsageSnapshot};
+        let Some(params) = msg.get("params") else {
+            return;
+        };
+        match serde_json::from_value::<AcpSessionUpdateNotification>(params.clone()) {
+            Ok(notif) => {
+                if let AcpSessionUpdateVariant::UsageUpdate(payload) = &notif.update {
+                    tracing::debug!(
+                        target: "acp::usage",
+                        session_id = %notif.session_id,
+                        used = payload.used,
+                        size = payload.size,
+                        cost = ?payload.cost.as_ref().map(|c| c.amount),
+                        "acp usage update"
+                    );
+                    self.usage
+                        .record(&notif.session_id, &UsageSnapshot::from(payload));
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "acp::usage",
+                    "session/update: usage deserialization error: {e}"
                 );
             }
         }
@@ -4177,7 +4229,7 @@ mod tests {
         assert!(client.take_turn_usage().is_none(), "starts empty");
 
         // begin_turn before sending the prompt — mirrors the real call flow.
-        client.goose_usage.begin_turn("s1");
+        client.usage.begin_turn("s1");
         let msg = goose_usage_update_msg("s1", 1000, 200, Some(0.01));
         client.handle_goose_usage_update(&msg);
 
@@ -4187,8 +4239,8 @@ mod tests {
         assert_eq!(usage.session_id, "s1");
         assert_eq!(usage.turn_seq, 1);
         assert!(!usage.delta_reliable, "first turn must be unreliable");
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.
@@ -4202,11 +4254,11 @@ mod tests {
     async fn goose_usage_second_turn_delta_reliable() {
         let mut client = spawn_inert_client().await;
         // Turn 1.
-        client.goose_usage.begin_turn("s2");
+        client.usage.begin_turn("s2");
         client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1000, 200, None));
         let _ = client.take_turn_usage();
         // Turn 2.
-        client.goose_usage.begin_turn("s2");
+        client.usage.begin_turn("s2");
         client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1800, 450, None));
         let usage = client.take_turn_usage().expect("turn 2 usage");
         assert!(usage.delta_reliable);
@@ -4229,6 +4281,125 @@ mod tests {
             "params": { "oops": true }
         });
         client.handle_goose_usage_update(&bad2);
+        assert!(client.take_turn_usage().is_none());
+    }
+
+    // ── Standard ACP usage notifications ──────────────────────────────────
+
+    /// A `session/update` notification exactly as claude-agent-acp emits it.
+    fn acp_usage_update_msg(session_id: &str, used: u64, cost: Option<f64>) -> serde_json::Value {
+        let mut update = serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": used,
+            "size": 200000u64,
+        });
+        if let Some(c) = cost {
+            update["cost"] = serde_json::json!({ "amount": c, "currency": "USD" });
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": update
+            }
+        })
+    }
+
+    /// Regression: harnesses that speak only core ACP (claude-agent-acp,
+    /// codex-acp) send `usage_update` over `session/update`, not over the goose
+    /// extension. Before this path existed the notification was parsed for
+    /// display and dropped, `take_turn_usage` returned `None` on every turn, and
+    /// no kind 44200 metric was ever published for those agents.
+    #[tokio::test]
+    async fn acp_usage_notification_recorded_and_take_returns_usage() {
+        let mut client = spawn_inert_client().await;
+        assert!(client.take_turn_usage().is_none(), "starts empty");
+
+        client.usage.begin_turn("acp-1");
+        client.handle_acp_usage_update(&acp_usage_update_msg("acp-1", 15_247, Some(0.0234)));
+
+        let usage = client
+            .take_turn_usage()
+            .expect("standard ACP usage_update must reach the tracker");
+        assert_eq!(usage.session_id, "acp-1");
+        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.cumulative_cost_usd, Some(0.0234));
+        // The standard payload has no cumulative token split: `used` is a
+        // context snapshot, which NIP-AM must not receive as a token count.
+        assert_eq!(usage.cumulative_input_tokens, None);
+        assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    /// The full dispatch path: a raw `session/update` frame must reach the
+    /// tracker through the same match arm that feeds `handle_session_update`.
+    #[tokio::test]
+    async fn acp_usage_second_turn_produces_a_cost_delta() {
+        let mut client = spawn_inert_client().await;
+        client.usage.begin_turn("acp-2");
+        client.handle_acp_usage_update(&acp_usage_update_msg("acp-2", 10_000, Some(0.10)));
+        let _ = client.take_turn_usage();
+
+        client.usage.begin_turn("acp-2");
+        client.handle_acp_usage_update(&acp_usage_update_msg("acp-2", 18_000, Some(0.25)));
+        let usage = client.take_turn_usage().expect("turn 2 usage");
+        assert!(usage.delta_reliable, "baseline observed, nothing decreased");
+        let cost = usage.turn_cost_usd.expect("cost delta");
+        assert!(
+            (cost - 0.15).abs() < 1e-9,
+            "expected a 0.15 cost delta, got {cost}"
+        );
+        assert_eq!(usage.turn_input_tokens, None, "tokens stay unknown");
+    }
+
+    /// claude-agent-acp interleaves bare `{used, size}` notifications (context
+    /// changes) with the ones that carry cost. Those carry nothing NIP-AM can
+    /// publish and must not overwrite the cost baseline.
+    #[tokio::test]
+    async fn acp_context_only_notification_does_not_clobber_the_cost_baseline() {
+        let mut client = spawn_inert_client().await;
+        client.usage.begin_turn("acp-3");
+        client.handle_acp_usage_update(&acp_usage_update_msg("acp-3", 10_000, Some(0.10)));
+        let _ = client.take_turn_usage();
+
+        client.usage.begin_turn("acp-3");
+        // Context-only frame: no cost, so nothing to record.
+        client.handle_acp_usage_update(&acp_usage_update_msg("acp-3", 4_000, None));
+        assert!(
+            client.take_turn_usage().is_none(),
+            "a counter-free notification must not produce a publishable metric"
+        );
+
+        // The baseline from turn 1 must have survived intact.
+        client.usage.begin_turn("acp-3");
+        client.handle_acp_usage_update(&acp_usage_update_msg("acp-3", 12_000, Some(0.30)));
+        let usage = client.take_turn_usage().expect("turn 3 usage");
+        let cost = usage.turn_cost_usd.expect("cost delta");
+        assert!(
+            (cost - 0.20).abs() < 1e-9,
+            "delta must be measured from the 0.10 baseline, got {cost}"
+        );
+    }
+
+    /// Malformed or non-usage `session/update` frames must be ignored without
+    /// disturbing the tracker — every other variant flows to
+    /// `handle_session_update`.
+    #[tokio::test]
+    async fn acp_non_usage_session_update_is_ignored() {
+        let mut client = spawn_inert_client().await;
+        client.usage.begin_turn("acp-4");
+        client.handle_acp_usage_update(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-4",
+                "update": { "sessionUpdate": "agent_message_chunk",
+                            "content": { "text": "hi" } }
+            }
+        }));
+        client.handle_acp_usage_update(&serde_json::json!({
+            "jsonrpc": "2.0", "method": "session/update"
+        }));
         assert!(client.take_turn_usage().is_none());
     }
 

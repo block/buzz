@@ -3603,10 +3603,10 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
 ///
 /// - `turn` is `None` when `delta_reliable` is false; otherwise it carries the
 ///   per-turn i/o/total/cost deltas for this turn.
-/// - `cumulative` always carries the session-aggregate i/o/cost totals.
-///   `total_tokens` is `Some` only when the session accumulated a genuine
-///   provider-reported total on every turn — never derived from i/o sums
-///   (NIP-AM MUST NOT).
+/// - `cumulative` always carries whichever session-aggregate counters the
+///   harness reported; each is null when it did not. `total_tokens` is `Some`
+///   only when the session accumulated a genuine provider-reported total on
+///   every turn — never derived from i/o sums (NIP-AM MUST NOT).
 pub(crate) fn build_turn_metric_counts(
     usage: &crate::usage::TurnUsage,
 ) -> (
@@ -3635,8 +3635,10 @@ pub(crate) fn build_turn_metric_counts(
         None
     };
     let cumulative_counts = Some(TokenCounts {
-        input_tokens: Some(usage.cumulative_input_tokens),
-        output_tokens: Some(usage.cumulative_output_tokens),
+        // `None` for harnesses whose wire format has no cumulative token split
+        // (standard ACP). NIP-AM publishes that as null — never as zero.
+        input_tokens: usage.cumulative_input_tokens,
+        output_tokens: usage.cumulative_output_tokens,
         // Present when every turn in the session reported a genuine provider
         // total. None when the session has never emitted one or any turn lacked
         // one. Never derived from input+output (NIP-AM MUST NOT).
@@ -3650,8 +3652,9 @@ pub(crate) fn build_turn_metric_counts(
 
 /// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
 ///
-/// Does nothing when `usage` is `None` (goose emitted no usage notification
-/// for this turn) or when `owner_pubkey` is unconfigured (no NIP-AO identity).
+/// Does nothing when `usage` is `None` (the harness emitted no usage
+/// notification for this turn, or none carrying a counter NIP-AM can publish)
+/// or when `owner_pubkey` is unconfigured (no NIP-AO identity).
 /// Errors are logged at WARN and never surface to the caller — metric
 /// publishing must never fail a turn.
 async fn publish_agent_turn_metric(
@@ -6022,8 +6025,8 @@ mod tests {
             turn_output_tokens: Some(50),
             turn_total_tokens: None,
             turn_cost_usd: None,
-            cumulative_input_tokens: 100,
-            cumulative_output_tokens: 50,
+            cumulative_input_tokens: Some(100),
+            cumulative_output_tokens: Some(50),
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
@@ -6056,8 +6059,8 @@ mod tests {
             turn_output_tokens: Some(80),
             turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
-            cumulative_input_tokens: 200,
-            cumulative_output_tokens: 80,
+            cumulative_input_tokens: Some(200),
+            cumulative_output_tokens: Some(80),
             cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
             model: None,
@@ -6091,8 +6094,8 @@ mod tests {
             turn_output_tokens: Some(20),
             turn_total_tokens: None,
             turn_cost_usd: None,
-            cumulative_input_tokens: 150,
-            cumulative_output_tokens: 70,
+            cumulative_input_tokens: Some(150),
+            cumulative_output_tokens: Some(70),
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
@@ -6126,8 +6129,8 @@ mod tests {
             turn_output_tokens: None,
             turn_total_tokens: None,
             turn_cost_usd: None,
-            cumulative_input_tokens: 400,
-            cumulative_output_tokens: 100,
+            cumulative_input_tokens: Some(400),
+            cumulative_output_tokens: Some(100),
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             model: None,
@@ -6158,8 +6161,8 @@ mod tests {
             turn_output_tokens: Some(30),
             turn_total_tokens: Some(130), // genuine per-turn total
             turn_cost_usd: None,
-            cumulative_input_tokens: 500,
-            cumulative_output_tokens: 120,
+            cumulative_input_tokens: Some(500),
+            cumulative_output_tokens: Some(120),
             cumulative_total_tokens: Some(620), // genuine cumulative total
             cumulative_cost_usd: None,
             model: None,
@@ -6205,8 +6208,8 @@ mod tests {
             turn_output_tokens: Some(60),
             turn_total_tokens: None, // provider did not supply a total
             turn_cost_usd: None,
-            cumulative_input_tokens: 200,
-            cumulative_output_tokens: 60,
+            cumulative_input_tokens: Some(200),
+            cumulative_output_tokens: Some(60),
             cumulative_total_tokens: None, // session has no total
             cumulative_cost_usd: None,
             model: None,
