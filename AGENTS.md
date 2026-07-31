@@ -47,6 +47,7 @@ crates/
   buzz-media          # Blossom/S3 media storage
   # Agent surface
   buzz-acp            # ACP harness bridging Buzz events to AI agents
+  buzz-a2a-acp        # OASF Agent Record + A2A remote-runtime adapter over ACP
   buzz-agent          # Minimal ACP-compliant agent (non-streaming, tool-calls-as-output)
   buzz-dev-mcp        # Developer MCP server — shell + file-edit tools
   buzz-persona        # Agent persona packs

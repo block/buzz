@@ -551,6 +551,9 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Publish ACP message chunks with the Buzz-local proxy identity. This is
+    /// enabled only for remote A2A adapters, which must not receive Buzz keys.
+    pub publish_agent_output: bool,
 }
 
 impl AgentPool {
@@ -1806,6 +1809,9 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    // Resolve proxy publication routing from the same channel/profile context
+    // used to construct the prompt.
+    let mut proxy_reply_thread_ref: Option<buzz_sdk::ThreadRef> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -1832,6 +1838,8 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+        proxy_reply_thread_ref =
+            automatic_reply_thread_ref(b, channel_info.as_ref(), profile_lookup.as_ref());
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -2055,23 +2063,40 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
-                        let usage = agent.acp.take_turn_usage();
-                        publish_agent_turn_metric(
+                        let proxy_publication = publish_captured_agent_output_best_effort(
+                            &mut agent,
                             &ctx,
-                            usage,
-                            observer_channel_id,
-                            &session_id,
-                            &turn_id,
-                            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            batch.as_ref(),
+                            proxy_reply_thread_ref.as_ref(),
                         )
                         .await;
+                        let disposition = successful_turn_disposition(
+                            StopReason::EndTurn,
+                            proxy_publication,
+                        );
+                        if disposition.publish_metric {
+                            let usage = agent.acp.take_turn_usage();
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                observer_channel_id,
+                                &session_id,
+                                &turn_id,
+                                Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            )
+                            .await;
+                        }
+                        let retry_batch = disposition
+                            .retry_batch
+                            .then(|| batch.clone())
+                            .flatten();
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
                             agent,
                             source,
-                            PromptOutcome::Ok(StopReason::EndTurn),
-                            None, // turn succeeded — batch was processed, no requeue
+                            PromptOutcome::Ok(disposition.stop_reason),
+                            retry_batch,
                         );
                         return;
                     }
@@ -2083,6 +2108,15 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            let proxy_publication = publish_captured_agent_output_best_effort(
+                &mut agent,
+                &ctx,
+                batch.as_ref(),
+                proxy_reply_thread_ref.as_ref(),
+            )
+            .await;
+            let disposition = successful_turn_disposition(stop_reason.clone(), proxy_publication);
 
             let should_rotate = matches!(
                 stop_reason,
@@ -2116,25 +2150,28 @@ pub async fn run_prompt_task(
                 agent.state.invalidate(&source);
             }
 
-            let core_stop = acp_stop_to_core(&stop_reason);
-            let usage = agent.acp.take_turn_usage();
-            publish_agent_turn_metric(
-                &ctx,
-                usage,
-                observer_channel_id,
-                &session_id,
-                &turn_id,
-                Some(core_stop),
-            )
-            .await;
+            let core_stop = acp_stop_to_core(&disposition.stop_reason);
+            if disposition.publish_metric {
+                let usage = agent.acp.take_turn_usage();
+                publish_agent_turn_metric(
+                    &ctx,
+                    usage,
+                    observer_channel_id,
+                    &session_id,
+                    &turn_id,
+                    Some(core_stop),
+                )
+                .await;
+            }
+            let retry_batch = disposition.retry_batch.then(|| batch.clone()).flatten();
 
             send_prompt_result(
                 &result_tx,
                 &turn_id,
                 agent,
                 source,
-                PromptOutcome::Ok(stop_reason),
-                None,
+                PromptOutcome::Ok(disposition.stop_reason),
+                retry_batch,
             );
         }
         Err(AcpError::AgentExited) => {
@@ -3844,6 +3881,178 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+fn automatic_reply_thread_ref(
+    batch: &FlushBatch,
+    channel_info: Option<&PromptChannelInfo>,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<buzz_sdk::ThreadRef> {
+    let triggering = &batch.events.last()?.event;
+    let parsed = crate::queue::parse_thread_tags(triggering);
+    let is_dm = channel_info
+        .map(|info| info.channel_type == "dm")
+        .unwrap_or(false);
+
+    if is_dm {
+        let root = parsed.root_event_id.as_deref()?;
+        let root_event_id = match nostr::EventId::from_hex(root) {
+            Ok(root_event_id) => root_event_id,
+            Err(error) => {
+                tracing::warn!(
+                    target: "pool::prompt",
+                    channel = %batch.channel_id,
+                    triggering_event_id = %triggering.id,
+                    malformed_root = root,
+                    %error,
+                    "malformed DM root tag; re-rooting proxy reply at triggering event"
+                );
+                triggering.id
+            }
+        };
+        return Some(buzz_sdk::ThreadRef {
+            root_event_id,
+            parent_event_id: triggering.id,
+        });
+    }
+
+    let parsed_anchor = crate::queue::resolve_reply_anchor(
+        &triggering.pubkey.to_hex(),
+        &parsed,
+        &triggering.id.to_hex(),
+        profile_lookup,
+    )?;
+    let root_event_id = match nostr::EventId::from_hex(&parsed_anchor) {
+        Ok(root_event_id) => root_event_id,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::prompt",
+                channel = %batch.channel_id,
+                triggering_event_id = %triggering.id,
+                malformed_root = parsed_anchor,
+                %error,
+                "malformed root tag; re-rooting proxy reply at triggering event"
+            );
+            triggering.id
+        }
+    };
+    Some(buzz_sdk::ThreadRef {
+        root_event_id,
+        parent_event_id: root_event_id,
+    })
+}
+
+async fn publish_captured_agent_output(
+    message: Option<&str>,
+    ctx: &PromptContext,
+    batch: Option<&FlushBatch>,
+    thread_ref: Option<&buzz_sdk::ThreadRef>,
+) -> Result<bool, AcpError> {
+    if !ctx.publish_agent_output {
+        return Ok(false);
+    }
+    let (Some(message), Some(batch)) = (message, batch) else {
+        return Ok(false);
+    };
+    let builder =
+        buzz_sdk::build_message(batch.channel_id, message, thread_ref, &[], false, &[])
+            .map_err(|error| AcpError::Protocol(format!("build remote agent reply: {error}")))?;
+    let event = builder
+        .sign_with_keys(&ctx.agent_keys)
+        .map_err(|error| AcpError::Protocol(format!("sign remote agent reply: {error}")))?;
+
+    let mut last_error = None;
+    for delay in [
+        Duration::ZERO,
+        Duration::from_millis(100),
+        Duration::from_millis(300),
+    ] {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match tokio::time::timeout(Duration::from_secs(5), ctx.rest_client.submit_event(&event))
+            .await
+        {
+            Ok(Ok(_)) => {
+                tracing::info!(
+                    target: "pool::prompt",
+                    channel = %batch.channel_id,
+                    event_id = %event.id,
+                    "published remote agent output through Buzz proxy"
+                );
+                return Ok(true);
+            }
+            Ok(Err(error)) => last_error = Some(error.to_string()),
+            Err(_) => last_error = Some("relay submission timed out".to_string()),
+        }
+    }
+    Err(AcpError::Protocol(format!(
+        "publish remote agent reply: {}",
+        last_error.unwrap_or_else(|| "unknown relay error".to_string())
+    )))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyPublication {
+    Skipped,
+    Published,
+    Failed,
+}
+
+#[derive(Debug, PartialEq)]
+struct SuccessfulTurnDisposition {
+    stop_reason: StopReason,
+    publish_metric: bool,
+    retry_batch: bool,
+}
+
+fn successful_turn_disposition(
+    stop_reason: StopReason,
+    _proxy_publication: ProxyPublication,
+) -> SuccessfulTurnDisposition {
+    SuccessfulTurnDisposition {
+        stop_reason,
+        publish_metric: true,
+        retry_batch: false,
+    }
+}
+
+async fn publish_captured_agent_output_best_effort(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    batch: Option<&FlushBatch>,
+    thread_ref: Option<&buzz_sdk::ThreadRef>,
+) -> ProxyPublication {
+    let captured_message = ctx
+        .publish_agent_output
+        .then(|| agent.acp.take_agent_message())
+        .flatten();
+    let result =
+        publish_captured_agent_output(captured_message.as_deref(), ctx, batch, thread_ref).await;
+    let error = match result {
+        Ok(true) => return ProxyPublication::Published,
+        Ok(false) => return ProxyPublication::Skipped,
+        Err(error) => error,
+    };
+
+    tracing::warn!(
+        target: "pool::prompt",
+        error = %error,
+        "remote turn succeeded but proxy publication failed"
+    );
+
+    let (Some(batch), Some(captured_message)) = (batch, captured_message.as_deref()) else {
+        return ProxyPublication::Failed;
+    };
+    let Some(triggering) = batch.events.last() else {
+        return ProxyPublication::Failed;
+    };
+    let thread_tags = crate::queue::parse_thread_tags(&triggering.event);
+    let notice = format!(
+        "The remote agent completed this turn, but Buzz could not publish its reply through the proxy identity.\n\n{captured_message}"
+    );
+    post_failure_notice(&ctx.rest_client, batch.channel_id, &thread_tags, &notice).await;
+    ProxyPublication::Failed
+}
+
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
 ///
 /// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
@@ -5337,6 +5546,170 @@ mod tests {
     }
 
     #[test]
+    fn automatic_remote_reply_uses_trigger_as_root_for_top_level_message() {
+        let batch = one_event_batch(Uuid::new_v4());
+        let triggering_id = batch.events[0].event.id;
+
+        let thread_ref = automatic_reply_thread_ref(&batch, None, None).expect("reply target");
+
+        assert_eq!(thread_ref.root_event_id, triggering_id);
+        assert_eq!(thread_ref.parent_event_id, triggering_id);
+    }
+
+    #[test]
+    fn automatic_remote_reply_stays_flat_in_existing_thread() {
+        let keys = Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let root_hex = root.id.to_hex();
+        let root_tag = Tag::parse(["e", root_hex.as_str(), "", "root"]).unwrap();
+        let triggering = EventBuilder::new(Kind::Custom(9), "follow-up")
+            .tags([root_tag])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event: triggering,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let thread_ref = automatic_reply_thread_ref(&batch, None, None).expect("reply target");
+
+        assert_eq!(thread_ref.root_event_id, root.id);
+        assert_eq!(thread_ref.parent_event_id, root.id);
+    }
+
+    #[test]
+    fn automatic_remote_reply_anchors_threaded_dm_to_triggering_event() {
+        let keys = Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let root_hex = root.id.to_hex();
+        let root_tag = Tag::parse(["e", root_hex.as_str(), "", "root"]).unwrap();
+        let triggering = EventBuilder::new(Kind::Custom(9), "follow-up")
+            .tags([root_tag])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let triggering_id = triggering.id;
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event: triggering,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let channel_info = PromptChannelInfo {
+            name: "dm".into(),
+            channel_type: "dm".into(),
+        };
+
+        let thread_ref =
+            automatic_reply_thread_ref(&batch, Some(&channel_info), None).expect("reply target");
+
+        assert_eq!(thread_ref.root_event_id, root.id);
+        assert_eq!(thread_ref.parent_event_id, triggering_id);
+    }
+
+    #[test]
+    fn automatic_remote_reply_does_not_flatten_agent_only_thread() {
+        let batch = one_event_batch(Uuid::new_v4());
+        let sender = batch.events[0].event.pubkey.to_hex();
+        let mut profiles = PromptProfileLookup::new();
+        profiles.insert(
+            sender,
+            PromptProfile {
+                is_agent: true,
+                ..PromptProfile::default()
+            },
+        );
+
+        assert!(automatic_reply_thread_ref(&batch, None, Some(&profiles)).is_none());
+    }
+
+    #[tokio::test]
+    async fn publish_captured_agent_output_is_noop_when_disabled() {
+        let ctx = make_prompt_context_no_owner();
+        let batch = one_event_batch(Uuid::new_v4());
+
+        let published =
+            publish_captured_agent_output(Some("remote output"), &ctx, Some(&batch), None)
+                .await
+                .expect("disabled publication is a no-op");
+
+        assert!(!published);
+    }
+
+    #[tokio::test]
+    async fn proxy_output_is_published_exactly_once_when_finalized_twice() {
+        let (base_url, events, server) = recording_event_server(200).await;
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.publish_agent_output = true;
+        ctx.rest_client.base_url = base_url;
+        let batch = one_event_batch(Uuid::new_v4());
+        let mut agent = owned_test_agent_with_message("remote output").await;
+
+        let first =
+            publish_captured_agent_output_best_effort(&mut agent, &ctx, Some(&batch), None).await;
+        let second =
+            publish_captured_agent_output_best_effort(&mut agent, &ctx, Some(&batch), None).await;
+
+        assert_eq!(first, ProxyPublication::Published);
+        assert_eq!(second, ProxyPublication::Skipped);
+        assert_eq!(events.lock().unwrap().len(), 1);
+        agent.acp.shutdown().await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_publish_failure_preserves_success_fate_and_reuses_signed_event() {
+        let (base_url, events, server) = recording_event_server(400).await;
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.publish_agent_output = true;
+        ctx.rest_client.base_url = base_url;
+        let batch = one_event_batch(Uuid::new_v4());
+        let mut agent = owned_test_agent_with_message("valuable remote output").await;
+
+        let publication =
+            publish_captured_agent_output_best_effort(&mut agent, &ctx, Some(&batch), None).await;
+        let disposition = successful_turn_disposition(StopReason::EndTurn, publication);
+
+        assert_eq!(publication, ProxyPublication::Failed);
+        assert_eq!(
+            disposition,
+            SuccessfulTurnDisposition {
+                stop_reason: StopReason::EndTurn,
+                publish_metric: true,
+                retry_batch: false,
+            }
+        );
+        {
+            let captured = events.lock().unwrap();
+            assert_eq!(
+                captured.len(),
+                4,
+                "three proxy attempts plus one best-effort failure notice"
+            );
+            let retry_ids: Vec<&str> = captured[..3]
+                .iter()
+                .map(|event| event["id"].as_str().expect("signed event id"))
+                .collect();
+            assert!(retry_ids.windows(2).all(|ids| ids[0] == ids[1]));
+        }
+        agent.acp.shutdown().await;
+        server.abort();
+    }
+
+    #[test]
     fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
         let cases = [
             (ControlSignal::Steer, Some(CancelReason::Steer)),
@@ -6301,6 +6674,93 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            publish_agent_output: false,
+        }
+    }
+
+    async fn recording_event_server(
+        status: u16,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind event server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server_events = events.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let (body_start, content_length) = loop {
+                    let mut chunk = [0_u8; 4096];
+                    let read = socket.read(&mut chunk).await.expect("read request");
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    break (header_end + 4, content_length);
+                };
+                while request.len() < body_start + content_length {
+                    let mut chunk = [0_u8; 4096];
+                    let read = socket.read(&mut chunk).await.expect("read request body");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                if content_length > 0 {
+                    let body = &request[body_start..body_start + content_length];
+                    let event = serde_json::from_slice(body).expect("event JSON");
+                    server_events.lock().unwrap().push(event);
+                }
+
+                let reason = if status == 200 { "OK" } else { "Bad Request" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        (base_url, events, server)
+    }
+
+    async fn owned_test_agent_with_message(message: &str) -> OwnedAgent {
+        let mut acp = AcpClient::spawn("cat", &[], &[], false)
+            .await
+            .expect("spawn inert test agent");
+        acp.capture_agent_message_for_test(message);
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "test".to_string(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
         }
     }
 
