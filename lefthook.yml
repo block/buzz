@@ -9,6 +9,9 @@
 #   drops deleted paths from push-file discovery (`extractFiles` existence
 #   check, repository.go). CI's dorny/paths-filter catches deletions.
 #   Deliberate — accepted, not worked around.
+# - `commit-msg` has no glob: it rewrites the commit message, not files. Note
+#   Git only runs it for `git commit` and `git merge` — other flows need their own
+#   flag: `git rebase --signoff`, `git cherry-pick -s`.
 pre-commit:
   parallel: true
   commands:
@@ -34,6 +37,14 @@ pre-commit:
       run: just mobile-fix
       stage_fixed: true
 
+# Appends the DCO Signed-off-by trailer the required "DCO Check" enforces.
+# `--if-exists doNothing` makes it idempotent and preserves an existing
+# sign-off (including `git commit -s` and a different signer's trailer).
+commit-msg:
+  commands:
+    signoff:
+      run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place {1}'
+
 pre-push:
   parallel: true
   commands:
@@ -50,12 +61,12 @@ pre-push:
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
       run: just desktop-test
-    desktop-tauri-test:
-      # ci.yml:113 — Desktop Core triggers on `rust` OR `desktop-rust`;
-      # desktop/src-tauri path-depends on crates/buzz-core, buzz-persona,
-      # buzz-sdk, buzz-agent (desktop/src-tauri/Cargo.toml:88-91).
+    desktop-tauri-checks:
+      # Keep local lint parity with Desktop Core CI for every path that can
+      # affect the Tauri crate or its path dependencies. Run clippy and tests
+      # serially so parallel pre-push hooks do not contend for Cargo's lock.
       glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
-      run: just desktop-tauri-test
+      run: just desktop-tauri-clippy && just desktop-tauri-test
     mobile-test:
       glob: ["mobile/**"]
       run: just mobile-test

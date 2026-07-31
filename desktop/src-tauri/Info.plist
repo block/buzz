@@ -10,6 +10,8 @@
     <string>Command Adviser needs microphone access for voice huddles.</string>
     <key>NSCameraUsageDescription</key>
     <string>Command Adviser needs camera access to record animated avatars.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Command Adviser uses your local network for trusted RAG, Memory, World Monitor, model, relay, and optional Share Compute connections.</string>
     <key>NSCalendarsUsageDescription</key>
     <string>Command Adviser can read selected calendars to prepare local command brief inputs.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>

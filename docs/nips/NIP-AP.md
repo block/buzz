@@ -218,15 +218,47 @@ Agents spawned from a persona carry [NIP-OA](NIP-OA.md) owner attestation — an
 
 ## Relay behavior
 
+### Ingest validation
+
 - The relay MUST accept `kind:30175` events that pass standard NIP-33 validation (valid signature, exactly one `d` tag with a non-empty value).
 - The relay stores persona events globally (`channel_id = NULL`); they are not channel-scoped.
 - The relay is NOT required to validate that `content` parses as valid `PersonaEventContent` JSON. Relays are dumb stores per Nostr convention; content validation is a client responsibility.
 - The relay MUST enforce that the `d` tag is non-empty (standard NIP-33 requirement for parameterized replaceable events).
+- The relay MUST enforce shared-tag shape: if a `shared` tag is present, it MUST consist of **exactly two elements** — `["shared", "true"]`. Extra elements (e.g. `["shared","true","extra"]`), wrong values (`["shared","false"]`), missing values (`["shared"]`), or duplicate `shared` tags are all rejected with `invalid:`. The two-element exact-shape constraint is required so that the relay's SQL visibility clause (`tags @> '[["shared","true"]]'`) never matches a stored malformed tag via JSONB containment supersets.
+
+### Access control: author-only-unless-shared
+
+Kind `30175` uses **shared-tag-gated read semantics** to protect system prompts and `respond_to_allowlist` from being visible to all community members as a side-effect of device sync.
+
+**Rules:**
+
+| Event state | Author reads | Foreign reads |
+|---|---|---|
+| No `shared` tag | ✅ allowed | ❌ withheld |
+| `["shared", "true"]` tag | ✅ allowed | ✅ allowed |
+
+These rules are enforced at the following relay read surfaces (content and event existence are withheld on all of them):
+
+- **REQ historical delivery** — foreign requests silently omit unshared persona events, even in mixed-kind filters (`{kinds:[30175,9]}`). The visibility check is applied **before `ORDER BY … LIMIT`** at the SQL level (`persona_reader` field in `EventQuery`), so a page of newer private personas cannot starve an older shared persona off the candidate set — the catalog's primary all-author query pattern is correctly served.
+- **NIP-01 `ids` lookup** — knowing an event id does NOT grant access to an unshared persona. The result gate returns nothing.
+- **Live fan-out** — unshared personas are delivered only to the author's connections. Shared personas fan out community-wide.
+- **COUNT** — the fast SQL `count_events()` path is bypassed when the filter can match `kind:30175`. A per-event fallback applies the shared-tag check, preventing existence-leak via COUNT.
+- **NIP-98 HTTP bridge `/query`** — the same per-event visibility check is applied to the catchall post-processing loop. The SQL-level `persona_reader` clause also applies before `LIMIT`, preventing older shared personas from being starved by newer private ones on paginated catalog queries. A foreign caller POSTing `{kinds:[30175],authors:[victim]}` or a kindless `{ids:[...]}` filter to `/query` receives no unshared persona content.
+- **NIP-98 HTTP bridge `/count`** — `needs_persona_filtering` forces the per-event fallback path for any filter that can match `kind:30175`; the fast SQL `count_events()` path is not used. Both the channel-scoped and unconstrained fallback loops apply `event_visible_to_reader`, preventing existence-leak via COUNT over HTTP.
+- **FTS (NIP-50 search) and `/search`** — kind `30175` is not in the relay's FTS allowlist (migration 8 indexes only kinds `0, 9, 40002, 45001, 45003`); no FTS result can contain an unshared persona. A defense-in-depth check is also present in the bridge search result loop so that a future FTS allowlist change cannot silently reopen the bypass.
+
+**Device sync is unaffected.** The sync subscription (`{kinds:[30175], authors:[self]}`) reads the author's own events, which are always returned regardless of shared state.
+
+**Opting in to community sharing.** Publish a NIP-33 replacement head for the persona with a `["shared", "true"]` tag. Unsharing is the reverse: republish without the tag. NIP-33 replacement semantics apply (newest `created_at` wins).
+
+**`shared` is a tag, not a content field.** Content bytes are hash-pinned as the NIP-01 event id and also used as the `source_version` for persona drift detection. A content-field toggle would look like a definition edit; a tag does not affect content bytes.
+
+**Non-goal: side-band existence oracles.** Reaction, report, and event-deletion validation resolves target events by id to check that they exist. These paths intentionally accept arbitrary event references by design — they leak one bit (existence) but never content, and exploiting them requires already possessing a 64-hex event id that unshared personas never expose through any gated read path. Gating these side-band resolvers would require teaching reaction/report validation about persona read semantics with no realistic attack mitigated. If a stricter "zero existence leakage" property is required in future, it is a separate scoped task.
 
 ## Security considerations
 
-- **No encryption.** System prompts, model names, runtime identifiers, and all configuration are visible to anyone with relay read access. Operators MUST NOT store secrets in persona event content.
-- **System prompt sensitivity.** System prompts may contain security-relevant behavioral instructions. Publishing them unencrypted enables adversarial prompt extraction. Operators who consider system prompts confidential SHOULD NOT publish them in persona events, or SHOULD use a relay with appropriate access controls.
+- **No encryption.** System prompts, model names, runtime identifiers, and all configuration are stored unencrypted. Shared persona events are readable community-wide. Operators MUST NOT store secrets in persona event content.
+- **System prompt protection.** System prompts and `respond_to_allowlist` pubkeys are sensitive. The relay's author-only-unless-shared gate ensures they are not visible to other community members unless the owner explicitly opts in by publishing a `["shared", "true"]` head. Shared persona events are readable community-wide; operators who need additional confidentiality should use relay-level access controls or choose not to share.
 - **Write authority.** Only the holder of `seckey_o` can publish or replace persona events. NIP-33 replacement is scoped by pubkey — no spoofing risk from other relay members.
 - **Slug collision across pubkeys.** Two different owners can publish personas with the same slug. Clients MUST always scope queries by author pubkey, not just slug.
 - **Metadata exposure.** The `(pubkey, kind:30175, slug)` triple reveals persona existence. Event timestamps reveal edit history.

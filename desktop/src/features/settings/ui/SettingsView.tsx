@@ -4,7 +4,7 @@ import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import {
-  canEditCommunityProfile,
+  canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
 } from "@/shared/api/relayMembers";
 import { getFeature } from "@/shared/features/manifest";
@@ -139,10 +139,10 @@ export function SettingsView({
           return false;
         }
       }
-      // Closed relays require a discovered admin/owner role. Open relays have
-      // no NIP-43 snapshot, so expose only the relay-authorized profile editor.
+      // Invites and member management require a discovered owner/admin role.
+      // Open relays have no membership snapshot or invite controls.
       if (s.value === "community-members") {
-        return canEditCommunityProfile(myMembershipQuery.data);
+        return canManageCommunityMembers(myMembershipQuery.data);
       }
       return true;
     });
@@ -242,7 +242,7 @@ export function SettingsView({
               data-testid="community-access-loading"
             >
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Checking community access…
+              Checking invite permissions…
             </div>
           ) : null}
           {myMembershipQuery.isError ? (
@@ -252,7 +252,7 @@ export function SettingsView({
             >
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
-                Community access could not be checked.
+                Invite settings could not be checked.
               </div>
               <button
                 className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
@@ -270,8 +270,8 @@ export function SettingsView({
               data-testid="community-access-snapshot-missing"
             >
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              Community access data is unavailable. Relay recovery may still be
-              in progress.
+              Invite settings are unavailable. Relay recovery may still be in
+              progress.
             </div>
           ) : null}
           {visibleNavGroups.map((group) => (

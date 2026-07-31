@@ -11,6 +11,7 @@ description = "Core types, event verification, and filter matching for Buzz"
 test-utils = []
 
 [dependencies]
+base64     = { workspace = true }
 nostr      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
@@ -21,7 +22,6 @@ chrono-tz  = "0.10"
 hex        = { workspace = true }
 hmac       = { workspace = true }
 sha2       = { workspace = true }
-base64     = "0.22"
 flate2     = "1"
 rand              = { workspace = true }
 subtle            = { workspace = true }

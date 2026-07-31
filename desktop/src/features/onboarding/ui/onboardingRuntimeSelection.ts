@@ -1,6 +1,11 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
-export const ONBOARDING_RUNTIME_ORDER = ["claude", "codex"];
+export const ONBOARDING_RUNTIME_ORDER = [
+  "claude",
+  "codex",
+  "goose",
+  "buzz-agent",
+];
 
 const VISIBLE_ONBOARDING_RUNTIME_IDS = new Set<string>(
   ONBOARDING_RUNTIME_ORDER,

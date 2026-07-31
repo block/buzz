@@ -41,6 +41,14 @@ test("reads source and target branches from the pull request", () => {
   assert.equal(pullRequest.targetBranch, "release");
 });
 
+test("preserves an optional source channel from the pull request", () => {
+  const event = pullRequestEvent();
+  event.tags.push(["h", "source-channel-id"]);
+
+  assert.equal(eventToProjectPullRequest(event).channelId, "source-channel-id");
+  assert.equal(eventToProjectPullRequest(pullRequestEvent()).channelId, null);
+});
+
 function updateEvent({ pubkey, createdAt, commit, cloneUrl }) {
   return {
     id: `update-${pubkey.slice(0, 8)}-${createdAt}`,
@@ -86,6 +94,44 @@ test("accepts updates signed by the PR author", () => {
     `https://relay.example/git/${AUTHOR}/demo-fork`,
   ]);
   assert.equal(pullRequest.updateCount, 1);
+});
+
+test("preserves root, update, and comment tags for rich content rendering", () => {
+  const root = pullRequestEvent({
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Add feature"],
+      ["c", "1111111111111111111111111111111111111111"],
+      ["imeta", "url https://relay.example/media/root.png", "m image/png"],
+    ],
+  });
+  const update = updateEvent({
+    pubkey: AUTHOR,
+    createdAt: 200,
+    commit: "2222222222222222222222222222222222222222",
+  });
+  update.tags.push([
+    "imeta",
+    "url https://relay.example/media/update.mp4",
+    "m video/mp4",
+  ]);
+  const comment = {
+    id: "comment-rich-content",
+    kind: 1,
+    pubkey: ATTACKER,
+    created_at: 250,
+    content: "[Demo](https://relay.example/media/comment.png)",
+    tags: [
+      ["e", root.id, "", "root"],
+      ["imeta", "url https://relay.example/media/comment.png", "m image/png"],
+    ],
+  };
+
+  const pullRequest = eventToProjectPullRequest(root, [update], [comment]);
+
+  assert.deepEqual(pullRequest.tags, [root.tags[3]]);
+  assert.deepEqual(pullRequest.updates[0].tags, [update.tags[3]]);
+  assert.deepEqual(pullRequest.comments[0].tags, [comment.tags[1]]);
 });
 
 test("accepts updates signed by the repo owner", () => {
@@ -232,6 +278,37 @@ test("parses commit-scoped inline comment anchors", () => {
   });
   assert.equal(pullRequest.comments[0].inlineCommentStatus, "current");
   assert.equal(pullRequest.comments[0].isInlineComment, true);
+});
+
+test("keeps anchors on comment-backed change requests", () => {
+  const commit = "1111111111111111111111111111111111111111";
+  const comment = commentEvent({
+    pubkey: OWNER,
+    createdAt: 150,
+    content: "Please handle the empty state before merging.",
+    labels: ["changes-requested"],
+    commit,
+    anchor: { path: "src/example.ts", side: "new", line: 12 },
+  });
+
+  const pullRequest = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [],
+    [comment],
+  );
+  const parsedComment = pullRequest.comments[0];
+
+  assert.deepEqual(parsedComment.anchor, {
+    path: "src/example.ts",
+    side: "new",
+    line: 12,
+  });
+  assert.equal(parsedComment.isTrustedReviewDecision, true);
+  assert.equal(
+    projectPullRequestCommentTimelineKind(parsedComment),
+    "changes-requested",
+  );
+  assert.equal(pullRequest.changeRequests.length, 1);
 });
 
 test("marks inline comments on earlier commits as outdated", () => {

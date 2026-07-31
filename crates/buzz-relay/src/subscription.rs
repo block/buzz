@@ -164,17 +164,30 @@ impl SubscriptionRegistry {
         conn_id: ConnId,
         sub_id: &str,
     ) -> Option<RemovedSubscription> {
-        if let Some(mut conn_subs) = self.subs.get_mut(&conn_id) {
-            if let Some((filters, community_id, channel_id)) = conn_subs.remove(sub_id) {
-                self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
-                metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
-                return Some(RemovedSubscription {
-                    community_id,
-                    channel_id,
-                });
-            }
-        }
-        None
+        self.remove_subscription_inner(conn_id, sub_id, || {})
+    }
+
+    fn remove_subscription_inner<F>(
+        &self,
+        conn_id: ConnId,
+        sub_id: &str,
+        after_remove: F,
+    ) -> Option<RemovedSubscription>
+    where
+        F: FnOnce(),
+    {
+        let mut conn_subs = self.subs.get_mut(&conn_id)?;
+        let (filters, community_id, channel_id) = conn_subs.remove(sub_id)?;
+
+        after_remove();
+        self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
+        drop(conn_subs);
+
+        metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
+        Some(RemovedSubscription {
+            community_id,
+            channel_id,
+        })
     }
 
     /// Remove all subscriptions for a connection and clean up index entries.
@@ -275,15 +288,37 @@ impl SubscriptionRegistry {
                 channel_id,
                 kind: event.event.kind,
             };
-            if let Some(candidates) = self.channel_kind_index.get(&(community_id, key)) {
-                for (conn_id, sub_id) in candidates.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+            if let Some(candidates) = self
+                .channel_kind_index
+                .get(&(community_id, key))
+                .map(|entry| entry.value().clone())
+            {
+                for (conn_id, sub_id) in candidates {
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
             // Also check wildcard (channel-only, kindless) index.
-            if let Some(wildcards) = self.channel_wildcard_index.get(&(community_id, channel_id)) {
-                for (conn_id, sub_id) in wildcards.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+            if let Some(wildcards) = self
+                .channel_wildcard_index
+                .get(&(community_id, channel_id))
+                .map(|entry| entry.value().clone())
+            {
+                for (conn_id, sub_id) in wildcards {
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
         } else {
@@ -296,24 +331,54 @@ impl SubscriptionRegistry {
                     kind: event.event.kind,
                     p,
                 };
-                if let Some(candidates) = self.global_p_kind_index.get(&key) {
-                    for (conn_id, sub_id) in candidates.iter() {
-                        self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+                if let Some(candidates) = self
+                    .global_p_kind_index
+                    .get(&key)
+                    .map(|entry| entry.value().clone())
+                {
+                    for (conn_id, sub_id) in candidates {
+                        self.push_match(
+                            conn_id,
+                            &sub_id,
+                            community_id,
+                            event,
+                            &mut results,
+                            &mut seen,
+                        );
                     }
                 }
             }
             if let Some(candidates) = self
                 .global_kind_index
                 .get(&(community_id, event.event.kind))
+                .map(|entry| entry.value().clone())
             {
-                for (conn_id, sub_id) in candidates.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+                for (conn_id, sub_id) in candidates {
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
             // Also check global wildcard (kindless global subs).
-            if let Some(wildcards) = self.global_wildcard_index.get(&community_id) {
-                for (conn_id, sub_id) in wildcards.iter() {
-                    self.push_match(*conn_id, sub_id, event, &mut results, &mut seen);
+            if let Some(wildcards) = self
+                .global_wildcard_index
+                .get(&community_id)
+                .map(|entry| entry.value().clone())
+            {
+                for (conn_id, sub_id) in wildcards {
+                    self.push_match(
+                        conn_id,
+                        &sub_id,
+                        community_id,
+                        event,
+                        &mut results,
+                        &mut seen,
+                    );
                 }
             }
         }
@@ -370,13 +435,20 @@ impl SubscriptionRegistry {
         &self,
         conn_id: ConnId,
         sub_id: &str,
+        community_id: CommunityId,
         event: &StoredEvent,
         results: &mut Vec<(ConnId, SubId)>,
         seen: &mut HashSet<(ConnId, SubId)>,
     ) {
         if let Some(conn_subs) = self.subs.get(&conn_id) {
-            if let Some((filters, _, _)) = conn_subs.get(sub_id) {
-                if filters_match(filters, event) {
+            if let Some((filters, sub_community_id, sub_channel_id)) = conn_subs.get(sub_id) {
+                // Candidate snapshots can become stale while a same-ID replacement
+                // moves the subscription. Re-check its authoritative scope before
+                // matching so an old index entry cannot deliver across scopes.
+                if *sub_community_id == community_id
+                    && *sub_channel_id == event.channel_id
+                    && filters_match(filters, event)
+                {
                     let entry = (conn_id, sub_id.to_string());
                     if seen.insert(entry.clone()) {
                         results.push(entry);
@@ -576,6 +648,8 @@ mod tests {
     use buzz_core::StoredEvent;
     use chrono::Utc;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn make_stored_event(kind: Kind, channel_id: Option<Uuid>) -> StoredEvent {
         let keys = Keys::generate();
@@ -627,6 +701,141 @@ mod tests {
         let event = make_stored_event(Kind::TextNote, Some(channel_id));
         let matches = registry.fan_out(&event);
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_subscription_removal_cannot_delete_replacement_index() {
+        let registry = Arc::new(SubscriptionRegistry::new());
+        let conn_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let sub_id = "same-id".to_string();
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+        registry.register(conn_id, sub_id.clone(), filters.clone(), Some(channel_id));
+
+        let (removed_tx, removed_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let remove_registry = Arc::clone(&registry);
+        let remove_sub_id = sub_id.clone();
+        let remove = std::thread::spawn(move || {
+            remove_registry.remove_subscription_inner(conn_id, &remove_sub_id, || {
+                removed_tx.send(()).expect("signal authoritative removal");
+                resume_rx.recv().expect("resume index cleanup");
+            })
+        });
+
+        removed_rx.recv().expect("old subscription removed");
+
+        let (registered_tx, registered_rx) = std::sync::mpsc::sync_channel(0);
+        let register_registry = Arc::clone(&registry);
+        let register_sub_id = sub_id.clone();
+        let register = std::thread::spawn(move || {
+            register_registry.register(conn_id, register_sub_id, filters, Some(channel_id));
+            registered_tx
+                .send(())
+                .expect("signal replacement registration");
+        });
+
+        let replacement_finished_early = registered_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_ok();
+        resume_tx.send(()).expect("resume old cleanup");
+        remove.join().expect("removal thread completes");
+        if !replacement_finished_early {
+            registered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("replacement registration completes");
+        }
+        register.join().expect("registration thread completes");
+        assert!(
+            !replacement_finished_early,
+            "replacement must wait until old index cleanup is complete"
+        );
+
+        let event = make_stored_event(Kind::TextNote, Some(channel_id));
+        assert_eq!(
+            registry.fan_out(&event),
+            vec![(conn_id, sub_id)],
+            "replacement must remain reachable through its index"
+        );
+    }
+
+    #[test]
+    fn test_stale_candidate_snapshot_does_not_cross_subscription_scope() {
+        let registry = SubscriptionRegistry::new();
+        let conn_id = Uuid::new_v4();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let sub_id = "same-id".to_string();
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+        registry.register(conn_id, sub_id.clone(), filters.clone(), Some(channel_a));
+
+        // Reproduce fan-out's unlocked candidate snapshot, then move the same
+        // subscription ID before the authoritative subscription lookup.
+        let key = IndexKey {
+            channel_id: channel_a,
+            kind: Kind::TextNote,
+        };
+        let candidates = registry
+            .channel_kind_index
+            .get(&(test_community(), key))
+            .expect("channel A candidate exists")
+            .value()
+            .clone();
+        registry.register(conn_id, sub_id, filters, Some(channel_b));
+
+        let event = make_stored_event(Kind::TextNote, Some(channel_a));
+        let mut results = Vec::new();
+        let mut seen = HashSet::new();
+        for (candidate_conn_id, candidate_sub_id) in candidates {
+            registry.push_match(
+                candidate_conn_id,
+                &candidate_sub_id,
+                test_community(),
+                &event,
+                &mut results,
+                &mut seen,
+            );
+        }
+
+        assert!(
+            results.is_empty(),
+            "replacement on channel B received channel A event through stale snapshot"
+        );
+    }
+
+    #[test]
+    fn test_fan_out_concurrent_with_subscription_replacement_completes() {
+        let registry = Arc::new(SubscriptionRegistry::new());
+        let conn_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let sub_id = "sub1".to_string();
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+        registry.register(conn_id, sub_id.clone(), filters.clone(), Some(channel_id));
+        let event = Arc::new(make_stored_event(Kind::TextNote, Some(channel_id)));
+        let deadline = Instant::now() + Duration::from_secs(2);
+
+        let fan_out_registry = Arc::clone(&registry);
+        let fan_out_event = Arc::clone(&event);
+        let fan_out = std::thread::spawn(move || {
+            while Instant::now() < deadline {
+                let _ = fan_out_registry.fan_out(&fan_out_event);
+            }
+        });
+
+        let replace_registry = Arc::clone(&registry);
+        let replace = std::thread::spawn(move || {
+            while Instant::now() < deadline {
+                replace_registry.register(
+                    conn_id,
+                    sub_id.clone(),
+                    filters.clone(),
+                    Some(channel_id),
+                );
+            }
+        });
+
+        fan_out.join().expect("fan-out thread completes");
+        replace.join().expect("replacement thread completes");
     }
 
     #[test]

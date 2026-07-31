@@ -8,8 +8,14 @@ import '../profile/user_profile.dart';
 class SmallAvatar extends StatelessWidget {
   final String pubkey;
   final Map<String, UserProfile> userCache;
+  final double size;
 
-  const SmallAvatar({super.key, required this.pubkey, required this.userCache});
+  const SmallAvatar({
+    super.key,
+    required this.pubkey,
+    required this.userCache,
+    this.size = 20,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -19,20 +25,20 @@ class SmallAvatar extends StatelessWidget {
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
 
     return Container(
-      width: 20,
-      height: 20,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(color: context.colors.surface, width: 1.5),
       ),
       child: AvatarImage(
         imageUrl: avatarUrl,
-        radius: 9,
+        radius: (size - 2) / 2,
         backgroundColor: context.colors.primaryContainer,
         fallback: Text(
           initial,
           style: TextStyle(
-            fontSize: 8,
+            fontSize: size * 0.4,
             fontWeight: FontWeight.w600,
             color: context.colors.onPrimaryContainer,
           ),

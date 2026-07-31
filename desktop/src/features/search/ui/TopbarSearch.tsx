@@ -409,6 +409,7 @@ export function TopbarSearch({
   const {
     channelLookup,
     debouncedQuery,
+    isWaitingOnFromResolution,
     query,
     resultProfiles,
     results,
@@ -487,7 +488,10 @@ export function TopbarSearch({
   const activeResults = isShowingSuggestions
     ? suggestionResults
     : groupedSearchResults;
-  const isSearchLoading = searchQuery.isLoading || userSearchQuery.isLoading;
+  const isSearchLoading =
+    isWaitingOnFromResolution ||
+    searchQuery.isLoading ||
+    userSearchQuery.isLoading;
 
   const openSearchDialog = React.useCallback(() => {
     setSelectedMenuIndex(0);

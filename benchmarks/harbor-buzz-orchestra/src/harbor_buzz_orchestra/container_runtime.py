@@ -24,7 +24,6 @@ from .manifest import AgentClass, ExperimentManifest
 from .provisioning import AgentCredential, TrialHandle
 from .runtime import RuntimeResult
 
-
 DEFAULT_MAX_AGENT_ROUNDS = 32
 # Container-side layout for the uploaded Buzz stack.
 REMOTE_ROOT = "/opt/buzz"
@@ -128,12 +127,20 @@ class BuzzContainerRuntime:
             if forwarder is not None:
                 infra.append(forwarder)
             await self._buzz_json(
-                trial.user, trial, "users", "set-profile", "--name",
+                trial.user,
+                trial,
+                "users",
+                "set-profile",
+                "--name",
                 trial.user.agent_id,
             )
             for credential in trial.credentials:
                 await self._buzz_json(
-                    credential, trial, "users", "set-profile", "--name",
+                    credential,
+                    trial,
+                    "users",
+                    "set-profile",
+                    "--name",
                     credential.agent_id,
                 )
                 agents.append(
@@ -244,11 +251,17 @@ class BuzzContainerRuntime:
             ) from error
         forwarder = _Agent(
             AgentCredential(
-                agent_id="relay-forwarder", role="infra",
-                nostr_secret_key="", nostr_pubkey="", nostr_auth_tag="",
-                llm_endpoint="", llm_api_key="",
+                agent_id="relay-forwarder",
+                role="infra",
+                nostr_secret_key="",
+                nostr_pubkey="",
+                nostr_auth_tag="",
+                llm_endpoint="",
+                llm_api_key="",
             ),
-            pid, log, log,
+            pid,
+            log,
+            log,
         )
         deadline = asyncio.get_running_loop().time() + self.readiness_timeout_seconds
         while True:
@@ -418,9 +431,14 @@ class BuzzContainerRuntime:
                 await self._raise_for_dead_agents(environment, agents)
             polls += 1
             messages = await self._buzz_json(
-                trial.user, trial,
-                "messages", "get", "--channel", trial.channel_id,
-                "--limit", "100",
+                trial.user,
+                trial,
+                "messages",
+                "get",
+                "--channel",
+                trial.channel_id,
+                "--limit",
+                "100",
             )
             for message in messages:
                 if message.get("pubkey") == orchestrator.nostr_pubkey and str(
@@ -451,9 +469,7 @@ class BuzzContainerRuntime:
             )
 
     @staticmethod
-    async def _stop_agents(
-        environment: BaseEnvironment, agents: list[_Agent]
-    ) -> None:
+    async def _stop_agents(environment: BaseEnvironment, agents: list[_Agent]) -> None:
         """Terminate every process of the uploaded stack (acp, agent, mcp)."""
         if not agents:
             return
@@ -461,14 +477,14 @@ class BuzzContainerRuntime:
         # to exist in task images, the /proc filesystem is.
         sweep = (
             "for d in /proc/[0-9]*; do "
-            f"grep -aq {REMOTE_BIN} \"$d/cmdline\" 2>/dev/null "
-            "&& kill -TERM \"${d#/proc/}\" 2>/dev/null; done; true"
+            f'grep -aq {REMOTE_BIN} "$d/cmdline" 2>/dev/null '
+            '&& kill -TERM "${d#/proc/}" 2>/dev/null; done; true'
         )
         try:
             await environment.exec(sweep)
             await asyncio.sleep(2)
             await environment.exec(sweep.replace("-TERM", "-KILL"))
-        except Exception:  # noqa: BLE001 — environment may already be gone
+        except Exception:  # noqa: S110, BLE001 — environment may already be gone
             pass
 
     async def _collect_logs(
@@ -476,7 +492,7 @@ class BuzzContainerRuntime:
     ) -> None:
         try:
             await environment.download_dir(REMOTE_LOGS, trial_dir)
-        except Exception:  # noqa: BLE001 — best effort; env may be torn down
+        except Exception:  # noqa: S110, BLE001 — best effort; env may be torn down
             pass
 
     # -- Buzz CLI as the trial user / provisioning identities -------------------
@@ -506,9 +522,14 @@ class BuzzContainerRuntime:
         self, credential: AgentCredential, trial: TrialHandle, content: str
     ) -> None:
         await self._buzz_json(
-            credential, trial,
-            "messages", "send", "--channel", trial.channel_id,
-            "--content", content,
+            credential,
+            trial,
+            "messages",
+            "send",
+            "--channel",
+            trial.channel_id,
+            "--content",
+            content,
         )
 
     async def _buzz_json(
@@ -614,9 +635,11 @@ class BuzzContainerRuntime:
             "",
             f"You are `{credential.agent_id}` (pubkey `{credential.nostr_pubkey}`).",
             f"The team coordinates in Buzz channel `{trial.channel_id}`.",
-            f"Tasks come from the user `{trial.user.agent_id}` "
-            f"(pubkey `{trial.user.nostr_pubkey}`); address your final report "
-            "to them.",
+            (
+                f"Tasks come from the user `{trial.user.agent_id}` "
+                f"(pubkey `{trial.user.nostr_pubkey}`); address your final report "
+                "to them."
+            ),
             "",
             "| Name | Role | Pubkey |",
             "|------|------|--------|",
@@ -625,8 +648,7 @@ class BuzzContainerRuntime:
             if teammate.agent_id == credential.agent_id:
                 continue
             lines.append(
-                f"| {teammate.agent_id} | {teammate.role} "
-                f"| `{teammate.nostr_pubkey}` |"
+                f"| {teammate.agent_id} | {teammate.role} | `{teammate.nostr_pubkey}` |"
             )
         composed = persona + "\n".join(lines) + "\n"
         path = trial_dir / f"{credential.agent_id}.system-prompt.md"

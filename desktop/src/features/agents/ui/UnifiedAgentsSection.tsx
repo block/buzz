@@ -1,12 +1,13 @@
 import * as React from "react";
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
   MessageCircle,
   RefreshCw,
 } from "lucide-react";
 
-import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -49,7 +50,6 @@ type UnifiedAgentsSectionProps = {
   messagingPersonaIds: ReadonlySet<string>;
   conversationErrorMessage: string | null;
   onMessagePersona: (personaId: string) => void;
-  canChooseCatalog: boolean;
   personas: AgentPersona[];
   personasError: Error | null;
   personaFeedbackErrorMessage: string | null;
@@ -57,12 +57,13 @@ type UnifiedAgentsSectionProps = {
   isPersonasLoading: boolean;
   isPersonasPending: boolean;
   onCreatePersona: () => void;
-  onChooseCatalog: () => void;
+  onDiscoverPersonas: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
   onEditPersona: (persona: AgentPersona) => void;
   onSharePersona: (
     persona: AgentPersona,
     linkedAgent: ManagedAgent | undefined,
+    effectiveAvatarUrl: string | null,
   ) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
@@ -70,7 +71,9 @@ type UnifiedAgentsSectionProps = {
 };
 
 const AGENT_CARD_COLUMN_CLASS = "w-full";
-const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} mx-auto grid max-w-[996px] grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-center gap-3`;
+export const AGENT_CARD_GRID_COLUMNS_CLASS =
+  "grid-cols-[repeat(auto-fill,minmax(220px,240px))]";
+const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid justify-start gap-3`;
 
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
@@ -90,7 +93,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     messagingPersonaIds,
     conversationErrorMessage,
     onMessagePersona,
-    canChooseCatalog,
     personas,
     personasError,
     personaFeedbackErrorMessage,
@@ -98,7 +100,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isPersonasLoading,
     isPersonasPending,
     onCreatePersona,
-    onChooseCatalog,
+    onDiscoverPersonas,
     onDuplicatePersona,
     onEditPersona,
     onSharePersona,
@@ -176,7 +178,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   const profileAgent = pickProfileAgent(group.agents);
                   return (
                     <AgentPersonaCard
-                      actions={
+                      actions={(effectiveAvatarUrl) => (
                         <div className="flex items-center gap-1">
                           <Button
                             disabled={messagingPersonaIds.has(group.persona.id)}
@@ -197,10 +199,16 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                             onDelete={onDeletePersona}
                             onDuplicate={onDuplicatePersona}
                             onEdit={onEditPersona}
-                            onShare={onSharePersona}
+                            onShare={(persona, linkedAgent) =>
+                              onSharePersona(
+                                persona,
+                                linkedAgent,
+                                effectiveAvatarUrl,
+                              )
+                            }
                           />
                         </div>
-                      }
+                      )}
                       agent={profileAgent}
                       defaultModel={defaultModel}
                       key={group.persona.id}
@@ -228,9 +236,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               const profileAgent = pickProfileAgent(group.agents);
               return (
                 <AgentPersonaCard
-                  actions={
+                  actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
                     <PersonaActionsMenu
-                      isActionPending={isActionPending}
+                      isActionPending={
+                        isActionPending || isEffectiveAvatarLoading
+                      }
                       isPending={isPersonasPending}
                       persona={group.persona}
                       linkedAgent={profileAgent}
@@ -238,9 +248,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       onDelete={onDeletePersona}
                       onDuplicate={onDuplicatePersona}
                       onEdit={onEditPersona}
-                      onShare={onSharePersona}
+                      onShare={(persona, linkedAgent) =>
+                        onSharePersona(persona, linkedAgent, effectiveAvatarUrl)
+                      }
                     />
-                  }
+                  )}
                   agent={profileAgent}
                   defaultModel={defaultModel}
                   key={group.persona.id}
@@ -255,11 +267,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               );
             })}
             <NewAgentCard
-              canChooseCatalog={canChooseCatalog}
-              isPersonasPending={isPersonasPending}
-              openFilePicker={openFilePicker}
-              onChooseCatalog={onChooseCatalog}
-              onCreatePersona={onCreatePersona}
+              isPending={isPersonasPending}
+              onCreate={onCreatePersona}
+              onDiscover={onDiscoverPersonas}
+              onImport={openFilePicker}
             />
           </div>
 
@@ -322,7 +333,10 @@ function AgentPersonaCard({
   onStartAgent,
   onStartPersona,
 }: {
-  actions?: React.ReactNode;
+  actions?: (
+    effectiveAvatarUrl: string | null,
+    isEffectiveAvatarLoading: boolean,
+  ) => React.ReactNode;
   agent: ManagedAgent | undefined;
   defaultModel: string;
   persona: AgentPersona;
@@ -337,10 +351,11 @@ function AgentPersonaCard({
   onStartPersona: (persona: AgentPersona) => void;
 }) {
   const title = persona.displayName;
-  const explicitModel = agent?.model ?? persona.model;
-  const modelLabel = explicitModel?.trim()
-    ? formatAgentModelLabel(explicitModel)
-    : formatDefaultModelLabel(defaultModel);
+  const modelLabel = resolveAgentCardModelLabel({
+    agent,
+    personaModel: persona.model,
+    defaultModel,
+  });
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
@@ -353,7 +368,10 @@ function AgentPersonaCard({
 
   return (
     <AgentIdentityCard
-      actions={actions}
+      actions={actions?.(
+        avatarUrl,
+        Boolean(agent && !persona.avatarUrl && profileQuery.isPending),
+      )}
       ariaLabel={`${title} agent profile`}
       avatar={
         agent ? (
@@ -398,7 +416,12 @@ function AgentPersonaCard({
         onOpenPersonaProfile(persona);
       }}
       statusBadge={
-        agent?.needsRestart ? (
+        agent?.personaOrphaned ? (
+          <Badge className="gap-1" variant="warning">
+            <AlertTriangle className="h-3 w-3" />
+            Configuration missing
+          </Badge>
+        ) : agent?.needsRestart ? (
           <Badge className="gap-1" variant="warning">
             <RefreshCw className="h-3 w-3" />
             Restart required
@@ -456,11 +479,11 @@ function StandaloneAgentCard({
       avatarUrl={profileQuery.data?.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
       label={title}
-      modelLabel={
-        agent.model?.trim()
-          ? formatAgentModelLabel(agent.model)
-          : formatDefaultModelLabel(defaultModel)
-      }
+      modelLabel={resolveAgentCardModelLabel({
+        agent,
+        personaModel: null,
+        defaultModel,
+      })}
       onClick={() => {
         onOpenAgentProfile(
           agent.pubkey,
@@ -468,7 +491,12 @@ function StandaloneAgentCard({
         );
       }}
       statusBadge={
-        agent.needsRestart ? (
+        agent.personaOrphaned ? (
+          <Badge className="gap-1" variant="warning">
+            <AlertTriangle className="h-3 w-3" />
+            Configuration missing
+          </Badge>
+        ) : agent.needsRestart ? (
           <Badge className="gap-1" variant="warning">
             <RefreshCw className="h-3 w-3" />
             Restart required
@@ -477,11 +505,6 @@ function StandaloneAgentCard({
       }
     />
   );
-}
-
-function formatDefaultModelLabel(defaultModel: string) {
-  const model = defaultModel.trim();
-  return model ? `Default model (${model})` : "Default model";
 }
 
 function firstAvatarUrl(
@@ -495,50 +518,37 @@ function firstAvatarUrl(
 }
 
 function NewAgentCard({
-  canChooseCatalog,
-  isPersonasPending,
-  openFilePicker,
-  onChooseCatalog,
-  onCreatePersona,
+  isPending,
+  onCreate,
+  onDiscover,
+  onImport,
 }: {
-  canChooseCatalog: boolean;
-  isPersonasPending: boolean;
-  openFilePicker: () => void;
-  onChooseCatalog: () => void;
-  onCreatePersona: () => void;
+  isPending: boolean;
+  onCreate: () => void;
+  onDiscover: () => void;
+  onImport: () => void;
 }) {
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <CreateIdentityCard
-          ariaLabel="New agent"
-          dataTestId="new-agent-card"
-          label="New agent"
-        />
+        <CreateIdentityCard ariaLabel="New agent" dataTestId="new-agent-card" />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        <DropdownMenuItem
-          disabled={isPersonasPending}
-          onClick={onCreatePersona}
-        >
-          Create from scratch
+        <DropdownMenuItem disabled={isPending} onClick={onCreate}>
+          Create agent
         </DropdownMenuItem>
-        {canChooseCatalog ? (
-          <DropdownMenuItem
-            disabled={isPersonasPending}
-            onClick={onChooseCatalog}
-          >
-            Choose from catalog
-          </DropdownMenuItem>
-        ) : null}
+        <DropdownMenuItem disabled={isPending} onClick={onDiscover}>
+          Discover agents
+        </DropdownMenuItem>
         <DropdownMenuItem
           data-testid="import-agent-snapshot-menu-item"
-          onClick={openFilePicker}
+          disabled={isPending}
+          onClick={onImport}
         >
-          Import agent snapshot
+          Import
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

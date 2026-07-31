@@ -5,6 +5,7 @@ import {
   THREAD_FOCUS_DRAWER_TRAVEL_PX,
   THREAD_FOCUS_SLIVER_WIDTH_PX,
 } from "@/features/channels/lib/threadFocusLayout";
+import { getThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { cn } from "@/shared/lib/cn";
 
 type FocusThreadDrawerProps = {
@@ -167,7 +168,11 @@ export function FocusThreadDrawer({
     return () => {
       const previousFocus = previousFocusRef.current;
       requestAnimationFrame(() => {
-        previousFocus?.focus({ preventScroll: true });
+        // A real dismissal keeps focus mode selected; a presentation switch
+        // has already selected split mode and owns focus inside the new panel.
+        if (getThreadViewMode() === "focus") {
+          previousFocus?.focus({ preventScroll: true });
+        }
       });
     };
   }, []);

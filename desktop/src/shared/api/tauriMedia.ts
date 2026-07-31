@@ -11,7 +11,7 @@ export async function pickAndUploadImage(): Promise<BlobDescriptor | null> {
 }
 
 /**
- * Fetch relay media bytes over IPC (Rust reqwest, WARP-tunneled).
+ * Fetch relay media bytes over IPC (Rust reqwest, VPN-tunneled).
  *
  * Used by the composer image editor: wrapping the bytes in a same-origin
  * `blob:` URL gives the canvas pixel access without CORS, so the media

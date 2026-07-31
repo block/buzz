@@ -1,8 +1,10 @@
 import { EllipsisVertical, Settings2, Users } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { useHuddle } from "@/features/huddle";
 import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
+import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import { buildHuddleChannelName } from "@/features/huddle/lib/huddleChannelName";
 import {
   useAvailableAcpRuntimes,
@@ -127,6 +129,7 @@ export function ChannelMembersBar({
           void queryClient.invalidateQueries({ queryKey: ["channels"] });
         } catch (e) {
           console.error("Failed to start huddle:", e);
+          toast.error(formatHuddleActionError(e, "start"));
         }
       }}
       renderMode={variant === "compact" ? "menu-item" : "button"}
