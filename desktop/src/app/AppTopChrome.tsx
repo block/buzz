@@ -4,8 +4,10 @@ import {
   ChevronRight,
   PanelLeftClose,
   PanelLeftOpen,
+  Terminal,
 } from "lucide-react";
 
+import { setDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { Button } from "@/shared/ui/button";
@@ -131,6 +133,31 @@ export function AppTopChrome({
           <ChevronRight />
         </Button>
       </div>
+      <div className={cn("ml-auto flex items-center", navRowAlignmentClass)}>
+        <DevModeSwitch />
+      </div>
     </div>
+  );
+}
+
+// Fixed px like the other top-chrome controls (see the traffic-light comment
+// above): this row must not scale with the Cmd +/- rem zoom.
+function DevModeSwitch() {
+  return (
+    <Button
+      aria-label="Switch to Dev Mode"
+      className="h-[28px] gap-[6px] rounded-[4px] px-[8px] text-[12px] font-medium text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[14px]"
+      data-testid="dev-mode-switch"
+      onClick={() => setDisplayStyle("developer")}
+      size="sm"
+      type="button"
+      variant="ghost"
+    >
+      <Terminal />
+      Dev Mode
+      <kbd className="rounded-[3px] border border-sidebar-foreground/20 px-[4px] py-[1px] font-sans text-[10px] text-sidebar-foreground/50">
+        {isMacPlatform() ? "⌘⇧D" : "Ctrl⇧D"}
+      </kbd>
+    </Button>
   );
 }
