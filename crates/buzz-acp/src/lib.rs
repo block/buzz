@@ -906,16 +906,27 @@ fn handle_cancel_turn_control(
         return;
     };
 
-    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
-    let status = if fired { "sent" } else { "no_active_turn" };
+    let Some(expected_session_id) = payload.get("sessionId").and_then(|value| value.as_str())
+    else {
+        tracing::warn!("observer cancel_turn control frame missing sessionId");
+        return;
+    };
+    let Some(expected_turn_id) = payload.get("turnId").and_then(|value| value.as_str()) else {
+        tracing::warn!("observer cancel_turn control frame missing turnId");
+        return;
+    };
+
+    let fired =
+        signal_expected_in_flight_task(pool, channel_id, expected_turn_id, ControlSignal::Cancel);
+    let status = if fired { "sent" } else { "context_mismatch" };
     if let Some(observer) = observer {
         observer.emit(
             "control_result",
             None,
             &observer::ObserverContext {
                 channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
+                session_id: Some(expected_session_id.to_string()),
+                turn_id: Some(expected_turn_id.to_string()),
                 started_at: None,
             },
             serde_json::json!({
@@ -2777,6 +2788,28 @@ fn signal_in_flight_task(
     false
 }
 
+/// Send a control signal only when the signed observer context still names
+/// the exact in-flight turn. A delayed control frame cannot cancel its successor.
+fn signal_expected_in_flight_task(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    expected_turn_id: &str,
+    mode: ControlSignal,
+) -> bool {
+    let entry = pool
+        .task_map_mut()
+        .values_mut()
+        .find(|meta| meta.channel_id == Some(channel_id) && meta.turn_id == expected_turn_id);
+    if let Some(meta) = entry {
+        if let Some(tx) = meta.control_tx.take() {
+            tracing::info!(channel = %channel_id, turn = expected_turn_id, ?mode, "context-bound control signal sent");
+            let _ = tx.send(mode);
+            return true;
+        }
+    }
+    false
+}
+
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
 ///
 /// Caller invariants:
@@ -4381,6 +4414,39 @@ mod owner_control_command_tests {
             channel_id,
             ControlSignal::Rotate
         ));
+    }
+
+    #[tokio::test]
+    async fn expected_turn_signal_rejects_stale_turn_without_consuming_control() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "current-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+            },
+        );
+
+        assert!(!signal_expected_in_flight_task(
+            &mut pool,
+            channel_id,
+            "stale-turn",
+            ControlSignal::Cancel,
+        ));
+        assert!(signal_expected_in_flight_task(
+            &mut pool,
+            channel_id,
+            "current-turn",
+            ControlSignal::Cancel,
+        ));
+        assert_eq!(control_rx.await.unwrap(), ControlSignal::Cancel);
     }
 }
 

@@ -2,12 +2,14 @@ import { ShieldAlert } from "lucide-react";
 
 import type { NumbatFinding } from "@/shared/api/tauriNumbat";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 
 export function NumbatSecurityFindings({
   error,
   findings,
   health,
+  onCancelTurn,
 }: {
   error: string | null;
   findings: NumbatFinding[];
@@ -15,6 +17,7 @@ export function NumbatSecurityFindings({
     state: "configured" | "disconnected" | "unsupported" | "stale";
     detail: string;
   } | null;
+  onCancelTurn?: () => void;
 }) {
   if (findings.length === 0 && !error && !health) return null;
 
@@ -71,6 +74,20 @@ export function NumbatSecurityFindings({
                   <p className="mt-1 font-mono text-xs text-muted-foreground">
                     {finding.ruleId}
                   </p>
+                  {(finding.severity === "high" ||
+                    finding.severity === "critical") &&
+                  onCancelTurn ? (
+                    <Button
+                      className="mt-2"
+                      data-testid="guardian-cancel-turn"
+                      onClick={onCancelTurn}
+                      size="xs"
+                      type="button"
+                      variant="destructive"
+                    >
+                      Stop this turn
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             </article>
