@@ -23,6 +23,15 @@ export function isLinuxPlatform(): boolean {
   );
 }
 
+/** Returns true on Windows desktop platforms. */
+export function isWindowsPlatform(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+
+  return /win/i.test(navigator.platform);
+}
+
 /**
  * The platform's normal application-shortcut modifier:
  * - macOS: Command (Meta)

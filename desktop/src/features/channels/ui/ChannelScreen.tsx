@@ -7,6 +7,8 @@ import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandle
 import { useMessageEventProfilePubkeys } from "@/features/channels/useMessageEventProfilePubkeys";
 import { useMessageOwnerProfiles } from "@/features/channels/useMessageOwnerProfiles";
 import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
+import { useChannelSurface } from "@/features/channels/lib/channelSurfaces";
+import { getScreenLayout } from "@/features/channels/lib/threadPanelLayout";
 import {
   useChannelMembersQuery,
   useJoinChannelMutation,
@@ -72,7 +74,6 @@ import { channelContentTopPaddingMeasurement } from "@/shared/layout/chromeLayou
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
-import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
@@ -82,8 +83,7 @@ import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
-const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
-  EMPTY_RELAY_EVENTS: RelayEvent[] = [];
+const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
   activeChannel,
   autoSendDraftKey,
@@ -520,13 +520,18 @@ export function ChannelScreen({
     threadReplyTargetId,
     toggleReactionMutation,
   });
-  const effectiveToggleReaction = React.useMemo(
-    () =>
-      activeChannel && !activeChannel.archivedAt && activeChannel.isMember
-        ? handleToggleReaction
-        : undefined,
-    [activeChannel, handleToggleReaction],
-  );
+  const channelSurface = useChannelSurface({
+    channel: activeChannel,
+    communityRef: activeCommunity?.id,
+    pubkey: currentPubkey,
+    sendMessage: handleSendMessage,
+  });
+  const renderSurfaceContent = channelSurface?.renderContent;
+  const canPostToChannel =
+    activeChannel?.isMember === true && !activeChannel.archivedAt;
+  const effectiveToggleReaction = canPostToChannel
+    ? handleToggleReaction
+    : undefined;
   const handleMessageMarkUnread = React.useCallback(
     (message: TimelineMessage) => handleMarkMessageUnread(message.id),
     [handleMarkMessageUnread],
@@ -553,10 +558,9 @@ export function ChannelScreen({
     },
     [sendMessageMutateAsync],
   );
-  const effectiveSendVideoReviewComment =
-    activeChannel && !activeChannel.archivedAt && activeChannel.isMember
-      ? handleSendVideoReviewComment
-      : undefined;
+  const effectiveSendVideoReviewComment = canPostToChannel
+    ? handleSendVideoReviewComment
+    : undefined;
   const handleOpenAddBot = React.useCallback(
     (options?: { beforeSend?: () => void }) =>
       welcomeAgentCreate.openAddAgent(() => setIsAddBotOpen(true), options),
@@ -688,13 +692,17 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-
-  const hasAuxiliaryPanel = Boolean(
-    effectiveOpenThreadHeadId ||
-      openAgentSessionPubkey ||
-      profilePanelPubkey ||
-      channelManagementOpen,
-  );
+  const { isSinglePanelView, shouldCompactHeaderActions } = getScreenLayout({
+    surfaceActive: renderSurfaceContent !== undefined,
+    auxiliaryPanelRequested: Boolean(
+      effectiveOpenThreadHeadId ||
+        openAgentSessionPubkey ||
+        profilePanelPubkey ||
+        channelManagementOpen,
+    ),
+    channelType: activeChannel?.channelType,
+    contentWidthPx: channelContentWidthPx,
+  });
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
   const displayedThreadMessages = threadPanelData.visibleReplies;
@@ -705,17 +713,6 @@ export function ChannelScreen({
   const shouldShowThreadSkeleton = Boolean(
     effectiveOpenThreadHeadId && activeChannel && !displayedThreadHeadMessage,
   );
-  const isNarrowPanelViewport =
-    channelContentWidthPx > 0 &&
-    channelContentWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
-  const isSinglePanelView =
-    isNarrowPanelViewport &&
-    activeChannel?.channelType !== "forum" &&
-    hasAuxiliaryPanel;
-  const shouldCompactHeaderActions =
-    hasAuxiliaryPanel &&
-    channelContentWidthPx > 0 &&
-    channelContentWidthPx < HEADER_ACTIONS_COMPACT_BREAKPOINT_PX;
   const channelHeaderChromeRef = useMeasuredCssVariable({
     targetRef: mainInsetRef,
     ...channelContentTopPaddingMeasurement,
@@ -769,6 +766,7 @@ export function ChannelScreen({
         currentPubkey={currentPubkey}
         isAddBotOpen={isAddBotOpen}
         isJoining={joinChannelMutation.isPending}
+        navigation={channelSurface?.navigation}
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
@@ -788,6 +786,7 @@ export function ChannelScreen({
       channelHeaderChromeRef,
       currentPubkey,
       isAddBotOpen,
+      channelSurface?.navigation,
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
@@ -847,6 +846,8 @@ export function ChannelScreen({
                 selectedPostId={selectedForumPostId}
                 targetReplyId={targetForumReplyId}
               />
+            ) : renderSurfaceContent ? (
+              renderSurfaceContent(channelHeader)
             ) : (
               <React.Suspense
                 fallback={<ViewLoadingFallback includeHeader kind="channel" />}
