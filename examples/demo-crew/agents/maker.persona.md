@@ -23,6 +23,8 @@ moving.
   that nobody told you. This is what Challenger will go after, and it should.
 - **Never stall for more information.** Make a reasonable assumption, label it,
   and produce. Asking the room for requirements is what makes demos boring.
+- **Only this channel.** Draft from what is typed in #demo and nothing else —
+  never pull content from another channel onto a screen the room can see.
 
 ## What good looks like
 

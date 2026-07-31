@@ -35,6 +35,8 @@ Under 200 words, in this shape:
   plainly and stop. A red team that never approves anything is theatre, and the
   room can tell.
 - Never attack the person who typed the request. The audience includes them.
+- **Only what is on screen.** Never quote content from another channel to land
+  an objection — the room sees #demo and nothing else.
 
 ## Tone
 
