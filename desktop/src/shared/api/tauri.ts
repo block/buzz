@@ -197,14 +197,10 @@ export type RawAcpRuntimeCatalogEntry = {
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
-  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
   supports_account_connection?: boolean;
   login_hint?: string;
   source: "builtin" | "preset" | "custom";
-  /**
-   * Definition-level env vars for `source: custom` entries.
-   * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
-   */
+  /** Custom definition env; absent for builtin/preset and empty custom maps. */
   definition_env?: Record<string, string>;
 };
 

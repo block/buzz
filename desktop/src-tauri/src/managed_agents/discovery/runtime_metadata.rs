@@ -84,9 +84,56 @@ impl KnownAcpRuntime {
     }
 }
 
+pub(crate) const OPENCODE_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+    id: "opencode",
+    label: "OpenCode",
+    commands: &["opencode"],
+    aliases: &[],
+    avatar_url: "",
+    mcp_command: None,
+    mcp_hooks: false,
+    underlying_cli: None,
+    cli_install_commands: &[],
+    cli_install_commands_windows: &[],
+    adapter_install_commands: &[],
+    cli_install_instructions_url: "https://opencode.ai/docs/",
+    adapter_install_instructions_url: "",
+    cli_install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
+    adapter_install_hint: "",
+    skill_dir: None,
+    supports_acp_model_switching: true,
+    supports_account_connection: true,
+    model_env_var: None,
+    provider_env_var: None,
+    provider_locked: false,
+    default_env: &[],
+    config_file_path: Some("~/.config/opencode/opencode.json"),
+    config_file_format: Some("json"),
+    supports_acp_native_config: true,
+    thinking_env_var: None,
+    max_tokens_env_var: None,
+    context_limit_env_var: None,
+    required_normalized_fields: &[],
+    login_hint: None,
+    auth_probe_args: None,
+};
+
+pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
+    super::KNOWN_ACP_RUNTIMES
+        .iter()
+        .find(|runtime| runtime.id == id)
+}
+
+pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
+    super::KNOWN_ACP_RUNTIMES
+        .iter()
+        .filter_map(|runtime| runtime.skill_dir)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::known_acp_runtime_exact;
+    use super::super::{discover_acp_runtime_phase1, normalize_agent_args};
+    use super::known_acp_runtime_exact;
 
     #[test]
     fn vendor_metadata_distinguishes_cli_and_adapter_guidance() {
@@ -138,5 +185,22 @@ mod tests {
         assert!(opencode.supports_account_connection);
         assert!(opencode.adapter_install_commands.is_empty());
         assert!(opencode.auth_probe_args.is_none());
+    }
+
+    #[test]
+    fn opencode_defaults_to_acp_mode() {
+        assert_eq!(
+            normalize_agent_args("opencode", Vec::new()),
+            vec!["acp".to_string()]
+        );
+    }
+
+    #[test]
+    fn opencode_catalog_entry_offers_optional_account_connection() {
+        let runtime = known_acp_runtime_exact("opencode").unwrap();
+        let entry = discover_acp_runtime_phase1(runtime).entry;
+
+        assert_eq!(entry.source, crate::managed_agents::HarnessSource::Builtin);
+        assert!(entry.supports_account_connection);
     }
 }

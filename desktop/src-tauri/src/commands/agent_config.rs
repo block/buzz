@@ -604,7 +604,6 @@ fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<
 mod tests {
     use super::*;
     use crate::managed_agents::{BackendKind, RespondTo};
-
     fn goose_runtime() -> &'static KnownAcpRuntime {
         &KnownAcpRuntime {
             id: "goose",

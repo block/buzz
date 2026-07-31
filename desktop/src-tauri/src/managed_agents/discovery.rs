@@ -15,7 +15,9 @@ mod runtime_metadata;
 
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use runtime_metadata::{
+    known_acp_runtime_exact, known_skill_dirs, KnownAcpRuntime, OPENCODE_RUNTIME,
+};
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -175,39 +177,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
-    KnownAcpRuntime {
-        id: "opencode",
-        label: "OpenCode",
-        commands: &["opencode"],
-        aliases: &[],
-        avatar_url: "",
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://opencode.ai/docs/",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: true,
-        supports_account_connection: true,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.config/opencode/opencode.json"),
-        config_file_format: Some("json"),
-        supports_acp_native_config: true,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: None,
-        auth_probe_args: None,
-    },
+    OPENCODE_RUNTIME,
     KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
@@ -242,11 +212,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         auth_probe_args: None,
     },
 ];
-
-/// Skill discovery directories declared by known runtimes.
-pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
-    KNOWN_ACP_RUNTIMES.iter().filter_map(|p| p.skill_dir)
-}
 
 fn workspace_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -306,10 +271,6 @@ pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntim
                 .any(|command| normalized == normalize_command_identity(command))
             || runtime.aliases.iter().any(|alias| normalized == *alias)
     })
-}
-
-pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
-    KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
 }
 
 /// The agent command a freshly-created agent defaults to when the create

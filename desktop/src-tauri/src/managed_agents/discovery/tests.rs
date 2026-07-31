@@ -95,23 +95,6 @@ fn normalizes_buzz_agent_args_to_empty() {
 }
 
 #[test]
-fn defaults_opencode_to_acp_mode() {
-    assert_eq!(
-        normalize_agent_args("opencode", Vec::new()),
-        vec!["acp".to_string()]
-    );
-}
-
-#[test]
-fn opencode_catalog_entry_offers_optional_account_connection() {
-    let runtime = super::known_acp_runtime_exact("opencode").unwrap();
-    let entry = super::discover_acp_runtime_phase1(runtime).entry;
-
-    assert_eq!(entry.source, crate::managed_agents::HarnessSource::Builtin);
-    assert!(entry.supports_account_connection);
-}
-
-#[test]
 fn login_shell_lookup_treats_command_as_data() {
     let marker =
         std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
