@@ -1677,12 +1677,18 @@ test("channel date divider keeps the date sticky while the separator rule scroll
     const groupRect = firstGroup.getBoundingClientRect();
     const pillRect = firstDividerPill.getBoundingClientRect();
     const groupBefore = getComputedStyle(firstGroup, "::before");
+    const ruleHeight = Number.parseFloat(groupBefore.height);
+    const ruleTranslateY = groupBefore.translate.split(" ")[1] ?? "0";
+    const ruleTranslateYOffset = ruleTranslateY.endsWith("%")
+      ? (Number.parseFloat(ruleTranslateY) / 100) * ruleHeight
+      : Number.parseFloat(ruleTranslateY);
     return {
       pillCenter: pillRect.top + pillRect.height / 2,
       ruleCenter:
         groupRect.top +
         Number.parseFloat(groupBefore.top) +
-        Number.parseFloat(groupBefore.height) / 2,
+        ruleHeight / 2 +
+        ruleTranslateYOffset,
     };
   });
   expect(initialAlignment.ruleCenter).toBeCloseTo(
