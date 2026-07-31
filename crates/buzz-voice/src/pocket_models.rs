@@ -24,12 +24,19 @@ pub struct PocketModelArtifact {
 /// Capabilities of Buzz Desktop's sole Pocket model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PocketModelInfo {
+    /// Language bundle selected from the pinned export.
     pub bundle_id: &'static str,
+    /// Upstream model repository.
     pub source_model_id: &'static str,
+    /// Pinned upstream model revision.
     pub revision: &'static str,
+    /// PCM output sample rate.
     pub sample_rate: u32,
+    /// Maximum input size declared by the bundle.
     pub max_token_per_chunk: usize,
+    /// Immutable files required by the runtime.
     pub artifacts: &'static [PocketModelArtifact],
+    /// Components quantized in the selected bundle.
     pub quantized_components: &'static [&'static str],
 }
 

@@ -6,6 +6,8 @@ import {
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
+  KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_EDIT,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
@@ -38,6 +40,17 @@ export function buildChannelFilter(
   }
 
   return filter;
+}
+
+/** Strictly live huddle message filter: zero stored rows, future messages only. */
+export function buildHuddleTtsLiveFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return {
+    kinds: [KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2],
+    "#h": [channelId],
+    limit: 0,
+  };
 }
 
 /**

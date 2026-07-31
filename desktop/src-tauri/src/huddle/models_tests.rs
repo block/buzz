@@ -22,11 +22,8 @@ fn expected_files_match_april_int8_metadata() {
         .artifacts
         .iter()
         .map(|artifact| artifact.filename)
-        .chain([
-            TTS_LICENSE_ARTIFACT.filename,
-            TTS_REFERENCE_ARTIFACT.filename,
-            TTS_LICENSE_FILE_NAME,
-        ])
+        .chain([TTS_LICENSE_ARTIFACT.filename, TTS_LICENSE_FILE_NAME])
+        .chain(POCKET_VOICES.iter().map(|voice| voice.reference_file))
         .collect::<Vec<_>>();
     expected.sort_unstable();
     let mut actual = TTS_EXPECTED_FILES.to_vec();
@@ -36,6 +33,7 @@ fn expected_files_match_april_int8_metadata() {
     assert!(!actual.contains(&"flow_lm_main.onnx"));
     assert!(!actual.contains(&"flow_lm_flow.onnx"));
     assert!(!actual.contains(&"mimi_decoder.onnx"));
+    assert!(!actual.contains(&"marius.wav"));
 }
 
 #[test]
