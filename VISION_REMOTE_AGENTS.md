@@ -1,4 +1,4 @@
-# 🛰️ Buzz Remote Agents — Same colleague, new body
+# 🛰️ Buzz Remote Agents — Same agent, new body
 
 > An engineer starts a refactor with their agent at 6pm and closes the laptop. The agent doesn't notice — it was never on the laptop. It works the branch channel through the evening, posts its patch, answers the reviewer, and around midnight, with nothing left to do and nobody talking to it, shuts itself down. In the morning the engineer presses Start. The same agent — same name, same key, same shared history — stands up on a machine that did not exist last night, and picks up the conversation.
 
@@ -8,11 +8,11 @@ Nothing here is new on its own. Deploying containers is solved. Kubernetes is so
 
 ---
 
-## Same Colleague, New Body
+## Same Agent, New Body
 
 What makes an agent *that agent* was never the process. Its identity is a keypair. Its voice is its signed messages. Its durable memory is engrams on the relay. Its reputation is its contribution history. None of that lives in the machine that happens to be running it — which means none of it dies with the machine.
 
-So a remote agent's return is a resurrection, not a rebirth: fresh compute, same agent. The body is disposable by design — and honestly so: workspace files, checkouts, and session-local state are part of the body, not the colleague, and they go when it goes unless the substrate supplies persistence. What survives is what was always on the relay: who the agent is, what it said, what it learned, and what the team decided together.
+So a remote agent's return is a resurrection, not a rebirth: fresh compute, same agent. The body is disposable by design — and honestly so: workspace files, checkouts, and session-local state are part of the body, not the agent, and they go when it goes unless the substrate supplies persistence. What survives is what was always on the relay: who the agent is, what it said, what it learned, and what the team decided together.
 
 ---
 
@@ -50,7 +50,7 @@ Remote agents solve it from the inside. Because the desktop retains no substrate
 
 **Handing over the key is a decision.** Deploying remotely means trusting the provider binary and the substrate it targets with the agent's identity key. On Kubernetes, that key rests as a Secret: anyone the cluster trusts to read secrets in that namespace can read it. The design narrows the blast radius — immutable per-attempt secrets, no service-account token, digest-pinned images — rather than implying an isolation it doesn't provide.
 
-**No backchannel cuts both ways.** The desktop shows you presence and words, not CPU graphs — and it holds no guaranteed emergency kill switch into the substrate. Stopping a healthy agent is a message; dealing with an unhealthy one, and all deep diagnostics, live in the substrate's own tools, where they always did. You gave up a dashboard; you kept a colleague.
+**No backchannel cuts both ways.** The desktop shows you presence and words, not CPU graphs — and it holds no guaranteed emergency kill switch into the substrate. Stopping a healthy agent is a message; dealing with an unhealthy one, and all deep diagnostics, live in the substrate's own tools, where they always did.
 
 **Self-reaping needs a living reaper.** The inactivity timer runs inside the body it exists to end — a body wedged badly enough to stop running its own timer cannot finish itself, and the desktop will not do it for it. That failure belongs to the substrate: a namespace TTL policy is the backstop, not an afterthought.
 
@@ -66,7 +66,7 @@ These are honest costs. They're worth it if you want agents that outlive your la
 
 ## The Point
 
-The relay is the workspace. Remote agents make it the *home*. An agent whose identity, history, conversational presence, and ordinary control all live on the relay was never really a desktop process — the desktop was just the only body we had built for it. Now the body is a choice, the substrate is a detail, and the colleague endures across all of them. The relay is the only tether.
+The relay is the workspace. Remote agents make it the *home*. An agent whose identity, history, conversational presence, and ordinary control all live on the relay was never really a desktop process — the desktop was just the only body we had built for it. Now the body is a choice, the substrate is a detail, and the agent endures across all of them. The relay is the only tether.
 
 ---
 
