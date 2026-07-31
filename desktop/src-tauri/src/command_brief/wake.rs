@@ -1,13 +1,17 @@
 //! Platform wake notification boundary for same-day schedule catch-up.
 
+#[cfg(any(target_os = "macos", test))]
 use std::sync::Arc;
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) type WakeEventHandler = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// Owned platform subscription. Dropping it stops further wake delivery.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) trait WakeSubscription: Send {}
 
 /// Testable boundary over an operating-system wake event source.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) trait WakeEventSource {
     fn subscribe(
         &self,

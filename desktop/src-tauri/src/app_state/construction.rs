@@ -63,6 +63,7 @@ pub fn build_app_state() -> AppState {
             crate::startup::CommandBriefRuntimeSet::default(),
         ),
         command_brief_runtime_generation: AtomicU64::new(0),
+        #[cfg(target_os = "macos")]
         command_brief_wake_subscription: Mutex::new(None),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))

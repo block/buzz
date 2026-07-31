@@ -20,6 +20,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub command_brief_runtimes: tokio::sync::RwLock<crate::startup::CommandBriefRuntimeSet>,
     pub command_brief_runtime_generation: AtomicU64,
+    #[cfg(target_os = "macos")]
     pub command_brief_wake_subscription:
         Mutex<Option<Box<dyn crate::command_brief::wake::WakeSubscription>>>,
     /// A no-redirect client for authenticated relay media fetches (download,
