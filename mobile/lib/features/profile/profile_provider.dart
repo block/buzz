@@ -1,10 +1,52 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'user_cache_provider.dart';
 import 'user_profile.dart';
+
+Map<String, dynamic> mergeProfileMetadata(
+  String? currentContent, {
+  required String displayName,
+  required String avatarUrl,
+  required String about,
+}) {
+  final trimmedDisplayName = displayName.trim();
+  if (trimmedDisplayName.isEmpty) {
+    throw ArgumentError.value(displayName, 'displayName', 'must not be empty');
+  }
+
+  final metadata = <String, dynamic>{};
+  if (currentContent != null) {
+    try {
+      final decoded = jsonDecode(currentContent);
+      if (decoded is Map<String, dynamic>) metadata.addAll(decoded);
+    } catch (_) {
+      // Replace malformed metadata with a valid profile snapshot.
+    }
+  }
+
+  metadata['display_name'] = trimmedDisplayName;
+  _setOptionalProfileField(metadata, 'picture', avatarUrl);
+  _setOptionalProfileField(metadata, 'about', about);
+  return metadata;
+}
+
+void _setOptionalProfileField(
+  Map<String, dynamic> metadata,
+  String key,
+  String value,
+) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty) {
+    metadata.remove(key);
+  } else {
+    metadata[key] = trimmed;
+  }
+}
 
 /// The current user's profile (kind:0 metadata) loaded over the relay
 /// WebSocket. Returns null when no nsec is configured or when the user has
@@ -36,6 +78,69 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 
   Future<void> refresh() async {
     state = await AsyncValue.guard(_fetch);
+  }
+
+  Future<UserProfile> updateProfile({
+    required String displayName,
+    required String avatarUrl,
+    required String about,
+  }) async {
+    final config = ref.read(relayConfigProvider);
+    final myPk = pubkeyFromNsec(config.nsec);
+    if (myPk == null) {
+      throw StateError('Cannot update profile without an active identity');
+    }
+
+    final session = ref.read(relaySessionProvider.notifier);
+    final events = await session.fetchHistory(NostrFilters.profile(myPk));
+    final currentEvent = events.isEmpty ? null : events.first;
+    final metadata = mergeProfileMetadata(
+      currentEvent?.content,
+      displayName: displayName,
+      avatarUrl: avatarUrl,
+      about: about,
+    );
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final createdAt = currentEvent != null && currentEvent.createdAt >= now
+        ? currentEvent.createdAt + 1
+        : now;
+    if (!_isSameRelayIdentity(config)) {
+      throw StateError('Active identity changed while editing the profile');
+    }
+    final relay = SignedEventRelay(session: session, nsec: config.nsec);
+    NostrEvent? signedEvent;
+
+    await relay.submit(
+      kind: EventKind.metadata,
+      content: jsonEncode(metadata),
+      tags: currentEvent?.tags ?? const [],
+      createdAt: createdAt,
+      onSigned: (event) => signedEvent = event,
+    );
+
+    final event = signedEvent;
+    if (event == null) {
+      throw StateError('Profile event was not signed');
+    }
+    final data = ProfileData.fromEvent(event);
+    final updated = UserProfile(
+      pubkey: data.pubkey,
+      displayName: data.displayName,
+      avatarUrl: data.avatarUrl,
+      about: data.about,
+      nip05Handle: data.nip05,
+      ownerPubkey: state.value?.ownerPubkey,
+    );
+    if (_isSameRelayIdentity(config)) {
+      state = AsyncData(updated);
+      ref.read(userCacheProvider.notifier).put(updated);
+    }
+    return updated;
+  }
+
+  bool _isSameRelayIdentity(RelayConfig expected) {
+    final active = ref.read(relayConfigProvider);
+    return active.nsec == expected.nsec && active.baseUrl == expected.baseUrl;
   }
 }
 
