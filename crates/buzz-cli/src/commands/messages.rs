@@ -391,6 +391,52 @@ pub async fn cmd_get_messages(
     Ok(())
 }
 
+/// Sentinel depth that effectively means "full thread".
+///
+/// The relay only routes a filter with `#e: [root]` to its recursive
+/// full-thread query (`get_thread_replies`, which walks descendants through
+/// the `thread_metadata` table) when a `depth_limit` extension field is
+/// present. Without it the query falls through to the generic path, where
+/// `#e` matches only *direct* replies to the root — silently dropping every
+/// nested reply (a reply-to-a-reply has its parent, not the root, in `#e`).
+///
+/// `messages thread` documents that it resolves the full thread from the event
+/// ID alone, so an unspecified `--depth` must still engage the full-thread
+/// path. The relay's DB clause is `tm.depth <= <n>` with `n` bound as `i32`,
+/// so `i32::MAX` (cast back to `u32` to survive JSON) bounds nothing real and
+/// returns the whole tree.
+const FULL_THREAD_DEPTH: u32 = i32::MAX as u32;
+
+/// Build the two filters (reply + root) that make up a thread read.
+///
+/// Pure and testable in isolation; `cmd_get_thread` just ships them to the
+/// relay. A `depth_limit` of `None` (the default from the CLI flags) maps to
+/// the `FULL_THREAD_DEPTH` sentinel rather than omission, so a plain
+/// `messages thread` returns the *entire* nested thread instead of only the
+/// root's direct replies.
+fn build_thread_filters(
+    channel_id: &str,
+    event_id: &str,
+    limit: u32,
+    depth_limit: Option<u32>,
+) -> Vec<serde_json::Value> {
+    // Two filters ORed in a single HTTP call:
+    // 1. Replies referencing this event via e-tag (no kind restriction)
+    // 2. The root event itself by ID
+    let reply_filter = serde_json::json!({
+        "kinds": [9, 40002, 40003, 40008, 45003],
+        "#h": [channel_id],
+        "#e": [event_id],
+        "limit": limit,
+        "depth_limit": depth_limit.unwrap_or(FULL_THREAD_DEPTH)
+    });
+    let root_filter = serde_json::json!({
+        "ids": [event_id],
+        "limit": 1
+    });
+    vec![reply_filter, root_filter]
+}
+
 pub async fn cmd_get_thread(
     client: &BuzzClient,
     channel_id: &str,
@@ -403,23 +449,8 @@ pub async fn cmd_get_thread(
     validate_hex64(event_id)?;
     let limit = limit.unwrap_or(100).min(500);
 
-    // Two filters ORed in a single HTTP call:
-    // 1. Replies referencing this event via e-tag (no kind restriction)
-    // 2. The root event itself by ID
-    let mut reply_filter = serde_json::json!({
-        "kinds": [9, 40002, 40003, 40008, 45003],
-        "#h": [channel_id],
-        "#e": [event_id],
-        "limit": limit
-    });
-    if let Some(d) = depth_limit {
-        reply_filter["depth_limit"] = serde_json::json!(d);
-    }
-    let root_filter = serde_json::json!({
-        "ids": [event_id],
-        "limit": 1
-    });
-    let resp = client.query_multi(&[reply_filter, root_filter]).await?;
+    let filters = build_thread_filters(channel_id, event_id, limit, depth_limit);
+    let resp = client.query_multi(&filters).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
     let normalized = normalize_events(&events);
@@ -993,9 +1024,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        build_thread_filters, event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, FULL_THREAD_DEPTH,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1371,5 +1402,36 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[test]
+    fn thread_filter_defaults_to_full_thread_depth() {
+        // A plain `messages thread` (no `--depth`) must still engage the
+        // relay's recursive full-thread path. Omitting `depth_limit` makes the
+        // relay treat the query as a generic `#e: [root]` filter, which
+        // matches only *direct* replies — silently dropping nested replies
+        // (a reply-to-a-reply carries its parent, not the root, in `#e`).
+        // Regression guard for that wrong-results bug.
+        let filters = build_thread_filters(ID_A, ID_B, 100, None);
+        assert_eq!(filters.len(), 2);
+        let reply = &filters[0];
+        assert_eq!(reply["#e"], serde_json::json!([ID_B]));
+        assert_eq!(reply["#h"], serde_json::json!([ID_A]));
+        assert_eq!(
+            reply["depth_limit"],
+            serde_json::json!(FULL_THREAD_DEPTH),
+            "a thread read with no explicit --depth must request the full nested thread"
+        );
+        let root = &filters[1];
+        assert_eq!(root["ids"], serde_json::json!([ID_B]));
+        assert_eq!(root["limit"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn thread_filter_honors_explicit_depth_limit() {
+        // With `--depth` the caller asks for a bounded slice; the sentinel
+        // must not override it.
+        let filters = build_thread_filters(ID_A, ID_B, 50, Some(3));
+        assert_eq!(filters[0]["depth_limit"], serde_json::json!(3));
     }
 }
