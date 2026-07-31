@@ -1,7 +1,7 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
     merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    validate_persona_deletion, BUILT_IN_PERSONAS, LEGACY_BUILT_IN_SYSTEM_PROMPTS, RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
@@ -88,6 +88,80 @@ fn merge_personas_preserves_builtin_edits() {
     assert_eq!(fizz.name_pool, edited_builtin.name_pool);
     assert_eq!(fizz.env_vars, edited_builtin.env_vars);
     assert_eq!(fizz.is_active, edited_builtin.is_active);
+}
+
+#[test]
+fn merge_personas_upgrades_unmodified_legacy_prompts() {
+    let mut legacy_records = built_in_persona_records("2026-03-19T00:00:00Z");
+    for record in &mut legacy_records {
+        record.system_prompt = LEGACY_BUILT_IN_SYSTEM_PROMPTS
+            .iter()
+            .find(|(id, _)| *id == record.id)
+            .map(|(_, prompt)| (*prompt).to_string())
+            .expect("each current built-in should have a legacy prompt");
+    }
+
+    let (records, changed) = merge_personas(legacy_records, "2026-07-31T00:00:00Z");
+
+    assert!(changed);
+    for record in records {
+        let current = BUILT_IN_PERSONAS
+            .iter()
+            .find(|persona| persona.id == record.id)
+            .expect("record should be a current built-in");
+        assert_eq!(record.system_prompt, current.system_prompt);
+        assert_eq!(record.updated_at, "2026-07-31T00:00:00Z");
+    }
+}
+
+#[test]
+fn built_in_prompts_define_distinct_work_contracts() {
+    for persona in BUILT_IN_PERSONAS {
+        for required_section in [
+            "Jurisdiction",
+            "Evidence rules",
+            "Output",
+            "Stop conditions",
+        ] {
+            assert!(
+                persona.system_prompt.contains(required_section),
+                "{} prompt is missing {required_section}",
+                persona.display_name
+            );
+        }
+        assert!(
+            persona
+                .system_prompt
+                .contains("Another agent's access is not your access."),
+            "{} prompt must keep authorization individual",
+            persona.display_name
+        );
+        assert!(
+            persona.system_prompt.contains("durable channel or thread"),
+            "{} prompt must treat the work room as durable context",
+            persona.display_name
+        );
+    }
+
+    let fizz = BUILT_IN_PERSONAS
+        .iter()
+        .find(|persona| persona.id == "builtin:fizz")
+        .expect("Fizz should exist");
+    assert!(fizz.system_prompt.contains("concrete workspace changes"));
+
+    let honey = BUILT_IN_PERSONAS
+        .iter()
+        .find(|persona| persona.id == "builtin:honey")
+        .expect("Honey should exist");
+    assert!(honey.system_prompt.contains("audience-ready draft"));
+    assert!(honey.system_prompt.contains("Stop before any send"));
+
+    let bumble = BUILT_IN_PERSONAS
+        .iter()
+        .find(|persona| persona.id == "builtin:bumble")
+        .expect("Bumble should exist");
+    assert!(bumble.system_prompt.contains("Research is read-only"));
+    assert!(bumble.system_prompt.contains("Cite or identify the source"));
 }
 
 #[test]
