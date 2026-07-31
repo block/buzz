@@ -459,7 +459,14 @@ fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
             // on every platform on purpose: switching Windows to `%APPDATA%` (or
             // macOS to `dirs::config_dir`) would relocate caches that already
             // exist, which is a separate call from fixing the failure.
-            let home = dirs::home_dir()
+            //
+            // `$HOME` still wins where it is set — `dirs::home_dir` ignores it on
+            // Windows, which would move an existing Git Bash cache and defeat the
+            // per-test `HOME` isolation this module documents above.
+            let home = std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(dirs::home_dir)
                 .ok_or_else(|| AgentError::Llm("oauth cache: no home directory".into()))?;
             home.join(".config")
                 .join("buzz-agent")

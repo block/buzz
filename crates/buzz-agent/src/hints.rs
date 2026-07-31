@@ -12,7 +12,16 @@ const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills
 /// such variable. Reading it directly meant `~/.agents/skills` and friends were
 /// never discovered there. `dirs::home_dir` consults the platform's own notion of
 /// the profile directory.
+///
+/// `$HOME` still wins when it is set. `dirs::home_dir` ignores it on Windows in
+/// favour of `USERPROFILE`, which would silently override a deliberate setting —
+/// Git Bash sessions export their own `HOME`, and callers that point `HOME` at a
+/// scratch directory expect to be obeyed on every platform. Falling back rather
+/// than replacing keeps Unix behaviour byte-identical.
 fn home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
     dirs::home_dir()
 }
 
