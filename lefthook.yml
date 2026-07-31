@@ -43,7 +43,7 @@ pre-commit:
 commit-msg:
   commands:
     signoff:
-      run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place {1}'
+      run: 'git interpret-trailers --if-exists doNothing --trailer "Signed-off-by: $(git var GIT_COMMITTER_IDENT | sed ''s/ [0-9]* [+-][0-9]*$//'')" --in-place "{1}"'
 
 pre-push:
   parallel: true

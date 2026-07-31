@@ -534,7 +534,7 @@ fn rejects_acknowledgement_rollback_and_cancels_between_pages() {
 }
 
 #[test]
-fn rejects_more_than_ten_thousand_pages() {
+fn rejects_more_than_the_configured_page_limit() {
     let _state = REPLICATION_TEST_STATE
         .lock()
         .expect("lock replication state");
@@ -543,17 +543,18 @@ fn rejects_more_than_ten_thousand_pages() {
     let mut exchange = PageFloodExchange::default();
 
     assert_eq!(
-        replicate_with_exchange(
+        replicate_with_exchange_limit(
             "pull",
             &local,
             &remote,
             Duration::from_secs(10),
+            2,
             &mut exchange
         )
         .expect_err("page flood must fail closed"),
         MemoryError::ResponseTooLarge
     );
-    assert_eq!(exchange.requests, 3 + (MAXIMUM_PAGES * 3));
+    assert_eq!(exchange.requests, 3 + (2 * 3));
 }
 
 #[test]
