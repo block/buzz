@@ -13,6 +13,7 @@ import 'package:buzz/features/channels/read_state/read_state_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
@@ -111,6 +112,7 @@ void main() {
     Map<String, int> readContexts = const {},
     List<Channel>? channels,
     TextScaler? textScaler,
+    EdgeInsets mediaPadding = EdgeInsets.zero,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -133,12 +135,12 @@ void main() {
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
-        builder: textScaler == null
-            ? null
-            : (context, child) => MediaQuery(
-                data: MediaQuery.of(context).copyWith(textScaler: textScaler),
-                child: child!,
-              ),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: textScaler, padding: mediaPadding),
+          child: child!,
+        ),
         home: const ActivityPage(),
       ),
     );
@@ -182,16 +184,22 @@ void main() {
     expect(find.byTooltip('Back'), findsNothing);
   });
 
-  testWidgets('keeps bottom clearance for the floating tab bar', (
+  testWidgets('keeps footer clearance inside the scrollable content', (
     tester,
   ) async {
-    await tester.pumpWidget(await buildTestable());
+    await tester.pumpWidget(
+      await buildTestable(mediaPadding: const EdgeInsets.only(bottom: 88)),
+    );
     await tester.pumpAndSettle();
 
-    final safeAreas = tester.widgetList<SafeArea>(find.byType(SafeArea));
-    expect(safeAreas, hasLength(1));
-    expect(safeAreas.single.top, isFalse);
-    expect(safeAreas.single.bottom, isTrue);
+    final safeArea = tester.widget<SafeArea>(
+      find.byKey(const ValueKey('activity-content-safe-area')),
+    );
+    expect(safeArea.top, isFalse);
+    expect(safeArea.bottom, isFalse);
+
+    final list = tester.widget<ListView>(find.byType(ListView));
+    expect(list.padding, const EdgeInsets.fromLTRB(0, Grid.xxs, 0, 96));
   });
 
   testWidgets('shows error view with retry button', (tester) async {
@@ -253,7 +261,13 @@ void main() {
 
     final material = tester.widget<Material>(surface);
     final shape = material.shape! as RoundedRectangleBorder;
-    expect(shape.borderRadius, BorderRadius.circular(Radii.card));
+    expect(shape.borderRadius, BorderRadius.circular(Radii.popover));
+    expect(shape.side.color, Colors.black.withValues(alpha: 0.04));
+    expect(material.elevation, appPopoverElevation);
+    expect(
+      material.shadowColor,
+      appPopoverShadowColor(tester.element(surface)),
+    );
     expect(material.surfaceTintColor, Colors.transparent);
     expect(material.clipBehavior, Clip.antiAlias);
 
@@ -275,7 +289,11 @@ void main() {
     final optionsSurface = find.byKey(
       const ValueKey('activity-options-popover'),
     );
+    final optionsMaterial = tester.widget<Material>(optionsSurface);
+    final optionsShape = optionsMaterial.shape! as RoundedRectangleBorder;
     expect(tester.getSize(optionsSurface).width, 216);
+    expect(optionsShape.borderRadius, BorderRadius.circular(Radii.popover));
+    expect(optionsMaterial.elevation, appPopoverElevation);
     expect(
       tester
           .widget<ScaleTransition>(
