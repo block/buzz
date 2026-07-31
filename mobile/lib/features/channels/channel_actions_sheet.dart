@@ -85,55 +85,17 @@ class ChannelActionsSheet extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: const Icon(LucideIcons.copy),
-              title: const Text('Copy channel name'),
-              onTap: () {
+            _ChannelQuickActionsRow(
+              isStarred: isStarred,
+              isUnread: isUnread,
+              onToggleStar: () {
                 close();
-                copyToClipboard(
-                  Navigator.of(context, rootNavigator: true).context,
-                  channel.name,
-                  message: 'Channel name copied to clipboard',
-                );
+                final notifier = ref.read(channelStarsProvider.notifier);
+                isStarred
+                    ? notifier.unstarChannel(channel.id)
+                    : notifier.starChannel(channel.id);
               },
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.hash),
-              title: const Text('Copy channel ID'),
-              onTap: () {
-                close();
-                copyToClipboard(
-                  Navigator.of(context, rootNavigator: true).context,
-                  channel.id,
-                  message: 'Channel ID copied to clipboard',
-                );
-              },
-            ),
-            if (!channel.isDm)
-              ListTile(
-                leading: const Icon(LucideIcons.folderInput),
-                title: const Text('Move to section'),
-                onTap: () async {
-                  final pageContext = Navigator.of(
-                    context,
-                    rootNavigator: true,
-                  ).context;
-                  close();
-                  await _showMoveSectionSheet(
-                    pageContext,
-                    ref,
-                    channel: channel,
-                    sectionId: sectionId,
-                  );
-                },
-              ),
-            const SheetDivider(),
-            ListTile(
-              leading: Icon(
-                isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
-              ),
-              title: Text(isUnread ? 'Mark as read' : 'Mark as unread'),
-              onTap: () {
+              onToggleRead: () {
                 close();
                 final timestamp = dateTimeToUnixSeconds(channel.lastMessageAt);
                 if (isUnread) {
@@ -160,6 +122,25 @@ class ChannelActionsSheet extends ConsumerWidget {
                 }
               },
             ),
+            const SizedBox(height: Grid.xs),
+            if (!channel.isDm)
+              ListTile(
+                leading: const Icon(LucideIcons.folderInput),
+                title: const Text('Move to section…'),
+                onTap: () async {
+                  final pageContext = Navigator.of(
+                    context,
+                    rootNavigator: true,
+                  ).context;
+                  close();
+                  await _showMoveSectionSheet(
+                    pageContext,
+                    ref,
+                    channel: channel,
+                    sectionId: sectionId,
+                  );
+                },
+              ),
             ListTile(
               leading: Icon(isMuted ? LucideIcons.bell : LucideIcons.bellOff),
               title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
@@ -172,20 +153,6 @@ class ChannelActionsSheet extends ConsumerWidget {
               },
             ),
             if (!channel.isDm)
-              ListTile(
-                leading: Icon(
-                  isStarred ? LucideIcons.starOff : LucideIcons.star,
-                ),
-                title: Text(isStarred ? 'Unstar channel' : 'Star channel'),
-                onTap: () {
-                  close();
-                  final notifier = ref.read(channelStarsProvider.notifier);
-                  isStarred
-                      ? notifier.unstarChannel(channel.id)
-                      : notifier.starChannel(channel.id);
-                },
-              ),
-            if (!channel.isDm) ...[
               ListTile(
                 leading: const Icon(LucideIcons.settings),
                 title: const Text('Manage channel'),
@@ -210,6 +177,19 @@ class ChannelActionsSheet extends ConsumerWidget {
                   }
                 },
               ),
+            ListTile(
+              leading: const Icon(LucideIcons.copy),
+              title: const Text('Copy'),
+              onTap: () async {
+                final pageContext = Navigator.of(
+                  context,
+                  rootNavigator: true,
+                ).context;
+                close();
+                await _showCopyChannelSheet(pageContext, channel: channel);
+              },
+            ),
+            if (!channel.isDm) ...[
               const SheetDivider(),
               if (channel.isMember && !channel.isArchived)
                 _ActionTile(
@@ -284,6 +264,79 @@ class ChannelActionsSheet extends ConsumerWidget {
   }
 }
 
+class _ChannelQuickActionsRow extends StatelessWidget {
+  const _ChannelQuickActionsRow({
+    required this.isStarred,
+    required this.isUnread,
+    required this.onToggleStar,
+    required this.onToggleRead,
+  });
+
+  final bool isStarred;
+  final bool isUnread;
+  final VoidCallback onToggleStar;
+  final VoidCallback onToggleRead;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+    children: [
+      _ChannelQuickAction(
+        icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
+        label: isStarred ? 'Unstar' : 'Star',
+        onTap: onToggleStar,
+      ),
+      _ChannelQuickAction(
+        icon: isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
+        label: isUnread ? 'Read' : 'Unread',
+        onTap: onToggleRead,
+      ),
+    ],
+  );
+}
+
+class _ChannelQuickAction extends StatelessWidget {
+  const _ChannelQuickAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    behavior: HitTestBehavior.opaque,
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 76,
+          height: 56,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: context.colors.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(Radii.dialog),
+          ),
+          child: Icon(icon, size: 24, color: context.colors.onSurface),
+        ),
+        const SizedBox(height: Grid.xxs),
+        Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: context.textTheme.labelMedium?.copyWith(
+            color: context.colors.onSurface,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 class _ActionTile extends StatelessWidget {
   const _ActionTile({
     required this.icon,
@@ -348,6 +401,55 @@ Future<void> _confirmAndRun(
       ),
     );
   }
+}
+
+Future<void> _showCopyChannelSheet(
+  BuildContext context, {
+  required Channel channel,
+}) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          0,
+          Grid.gutter,
+          Grid.xs,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(LucideIcons.copy),
+              title: const Text('Copy channel name'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                copyToClipboard(
+                  context,
+                  channel.name,
+                  message: 'Channel name copied to clipboard',
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.hash),
+              title: const Text('Copy channel ID'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                copyToClipboard(
+                  context,
+                  channel.id,
+                  message: 'Channel ID copied to clipboard',
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 Future<void> _showMoveSectionSheet(

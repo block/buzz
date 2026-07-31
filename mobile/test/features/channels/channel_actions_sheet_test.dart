@@ -57,19 +57,31 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final label in [
-      'Copy channel name',
-      'Copy channel ID',
-      'Move to section',
-      'Mark as unread',
+      'Star',
+      'Unread',
+      'Move to section…',
       'Mute channel',
-      'Star channel',
       'Manage channel',
+      'Copy',
       'Leave channel',
       'Archive channel',
       'Delete channel',
     ]) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
+
+    final moveTop = tester.getTopLeft(find.text('Move to section…')).dy;
+    final muteTop = tester.getTopLeft(find.text('Mute channel')).dy;
+    final manageTop = tester.getTopLeft(find.text('Manage channel')).dy;
+    final copyTop = tester.getTopLeft(find.text('Copy')).dy;
+    expect(moveTop, lessThan(muteTop));
+    expect(muteTop, lessThan(manageTop));
+    expect(manageTop, lessThan(copyTop));
+
+    await tester.tap(find.text('Copy'));
+    await tester.pumpAndSettle();
+    expect(find.text('Copy channel name'), findsOneWidget);
+    expect(find.text('Copy channel ID'), findsOneWidget);
   });
 
   testWidgets('admin can archive but cannot delete', (tester) async {
@@ -126,7 +138,9 @@ void main() {
     expect(find.text('Channel actions unavailable'), findsOneWidget);
   });
 
-  testWidgets('DM keeps only copy, read, and mute actions', (tester) async {
+  testWidgets('DM keeps quick star and unread, then mute and copy actions', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
         channel: _channel(type: 'dm'),
@@ -135,17 +149,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    for (final label in [
-      'Copy channel name',
-      'Copy channel ID',
-      'Mark as unread',
-      'Mute channel',
-    ]) {
+    for (final label in ['Star', 'Unread', 'Mute channel', 'Copy']) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
     for (final label in [
-      'Move to section',
-      'Star channel',
+      'Move to section…',
       'Manage channel',
       'Leave channel',
       'Archive channel',
@@ -153,5 +161,14 @@ void main() {
     ]) {
       expect(find.text(label), findsNothing, reason: label);
     }
+
+    final muteTop = tester.getTopLeft(find.text('Mute channel')).dy;
+    final copyTop = tester.getTopLeft(find.text('Copy')).dy;
+    expect(muteTop, lessThan(copyTop));
+
+    await tester.tap(find.text('Copy'));
+    await tester.pumpAndSettle();
+    expect(find.text('Copy channel name'), findsOneWidget);
+    expect(find.text('Copy channel ID'), findsOneWidget);
   });
 }
