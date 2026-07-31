@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge } from "../helpers/bridge";
+import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
 const OUTDIR = "test-results/invites-settings";
@@ -34,6 +34,15 @@ test.beforeEach(async ({ page }, testInfo) => {
   });
   await page.goto("/");
   await openSettings(page, "community-members");
+});
+
+test("opens a profile from a community member avatar", async ({ page }) => {
+  await page.getByRole("button", { name: "Open profile for alice" }).click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`/pulse\\?profile=${TEST_IDENTITIES.alice.pubkey}$`),
+  );
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 });
 
 test("capture: consolidated invites settings", async ({ page }) => {
