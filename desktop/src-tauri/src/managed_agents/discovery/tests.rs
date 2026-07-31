@@ -1685,6 +1685,48 @@ fn command_override_without_runtime_id_still_gets_preset_args() {
     );
 }
 
+/// When `record.runtime` and the effective command (from
+/// `agent_command_override`) name *different* presets, the explicit
+/// `runtime` id wins over the command-match fallback — the fallback only
+/// fires when the id-based lookup misses entirely, it never overrides an id
+/// that resolved successfully.
+///
+/// Here `runtime: Some("amp")` resolves via id to the `amp` preset (args:
+/// `[]`), while the override command `"opencode"` would independently match
+/// the `opencode` preset (args: `["acp"]`) if command-match ran first. The
+/// id wins, so the effective args are `amp`'s (empty) — even though the
+/// command actually being launched is `opencode`. This is a pre-existing
+/// precedence (id-before-command), not something this PR's fallback
+/// changes; this test just pins it down now that a command-match path
+/// exists to disagree with the id at all.
+#[test]
+fn runtime_id_wins_over_disagreeing_command_match() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
+
+    let _lock = registry_test_lock();
+    warm_harness_registry_from_dir(None);
+
+    let record = record_with(Some("amp"), None, Some("opencode"));
+    let global = GlobalAgentConfig::default();
+
+    let descriptor = resolve_effective_harness_descriptor(&record, &[], &global)
+        .expect("amp runtime id should resolve");
+
+    assert_eq!(
+        descriptor.command, "opencode",
+        "agent_command_override still determines the actual command to launch"
+    );
+    assert_eq!(
+        descriptor.args,
+        Vec::<String>::new(),
+        "runtime id 'amp' must win over the disagreeing 'opencode' command match, \
+         so amp's (empty) args apply — not opencode's ['acp']"
+    );
+}
+
 // ── I2: custom catalog entry carries definition_env for the edit round-trip ───
 
 /// A custom harness definition that includes env vars must surface those vars
