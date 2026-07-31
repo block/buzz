@@ -497,6 +497,13 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
+    append_log_marker(
+        &log_path,
+        &format!(
+            "resolved launch: agent_command={:?} args={:?}",
+            resolved_agent_command, agent_args
+        ),
+    )?;
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
