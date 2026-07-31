@@ -13,6 +13,7 @@ import {
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
+import { shouldStartManagedAgentForMention } from "@/features/messages/lib/managedAgentMentionReadiness";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
@@ -25,6 +26,7 @@ import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTex
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
+import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
@@ -131,14 +133,6 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 function uniqueNormalizedPubkeys(pubkeys: Iterable<string>) {
   return [...new Set([...pubkeys].map(normalizePubkey))].filter(Boolean);
-}
-
-function isManagedAgentRunning(agent: ManagedAgent) {
-  return agent.status === "running" || agent.status === "deployed";
-}
-
-function isProviderBackedAgent(agent: ManagedAgent) {
-  return agent.backend.type === "provider";
 }
 
 const DM_THREAD_AGENT_MENTION_ERROR =
@@ -254,26 +248,50 @@ export function useMentionSendFlow({
       ]);
       const errors: string[] = [];
       const pubkeys: string[] = [];
+      const normalizedMentionPubkeys = uniqueNormalizedPubkeys(mentionPubkeys);
+      const inactivePubkeys = normalizedMentionPubkeys.filter((pubkey) => {
+        const agent = managedAgentsByPubkey.get(pubkey);
+        return agent && shouldStartManagedAgentForMention(agent, undefined);
+      });
+      let presenceByPubkey: Record<string, "online" | "away" | "offline"> = {};
+      if (inactivePubkeys.length > 0) {
+        try {
+          presenceByPubkey = await getPresence(inactivePubkeys);
+        } catch (error) {
+          const message = getErrorMessage(
+            error,
+            "Could not verify whether another agent runtime is active.",
+          );
+          return {
+            errors: inactivePubkeys.map((pubkey) => {
+              const agent = managedAgentsByPubkey.get(pubkey);
+              return `${agent?.name ?? truncatePubkey(pubkey)}: ${message}`;
+            }),
+            pubkeys: [] as string[],
+          };
+        }
+      }
 
-      for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
+      for (const pubkey of normalizedMentionPubkeys) {
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) {
           continue;
         }
 
         try {
+          const shouldStart = shouldStartManagedAgentForMention(
+            agent,
+            presenceByPubkey[pubkey],
+          );
           if (participantPubkeys.has(pubkey)) {
-            if (isProviderBackedAgent(agent)) {
-              if (agent.status !== "deployed") {
-                await startAgentMutation.mutateAsync(agent.pubkey);
-              }
-            } else if (!isManagedAgentRunning(agent)) {
+            if (shouldStart) {
               await startAgentMutation.mutateAsync(agent.pubkey);
             }
           } else {
             await attachAgentMutation.mutateAsync({
               channelId: capturedChannelId,
               agent,
+              ensureRunning: shouldStart,
               role: "bot",
             });
           }

@@ -239,6 +239,8 @@ type E2eConfig = {
     personaSharePublicationStatuses?: Array<"published" | "queued">;
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
+    /** Current presence by pubkey for mention/lifecycle single-writer tests. */
+    presence?: Record<string, PresenceStatus>;
     agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     addChannelMembersDelayMs?: number;
@@ -9500,6 +9502,9 @@ export function maybeInstallE2eTauriMocks() {
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
+  for (const [pubkey, status] of Object.entries(config.mock?.presence ?? {})) {
+    setMockPresenceStatus(pubkey, status);
+  }
   resetMockPersonas(config);
   resetMockTeams(config);
   seedMockSearchProfiles(config);
