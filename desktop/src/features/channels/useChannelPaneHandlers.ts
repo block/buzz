@@ -159,15 +159,15 @@ export function useChannelPaneHandlers({
       // Clearing an edit to empty (no text, no attachments) is the keyboard
       // shorthand for "Delete message". Rather than publish an empty edit,
       // route it through the same "Delete message?" confirmation the Delete
-      // button shows: exit edit mode and ask the pane to open the dialog, which
-      // runs the actual delete on confirm. This is the single decision point
-      // for both the main timeline and the thread panel, since both route
+      // button shows. Keep edit mode active while the dialog is open so Cancel
+      // returns the user to the editor; edit mode is exited only once the
+      // deletion is confirmed (see ChannelScreen's onConfirm). Single decision
+      // point for both the main timeline and thread panel — both route
       // edit-save through here.
       const isEmptyDeletion =
         content.trim().length === 0 &&
         (mediaTags === undefined || mediaTags.length === 0);
       if (isEmptyDeletion) {
-        setEditTargetId(null);
         onRequestEmptyEditDelete(eventId);
         return;
       }

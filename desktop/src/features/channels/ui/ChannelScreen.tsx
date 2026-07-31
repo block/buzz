@@ -810,6 +810,7 @@ export function ChannelScreen({
         <DeleteMessageConfirmDialog
           onConfirm={() => {
             if (emptyDeleteId) {
+              setEditTargetId(null);
               void handleDelete({ id: emptyDeleteId });
             }
             setEmptyDeleteId(null);
