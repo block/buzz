@@ -93,6 +93,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "",
         skill_dir: Some(".goose/skills"),
         supports_acp_model_switching: false,
+        supports_account_connection: false,
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
@@ -125,6 +126,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
+        supports_account_connection: false,
         model_env_var: None,
         provider_env_var: None,
         provider_locked: true,
@@ -157,6 +159,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
         skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
+        supports_account_connection: false,
         model_env_var: None,
         provider_env_var: None,
         provider_locked: false,
@@ -171,6 +174,39 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "opencode",
+        label: "OpenCode",
+        commands: &["opencode"],
+        aliases: &[],
+        avatar_url: "",
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: None,
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://opencode.ai/docs/",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: true,
+        supports_account_connection: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.config/opencode/opencode.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: true,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: None,
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -190,6 +226,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: true,
+        supports_account_connection: false,
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
@@ -465,7 +502,7 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "opencode" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1421,6 +1458,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             node_required,
             // Filled in by the auth-probe phase in full catalog discovery.
             auth_status: AuthStatus::Unknown,
+            supports_account_connection: runtime.supports_account_connection,
             login_hint: None,
             source: HarnessSource::Builtin,
             // Builtin entries have no user-editable env; definition_env is empty.
@@ -1580,6 +1618,7 @@ pub fn discover_acp_runtimes_from(
                 node_required: false,
                 // No auth probe for custom harnesses.
                 auth_status: AuthStatus::NotApplicable,
+                supports_account_connection: false,
                 login_hint: None,
                 source: HarnessSource::Custom,
                 // Carry definition env into the catalog so the edit form can

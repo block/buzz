@@ -657,6 +657,8 @@ pub struct AcpRuntimeCatalogEntry {
     pub node_required: bool,
     /// Login/authentication status for CLI-based runtimes.
     pub auth_status: AuthStatus,
+    /// Whether the settings UI may start an optional vendor account connection.
+    pub supports_account_connection: bool,
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,

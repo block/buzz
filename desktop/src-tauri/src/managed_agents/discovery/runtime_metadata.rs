@@ -38,6 +38,9 @@ pub(crate) struct KnownAcpRuntime {
     /// this value. Retained as scaffolding for when ACP model switching matures.
     #[allow(dead_code)]
     pub supports_acp_model_switching: bool,
+    /// Whether the settings UI should offer an account connection even when
+    /// authentication is optional and therefore has no logged-out probe state.
+    pub supports_account_connection: bool,
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
@@ -120,5 +123,20 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+    }
+
+    #[test]
+    fn opencode_is_a_native_acp_runtime() {
+        let opencode = known_acp_runtime_exact("opencode").unwrap();
+
+        assert_eq!(opencode.commands, &["opencode"]);
+        assert_eq!(
+            opencode.config_file_path,
+            Some("~/.config/opencode/opencode.json")
+        );
+        assert!(opencode.supports_acp_model_switching);
+        assert!(opencode.supports_account_connection);
+        assert!(opencode.adapter_install_commands.is_empty());
+        assert!(opencode.auth_probe_args.is_none());
     }
 }

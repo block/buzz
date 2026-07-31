@@ -624,6 +624,7 @@ mod tests {
             adapter_install_hint: "",
             skill_dir: None,
             supports_acp_model_switching: false,
+            supports_account_connection: false,
             model_env_var: Some("GOOSE_MODEL"),
             provider_env_var: Some("GOOSE_PROVIDER"),
             provider_locked: false,

@@ -76,6 +76,7 @@ pub(super) fn preset_catalog_entry(
         underlying_cli_path,
         node_required: false,
         auth_status: AuthStatus::NotApplicable,
+        supports_account_connection: false,
         login_hint: None,
         source: HarnessSource::Preset,
         definition_env: Default::default(),
@@ -117,15 +118,6 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &["agent", "--always-approve", "stdio"],
         install_instructions_url: "https://build.x.ai/docs",
         install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
-        underlying_cli: None,
-    },
-    PresetHarness {
-        id: "opencode",
-        label: "OpenCode",
-        command: "opencode",
-        args: &["acp"],
-        install_instructions_url: "https://opencode.ai/docs",
-        install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
         underlying_cli: None,
     },
     PresetHarness {
