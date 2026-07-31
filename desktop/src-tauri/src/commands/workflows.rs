@@ -70,11 +70,12 @@ pub async fn get_channel_workflows(
 ///
 /// The Workflows overview screen previously issued one `get_channel_workflows`
 /// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
-/// query with all channel ids returns the same set. Each `WorkflowWire` carries
-/// its own `channel_id` (from the event's `h` tag), so the frontend can still
-/// group results by channel. Neither this nor the per-channel command sets a
-/// `limit`, so batching does not change result completeness.
+/// relay POSTs. Keep the single relay round-trip, but send one filter per
+/// channel: deployed relays can treat multiple values inside one `#h` filter as
+/// a single value, which makes workflows outside the first channel disappear
+/// from the overview. Multiple Nostr filters are ORed and preserve the intended
+/// cross-channel result set. Each `WorkflowWire` carries its own `channel_id`
+/// (from the event's `h` tag), so the frontend can still group results.
 #[tauri::command]
 pub async fn get_channels_workflows(
     channel_ids: Vec<String>,
@@ -84,14 +85,8 @@ pub async fn get_channels_workflows(
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [30620],
-            "#h": channel_ids,
-        })],
-    )
-    .await?;
+    let filters = workflow_channel_filters(channel_ids);
+    let events = query_relay(&state, &filters).await?;
 
     Ok(events.iter().map(workflow_from_event).collect())
 }
@@ -299,6 +294,23 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default()
+}
+
+/// Build one workflow-definition filter per channel.
+///
+/// Multiple filters are ORed by Nostr relays. Keeping each `#h` array to one
+/// value also works with deployed relays that do not implement multi-value tag
+/// matching correctly.
+fn workflow_channel_filters(channel_ids: Vec<String>) -> Vec<Value> {
+    channel_ids
+        .into_iter()
+        .map(|channel_id| {
+            serde_json::json!({
+                "kinds": [30620],
+                "#h": [channel_id],
+            })
+        })
+        .collect()
 }
 
 /// First value of the tag whose name matches `name` (e.g. `d`, `h`).

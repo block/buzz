@@ -207,3 +207,14 @@ fn runs_and_approvals_serialize_to_bare_empty_array() {
         "[]"
     );
 }
+
+#[test]
+fn workflow_channel_filters_use_one_h_value_per_filter() {
+    let second_channel = "33333333-3333-3333-3333-333333333333";
+    let filters = workflow_channel_filters(vec![CHAN.to_string(), second_channel.to_string()]);
+
+    assert_eq!(filters.len(), 2);
+    assert_eq!(filters[0]["kinds"], serde_json::json!([30620]));
+    assert_eq!(filters[0]["#h"], serde_json::json!([CHAN]));
+    assert_eq!(filters[1]["#h"], serde_json::json!([second_channel]));
+}
