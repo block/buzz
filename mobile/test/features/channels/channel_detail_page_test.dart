@@ -828,7 +828,14 @@ void main() {
       );
       expect(find.text('Message…'), findsNothing);
 
-      await tester.tap(find.byTooltip('Manage channel'));
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byType(SingleChildScrollView).last,
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Join channel'));
       await tester.pumpAndSettle();
@@ -860,7 +867,14 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byTooltip('Manage channel'));
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byType(SingleChildScrollView).last,
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
       await tester.pumpAndSettle();
 
       final sheet = find.byType(BottomSheet);

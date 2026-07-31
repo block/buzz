@@ -479,6 +479,15 @@ List<List<String>> buildCreateChannelTags({
   ];
 }
 
+List<List<String>> buildArchiveChannelTags(String channelId) => [
+  ['h', channelId],
+  ['archived', 'true'],
+];
+
+List<List<String>> buildDeleteChannelTags(String channelId) => [
+  ['h', channelId],
+];
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -580,6 +589,24 @@ class ChannelActions {
       tags: [
         ['h', channelId],
       ],
+    );
+    await _refreshChannelState(channelId);
+  }
+
+  Future<void> archiveChannel(String channelId) async {
+    await _signedEventRelay.submit(
+      kind: 9002,
+      content: '',
+      tags: buildArchiveChannelTags(channelId),
+    );
+    await _refreshChannelState(channelId);
+  }
+
+  Future<void> deleteChannel(String channelId) async {
+    await _signedEventRelay.submit(
+      kind: 9008,
+      content: '',
+      tags: buildDeleteChannelTags(channelId),
     );
     await _refreshChannelState(channelId);
   }

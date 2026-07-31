@@ -200,6 +200,21 @@ void main() {
     });
   });
 
+  group('build channel lifecycle tags', () {
+    test('archive matches desktop kind 9002 tags', () {
+      expect(buildArchiveChannelTags('channel-id'), [
+        ['h', 'channel-id'],
+        ['archived', 'true'],
+      ]);
+    });
+
+    test('delete matches desktop kind 9008 tags', () {
+      expect(buildDeleteChannelTags('channel-id'), [
+        ['h', 'channel-id'],
+      ]);
+    });
+  });
+
   group('directory providers relay-config invalidation', () {
     NostrEvent profile(String pubkey, String name) => NostrEvent(
       id: '$pubkey-profile',
