@@ -1413,22 +1413,9 @@ async fn handle_remove_user(
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
 
     if target_is_relay_guest {
-        if let Err(error) = state
-            .db
-            .revoke_guest_channel(tenant.community(), &target_hex, channel_id)
-            .await
-        {
-            // The active channel-membership row is already gone, so future
-            // authentication fails closed. Disconnect now even if durable
-            // grant cleanup failed so the old AuthContext cannot keep its
-            // discovery/profile subscriptions alive.
-            warn!(
-                %error,
-                %channel_id,
-                guest = %target_hex,
-                "failed to remove guest channel grant"
-            );
-        }
+        // remove_member revoked the guest grant and relay admission in the
+        // same transaction. Only the session side effect remains here; a
+        // second post-commit revocation could delete a freshly reclaimed grant.
         state.disconnect_pubkey_clusterwide(
             tenant,
             &target_pubkey,
