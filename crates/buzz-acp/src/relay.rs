@@ -511,6 +511,24 @@ const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
 /// Subscription ID for encrypted owner-to-agent observer control frames.
 const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
 
+fn is_membership_sub_id(sub_id: &str) -> bool {
+    is_control_sub_id(sub_id, MEMBERSHIP_NOTIF_SUB_ID)
+}
+
+fn is_observer_control_sub_id(sub_id: &str) -> bool {
+    is_control_sub_id(sub_id, OBSERVER_CONTROL_SUB_ID)
+}
+
+fn is_control_sub_id(sub_id: &str, prefix: &str) -> bool {
+    let Some(suffix) = sub_id.strip_prefix(prefix) else {
+        return false;
+    };
+    suffix.is_empty()
+        || suffix
+            .strip_prefix('-')
+            .is_some_and(|nonce| nonce.parse::<Uuid>().is_ok())
+}
+
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
 enum RelayCommand {
     /// Subscribe to a channel (sends a NIP-01 REQ) with the given filter.
@@ -1401,10 +1419,8 @@ async fn execute_connected_command(
                 .or_else(|| state.subscribe_since.get(&channel_id).copied());
             let sent =
                 send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-            if sent {
-                state
-                    .active_subscriptions
-                    .insert(channel_id, channel_sub_id(channel_id));
+            if let Some(sub_id) = sent {
+                state.active_subscriptions.insert(channel_id, sub_id);
                 state.active_filters.insert(channel_id, filter);
                 // Evict stale drain entries so the drain loop can't send a
                 // duplicate REQ for this now-live subscription.
@@ -2079,7 +2095,7 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
-                    if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                    if is_observer_control_sub_id(&subscription_id) {
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -2087,7 +2103,7 @@ async fn handle_ws_message(
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
-                    } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
+                    } else if is_membership_sub_id(&subscription_id) {
                         // Membership notification — extract channel UUID from h tag.
                         let channel_uuid = match extract_h_tag_uuid(&event) {
                             Some(uuid) => uuid,
@@ -2248,12 +2264,12 @@ async fn handle_ws_message(
                         );
                         if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
                             state.rate_limited_pending.insert(channel_id, deadline);
-                        } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
+                        } else if is_membership_sub_id(&subscription_id) {
                             // Mark membership sub for drain recovery. The relay rejected
                             // this REQ before registering it, so the sub does not exist
                             // server-side — the drain must re-send it.
                             state.membership_resub_needed = true;
-                        } else if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                        } else if is_observer_control_sub_id(&subscription_id) {
                             state.observer_resub_needed = true;
                         }
                         return true; // keep the socket
@@ -2281,7 +2297,7 @@ async fn handle_ws_message(
                     // the attempt — if the send fails and triggers reconnect,
                     // resubscribe_after_reconnect() needs the subscription to
                     // still be in state so it can restore it.
-                    if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                    if is_observer_control_sub_id(&subscription_id) {
                         let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
                         if sent {
                             state.observer_control_sub_active = true;
@@ -2289,7 +2305,7 @@ async fn handle_ws_message(
                             warn!("observer control resubscribe failed after CLOSED — triggering reconnect");
                             return false;
                         }
-                    } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
+                    } else if is_membership_sub_id(&subscription_id) {
                         let since =
                             match (state.membership_dropped_since, state.membership_last_seen) {
                                 (Some(d), Some(l)) => Some(d.min(l)),
@@ -2337,11 +2353,8 @@ async fn handle_ws_message(
                                 &filter,
                             )
                             .await;
-                            if sent {
-                                // Success — update subscription ID (relay may assign new one).
-                                state
-                                    .active_subscriptions
-                                    .insert(channel_id, channel_sub_id(channel_id));
+                            if let Some(sub_id) = sent {
+                                state.active_subscriptions.insert(channel_id, sub_id);
                                 state.channel_dropped_since.remove(&channel_id);
                             } else {
                                 // Resubscribe failed — likely half-dead socket.
@@ -2545,7 +2558,8 @@ async fn resubscribe_after_reconnect(
             };
             let this_sent =
                 send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-            if this_sent {
+            if let Some(sub_id) = this_sent {
+                state.active_subscriptions.insert(channel_id, sub_id);
                 state.channel_dropped_since.remove(&channel_id);
                 // Shutdown-aware pacing sleep before any next replay/deferred REQ.
                 if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
@@ -2715,7 +2729,8 @@ async fn drain_rate_limited_pending(
             }
         };
         let sent = send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-        if sent {
+        if let Some(sub_id) = sent {
+            state.active_subscriptions.insert(channel_id, sub_id);
             state.rate_limited_pending.remove(&channel_id);
             state.channel_dropped_since.remove(&channel_id);
             sent_count += 1;
@@ -2772,7 +2787,8 @@ async fn drain_resubscribe_retry(
             }
         };
         let sent = send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-        if sent {
+        if let Some(sub_id) = sent {
+            state.active_subscriptions.insert(channel_id, sub_id);
             state.resubscribe_retry.remove(&channel_id);
             state.channel_dropped_since.remove(&channel_id);
             sent_count += 1;
@@ -3169,7 +3185,7 @@ async fn wait_for_reconnect(
 /// - On first subscribe (`since` is `None`) adds `since=now` to avoid replaying
 ///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
 ///
-/// Returns `true` if the REQ was successfully written to the WebSocket.
+/// Returns the fresh subscription ID if the REQ was successfully written.
 async fn send_subscribe(
     ws: &mut WsStream,
     _state: &BgState,
@@ -3177,8 +3193,12 @@ async fn send_subscribe(
     agent_pubkey_hex: &str,
     since: Option<u64>,
     filter: &ChannelFilter,
-) -> bool {
-    let sub_id = channel_sub_id(channel_id);
+) -> Option<String> {
+    // The relay currently poisons reused subscription IDs after CLOSE/reconnect
+    // (block/buzz#3019). A fresh suffix also avoids same-ID replacement on a
+    // live socket while preserving the channel UUID prefix for routing CLOSED
+    // and EVENT frames back to their channel.
+    let sub_id = fresh_channel_sub_id(channel_id);
 
     let mut req_filter = serde_json::Map::new();
 
@@ -3220,17 +3240,17 @@ async fn send_subscribe(
                             " (since=now)"
                         }
                     );
-                    true
+                    Some(sub_id)
                 }
                 Err(e) => {
                     warn!("failed to send REQ for channel {channel_id}: {e}");
-                    false
+                    None
                 }
             }
         }
         Err(e) => {
             warn!("failed to serialize REQ for channel {channel_id}: {e}");
-            false
+            None
         }
     }
 }
@@ -3261,7 +3281,8 @@ async fn send_membership_subscribe(
     };
     req_filter.insert("since".into(), json!(since_ts));
 
-    let req = json!(["REQ", MEMBERSHIP_NOTIF_SUB_ID, Value::Object(req_filter)]);
+    let sub_id = fresh_control_sub_id(MEMBERSHIP_NOTIF_SUB_ID);
+    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
     match serde_json::to_string(&req) {
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
@@ -3284,9 +3305,10 @@ async fn send_membership_subscribe(
 
 /// Send a NIP-01 REQ for owner-to-agent observer control frames.
 async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
+    let sub_id = fresh_control_sub_id(OBSERVER_CONTROL_SUB_ID);
     let req = json!([
         "REQ",
-        OBSERVER_CONTROL_SUB_ID,
+        sub_id,
         {
             "kinds": [KIND_AGENT_OBSERVER_FRAME],
             "#p": [agent_pubkey_hex],
@@ -3492,12 +3514,24 @@ pub(crate) fn channel_sub_id(channel_id: Uuid) -> String {
     format!("ch-{channel_id}")
 }
 
-/// Extract a channel UUID from a subscription ID of the form `ch-<uuid>`.
+/// Build a never-reused subscription ID while preserving the channel prefix.
+fn fresh_channel_sub_id(channel_id: Uuid) -> String {
+    format!("{}-{}", channel_sub_id(channel_id), Uuid::new_v4())
+}
+
+fn fresh_control_sub_id(prefix: &str) -> String {
+    format!("{prefix}-{}", Uuid::new_v4())
+}
+
+/// Extract a channel UUID from `ch-<uuid>` or `ch-<uuid>-<nonce>`.
 /// Returns `None` if the format doesn't match or the UUID is invalid.
 fn channel_id_from_sub_id(sub_id: &str) -> Option<Uuid> {
-    sub_id
-        .strip_prefix("ch-")
-        .and_then(|s| s.parse::<Uuid>().ok())
+    let suffix = sub_id.strip_prefix("ch-")?;
+    let (channel, remainder) = suffix.split_at_checked(36)?;
+    if !remainder.is_empty() {
+        remainder.strip_prefix('-')?.parse::<Uuid>().ok()?;
+    }
+    channel.parse::<Uuid>().ok()
 }
 
 /// Per-channel CLOSED denials: the channel is forbidden but the connection is
@@ -4076,6 +4110,13 @@ mod tests {
     }
 
     #[test]
+    fn channel_id_from_sub_id_invalid_nonce() {
+        assert!(
+            channel_id_from_sub_id("ch-550e8400-e29b-41d4-a716-446655440000-not-a-uuid").is_none()
+        );
+    }
+
+    #[test]
     fn channel_id_from_sub_id_empty() {
         assert!(channel_id_from_sub_id("").is_none());
     }
@@ -4398,6 +4439,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconnect_uses_a_fresh_channel_subscription_id() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        seed_test_subscription(&mut state, channel_id);
+        let previous_sub_id = state.active_subscriptions[&channel_id].clone();
+
+        let result =
+            resubscribe_after_reconnect(&mut client, &mut cmd_rx, &mut state, "agent-pubkey", true)
+                .await;
+
+        assert!(matches!(result, ResubscribeResult::Ok));
+        let frame = next_test_frame(&mut server).await;
+        let replayed_sub_id = frame[1].as_str().expect("subscription ID is a string");
+        assert_ne!(replayed_sub_id, previous_sub_id);
+        assert_eq!(channel_id_from_sub_id(replayed_sub_id), Some(channel_id));
+        assert_eq!(state.active_subscriptions[&channel_id], replayed_sub_id);
+    }
+
+    #[tokio::test]
+    async fn reconnect_uses_fresh_control_subscription_ids() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let mut state = BgState::new();
+        state.membership_sub_active = true;
+        state.observer_control_sub_active = true;
+
+        let result =
+            resubscribe_after_reconnect(&mut client, &mut cmd_rx, &mut state, "agent-pubkey", true)
+                .await;
+
+        assert!(matches!(result, ResubscribeResult::Ok));
+        let membership = next_test_frame(&mut server).await;
+        let membership_sub_id = membership[1]
+            .as_str()
+            .expect("membership subscription ID is a string");
+        assert_ne!(membership_sub_id, MEMBERSHIP_NOTIF_SUB_ID);
+        assert!(is_membership_sub_id(membership_sub_id));
+
+        let observer = next_test_frame(&mut server).await;
+        let observer_sub_id = observer[1]
+            .as_str()
+            .expect("observer subscription ID is a string");
+        assert_ne!(observer_sub_id, OBSERVER_CONTROL_SUB_ID);
+        assert!(is_observer_control_sub_id(observer_sub_id));
+    }
+
+    #[tokio::test]
     async fn fresh_reconnect_preserves_gate_until_pending_replay_resumes() {
         let (mut client, mut server) = test_ws_pair().await;
         let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
@@ -4427,7 +4517,10 @@ mod tests {
         );
         let frame = next_test_frame(&mut server).await;
         assert_eq!(frame[0], "REQ");
-        assert_eq!(frame[1], channel_sub_id(channel_id));
+        assert_eq!(
+            frame[1].as_str().and_then(channel_id_from_sub_id),
+            Some(channel_id)
+        );
     }
 
     #[tokio::test]
@@ -4453,7 +4546,10 @@ mod tests {
         });
 
         let replay = next_test_frame(&mut server).await;
-        assert_eq!(replay[1], channel_sub_id(replayed_channel));
+        assert_eq!(
+            replay[1].as_str().and_then(channel_id_from_sub_id),
+            Some(replayed_channel)
+        );
         cmd_tx
             .send(RelayCommand::Subscribe {
                 channel_id: deferred_channel,
@@ -4465,7 +4561,10 @@ mod tests {
 
         let deferred = next_test_frame(&mut server).await;
         assert_eq!(deferred[0], "REQ");
-        assert_eq!(deferred[1], channel_sub_id(deferred_channel));
+        assert_eq!(
+            deferred[1].as_str().and_then(channel_id_from_sub_id),
+            Some(deferred_channel)
+        );
         let (result, state) = task.await.expect("join resubscribe task");
         assert!(matches!(result, ResubscribeResult::Ok));
         assert!(state.active_subscriptions.contains_key(&deferred_channel));
@@ -4493,14 +4592,17 @@ mod tests {
         });
 
         let replay = next_test_frame(&mut server).await;
-        assert_eq!(replay[1], channel_sub_id(channel_id));
+        let replayed_sub_id = replay[1]
+            .as_str()
+            .expect("replayed subscription ID is a string");
+        assert_eq!(channel_id_from_sub_id(replayed_sub_id), Some(channel_id));
         cmd_tx
             .send(RelayCommand::Unsubscribe { channel_id })
             .await
             .expect("queue unsubscribe during pacing");
 
         let close = next_test_frame(&mut server).await;
-        assert_eq!(close, json!(["CLOSE", channel_sub_id(channel_id)]));
+        assert_eq!(close, json!(["CLOSE", replayed_sub_id]));
         let (result, state) = task.await.expect("join resubscribe task");
         assert!(matches!(result, ResubscribeResult::Ok));
         assert!(!state.active_subscriptions.contains_key(&channel_id));
@@ -4530,7 +4632,10 @@ mod tests {
         });
 
         let replay = next_test_frame(&mut server).await;
-        assert_eq!(replay[1], channel_sub_id(channel_id));
+        assert_eq!(
+            replay[1].as_str().and_then(channel_id_from_sub_id),
+            Some(channel_id)
+        );
         cmd_tx
             .send(RelayCommand::PublishEvent {
                 event: Box::new(event),
