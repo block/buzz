@@ -50,6 +50,10 @@ export function mcpAppDisplayText(
   );
 }
 
+export function mcpAppDisplayNetworkSource(value: string): string {
+  return mcpAppDisplayLabel(value, "Unrecognized network source", 256);
+}
+
 export function mcpAppMessageText(message: McpAppMessage): string | null {
   const blocks = Array.isArray(message.content)
     ? message.content

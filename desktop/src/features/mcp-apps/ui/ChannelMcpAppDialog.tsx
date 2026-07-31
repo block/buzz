@@ -8,6 +8,7 @@ import {
 } from "@/features/mcp-apps/lib/channelMcpAppStorage";
 import {
   mcpAppDisplayLabel,
+  mcpAppDisplayNetworkSource,
   mcpAppDisplayText,
 } from "@/features/mcp-apps/lib/mcpAppMessage";
 import {
@@ -87,6 +88,8 @@ function approvedDomains(policy: McpAppResourcePolicy | null): string[] {
   ]
     .flatMap((value) => (Array.isArray(value) ? value : []))
     .filter((value): value is string => typeof value === "string")
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .map(mcpAppDisplayNetworkSource)
     .filter((value, index, values) => values.indexOf(value) === index);
 }
 

@@ -171,6 +171,7 @@ async fn build_pinned_client(endpoint: &Url) -> Result<Client, String> {
         return Err("MCP server resolved to a private or reserved address".to_string());
     }
     let mut builder = Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(120))
@@ -182,6 +183,16 @@ async fn build_pinned_client(endpoint: &Url) -> Result<Client, String> {
     builder
         .build()
         .map_err(|error| format!("failed to build MCP HTTP client: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_mcp_apps_supported() -> Result<(), String> {
+    Err("MCP Apps are not available on Windows in this version of Buzz".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_mcp_apps_supported() -> Result<(), String> {
+    Ok(())
 }
 
 fn sse_event_end(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -473,7 +484,7 @@ fn mcp_param_header_value(value: &Value) -> Result<Option<String>, String> {
             )
         }
     };
-    let sentinel = raw.starts_with("=?base64?") && raw.ends_with("?=");
+    let sentinel = raw.starts_with("=?");
     let edge_whitespace = raw
         .as_bytes()
         .first()
@@ -872,3 +883,7 @@ pub use host::{
 #[cfg(test)]
 #[path = "mcp_apps_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_apps_live_tests.rs"]
+mod live_tests;

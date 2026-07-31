@@ -726,7 +726,20 @@ MCP tools that are visible to app callers through the host bridge. An app can
 request a channel post, but Buzz publishes the exact attributed message only
 after user approval.
 
+For each MCP tool call, Buzz can add host-owned binding context under
+`params._meta["xyz.block.buzz/context"]`. The current context contains available
+community, channel, and app-installation references. Buzz removes any
+caller-supplied value under the `xyz.block.buzz/*` host namespace before it adds
+the current host value. These references are routing context, not authorization.
+This contract does not currently define thread, project, or external Space
+references.
+
 See the [MCP App channel-host trust-boundary diagram](docs/architecture/mcp-app-channel-host.mmd).
+
+This host is disabled on Windows until the WebView2 subframe IPC boundary has
+been verified. The desktop UI does not advertise channel Apps on that platform,
+the Rust connection boundary rejects them, and the untrusted App protocol is
+not registered.
 
 ---
 

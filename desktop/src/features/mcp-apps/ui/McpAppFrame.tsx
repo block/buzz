@@ -35,7 +35,6 @@ export async function runInitialMcpAppTool(
   initialTool: NonNullable<McpAppFrameProps["initialTool"]>,
   lifecycle: InitialToolLifecycle,
   callTool: typeof callMcpAppTool = callMcpAppTool,
-  invocationContext?: McpAppInvocationContext,
 ): Promise<void> {
   lifecycle.started = true;
   try {
@@ -45,7 +44,6 @@ export async function runInitialMcpAppTool(
       initialTool.name,
       initialTool.arguments,
       "host",
-      invocationContext,
     );
     if (!lifecycle.terminalSent) {
       lifecycle.terminalSent = true;

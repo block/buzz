@@ -9,14 +9,15 @@ pub(super) fn app_tool_allowed(tool: &McpAppTool, caller: McpAppToolCaller) -> b
 }
 
 const BUZZ_CONTEXT_META_KEY: &str = "xyz.block.buzz/context";
+const BUZZ_META_PREFIX: &str = "xyz.block.buzz/";
 
 /// Build a `tools/call` params object with host-owned Buzz binding context.
 ///
 /// MCP callers may provide generic `_meta` (for example a progress token), so
-/// unrelated entries are preserved. The host removes the complete Buzz context
-/// value before it writes a replacement. This prevents an App from mixing
-/// caller-owned fields into host-owned context. The values are context only;
-/// authorization remains in the host and relay layers.
+/// unrelated entries are preserved. The host removes its complete metadata
+/// namespace before it writes current host-owned values. This prevents an App
+/// from pre-populating current or future Buzz metadata. The values are context
+/// only; authorization remains in the host and relay layers.
 pub(super) fn build_tool_call_params(
     name: &str,
     arguments: Value,
@@ -32,7 +33,7 @@ pub(super) fn build_tool_call_params(
         _ => serde_json::Map::new(),
     };
 
-    meta.remove(BUZZ_CONTEXT_META_KEY);
+    meta.retain(|key, _| !key.starts_with(BUZZ_META_PREFIX));
     if let Some(context) = context {
         let mut buzz_context = serde_json::Map::new();
         insert_context_refs(&mut buzz_context, context);
@@ -74,6 +75,7 @@ pub async fn connect_mcp_app_server(
     endpoint: String,
     state: State<'_, McpAppHostState>,
 ) -> Result<McpAppServerDescriptor, String> {
+    ensure_mcp_apps_supported()?;
     let endpoint = validate_mcp_endpoint(&endpoint)?;
     let client = build_pinned_client(&endpoint).await?;
     let (connection, server_name, server_version, tools_response) =

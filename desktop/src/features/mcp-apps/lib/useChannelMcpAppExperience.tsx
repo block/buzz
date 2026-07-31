@@ -14,6 +14,7 @@ import { ChannelMcpAppPane } from "@/features/mcp-apps/ui/ChannelMcpAppPane";
 import { ChannelMcpAppTabs } from "@/features/mcp-apps/ui/ChannelMcpAppTabs";
 import type { Channel } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
+import { isWindowsPlatform } from "@/shared/lib/platform";
 import {
   Dialog,
   DialogContent,
@@ -85,10 +86,23 @@ export function useMcpAppUi(
     pubkey,
   });
   const channelAppsAvailable =
+    !isWindowsPlatform() &&
     channel?.channelType !== "forum" &&
     channel?.isMember === true &&
     !channel.archivedAt;
   const activeApp = channelAppsAvailable ? apps.activeApp : null;
+  const activeAppId = activeApp?.id;
+  const activeInvocationContext = React.useMemo(
+    () =>
+      activeAppId
+        ? {
+            communityRef: communityRef ?? undefined,
+            channelRef: channel?.id,
+            installationRef: activeAppId,
+          }
+        : null,
+    [activeAppId, channel?.id, communityRef],
+  );
   const rejectPendingPost = React.useCallback((reason: string) => {
     const current = pendingPostRef.current;
     pendingPostRef.current = null;
@@ -130,7 +144,7 @@ export function useMcpAppUi(
   }, [apps.activeAppId, apps.showChat, channelAppsAvailable]);
   const handleMessage = React.useCallback(
     async (
-      app: ChannelMcpAppInstallation,
+      app: Pick<ChannelMcpAppInstallation, "id" | "title">,
       message: Parameters<typeof mcpAppMessageText>[0],
     ) => {
       if (!channel?.isMember || channel.archivedAt || !channel.id) {
@@ -333,19 +347,15 @@ export function useMcpAppUi(
   );
   const renderPane = React.useCallback(
     (header: React.ReactNode) =>
-      activeApp ? (
+      activeApp && activeInvocationContext ? (
         <ChannelMcpAppPane
           app={activeApp}
           header={header}
-          invocationContext={{
-            communityRef: communityRef ?? undefined,
-            channelRef: channel?.id,
-            installationRef: activeApp.id,
-          }}
+          invocationContext={activeInvocationContext}
           onMessage={handleMessage}
         />
       ) : null,
-    [activeApp, channel?.id, communityRef, handleMessage],
+    [activeApp, activeInvocationContext, handleMessage],
   );
 
   return {

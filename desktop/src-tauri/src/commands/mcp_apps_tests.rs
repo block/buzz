@@ -132,6 +132,83 @@ fn caller_metadata_cannot_override_host_context() {
 }
 
 #[test]
+fn caller_metadata_cannot_claim_the_buzz_host_namespace() {
+    let params = build_tool_call_params(
+        "board.open",
+        json!({}),
+        Some(json!({
+            "progressToken": 9,
+            "xyz.block.buzz/context": {"channelRef": "spoofed"},
+            "xyz.block.buzz/futurePolicy": {"approved": true},
+            "xyz.block.buzzard/context": {"preserved": true}
+        })),
+        Some(&McpAppInvocationContext {
+            community_ref: None,
+            channel_ref: Some("channel-1".to_string()),
+            installation_ref: None,
+        }),
+    );
+
+    assert_eq!(params.pointer("/_meta/progressToken"), Some(&json!(9)));
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context/channelRef"),
+        Some(&json!("channel-1"))
+    );
+    assert!(params
+        .pointer("/_meta/xyz.block.buzz~1futurePolicy")
+        .is_none());
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzzard~1context/preserved"),
+        Some(&json!(true))
+    );
+}
+
+#[test]
+fn caller_context_is_removed_when_host_context_is_absent() {
+    let params = build_tool_call_params(
+        "board.open",
+        json!({}),
+        Some(json!({
+            "progressToken": "caller-owned",
+            "xyz.block.buzz/context": {
+                "communityRef": "spoofed-community"
+            }
+        })),
+        None,
+    );
+
+    assert_eq!(
+        params.pointer("/_meta/progressToken"),
+        Some(&json!("caller-owned"))
+    );
+    assert!(params.pointer("/_meta/xyz.block.buzz~1context").is_none());
+}
+
+#[test]
+fn non_object_caller_metadata_is_dropped_without_panicking() {
+    for caller_meta in [
+        json!("not-an-object"),
+        json!(["also", "not", "an", "object"]),
+    ] {
+        let params = build_tool_call_params(
+            "board.open",
+            json!({}),
+            Some(caller_meta),
+            Some(&McpAppInvocationContext {
+                community_ref: Some("community-1".to_string()),
+                channel_ref: None,
+                installation_ref: None,
+            }),
+        );
+
+        assert_eq!(
+            params.pointer("/_meta/xyz.block.buzz~1context/communityRef"),
+            Some(&json!("community-1"))
+        );
+    }
+}
+
+#[test]
 fn endpoint_policy_allows_https_and_loopback_http() {
     assert!(validate_mcp_endpoint("https://apps.example.com/mcp").is_ok());
     assert!(validate_mcp_endpoint("https://localhost:1337/mcp").is_ok());
@@ -238,7 +315,7 @@ fn reviewed_policy_allows_only_equal_or_narrower_capabilities() {
         csp: McpAppResourceCsp {
             connect_domains: vec![
                 "https://api.example.com".to_string(),
-                "https://events.example.com".to_string(),
+                "https://stream.example.com".to_string(),
             ],
             resource_domains: vec!["https://cdn.example.com".to_string()],
             ..Default::default()
@@ -415,7 +492,7 @@ fn ui_resource_csp_is_sanitized_before_reaching_the_proxy() {
                         "csp": {
                             "connectDomains": [
                                 "https://api.example.com",
-                                "wss://events.example.com",
+                                "wss://stream.example.com",
                                 "http://public.example.com",
                                 "https://example.com/path"
                             ],
@@ -429,7 +506,7 @@ fn ui_resource_csp_is_sanitized_before_reaching_the_proxy() {
     let (_, csp, _) = parse_ui_resource(&response, "ui://board", None).unwrap();
     assert_eq!(
         csp.connect_domains,
-        vec!["https://api.example.com", "wss://events.example.com"]
+        vec!["https://api.example.com", "wss://stream.example.com"]
     );
     assert_eq!(csp.frame_domains, vec!["https://video.example.com"]);
 }
@@ -463,6 +540,40 @@ fn modern_request_carries_version_method_and_meta() {
         .expect("capabilities must declare the ui extension");
     assert_eq!(mime_types, &json!([MCP_APP_MIME_TYPE]));
     assert!(meta.get("io.modelcontextprotocol/clientInfo").is_some());
+}
+
+#[test]
+fn modern_tool_call_preserves_buzz_context_and_required_protocol_metadata() {
+    let context = McpAppInvocationContext {
+        community_ref: Some("community-1".to_string()),
+        channel_ref: Some("channel-1".to_string()),
+        installation_ref: Some("installation-1".to_string()),
+    };
+    let params = prepare_params(
+        McpEra::Modern,
+        build_tool_call_params("board.open", json!({}), None, Some(&context)),
+        MCP_MODERN_PROTOCOL_VERSION,
+    );
+
+    assert_eq!(
+        params.pointer("/_meta/xyz.block.buzz~1context"),
+        Some(&json!({
+            "communityRef": "community-1",
+            "channelRef": "channel-1",
+            "installationRef": "installation-1"
+        }))
+    );
+    let meta = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .expect("modern params must carry _meta");
+    for key in [
+        "io.modelcontextprotocol/protocolVersion",
+        "io.modelcontextprotocol/clientCapabilities",
+        "io.modelcontextprotocol/clientInfo",
+    ] {
+        assert!(meta.contains_key(key), "modern metadata is missing {key}");
+    }
 }
 
 #[test]
@@ -686,6 +797,14 @@ fn unsafe_parameter_header_values_use_the_base64_sentinel() {
     assert_eq!(
         mcp_param_header_value(&json!("=?base64?literal?=")).unwrap(),
         Some("=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=".to_string())
+    );
+    assert_eq!(
+        mcp_param_header_value(&json!("=?BASE64?bGluZTEKbGluZTI=?=")).unwrap(),
+        Some("=?base64?PT9CQVNFNjQ/YkdsdVpURUtiR2x1WlRJPT89?=".to_string())
+    );
+    assert_eq!(
+        mcp_param_header_value(&json!("=?future-sentinel")).unwrap(),
+        Some("=?base64?PT9mdXR1cmUtc2VudGluZWw=?=".to_string())
     );
 }
 

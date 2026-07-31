@@ -6,6 +6,7 @@ import {
   MCP_APP_POST_MAX_CHARS,
   MCP_APP_POST_MAX_LINES,
   mcpAppDisplayLabel,
+  mcpAppDisplayNetworkSource,
   mcpAppDisplayText,
   mcpAppMessageText,
 } from "./mcpAppMessage.ts";
@@ -74,6 +75,14 @@ test("normalizes line endings and removes spoofing controls", () => {
   assert.equal(
     mcpAppDisplayLabel("Buzz\u202e Security", "app"),
     "Buzz Security",
+  );
+  assert.equal(
+    mcpAppDisplayNetworkSource("https://trusted.example\u202e/moc.live"),
+    "https://trusted.example/moc.live",
+  );
+  assert.equal(
+    mcpAppDisplayNetworkSource("\u202e\u0000"),
+    "Unrecognized network source",
   );
 });
 

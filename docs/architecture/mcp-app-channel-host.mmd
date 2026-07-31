@@ -56,6 +56,8 @@ sequenceDiagram
     Proxy->>Shell: Relay validated message
     alt MCP tool call
       Shell->>Host: tools/call as app
+      Host->>Host: Remove caller Buzz namespace and add host-owned refs
+      Note over Host,Server: params._meta["xyz.block.buzz/context"] can contain<br/>communityRef, channelRef, and installationRef.<br/>The refs provide context, not authorization.
       Host->>Server: tools/call
       Server-->>Host: Tool result
       Host-->>Shell: Tool result

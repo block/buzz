@@ -11,6 +11,7 @@ import {
   connectMcpAppServer,
   disconnectMcpAppServer,
   type McpAppInvocationContext,
+  type McpAppResourcePolicy,
 } from "@/shared/api/tauriMcpApps";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -23,7 +24,7 @@ type ChannelMcpAppPaneProps = Pick<
   invocationContext: McpAppInvocationContext;
   header: React.ReactNode;
   onMessage?: (
-    app: ChannelMcpAppInstallation,
+    app: Pick<ChannelMcpAppInstallation, "id" | "title">,
     message: McpAppMessage,
   ) => Promise<void> | void;
 };
@@ -38,13 +39,27 @@ export function ChannelMcpAppPane({
 }: ChannelMcpAppPaneProps) {
   const [serverId, setServerId] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const serializedArguments = JSON.stringify(app.arguments);
+  const serializedPolicy = JSON.stringify(app.approvedPolicy);
+  const stableArguments = React.useMemo(
+    () => JSON.parse(serializedArguments) as Record<string, unknown>,
+    [serializedArguments],
+  );
+  const stablePolicy = React.useMemo(
+    () => JSON.parse(serializedPolicy) as McpAppResourcePolicy,
+    [serializedPolicy],
+  );
+  const messageApp = React.useMemo(
+    () => ({ id: app.id, title: app.title }),
+    [app.id, app.title],
+  );
   const initialTool = React.useMemo(
-    () => ({ name: app.toolName, arguments: app.arguments }),
-    [app.arguments, app.toolName],
+    () => ({ name: app.toolName, arguments: stableArguments }),
+    [app.toolName, stableArguments],
   );
   const handleMessage = React.useCallback(
-    (message: McpAppMessage) => onMessage?.(app, message),
-    [app, onMessage],
+    (message: McpAppMessage) => onMessage?.(messageApp, message),
+    [messageApp, onMessage],
   );
 
   React.useEffect(() => {
@@ -109,10 +124,11 @@ export function ChannelMcpAppPane({
       >
         {serverId ? (
           <McpAppFrame
-            approvedPolicy={app.approvedPolicy}
+            approvedPolicy={stablePolicy}
             className="min-h-0 flex-1"
             initialTool={initialTool}
             invocationContext={invocationContext}
+            key={app.id}
             onMessage={handleMessage}
             onModelContext={onModelContext}
             onOpenLink={onOpenLink}
