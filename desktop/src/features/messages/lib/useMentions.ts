@@ -428,7 +428,6 @@ export function useMentions(
     managedAgentsQuery.data,
     memberPubkeys,
     members,
-    mentionableAgentPubkeys,
     personaNameByPubkey,
     profiles,
     relayAgentNamesByPubkey,
