@@ -43,6 +43,7 @@ pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> 
     Ok(IdentityInfo {
         pubkey: pubkey_hex,
         display_name,
+        storage: state.identity_storage().as_str().to_string(),
         lost,
         locked,
         reset_failed,
@@ -334,11 +335,17 @@ pub async fn save_ncryptsec_copy(
 #[tauri::command]
 pub async fn import_identity(
     nsec: String,
+    password: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
     tokio::task::spawn_blocking(move || {
-        let trimmed = nsec.trim();
-        let keys = Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))?;
+        // NIP-49 backups require a passphrase and decrypt entirely in Rust.
+        // Raw nsec/hex input follows the existing parser path unchanged.
+        let password = password.map(zeroize::Zeroizing::new);
+        let keys = crate::key_backup::recover_keys_from_input(
+            &nsec,
+            password.as_ref().map(|value| value.as_str()),
+        )?;
 
         // Serialize against persist_current_identity: hold this guard for the
         // full function body so a concurrent stale persist can't overwrite
@@ -353,30 +360,14 @@ pub async fn import_identity(
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
         let key_path = data_dir.join("identity.key");
 
-        // Persist into the OS keyring first (store → read-back verify → marker →
-        // delete file). Falls back to the 0o600 file when the keyring is
-        // unavailable; returns Err only when both backends fail.
-        let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-        crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
-
-        // Update in-memory keys BEFORE clearing recovery flags. The Release
-        // stores below pair with Acquire loads in get_identity: a reader
-        // observing false is guaranteed to see the updated keys.
-        let pubkey = keys.public_key();
-        *state.keys.lock().map_err(|e| e.to_string())? = keys;
-
-        // Clear both recovery flags — an import is valid in either lost or
-        // keyring-locked state and resolves both. In the locked case the
-        // keyring is unreachable, so persist_imported_identity already fell
-        // back to identity.key; on the next Unreachable boot the file is
-        // loaded directly and when the keyring returns the adoption path
-        // picks it up.
-        state
-            .identity_lost
-            .store(false, std::sync::atomic::Ordering::Release);
-        state
-            .keyring_locked
-            .store(false, std::sync::atomic::Ordering::Release);
+        let (pubkey, storage) = commit_imported_identity(&state, &data_dir, keys, |keys| {
+            // Persist into the OS keyring first (store → read-back verify →
+            // marker → delete file). Falls back to the 0o600 file when the
+            // keyring is unavailable; returns Err only when both backends fail.
+            let store =
+                crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
+            crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
+        })?;
 
         let pubkey_hex = pubkey.to_hex();
         let display_name = truncated_display_name(&pubkey)?;
@@ -386,6 +377,7 @@ pub async fn import_identity(
         Ok(IdentityInfo {
             pubkey: pubkey_hex,
             display_name,
+            storage: storage.as_str().to_string(),
             lost: false,
             locked: false,
             reset_failed: false,
@@ -393,6 +385,69 @@ pub async fn import_identity(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Commit an imported identity: durably persist, swap in-memory keys, clear
+/// recovery flags, then remove the previous identity's stale app-managed
+/// backup. Caller must hold `state.identity_mutation`.
+///
+/// Ordering is the contract:
+///
+/// 1. `persist` runs FIRST. If it fails (`Err` from both keyring and file
+///    fallback), nothing has changed — the previous identity stays live in
+///    memory AND its valid canonical `identity.ncryptsec` stays on disk.
+/// 2. Only after durable persistence do we swap `state.keys` and clear the
+///    recovery flags.
+/// 3. Stale-backup cleanup runs LAST and is deliberately best-effort: at that
+///    point the import is durably committed, so reporting a cleanup failure
+///    as a command `Err` would claim a half-applied import that actually
+///    succeeded. The leftover blob is still passphrase-encrypted and is
+///    replaced by the next backup creation; we log and move on.
+fn commit_imported_identity(
+    state: &AppState,
+    data_dir: &std::path::Path,
+    keys: nostr::Keys,
+    persist: impl FnOnce(&nostr::Keys) -> Result<crate::app_state::IdentityStorage, String>,
+) -> Result<(nostr::PublicKey, crate::app_state::IdentityStorage), String> {
+    // Capture the previous pubkey up front for post-commit cleanup.
+    let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
+
+    let storage = persist(&keys)?;
+
+    // Update in-memory keys BEFORE clearing recovery flags. The Release
+    // stores below pair with Acquire loads in get_identity: a reader
+    // observing false is guaranteed to see the updated keys.
+    let pubkey = keys.public_key();
+    {
+        let mut active_keys = state.keys.lock().map_err(|e| e.to_string())?;
+        *active_keys = keys;
+        state.set_identity_storage(storage);
+    }
+
+    // Clear both recovery flags — an import is valid in either lost or
+    // keyring-locked state and resolves both. In the locked case the
+    // keyring is unreachable, so the persist step already fell back to
+    // identity.key; on the next Unreachable boot the file is loaded
+    // directly and when the keyring returns the adoption path picks it up.
+    state
+        .identity_lost
+        .store(false, std::sync::atomic::Ordering::Release);
+    state
+        .keyring_locked
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    // Importing a different identity invalidates the app-managed backup: it
+    // encrypts the previous key and must not linger mislabeled. Best-effort
+    // per the ordering contract above.
+    if let Err(e) = crate::key_backup::cleanup_stale_backup(&previous_pubkey, &pubkey, data_dir) {
+        eprintln!(
+            "buzz-desktop: import committed, but stale key backup cleanup failed: {e}; \
+             the leftover identity.ncryptsec encrypts the PREVIOUS key and will be \
+             replaced by the next backup creation"
+        );
+    }
+
+    Ok((pubkey, storage))
 }
 
 /// Make the current ephemeral identity durable by persisting it to the OS
@@ -438,11 +493,12 @@ pub async fn persist_current_identity(
         let key_path = data_dir.join("identity.key");
 
         let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-        crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
+        let storage =
+            crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
 
-        // Keys are already the live identity — only clear identity_lost.
-        // Release pairs with Acquire in get_identity so readers see
-        // consistent state.
+        // Keys are already the live identity. Record where the durable write
+        // landed before clearing identity_lost.
+        state.set_identity_storage(storage);
         state
             .identity_lost
             .store(false, std::sync::atomic::Ordering::Release);
@@ -454,6 +510,7 @@ pub async fn persist_current_identity(
         Ok(IdentityInfo {
             pubkey: pubkey_hex,
             display_name,
+            storage: storage.as_str().to_string(),
             lost: false,
             locked: false,
             reset_failed: false,

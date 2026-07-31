@@ -13,7 +13,8 @@ use crate::managed_agents::{
 mod presets;
 mod runtime_metadata;
 
-use presets::PRESET_HARNESSES;
+use presets::{preset_catalog_entry, PRESET_HARNESSES};
+pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -1436,143 +1437,6 @@ pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpA
     known_acp_runtime_exact(runtime_id)
         .map(discover_acp_runtime_phase1)
         .map(|partial| partial.entry.availability)
-}
-
-// ── Tier-2 preset harnesses ────────────────────────────────────────────────
-//
-// Static data for well-known ACP harnesses that have bundled logos and
-// verified command/args. PATH-probed at discovery time (Detected badge);
-// not editable or deletable by users. Logos are bundled assets referenced
-// by id in the frontend `RUNTIME_LOGOS` map.
-
-struct PresetHarness {
-    id: &'static str,
-    label: &'static str,
-    command: &'static str,
-    args: &'static [&'static str],
-    install_instructions_url: &'static str,
-    install_hint: &'static str,
-    /// Vendor CLI the ACP command wraps, when the preset is an adapter
-    /// (e.g. Amp's `amp-acp` wraps the separately-installed `amp` CLI).
-    /// Consulted only when the adapter is absent, so `AdapterMissing`
-    /// replaces the misleading `NotInstalled` when the CLI is present but
-    /// the adapter is not. Deliberately NOT fed through the builtins'
-    /// full `classify_runtime` predicate: that would flip
-    /// adapter-present/CLI-absent from today's `Available` to `CliMissing`
-    /// (unselectable), and presets carry a single flat `install_hint`, so
-    /// the `CliMissing` copy would tell the user to install the adapter
-    /// they already have. `None` when the command IS the vendor CLI.
-    underlying_cli: Option<&'static str>,
-}
-
-/// Build the catalog entry for one preset harness through an injectable
-/// resolver — the seam the preset loop consumes and tests bind.
-///
-/// Availability consumes only the adapter-missing arm of the builtin
-/// predicate: adapter presence alone decides `Available` (exactly today's
-/// behavior — an `amp-acp` without `amp` stays selectable), and
-/// `underlying_cli` is consulted only when the adapter is absent, to
-/// distinguish `AdapterMissing` (vendor CLI present) from `NotInstalled`
-/// (neither found). See the `underlying_cli` field doc for why the full
-/// `classify_runtime` predicate is deliberately not used here.
-fn preset_catalog_entry(
-    def: &PresetHarness,
-    resolve: impl Fn(&str) -> Option<PathBuf>,
-) -> AcpRuntimeCatalogEntry {
-    let (availability, command, binary_path) = match resolve(def.command) {
-        Some(path) => (
-            AcpAvailabilityStatus::Available,
-            Some(def.command.to_string()),
-            Some(path.display().to_string()),
-        ),
-        None => {
-            let underlying_cli_found = def
-                .underlying_cli
-                .map(|cli| resolve(cli).is_some())
-                .unwrap_or(false);
-            if underlying_cli_found {
-                (AcpAvailabilityStatus::AdapterMissing, None, None)
-            } else {
-                (AcpAvailabilityStatus::NotInstalled, None, None)
-            }
-        }
-    };
-    let underlying_cli_path = def
-        .underlying_cli
-        .and_then(resolve)
-        .map(|p| p.display().to_string());
-
-    let default_args = normalize_agent_args(
-        def.command,
-        def.args.iter().map(|s| s.to_string()).collect(),
-    );
-
-    AcpRuntimeCatalogEntry {
-        id: def.id.to_string(),
-        label: def.label.to_string(),
-        // No remote URL — all preset icons are bundled assets.
-        avatar_url: String::new(),
-        availability,
-        command,
-        binary_path,
-        default_args,
-        mcp_command: None,
-        model_env_var: None,
-        provider_env_var: None,
-        thinking_env_var: None,
-        install_hint: def.install_hint.to_string(),
-        install_instructions_url: def.install_instructions_url.to_string(),
-        can_auto_install: false,
-        // Kept false even for adapter presets: presets carry one flat
-        // install_hint (the adapter's), so the requiresExternalCli
-        // "CLI is missing" wording would pair the wrong noun with it.
-        // The builtin path, with per-availability hints, is the only
-        // consumer of the true case.
-        requires_external_cli: false,
-        underlying_cli_path,
-        node_required: false,
-        auth_status: AuthStatus::NotApplicable,
-        login_hint: None,
-        source: HarnessSource::Preset,
-        // Preset entries have static, non-editable env; definition_env is empty.
-        definition_env: Default::default(),
-    }
-}
-
-/// Return the static preset harness definitions as `HarnessDefinition` values.
-///
-/// Used by `warm_harness_registry_from_dir` to seed the loaded-harness registry
-/// at startup before the frontend triggers a full discovery run.
-pub(crate) fn preset_harness_definitions(
-) -> Vec<crate::managed_agents::custom_harnesses::HarnessDefinition> {
-    PRESET_HARNESSES
-        .iter()
-        .map(
-            |p| crate::managed_agents::custom_harnesses::HarnessDefinition {
-                id: p.id.to_string(),
-                label: p.label.to_string(),
-                command: p.command.to_string(),
-                args: p.args.iter().map(|s| s.to_string()).collect(),
-                env: std::collections::BTreeMap::new(),
-                install_instructions_url: p.install_instructions_url.to_string(),
-                install_hint: p.install_hint.to_string(),
-            },
-        )
-        .collect()
-}
-
-/// Return the static slice of preset harness IDs.
-///
-/// Used by `check_id_collision` in `custom_harnesses` to derive the reserved-ID
-/// set from the single source of truth (`PRESET_HARNESSES`) rather than a
-/// hand-maintained copy.  Adding a preset automatically reserves its ID.
-pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
-    // `PRESET_HARNESSES` is `'static`; we project its `id` fields.
-    // Computed once via OnceLock to avoid repeated allocations on hot paths.
-    use std::sync::OnceLock;
-    static IDS: OnceLock<Vec<&'static str>> = OnceLock::new();
-    IDS.get_or_init(|| PRESET_HARNESSES.iter().map(|p| p.id).collect())
-        .as_slice()
 }
 
 /// Discover all ACP runtimes, optionally merging user-defined custom harnesses

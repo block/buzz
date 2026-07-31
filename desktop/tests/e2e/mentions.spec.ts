@@ -157,7 +157,7 @@ async function waitForTimelineSettled(page: import("@playwright/test").Page) {
   await expect(page.locator("[data-render-pending]")).toHaveCount(0);
 }
 
-async function expectAgentProfileMessageOnly(
+async function expectOwnedAgentProfileActions(
   profilePopover: import("@playwright/test").Locator,
   pubkey: string,
 ) {
@@ -169,7 +169,7 @@ async function expectAgentProfileMessageOnly(
   ).toHaveCount(0);
   await expect(
     profilePopover.getByTestId(`user-profile-popover-huddle-${pubkey}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
 }
 
 async function expectAgentProfileActionsHidden(
@@ -1114,7 +1114,7 @@ test("system add rows use plain names while remove rows retain agent mention sty
   const addedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "portal" })
-    .filter({ hasText: "was added by" });
+    .filter({ hasText: "added by" });
   const removedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "removed portal from the channel" });
@@ -1178,7 +1178,7 @@ test("groups member additions and joins with hidden names in the standard toolti
 
   const groupedRow = page
     .getByTestId("system-message-row")
-    .filter({ hasText: "was added by Alice Chen" });
+    .filter({ hasText: "added by Alice Chen" });
   for (const visibleName of [
     "Erica Chapman",
     "Peter Griffin",
@@ -1188,9 +1188,9 @@ test("groups member additions and joins with hidden names in the standard toolti
     await expect(groupedRow).toContainText(visibleName);
   }
   await expect(
-    groupedRow.locator("p").filter({ hasText: "was added by" }),
+    groupedRow.locator("p").filter({ hasText: "added by" }),
   ).toContainText(
-    "was added by Alice Chen, along with Peter Griffin, Marcia Thomas, Jordan Lee, and 2 others",
+    "added by Alice Chen, along with Peter Griffin, Marcia Thomas, Jordan Lee, and 2 others",
   );
   await expect(groupedRow.locator("[data-mention]")).toHaveCount(0);
 
@@ -1200,6 +1200,11 @@ test("groups member additions and joins with hidden names in the standard toolti
   await expect(visibleName).toHaveCSS("text-decoration-line", "underline");
 
   const othersTrigger = groupedRow.getByRole("button", { name: "2 others" });
+  // Park the pointer off-target first: the previous hover leaves the mouse at a
+  // fixed viewport point, and any later reflow (new rows, scroll-to-bottom, a
+  // different text wrap) can slide this button under it. Without this the
+  // assertion measures where the mouse happens to be, not the resting style.
+  await page.mouse.move(0, 0);
   await expect(othersTrigger).toHaveCSS("text-decoration-line", "none");
   await othersTrigger.hover();
   await expect(othersTrigger).toHaveCSS("text-decoration-line", "underline");
@@ -1242,13 +1247,20 @@ test("groups member additions and joins with hidden names in the standard toolti
   const joinedOthersTrigger = joinedRow.getByRole("button", {
     name: "2 others",
   });
+  await page.mouse.move(0, 0);
   await expect(joinedOthersTrigger).toHaveCSS("text-decoration-line", "none");
   await joinedOthersTrigger.hover();
-  await expect(page.getByRole("tooltip")).toContainText("Olivia Park");
-  await expect(page.getByRole("tooltip")).toContainText("Sam Rivera");
+  // Scope to the *open* tooltip: the first row's tooltip stays mounted with
+  // data-state="closed" while it animates out, so a bare role=tooltip lookup
+  // matches two elements and trips strict mode.
+  const joinedTooltip = page.locator(
+    '[role="tooltip"]:not([data-state="closed"])',
+  );
+  await expect(joinedTooltip).toContainText("Olivia Park");
+  await expect(joinedTooltip).toContainText("Sam Rivera");
 });
 
-test("system agent profile only exposes message action", async ({ page }) => {
+test("system agent profile exposes owned agent actions", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1277,7 +1289,7 @@ test("system agent profile only exposes message action", async ({ page }) => {
   const joinedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "mira" })
-    .filter({ hasText: "was added by" });
+    .filter({ hasText: "added by" });
   const agentName = joinedRow.getByText("mira", { exact: true });
   await expect(agentName).toHaveText("mira");
   await expect(agentName).not.toHaveAttribute("data-mention");
@@ -1287,13 +1299,13 @@ test("system agent profile only exposes message action", async ({ page }) => {
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expectAgentProfileMessageOnly(
+  await expectOwnedAgentProfileActions(
     profilePopover,
     PROFILE_ONLY_AGENT_PUBKEY,
   );
 });
 
-test("system agent avatar only exposes message action", async ({ page }) => {
+test("system agent avatar exposes owned agent actions", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
@@ -1328,7 +1340,7 @@ test("system agent avatar only exposes message action", async ({ page }) => {
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expectAgentProfileMessageOnly(
+  await expectOwnedAgentProfileActions(
     profilePopover,
     PROFILE_ONLY_AGENT_PUBKEY,
   );
@@ -1907,7 +1919,9 @@ test("human profile popover does not show an owner", async ({ page }) => {
   ).toHaveCount(0);
 });
 
-test("owned bot profile only exposes message action", async ({ page }) => {
+test("owned bot profile exposes message and huddle actions", async ({
+  page,
+}) => {
   await installMockBridge(page, {
     managedAgents: [
       {
@@ -1931,13 +1945,29 @@ test("owned bot profile only exposes message action", async ({ page }) => {
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expectAgentProfileMessageOnly(
+  await expectOwnedAgentProfileActions(
     profilePopover,
     TEST_IDENTITIES.charlie.pubkey,
   );
+
+  await profilePopover
+    .getByTestId(
+      `user-profile-popover-huddle-${TEST_IDENTITIES.charlie.pubkey}`,
+    )
+    .click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).find(
+            (entry) => entry.command === "start_huddle",
+          )?.payload,
+      ),
+    )
+    .toMatchObject({ memberPubkeys: [TEST_IDENTITIES.charlie.pubkey] });
 });
 
-test("owned agent mention profile only exposes message action", async ({
+test("owned agent mention profile exposes message and huddle actions", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1970,7 +2000,7 @@ test("owned agent mention profile only exposes message action", async ({
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await expectAgentProfileMessageOnly(
+  await expectOwnedAgentProfileActions(
     profilePopover,
     TEST_IDENTITIES.charlie.pubkey,
   );

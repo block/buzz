@@ -13,6 +13,10 @@
 use nostr::nips::nip49::{EncryptedSecretKey, KeySecurity};
 use nostr::{FromBech32, Keys, ToBech32};
 
+/// Bech32 prefix of NIP-49 encrypted secret keys. Import routing is
+/// case-insensitive because bech32 permits all-uppercase encodings.
+pub const NCRYPTSEC_HRP: &str = "ncryptsec1";
+
 /// scrypt cost for new backups (2^18 — Gossip's desktop default, ~256 MiB).
 /// The blob self-describes its cost, so this can be raised later without
 /// breaking existing backups.
@@ -108,6 +112,27 @@ pub fn decrypt_ncryptsec(input: &str, password: &str) -> Result<Keys, String> {
     Ok(Keys::new(secret_key))
 }
 
+/// Recover identity keys from either an encrypted NIP-49 backup or the raw
+/// nsec/hex formats accepted before encrypted imports were added.
+pub fn recover_keys_from_input(input: &str, password: Option<&str>) -> Result<Keys, String> {
+    let trimmed = input.trim();
+    let is_ncryptsec = trimmed
+        .get(..NCRYPTSEC_HRP.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(NCRYPTSEC_HRP));
+
+    if is_ncryptsec {
+        let password = password.ok_or_else(|| "key backup requires a password".to_string())?;
+        decrypt_ncryptsec(trimmed, password)
+    } else {
+        Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))
+    }
+}
+
+/// Path of the canonical app-managed backup file.
+pub fn backup_file_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(BACKUP_FILE_NAME)
+}
+
 /// Atomically write `ncryptsec` to `path` with owner-only permissions, then
 /// reread and byte-compare. Same crash-safety pattern as
 /// `app_state::save_key_file`.
@@ -137,6 +162,28 @@ pub fn write_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), 
         return Err("backup file verification failed: on-disk bytes differ".to_string());
     }
 
+    Ok(())
+}
+
+/// Delete the app-managed backup if present. Missing files are already clean.
+pub fn delete_backup_file(data_dir: &std::path::Path) -> Result<(), String> {
+    let path = backup_file_path(data_dir);
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("delete stale backup file: {e}")),
+    }
+}
+
+/// Remove the app-managed backup only when an import changes identities.
+pub fn cleanup_stale_backup(
+    previous: &nostr::PublicKey,
+    new: &nostr::PublicKey,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
+    if previous != new {
+        delete_backup_file(data_dir)?;
+    }
     Ok(())
 }
 

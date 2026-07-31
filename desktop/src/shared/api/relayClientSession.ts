@@ -53,20 +53,19 @@ import {
 } from "@/shared/api/relayReconnectPolicy";
 import { RelayReconnectWaiters } from "@/shared/api/relayReconnectWaiters";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
+import {
+  AUTH_TIMEOUT_MS,
+  BACKOFF_RESET_STABLE_MS,
+  EVENT_BATCH_MS,
+  HISTORY_TIMEOUT_MS,
+  PUBLISH_TIMEOUT_MS,
+  RECONNECT_BASE_DELAY_MS,
+  RECONNECT_MAX_DELAY_MS,
+  STALL_CHECK_INTERVAL_MS,
+  STALL_IDLE_TIMEOUT_MS,
+} from "@/shared/api/relayClientTimings";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
-const RECONNECT_BASE_DELAY_MS = 1_000,
-  RECONNECT_MAX_DELAY_MS = 30_000,
-  EVENT_BATCH_MS = 16;
-
-export const AUTH_TIMEOUT_MS = 25_000;
-export const HISTORY_TIMEOUT_MS = 25_000;
-export const PUBLISH_TIMEOUT_MS = 25_000;
-
-export const BACKOFF_RESET_STABLE_MS = 60_000;
-
-const STALL_CHECK_INTERVAL_MS = 10_000;
-const STALL_IDLE_TIMEOUT_MS = 60_000;
 
 export class RelayClient {
   private wsId: number | null = null;
@@ -566,8 +565,8 @@ export class RelayClient {
         this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
       }, BACKOFF_RESET_STABLE_MS);
 
-      await this.replayLiveSubscriptions();
       this.connectionStateEmitter.set("connected");
+      await this.replayLiveSubscriptions();
       this.stallWatchdog.start();
       this.emitReconnectIfNeeded();
     } catch (error) {
