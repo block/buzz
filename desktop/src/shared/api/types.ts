@@ -527,6 +527,8 @@ export type AcpRuntimeCatalogEntry = {
   nodeRequired: boolean;
   /** Login/auth status for CLI-based runtimes. */
   authStatus: AuthStatus;
+  /** Whether an optional vendor account connection can be started. */
+  supportsAccountConnection: boolean;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
   /**

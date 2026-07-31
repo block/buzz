@@ -184,6 +184,41 @@ test("fromRawAcpRuntimeCatalogEntry preserves source preset", () => {
   assert.deepStrictEqual(entry.definitionEnv, {});
 });
 
+test("fromRawAcpRuntimeCatalogEntry maps optional account capability", () => {
+  const entry = fromRawAcpRuntimeCatalogEntry({
+    id: "opencode",
+    label: "OpenCode",
+    availability: "available",
+    command: "opencode",
+    source: "builtin",
+    default_args: ["acp"],
+    can_auto_install: false,
+    requires_external_cli: false,
+    install_hint: "",
+    install_instructions_url: "https://opencode.ai/docs/",
+    supports_account_connection: true,
+  });
+
+  assert.equal(entry.supportsAccountConnection, true);
+});
+
+test("fromRawAcpRuntimeCatalogEntry defaults optional account capability to false", () => {
+  const entry = fromRawAcpRuntimeCatalogEntry({
+    id: "legacy-runtime",
+    label: "Legacy Runtime",
+    availability: "available",
+    command: "legacy-runtime",
+    source: "preset",
+    default_args: [],
+    can_auto_install: false,
+    requires_external_cli: false,
+    install_hint: "",
+    install_instructions_url: "",
+  });
+
+  assert.equal(entry.supportsAccountConnection, false);
+});
+
 test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape", () => {
   // Simulate the full save → re-open cycle: raw entry comes back from Rust
   // with definition_env populated; the edit form reads entry.definitionEnv.

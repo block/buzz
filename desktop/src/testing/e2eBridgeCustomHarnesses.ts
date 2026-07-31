@@ -96,6 +96,7 @@ export function handleSaveCustomHarness(args: {
     underlying_cli_path: null,
     node_required: false,
     auth_status: { status: "not_applicable" },
+    supports_account_connection: false,
     source: "custom",
     // Omit definition_env when the env map is empty — mirrors Rust's BTreeMap
     // serialization which skips empty maps so the field is absent on the wire.

@@ -15,6 +15,17 @@ const ROW_SORT_PRIORITY: Record<string, number> = {
   goose: 1,
 };
 
+/** Whether settings should load and offer this runtime's ACP auth methods. */
+export function canConnectRuntimeAccount(
+  entry: AcpRuntimeCatalogEntry,
+): boolean {
+  return (
+    entry.availability === "available" &&
+    (entry.authStatus.status === "logged_out" ||
+      entry.supportsAccountConnection)
+  );
+}
+
 /**
  * True when the entry earns a row in "Your runtimes":
  *

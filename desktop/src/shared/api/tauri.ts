@@ -197,6 +197,8 @@ export type RawAcpRuntimeCatalogEntry = {
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  supports_account_connection?: boolean;
   login_hint?: string;
   source: "builtin" | "preset" | "custom";
   /**
@@ -756,6 +758,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
+    supportsAccountConnection: entry.supports_account_connection ?? false,
     loginHint: entry.login_hint ?? null,
     source: entry.source,
     // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
