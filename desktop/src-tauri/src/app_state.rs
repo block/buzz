@@ -102,10 +102,6 @@ pub struct AppState {
     /// Ordering: written once in `setup()` with `Ordering::Release`; read in
     /// `get_identity` with `Ordering::Acquire`.
     pub reset_failed: AtomicBool,
-    /// Serializes Databricks browser authentication. Model discovery can be
-    /// triggered by multiple dialogs at once; only one callback listener and
-    /// browser flow may exist for the shared OAuth cache.
-    pub databricks_auth: tokio::sync::Mutex<()>,
     /// Cached ACP session config from running agents, keyed by canonical
     /// `(agent pubkey, relay URL)` runtime identity.
     /// Populated when the harness emits `session_config_captured` observer events.
@@ -219,7 +215,6 @@ pub fn build_app_state() -> AppState {
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
-        databricks_auth: tokio::sync::Mutex::new(()),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         huddle_audio: Default::default(),
