@@ -139,6 +139,18 @@ export function useMentions(
       ),
     [managedAgentsQuery.data],
   );
+  const managedAgentNameColorByPubkey = React.useMemo(
+    () =>
+      new Map(
+        (managedAgentsQuery.data ?? [])
+          .filter((agent) => Boolean(agent.nameColor))
+          .map((agent) => [
+            normalizePubkey(agent.pubkey),
+            agent.nameColor as string,
+          ]),
+      ),
+    [managedAgentsQuery.data],
+  );
   const managedAgentPersonaIdsByPubkey = React.useMemo(
     () =>
       new Map(
@@ -269,6 +281,7 @@ export function useMentions(
       candidatesByPubkey.set(pubkey, {
         ...current,
         avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
+        nameColor: current.nameColor ?? candidate.nameColor ?? null,
         displayName:
           current.isAgent && !candidate.isAgent
             ? current.displayName
@@ -312,6 +325,7 @@ export function useMentions(
           profile?.nip05Handle?.trim() ||
           null,
         avatarUrl: profile?.avatarUrl ?? null,
+        nameColor: managedAgentNameColorByPubkey.get(pubkey) ?? null,
         isMember: true,
         personaId:
           managedAgentPersonaIdsByPubkey.get(pubkey) ?? linkedPersonaId,
@@ -351,6 +365,7 @@ export function useMentions(
         kind: "identity",
         pubkey: agent.pubkey,
         displayName: agent.name,
+        nameColor: agent.nameColor ?? null,
         isMember: false,
         isAgent: true,
         isManagedAgent: true,
@@ -369,6 +384,7 @@ export function useMentions(
           pubkey,
           displayName: formatSearchUserDisplayName(user),
           avatarUrl: user.avatarUrl ?? null,
+          nameColor: managedAgentNameColorByPubkey.get(pubkey) ?? null,
           personaId:
             managedAgentPersonaIdsByPubkey.get(pubkey) ??
             (activePersonaById.has(pubkey) ? pubkey : undefined),
@@ -393,6 +409,7 @@ export function useMentions(
         personaId: persona.id,
         displayName: persona.displayName,
         avatarUrl: persona.avatarUrl,
+        nameColor: persona.nameColor ?? null,
         isMember: false,
         isAgent: true,
       }))
@@ -417,6 +434,7 @@ export function useMentions(
     currentPubkey,
     directoryAgentPubkeys,
     isArchivedDiscovery,
+    managedAgentNameColorByPubkey,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
@@ -507,6 +525,36 @@ export function useMentions(
 
     return names;
   }, [selectedAgentMentionNames]);
+
+  // Lowercased-trimmed agent/persona display name -> nameColor, sourced from
+  // the same local persona and managed-agent lists used to build the mention
+  // candidates above. Relay agents (other users' shared agents) never carry
+  // a color — nameColor is a local-only display preference.
+  const agentNameColorByName = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const persona of personasQuery.data ?? []) {
+      if (persona.nameColor) {
+        map.set(persona.displayName.trim().toLowerCase(), persona.nameColor);
+      }
+    }
+    for (const agent of managedAgentsQuery.data ?? []) {
+      if (agent.nameColor) {
+        map.set(agent.name.trim().toLowerCase(), agent.nameColor);
+      }
+    }
+    return map;
+  }, [personasQuery.data, managedAgentsQuery.data]);
+
+  const agentHighlightColors = React.useMemo<Record<string, string>>(() => {
+    const result: Record<string, string> = {};
+    for (const name of agentHighlightNames) {
+      const color = agentNameColorByName.get(name.trim().toLowerCase());
+      if (color) {
+        result[name.trim().toLowerCase()] = color;
+      }
+    }
+    return result;
+  }, [agentHighlightNames, agentNameColorByName]);
 
   const searchableNamesLower = React.useMemo<string[]>(
     () => searchableNames.map((n) => n.toLowerCase()),
@@ -980,6 +1028,7 @@ export function useMentions(
     insertMention,
     insertResolvedMention,
     agentKnownNames: agentHighlightNames,
+    agentKnownNameColors: agentHighlightColors,
     isAgentPubkey,
     isManagedAgentPubkey,
     isMentionOpen,

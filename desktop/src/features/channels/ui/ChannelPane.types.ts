@@ -133,6 +133,8 @@ export type ChannelPaneProps = {
     event: React.PointerEvent<HTMLButtonElement>,
   ) => void;
   personaLookup?: Map<string, string>;
+  /** Map from lowercase pubkey → agent name-color id, for coloring mention chips. */
+  nameColorLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
   ownerProfiles?: UserProfileLookup;
   openThreadHeadId: string | null;

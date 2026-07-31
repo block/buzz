@@ -327,6 +327,7 @@ function AgentPersonaCard({
       dataTestId={`persona-agent-row-${persona.id}`}
       label={title}
       modelLabel={modelLabel}
+      nameColor={agent?.nameColor ?? persona.nameColor}
       onClick={() => {
         if (agent) {
           onOpenAgentProfile(
@@ -406,6 +407,7 @@ function StandaloneAgentCard({
         personaModel: null,
         defaultModel,
       })}
+      nameColor={agent.nameColor}
       onClick={() => {
         onOpenAgentProfile(
           agent.pubkey,

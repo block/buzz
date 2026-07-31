@@ -88,6 +88,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
   assert.deepEqual(state.initialValues, {
     displayName: "Solo copy",
     avatarUrl: "avatar://solo",
+    nameColor: undefined,
     systemPrompt: "Be direct.",
     runtime: "provider-a",
     model: "model-a",
@@ -145,6 +146,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     id: "persona-2",
     displayName: "Kit",
     avatarUrl: "",
+    nameColor: undefined,
     systemPrompt: "Keep it weird.",
     runtime: undefined,
     model: undefined,
@@ -174,6 +176,49 @@ test("editPersonaDialogState seeds envVars and namePool from the persona", () =>
     ANTHROPIC_API_KEY: "sk-test",
   });
   assert.deepEqual(state.initialValues.namePool, ["alice", "bob"]);
+});
+
+test("duplicatePersonaDialogState carries nameColor into the duplicate", () => {
+  const state = duplicatePersonaDialogState({
+    id: "persona-colored-dup",
+    displayName: "Hue",
+    avatarUrl: null,
+    nameColor: "violet",
+    systemPrompt: "Be violet.",
+    runtime: null,
+    model: null,
+    isBuiltIn: false,
+    isActive: true,
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  });
+
+  assert.equal(state.initialValues.nameColor, "violet");
+});
+
+test("editPersonaDialogState seeds nameColor from the persona (regression: editing must not erase the color)", () => {
+  // Regression: without this, AgentDefinitionDialog's
+  // `setNameColor(initialValues.nameColor ?? null)` sees `undefined` for a
+  // colored persona, the picker shows "No color", and clicking Save wipes
+  // the stored color because update_persona sets it unconditionally.
+  const state = editPersonaDialogState({
+    id: "persona-colored",
+    displayName: "Hue",
+    avatarUrl: null,
+    nameColor: "blue",
+    systemPrompt: "Be blue.",
+    runtime: null,
+    model: null,
+    provider: null,
+    isBuiltIn: false,
+    isActive: true,
+    namePool: [],
+    envVars: {},
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  });
+
+  assert.equal(state.initialValues.nameColor, "blue");
 });
 
 test("editPersonaDialogState preserves provider=databricks", () => {

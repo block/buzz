@@ -10,6 +10,7 @@ export type RawPersona = {
   id: string;
   display_name: string;
   avatar_url: string | null;
+  name_color?: string | null;
   system_prompt: string;
   runtime?: string | null;
   model?: string | null;
@@ -40,6 +41,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     id: persona.id,
     displayName: persona.display_name,
     avatarUrl: persona.avatar_url,
+    nameColor: persona.name_color ?? null,
     systemPrompt: persona.system_prompt,
     runtime: persona.runtime ?? null,
     model: persona.model ?? null,
@@ -76,6 +78,7 @@ export async function createPersona(
       input: {
         displayName: input.displayName,
         avatarUrl: input.avatarUrl,
+        nameColor: input.nameColor,
         systemPrompt: input.systemPrompt,
         runtime: input.runtime,
         model: input.model,
@@ -95,6 +98,7 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     id: input.id,
     displayName: input.displayName,
     avatarUrl: input.avatarUrl,
+    nameColor: input.nameColor,
     systemPrompt: input.systemPrompt,
     runtime: input.runtime,
     model: input.model,

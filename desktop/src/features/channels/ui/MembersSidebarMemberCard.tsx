@@ -25,6 +25,7 @@ import {
   MANAGED_AGENT_PAIR_ACTION_LABELS,
   type ManagedAgentPairAction,
 } from "@/features/agents/managedAgentRuntimeStatus";
+import { getAgentNameColorStyle } from "@/shared/lib/agentNameColors";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import type {
   ChannelMember,
@@ -179,7 +180,10 @@ export function MembersSidebarMemberCard({
         {memberIsBot ? (
           <div className="relative min-w-0">
             <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/member:opacity-0 group-focus-within/member:opacity-0">
-              <span className="truncate text-sm font-medium tracking-tight">
+              <span
+                className="truncate text-sm font-medium tracking-tight"
+                style={getAgentNameColorStyle(managedAgent?.nameColor)}
+              >
                 {memberLabel}
               </span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">

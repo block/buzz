@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { cn } from "@/shared/lib/cn";
+import { getAgentNameColorStyle } from "@/shared/lib/agentNameColors";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
 
 type AgentIdentityCardProps = {
@@ -12,6 +13,7 @@ type AgentIdentityCardProps = {
   dataTestId: string;
   label: string;
   modelLabel?: string | null;
+  nameColor?: string | null;
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
@@ -25,6 +27,7 @@ export function AgentIdentityCard({
   dataTestId,
   label,
   modelLabel,
+  nameColor,
   onClick,
   statusBadge,
 }: AgentIdentityCardProps) {
@@ -69,7 +72,10 @@ export function AgentIdentityCard({
       ) : null}
 
       <div className="pointer-events-none absolute right-3 bottom-3 left-3 z-30 flex min-w-0 flex-col gap-0.5 text-left text-sm leading-5">
-        <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
+        <span
+          className="min-w-0 truncate font-semibold text-foreground tracking-normal"
+          style={getAgentNameColorStyle(nameColor)}
+        >
           {label}
         </span>
         {modelLabel ? (

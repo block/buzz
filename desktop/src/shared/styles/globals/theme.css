@@ -63,6 +63,24 @@
     --buzz-hosted-community-modal-action-fg: 255 255 255;
     --buzz-hosted-community-modal-overlay-bg: 0 0 0;
     --buzz-hosted-community-identity-bg: 255 255 255;
+    /* Agent name-color palette — fixed 16 ids, Tailwind 600 shades for
+       legible text on the light background. */
+    --agent-color-red: #dc2626;
+    --agent-color-orange: #ea580c;
+    --agent-color-amber: #b45309;
+    --agent-color-yellow: #a16207;
+    --agent-color-lime: #4d7c0f;
+    --agent-color-green: #16a34a;
+    --agent-color-emerald: #059669;
+    --agent-color-teal: #0d9488;
+    --agent-color-cyan: #0891b2;
+    --agent-color-sky: #0284c7;
+    --agent-color-blue: #2563eb;
+    --agent-color-indigo: #4f46e5;
+    --agent-color-violet: #7c3aed;
+    --agent-color-purple: #9333ea;
+    --agent-color-fuchsia: #c026d3;
+    --agent-color-pink: #db2777;
   }
 
   .dark {
@@ -113,6 +131,24 @@
     --sidebar-accent-foreground: 227 68.25% 87.65%;
     --sidebar-border: 231 15.61% 33.92%;
     --sidebar-ring: 231 15.61% 33.92%;
+    /* Agent name-color palette — Tailwind 400 shades for legible text on
+       the dark background. */
+    --agent-color-red: #f87171;
+    --agent-color-orange: #fb923c;
+    --agent-color-amber: #fbbf24;
+    --agent-color-yellow: #facc15;
+    --agent-color-lime: #a3e635;
+    --agent-color-green: #4ade80;
+    --agent-color-emerald: #34d399;
+    --agent-color-teal: #2dd4bf;
+    --agent-color-cyan: #22d3ee;
+    --agent-color-sky: #38bdf8;
+    --agent-color-blue: #60a5fa;
+    --agent-color-indigo: #818cf8;
+    --agent-color-violet: #a78bfa;
+    --agent-color-purple: #c084fc;
+    --agent-color-fuchsia: #e879f9;
+    --agent-color-pink: #f472b6;
   }
 
   * {

@@ -17,6 +17,11 @@ pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// One of the 16 fixed palette ids (see `managed_agents::name_color`),
+    /// or `None` if the user hasn't chosen a color. Purely local display
+    /// state — never published to a relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_color: Option<String>,
     pub system_prompt: String,
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
     /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
@@ -106,6 +111,7 @@ impl AgentDefinition {
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: self.avatar_url,
+            name_color: self.name_color,
             acp_command: DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
             agent_command_override: None,
@@ -171,6 +177,7 @@ impl ManagedAgentRecord {
                 .clone()
                 .unwrap_or_else(|| self.name.clone()),
             avatar_url: self.avatar_url.clone(),
+            name_color: self.name_color.clone(),
             system_prompt: self.system_prompt.clone().unwrap_or_default(),
             runtime: self.runtime.clone(),
             model: self.model.clone(),
@@ -243,6 +250,12 @@ pub struct ManagedAgentRecord {
     /// `#[serde(default)]` so pre-existing records deserialize as `None`.
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// Snapshot of the linked persona's `name_color` at creation time (same
+    /// snapshot semantics as `system_prompt`/`model`/`provider` — NOT
+    /// live-propagated on persona edit, since this is a local-only display
+    /// preference with no relay-consistency requirement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_color: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
     /// Explicit per-instance harness pin. `None` (the default) means inherit
@@ -521,6 +534,7 @@ pub struct ManagedAgentSummary {
     pub parallelism: u32,
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
+    pub name_color: Option<String>,
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_source: Option<super::effective_config::ConfigSource>,

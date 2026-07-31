@@ -93,6 +93,8 @@ type TimelineMessageListProps = {
   ) => Promise<void>;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
+  /** Map from lowercase pubkey → agent name-color id, for coloring mention chips. */
+  nameColorLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
   ownerProfiles?: UserProfileLookup;
   /** The message ID of the currently active find-in-channel match. */
@@ -147,6 +149,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onToggleReaction,
   profiles,
   ownerProfiles,
+  nameColorLookup,
   searchActiveMessageId = null,
   searchMatchingMessageIds,
   searchQuery,
@@ -256,6 +259,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onMarkUnread={onMarkUnread}
               onReply={onReply}
               onToggleReaction={onToggleReaction}
+              nameColorLookup={nameColorLookup}
               profiles={profiles}
               searchActiveMessageId={searchActiveMessageId}
               searchMatchingMessageIds={searchMatchingMessageIds}
@@ -287,6 +291,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       onMarkUnread,
       onReply,
       onToggleReaction,
+      nameColorLookup,
       profiles,
       ownerProfiles,
       searchActiveMessageId,
@@ -700,6 +705,7 @@ type MessageRowItemProps = Pick<
   | "onMarkRead"
   | "onReply"
   | "onToggleReaction"
+  | "nameColorLookup"
   | "profiles"
   | "searchActiveMessageId"
   | "searchMatchingMessageIds"
@@ -738,6 +744,7 @@ function MessageRowItem({
   onMarkRead,
   onReply,
   onToggleReaction,
+  nameColorLookup,
   profiles,
   searchActiveMessageId,
   searchMatchingMessageIds,
@@ -795,6 +802,7 @@ function MessageRowItem({
               ? () => unfollowThreadById(message.id)
               : undefined
           }
+          nameColorLookup={nameColorLookup}
           profiles={profiles}
           showDepthGuides={false}
           videoReviewContext={videoReviewContext}
@@ -839,6 +847,7 @@ function MessageRowItem({
         onMarkUnread={onMarkUnread}
         onToggleReaction={onToggleReaction}
         onReply={onReply}
+        nameColorLookup={nameColorLookup}
         profiles={profiles}
         searchQuery={isSearchMatch ? searchQuery : undefined}
         showDepthGuides={false}

@@ -12,6 +12,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,
+        name_color: None,
         acp_command: String::new(),
         agent_command: String::new(),
         agent_command_override: None,

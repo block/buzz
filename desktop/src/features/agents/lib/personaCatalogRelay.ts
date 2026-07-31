@@ -293,6 +293,9 @@ function publicationToPersona(
     id: `catalog:${publication.ownerPubkey}:${publication.sourcePersonaId}`,
     displayName: publication.agent.displayName,
     avatarUrl: publication.agent.avatarUrl,
+    // nameColor is a local-only display preference — never part of the published
+    // catalog event. Catalog-derived personas always start with no color.
+    nameColor: null,
     systemPrompt: publication.agent.systemPrompt,
     runtime: publication.agent.runtime,
     model: publication.agent.model,

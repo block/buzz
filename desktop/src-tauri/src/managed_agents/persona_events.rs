@@ -185,6 +185,8 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
+        // name_color is a local-only display preference — never part of the published event content.
+        name_color: None,
         system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
         model: content.model,

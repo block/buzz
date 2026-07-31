@@ -9,7 +9,7 @@ use crate::{
     managed_agents::{
         apply_persona_behavior, effective_agent_command, load_managed_agents, load_personas,
         managed_agent_avatar_url, save_managed_agents, save_personas, try_regenerate_nest,
-        AgentDefinition, ManagedAgentRecord, UpdatePersonaRequest,
+        validate_agent_name_color, AgentDefinition, ManagedAgentRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -95,6 +95,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
             let provider = trim_optional(input.provider);
+            let name_color = validate_agent_name_color(input.name_color)?;
 
             let _store_guard = state
                 .managed_agents_store_lock
@@ -118,6 +119,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             persona.runtime = runtime;
             persona.model = model;
             persona.provider = provider;
+            persona.name_color = name_color;
             persona.name_pool = input
                 .name_pool
                 .into_iter()

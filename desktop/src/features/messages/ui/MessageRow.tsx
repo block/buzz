@@ -38,6 +38,7 @@ import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import { getAgentNameColorStyle } from "@/shared/lib/agentNameColors";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
@@ -77,6 +78,7 @@ export const MessageRow = React.memo(
     isUnread,
     layoutVariant = "default",
     message,
+    nameColorLookup,
     onCollapseDepthGuide,
     onCollapseDepthGuideHoverChange,
     onCollapseDescendants,
@@ -114,6 +116,8 @@ export const MessageRow = React.memo(
     isUnread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
+    /** Pubkey (lowercase) → agent name-color id, for coloring mention chips in the body. */
+    nameColorLookup?: Map<string, string>;
     onCollapseDepthGuide?: (message: TimelineMessage) => void;
     onCollapseDepthGuideHoverChange?: (
       message: TimelineMessage,
@@ -221,6 +225,22 @@ export const MessageRow = React.memo(
 
       return Object.keys(values).length > 0 ? values : undefined;
     }, [isKnownAgentPubkey, mentionPubkeysByName]);
+
+    const agentMentionNameColors = React.useMemo(() => {
+      if (!agentMentionPubkeysByName || !nameColorLookup) {
+        return undefined;
+      }
+
+      const values: Record<string, string> = {};
+      for (const [name, pubkey] of Object.entries(agentMentionPubkeysByName)) {
+        const color = nameColorLookup.get(normalizePubkey(pubkey));
+        if (color) {
+          values[name] = color;
+        }
+      }
+
+      return Object.keys(values).length > 0 ? values : undefined;
+    }, [agentMentionPubkeysByName, nameColorLookup]);
 
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
@@ -373,6 +393,7 @@ export const MessageRow = React.memo(
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
               agentMentionPubkeysByName={agentMentionPubkeysByName}
+              agentMentionNameColors={agentMentionNameColors}
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
@@ -468,10 +489,15 @@ export const MessageRow = React.memo(
       <div className="flex shrink-0 items-start">{avatarNode}</div>
     );
 
+    const authorNameColorStyle = getAgentNameColorStyle(message.nameColor);
     const authorNode = message.pubkey ? (
-      <MessageAuthorText hoverUnderline>{message.author}</MessageAuthorText>
+      <MessageAuthorText hoverUnderline style={authorNameColorStyle}>
+        {message.author}
+      </MessageAuthorText>
     ) : (
-      <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
+      <MessageAuthorText as="h3" style={authorNameColorStyle}>
+        {message.author}
+      </MessageAuthorText>
     );
     const agentOwnerNode = message.isAgent ? (
       <MessageAgentOwner
@@ -843,6 +869,7 @@ export const MessageRow = React.memo(
     prev.message.ownerPubkey === next.message.ownerPubkey &&
     prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
+    prev.message.nameColor === next.message.nameColor &&
     prev.message.accent === next.message.accent &&
     prev.message.time === next.message.time &&
     prev.message.depth === next.message.depth &&
@@ -878,6 +905,7 @@ export const MessageRow = React.memo(
     prev.isFollowingThread === next.isFollowingThread &&
     prev.isUnread === next.isUnread &&
     prev.layoutVariant === next.layoutVariant &&
+    prev.nameColorLookup === next.nameColorLookup &&
     prev.onCollapseDepthGuide === next.onCollapseDepthGuide &&
     prev.onCollapseDepthGuideHoverChange ===
       next.onCollapseDepthGuideHoverChange &&

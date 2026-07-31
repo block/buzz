@@ -12,6 +12,7 @@ import {
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { getAgentNameColorStyle } from "@/shared/lib/agentNameColors";
 
 export type MentionSuggestion = {
   pubkey?: string;
@@ -21,6 +22,7 @@ export type MentionSuggestion = {
   kind?: "identity" | "persona" | "team";
   displayName: string;
   avatarUrl?: string | null;
+  nameColor: string | null;
   isAgent?: boolean;
   notInChannel?: boolean;
   ownerLabel?: string | null;
@@ -140,6 +142,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span
                   className="min-w-0 break-words font-medium leading-snug"
+                  style={getAgentNameColorStyle(suggestion.nameColor)}
                   title={suggestion.displayName}
                 >
                   {suggestion.displayName}

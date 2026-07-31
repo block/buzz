@@ -448,6 +448,7 @@ pub async fn confirm_agent_snapshot_import(
             id: persona_id.clone(),
             display_name: display_name.clone(),
             avatar_url: effective_avatar.clone(),
+            name_color: None,
             system_prompt: snapshot
                 .definition
                 .system_prompt
@@ -483,6 +484,7 @@ pub async fn confirm_agent_snapshot_import(
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
+            name_color: None,
             slug: None,
             persona_id: Some(persona_id.clone()),
             private_key_nsec: private_key_nsec.clone(),

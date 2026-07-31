@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        apply_persona_behavior, load_personas, save_personas, try_regenerate_nest, AgentDefinition,
-        CatalogSource, CreatePersonaRequest,
+        apply_persona_behavior, load_personas, save_personas, try_regenerate_nest,
+        validate_agent_name_color, AgentDefinition, CatalogSource, CreatePersonaRequest,
     },
     util::now_iso,
 };
@@ -30,6 +30,7 @@ pub async fn create_persona(
         let runtime = trim_optional(input.runtime);
         let model = trim_optional(input.model);
         let provider = trim_optional(input.provider);
+        let name_color = validate_agent_name_color(input.name_color)?;
         // Normalized before the store is touched: a coordinate that can't match
         // a publication is worse than no coordinate, because it silently
         // re-enables the duplicate add it exists to prevent.
@@ -55,6 +56,7 @@ pub async fn create_persona(
             id: Uuid::new_v4().to_string(),
             display_name,
             avatar_url,
+            name_color,
             system_prompt,
             runtime,
             model,

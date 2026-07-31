@@ -137,6 +137,7 @@ export type RawManagedAgent = {
   parallelism: number;
   system_prompt: string | null;
   avatar_url?: string | null;
+  name_color?: string | null;
   model: string | null;
   model_source?: ManagedAgent["modelSource"];
   provider: string | null;
@@ -705,6 +706,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     parallelism: agent.parallelism,
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
+    nameColor: agent.name_color ?? null,
     model: agent.model,
     modelSource: agent.model_source ?? null,
     // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.

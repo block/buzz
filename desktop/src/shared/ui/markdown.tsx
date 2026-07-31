@@ -22,6 +22,7 @@ import {
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import { getAgentNameColorStyle } from "@/shared/lib/agentNameColors";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
@@ -1669,14 +1670,20 @@ function createMarkdownComponents(
     }: {
       children?: React.ReactNode;
     }) {
-      const { agentMentionPubkeysByName, mentionPubkeysByName } =
-        useMarkdownRuntime();
+      const {
+        agentMentionNameColors,
+        agentMentionPubkeysByName,
+        mentionPubkeysByName,
+      } = useMarkdownRuntime();
       const mentionText = String(children ?? "");
       const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
       const pubkey = mentionPubkeysByName?.[mentionName];
       const isAgentMention =
         pubkey !== undefined &&
         agentMentionPubkeysByName?.[mentionName] === pubkey;
+      const mentionNameColorStyle = isAgentMention
+        ? getAgentNameColorStyle(agentMentionNameColors?.[mentionName] ?? null)
+        : undefined;
       const mentionLabel = mentionText.replace(/^@/, "");
       const renderedMentionText = isAgentMention ? (
         mentionLabel
@@ -1699,6 +1706,7 @@ function createMarkdownComponents(
             opensProfile && MENTION_CHIP_HOVER_CLASSES,
             isAgentMention && "agent-mention-highlight",
           )}
+          style={mentionNameColorStyle}
         >
           {renderedMentionText}
         </span>
@@ -1836,6 +1844,7 @@ function MarkdownInner({
   imetaByUrl,
   interactive = true,
   agentMentionPubkeysByName,
+  agentMentionNameColors,
   mediaInset = false,
   mentionNames,
   mentionPubkeysByName,
@@ -1879,6 +1888,7 @@ function MarkdownInner({
   const runtime = React.useMemo<MarkdownRuntime>(
     () => ({
       agentMentionPubkeysByName,
+      agentMentionNameColors,
       channels,
       imetaByUrl,
       mentionPubkeysByName,
@@ -1896,6 +1906,7 @@ function MarkdownInner({
     }),
     [
       agentMentionPubkeysByName,
+      agentMentionNameColors,
       channels,
       imetaByUrl,
       mentionPubkeysByName,
@@ -1998,6 +2009,10 @@ export const Markdown = React.memo(
     shallowRecordEqual(
       prev.agentMentionPubkeysByName,
       next.agentMentionPubkeysByName,
+    ) &&
+    shallowRecordEqual(
+      prev.agentMentionNameColors,
+      next.agentMentionNameColors,
     ) &&
     shallowRecordEqual(prev.mentionPubkeysByName, next.mentionPubkeysByName) &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&

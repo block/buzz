@@ -371,21 +371,28 @@ export function ChannelScreen({
     return pubkeys;
   }, [knownAgentPubkeys, messageProfiles, communityAgentPubkeys]);
   const personasQuery = usePersonasQuery();
-  const { personaLookup, respondToLookup } = React.useMemo(() => {
-    const agents = managedAgentsQuery.data ?? [];
-    const personaById = new Map(
-      (personasQuery.data ?? []).map((p) => [p.id, p.displayName]),
-    );
-    const pLookup = new Map<string, string>();
-    const rLookup = new Map<string, RespondToMode>();
-    for (const agent of agents) {
-      const key = agent.pubkey.toLowerCase();
-      rLookup.set(key, agent.respondTo);
-      const pName = agent.personaId ? personaById.get(agent.personaId) : null;
-      if (pName) pLookup.set(key, pName);
-    }
-    return { personaLookup: pLookup, respondToLookup: rLookup };
-  }, [managedAgentsQuery.data, personasQuery.data]);
+  const { personaLookup, respondToLookup, nameColorLookup } =
+    React.useMemo(() => {
+      const agents = managedAgentsQuery.data ?? [];
+      const personaById = new Map(
+        (personasQuery.data ?? []).map((p) => [p.id, p.displayName]),
+      );
+      const pLookup = new Map<string, string>();
+      const rLookup = new Map<string, RespondToMode>();
+      const cLookup = new Map<string, string>();
+      for (const agent of agents) {
+        const key = agent.pubkey.toLowerCase();
+        rLookup.set(key, agent.respondTo);
+        const pName = agent.personaId ? personaById.get(agent.personaId) : null;
+        if (pName) pLookup.set(key, pName);
+        if (agent.nameColor) cLookup.set(key, agent.nameColor);
+      }
+      return {
+        personaLookup: pLookup,
+        respondToLookup: rLookup,
+        nameColorLookup: cLookup,
+      };
+    }, [managedAgentsQuery.data, personasQuery.data]);
   const timelineMessages = React.useMemo(
     () =>
       formatTimelineMessages(
@@ -399,6 +406,7 @@ export function ChannelScreen({
         respondToLookup,
         relaySelfPubkey,
         messageOwnerProfiles,
+        nameColorLookup,
       ),
     [
       activeChannel,
@@ -407,6 +415,7 @@ export function ChannelScreen({
       currentPubkey,
       messageProfiles,
       messageOwnerProfiles,
+      nameColorLookup,
       personaLookup,
       relaySelfPubkey,
       respondToLookup,
@@ -449,6 +458,7 @@ export function ChannelScreen({
     personaLookup,
     respondToLookup,
     relaySelfPubkey,
+    nameColorLookup,
   });
   const {
     firstUnreadMessageId,
@@ -958,6 +968,7 @@ export function ChannelScreen({
                   profilePanelTab={profilePanelTab}
                   profilePanelView={profilePanelView}
                   personaLookup={personaLookup}
+                  nameColorLookup={nameColorLookup}
                   profiles={messageProfiles}
                   ownerProfiles={messageOwnerProfiles}
                   firstUnreadMessageId={firstUnreadMessageId}

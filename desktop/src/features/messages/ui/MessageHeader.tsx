@@ -28,6 +28,7 @@ type MessageAuthorTextProps = {
   children: React.ReactNode;
   className?: string;
   hoverUnderline?: boolean;
+  style?: React.CSSProperties;
 };
 
 export function MessageAuthorText({
@@ -35,6 +36,7 @@ export function MessageAuthorText({
   children,
   className,
   hoverUnderline = false,
+  style,
 }: MessageAuthorTextProps) {
   return (
     <Component
@@ -44,6 +46,7 @@ export function MessageAuthorText({
         className,
       )}
       data-testid="message-author"
+      style={style}
     >
       {children}
     </Component>
