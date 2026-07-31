@@ -19,6 +19,7 @@
 //!
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -309,10 +310,13 @@ pub enum ControlSignal {
 /// for that — only a function parameter pass-through.
 ///
 /// If `active_run_id` is `None` at write time (no `session/update` seen yet
-/// — e.g. agents that never emit run-id metadata), the steer cannot form a
-/// valid `expectedRunId` and the read loop acks
-/// [`SteerError::ExpectedRunIdMissing`]. The main loop maps this to the
-/// "Err-before-pending" bucket: no withhold/mark was established at
+/// — e.g. agents that never emit run-id metadata), the goose-native method
+/// cannot form a valid `expectedRunId`, and the read loop falls back to the
+/// cross-adapter `_session/steering` method when the agent advertised
+/// `_meta.steering.supported` at `initialize`. That method takes no run id, so
+/// no freshness concern applies to it. When neither transport is available the
+/// read loop acks [`SteerError::ExpectedRunIdMissing`]. The main loop maps that
+/// to the "Err-before-pending" bucket: no withhold/mark was established at
 /// `pool::send_steer` time because the request was rejected before any
 /// write, so the watcher only needs to release nothing and fall back to the
 /// universal `ControlSignal::Steer` cancel+merge path.
@@ -326,7 +330,8 @@ pub struct SteerRequest {
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
 }
 
-/// Why a goose-native steer failed.
+/// Why a mid-turn steer failed, on either transport
+/// (`_goose/unstable/session/steer` or `_session/steering`).
 ///
 /// String and integer fields are intentionally `Debug`-only — read by
 /// `tracing` macros in the main loop's `PoolEvent::SteerAck` arm via
@@ -349,14 +354,28 @@ pub enum SteerError {
     /// Transport-level failure: write error, read EOF, JSON-RPC framing
     /// violation, etc. The string carries the underlying `AcpError`'s display.
     Transport(String),
-    /// At steer-write time `AcpClient::active_run_id` was `None`, so the
-    /// read loop couldn't form a valid `expectedRunId`. The read loop drops
-    /// the request without writing anything; the main loop should release
-    /// any withheld event and fall back to the universal cancel+merge
+    /// At steer-write time neither steer transport was available: no
+    /// `expectedRunId` (`AcpClient::active_run_id` was `None`, so the
+    /// goose-native method could not be formed) and the agent did not
+    /// advertise the cross-adapter `_session/steering` extension. The read
+    /// loop drops the request without writing anything; the main loop should
+    /// release any withheld event and fall back to the universal cancel+merge
     /// `ControlSignal::Steer` path. This is in the same "Err-before-pending"
     /// bucket as `Transport` write failures: no in-process state was
     /// established, so no in-process cleanup is needed.
     ExpectedRunIdMissing,
+    /// A `_session/steering` request returned a JSON-RPC *success* whose
+    /// `outcome` was not one of the two recognized delivery outcomes
+    /// (`injected`, `startedNewTurn`) — including `failed` (codex-acp) and a
+    /// missing `outcome` entirely. `outcome` carries what the agent actually
+    /// reported, for logs.
+    ///
+    /// The steer did NOT land, so the main loop must release the withheld
+    /// event and fire the cancel+merge fallback — exactly like a write that
+    /// never happened. Treating an unrecognized success as delivery would
+    /// drop the user's message: codex-acp answers unrecognized extension
+    /// methods with a bare `{}` success rather than `-32601`.
+    OutcomeRejected { outcome: String },
     /// The read loop never got to dispatch the steer because the prompt
     /// completed first. Delivery state for the underlying message is
     /// unknown after prompt completion — the main loop must treat this as
@@ -369,7 +388,7 @@ pub enum SteerError {
     PromptCompleted,
 }
 
-/// Outcome of a goose-native steer, sent from the read loop back to the
+/// Outcome of a mid-turn steer, sent from the read loop back to the
 /// main loop's ack watcher.
 #[derive(Debug)]
 pub enum SteerAck {
@@ -781,6 +800,9 @@ pub enum IdleSwitchResult {
 /// Each call gets this budget; with one retry the total worst-case is
 /// 2 × CONTEXT_FETCH_TIMEOUT + CONTEXT_FETCH_RETRY_DELAY ≈ 6.5 s.
 const CONTEXT_FETCH_TIMEOUT: Duration = Duration::from_millis(3_000);
+
+/// Short, single-attempt timeout for best-effort exact truncated-thread counts.
+const CONTEXT_COUNT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Delay between the first failed context fetch and the single retry.
 const CONTEXT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -1879,6 +1901,18 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Turn start, labelled exactly as `log_stop_reason` labels the end, so a
+    // log reads as start/stop pairs. Purely observational: an unpaired start is
+    // the only durable evidence that a turn was entered and never returned, and
+    // without it a stalled agent and an agent nobody woke leave identical logs —
+    // zero completions either way, so anything reading them afterwards has to
+    // guess which happened.
+    tracing::info!(
+        target: "pool::prompt",
+        "turn starting for {}",
+        prompt_label(&source)
+    );
+
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -2570,7 +2604,14 @@ async fn fetch_conversation_context(
     let last_event = batch.events.last()?;
     let tags = crate::queue::parse_thread_tags(&last_event.event);
     if let Some(root_id) = tags.root_event_id {
-        return fetch_thread_context(batch.channel_id, &root_id, limit, &ctx.rest_client).await;
+        return fetch_thread_context(
+            batch.channel_id,
+            &root_id,
+            limit,
+            ctx.agent_keys.public_key(),
+            &ctx.rest_client,
+        )
+        .await;
     }
 
     // DM non-reply: fetch recent conversation history.
@@ -2732,12 +2773,48 @@ async fn fetch_prompt_profile_lookup(
 }
 
 /// Fetch thread context via Nostr query: root event by ID + replies by `#e` tag.
+///
+/// The reply query intentionally requests one more reply than the configured
+/// display window. That sentinel event lets the prompt say `N of M, truncated`
+/// when the relay has more thread history, instead of reporting the capped page
+/// as the total. When the window is full, a best-effort `/count` attempts to
+/// improve that lower-bound total; because it is a separate racy request, the
+/// result is clamped to the sentinel-proven minimum. The query also asks for the
+/// agent's newest reply separately so the next prompt can include the agent's
+/// own prior turn even in busy threads where the recent-message window would
+/// otherwise push it out.
 async fn fetch_thread_context(
     channel_id: Uuid,
     root_event_id: &str,
     limit: u32,
+    agent_pubkey: nostr::PublicKey,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
+    fetch_thread_context_with(
+        channel_id,
+        root_event_id,
+        limit,
+        agent_pubkey,
+        |filters| async move { rest.query(&filters).await },
+        |filters| async move { rest.count(&filters).await },
+    )
+    .await
+}
+
+async fn fetch_thread_context_with<Query, QueryFut, Count, CountFut>(
+    channel_id: Uuid,
+    root_event_id: &str,
+    limit: u32,
+    agent_pubkey: nostr::PublicKey,
+    query: Query,
+    count: Count,
+) -> Option<ConversationContext>
+where
+    Query: Fn(Vec<nostr::Filter>) -> QueryFut,
+    QueryFut: std::future::Future<Output = Result<serde_json::Value, crate::relay::RelayError>>,
+    Count: Fn(Vec<nostr::Filter>) -> CountFut,
+    CountFut: std::future::Future<Output = Result<serde_json::Value, crate::relay::RelayError>>,
+{
     use nostr::{Alphabet, SingleLetterTag};
 
     // Defense-in-depth: validate hex event ID.
@@ -2756,7 +2833,8 @@ async fn fetch_thread_context(
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
     let ch_str = channel_id.to_string();
 
-    // Two filters: (1) root event by ID, (2) replies with #e=root + #h=channel.
+    // Three filters: (1) root event by ID, (2) recent replies with #e=root +
+    // #h=channel plus a sentinel, and (3) the agent's newest reply for pinning.
     let root_filter = nostr::Filter::new().id(nostr::EventId::from_hex(root_event_id).ok()?);
     let replies_filter = nostr::Filter::new()
         .kinds([
@@ -2765,16 +2843,23 @@ async fn fetch_thread_context(
         ])
         .custom_tags(e_tag, [root_event_id])
         .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit as usize);
+        .limit(limit.saturating_add(1) as usize);
+    let agent_reply_filter = replies_filter.clone().author(agent_pubkey).limit(1);
 
-    fetch_with_retry(|| async {
+    let context = fetch_with_retry(|| async {
         match timeout(
             CONTEXT_FETCH_TIMEOUT,
-            rest.query(&[root_filter.clone(), replies_filter.clone()]),
+            query(vec![
+                root_filter.clone(),
+                replies_filter.clone(),
+                agent_reply_filter.clone(),
+            ]),
         )
         .await
         {
-            Ok(Ok(json)) => parse_nostr_thread_response(json, root_event_id),
+            Ok(Ok(json)) => {
+                parse_nostr_thread_response_with_meta(json, root_event_id, limit, &agent_pubkey)
+            }
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
@@ -2793,7 +2878,75 @@ async fn fetch_thread_context(
             }
         }
     })
-    .await
+    .await;
+
+    let mut parsed = context?;
+
+    if matches!(
+        parsed.context,
+        ConversationContext::Thread {
+            truncated: true,
+            ..
+        }
+    ) {
+        let replies_count_filter = replies_filter.clone().limit(0);
+        if let Some(total) = fetch_thread_total(
+            channel_id,
+            &replies_count_filter,
+            parsed.root_present,
+            &count,
+        )
+        .await
+        {
+            if let ConversationContext::Thread {
+                total: context_total,
+                ..
+            } = &mut parsed.context
+            {
+                let sentinel_minimum = *context_total;
+                // `/count` is a separate best-effort request after the message
+                // query. If replies are deleted between the two, the exact count
+                // can fall below the already-proven sentinel minimum; never
+                // render impossible labels like `13 of 12 messages, truncated`.
+                *context_total = total.max(sentinel_minimum);
+            }
+        }
+    }
+
+    Some(parsed.context)
+}
+
+/// Best-effort exact thread size for truncated context labels.
+async fn fetch_thread_total<Count, CountFut>(
+    channel_id: Uuid,
+    replies_filter: &nostr::Filter,
+    root_present: bool,
+    count: &Count,
+) -> Option<usize>
+where
+    Count: Fn(Vec<nostr::Filter>) -> CountFut,
+    CountFut: std::future::Future<Output = Result<serde_json::Value, crate::relay::RelayError>>,
+{
+    let replies_count =
+        match timeout(CONTEXT_COUNT_TIMEOUT, count(vec![replies_filter.clone()])).await {
+            Ok(Ok(json)) => json.get("count").and_then(|v| v.as_u64())?,
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "thread context count failed; using sentinel minimum: {e}"
+                );
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "thread context count timed out; using sentinel minimum"
+                );
+                return None;
+            }
+        };
+
+    Some(replies_count as usize + usize::from(root_present))
 }
 
 /// Fetch DM context via Nostr query: recent messages in channel by `#h` tag.
@@ -2946,48 +3099,110 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
 
 /// Parse a Nostr query response (array of events) into thread context.
 ///
-/// Separates the root event (matching `root_event_id`) from replies, sorts
-/// chronologically by `created_at`.
+/// Separates the root event (matching `root_event_id`) from replies, keeps the
+/// newest `limit` replies returned by the sentinel query, then sorts the
+/// displayed window chronologically for the prompt. If the agent's newest reply
+/// is outside that window, keep it instead of the oldest displayed reply so the
+/// next prompt always includes the agent's most recent prior turn.
+#[cfg(test)]
 fn parse_nostr_thread_response(
     json: serde_json::Value,
     root_event_id: &str,
+    limit: u32,
+    agent_pubkey: &nostr::PublicKey,
 ) -> Option<ConversationContext> {
+    parse_nostr_thread_response_with_meta(json, root_event_id, limit, agent_pubkey)
+        .map(|parsed| parsed.context)
+}
+
+struct ParsedThreadContext {
+    context: ConversationContext,
+    root_present: bool,
+}
+
+fn parse_nostr_thread_response_with_meta(
+    json: serde_json::Value,
+    root_event_id: &str,
+    limit: u32,
+    agent_pubkey: &nostr::PublicKey,
+) -> Option<ParsedThreadContext> {
     let events = json.as_array()?;
+    let agent_pubkey_hex = agent_pubkey.to_hex();
     let mut root_msg = None;
     let mut reply_msgs = Vec::new();
+    let mut seen_reply_ids = HashSet::new();
 
     for ev in events {
         let ev_id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(msg) = json_to_context_message(ev) {
             if ev_id == root_event_id {
                 root_msg = Some(msg);
-            } else {
+            } else if seen_reply_ids.insert(ev_id.to_string()) {
+                let is_agent = msg.pubkey.eq_ignore_ascii_case(&agent_pubkey_hex);
                 reply_msgs.push((
+                    ev_id.to_string(),
                     ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+                    is_agent,
                     msg,
                 ));
             }
         }
     }
 
-    // Sort replies chronologically.
-    reply_msgs.sort_by_key(|(ts, _)| *ts);
+    let root_present = root_msg.is_some();
+    let fetched_total = reply_msgs.len() + usize::from(root_present);
+    let newest_agent_reply = reply_msgs
+        .iter()
+        .filter(|(_, _, is_agent, _)| *is_agent)
+        .max_by_key(|(_, ts, _, _)| *ts)
+        .cloned();
+
+    let truncated = reply_msgs.len() > limit as usize;
+    if truncated {
+        // The relay returns limited REQ results newest-first. Sort explicitly so
+        // the sentinel we drop is the oldest reply in the fetched window, not an
+        // arbitrary last element if the HTTP bridge ever changes iteration order.
+        reply_msgs.sort_by_key(|(_, ts, _, _)| Reverse(*ts));
+        reply_msgs.truncate(limit as usize);
+    }
+
+    if let Some(agent_reply) = newest_agent_reply {
+        let agent_reply_already_displayed =
+            reply_msgs.iter().any(|(id, _, _, _)| *id == agent_reply.0);
+        if !agent_reply_already_displayed {
+            reply_msgs.sort_by_key(|(_, ts, _, _)| *ts);
+            if let Some(oldest) = reply_msgs.first_mut() {
+                *oldest = agent_reply;
+            }
+        }
+    }
+
+    // Sort displayed replies chronologically.
+    reply_msgs.sort_by_key(|(_, ts, _, _)| *ts);
 
     let mut messages = Vec::new();
     if let Some(root) = root_msg {
         messages.push(root);
     }
-    messages.extend(reply_msgs.into_iter().map(|(_, msg)| msg));
+    messages.extend(reply_msgs.into_iter().map(|(_, _, _, msg)| msg));
 
-    let total = messages.len();
     if messages.is_empty() {
         return None;
     }
 
-    Some(ConversationContext::Thread {
-        messages,
-        total,
-        truncated: false, // query returns all within limit
+    let total = if truncated {
+        fetched_total // all distinct fetched replies plus the root are proven visible history
+    } else {
+        messages.len()
+    };
+
+    Some(ParsedThreadContext {
+        context: ConversationContext::Thread {
+            messages,
+            total,
+            truncated,
+        },
+        root_present,
     })
 }
 
@@ -3113,12 +3328,19 @@ fn classify_control_cancel_failure(
     }
 }
 
-/// Log a stop reason at the appropriate tracing level.
-fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
-    let label = match source {
+/// How a turn's source is named in the `pool::prompt` log lines.
+///
+/// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
+fn prompt_label(source: &PromptSource) -> String {
+    match source {
         PromptSource::Channel(cid) => format!("channel {cid}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
-    };
+    }
+}
+
+/// Log a stop reason at the appropriate tracing level.
+fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
+    let label = prompt_label(source);
     match stop_reason {
         StopReason::EndTurn => {
             tracing::info!(target: "pool::prompt", "turn complete for {label}: end_turn");
@@ -3372,6 +3594,70 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
     }
 }
 
+/// Build the `(turn, cumulative)` `TokenCounts` pair for a NIP-AM kind-44200
+/// payload from a completed `TurnUsage`.
+///
+/// Extracted as a pure function so the mapping logic can be tested independently
+/// of relay/crypto infrastructure. `publish_agent_turn_metric` is the only
+/// production caller.
+///
+/// - `turn` is `None` when `delta_reliable` is false; otherwise it carries the
+///   per-turn i/o/total/cost deltas for this turn.
+/// - `cumulative` always carries the session-aggregate i/o/cost totals.
+///   `total_tokens` is `Some` only when the session accumulated a genuine
+///   provider-reported total on every turn — never derived from i/o sums
+///   (NIP-AM MUST NOT).
+pub(crate) fn build_turn_metric_counts(
+    usage: &crate::usage::TurnUsage,
+) -> (
+    Option<buzz_core::agent_turn_metric::TokenCounts>,
+    Option<buzz_core::agent_turn_metric::TokenCounts>,
+) {
+    use buzz_core::agent_turn_metric::TokenCounts;
+
+    let turn_counts = if usage.delta_reliable {
+        Some(TokenCounts {
+            input_tokens: usage.turn_input_tokens,
+            output_tokens: usage.turn_output_tokens,
+            // Field-local: present only when both the previous and current
+            // cumulative totals were available and monotonic. Never derived
+            // from input+output.
+            total_tokens: usage.turn_total_tokens,
+            cost_usd: usage.turn_cost_usd,
+            // Field-local: present when the cumulative counter was monotonic
+            // across this turn. Zero means no cache hits this turn (not absent).
+            cache_read_tokens: usage.turn_cache_read_tokens,
+            // buzz-agent does not emit a cache-write count on the wire today;
+            // leave None rather than deriving it from other fields.
+            cache_write_tokens: None,
+        })
+    } else {
+        // Defense-in-depth: UsageTracker already sets all turn_* fields to None
+        // when delta_reliable is false, so the None arm here is technically
+        // redundant. The explicit guard prevents a future refactor from
+        // accidentally publishing unreliable per-turn counts.
+        None
+    };
+    let cumulative_counts = Some(TokenCounts {
+        input_tokens: Some(usage.cumulative_input_tokens),
+        output_tokens: Some(usage.cumulative_output_tokens),
+        // Present when every turn in the session reported a genuine provider
+        // total. None when the session has never emitted one or any turn lacked
+        // one. Never derived from input+output (NIP-AM MUST NOT).
+        total_tokens: usage.cumulative_total_tokens,
+        cost_usd: usage.cumulative_cost_usd,
+        // Session-cumulative cache-read tokens; None when the harness never
+        // reported this field (e.g. goose or older buzz-agent sessions).
+        // Passes through directly — do not wrap in Some() as the field already
+        // carries provenance (None vs Some(0) are distinct meanings).
+        cache_read_tokens: usage.cumulative_cache_read_tokens,
+        // buzz-agent does not emit a cache-write count on the wire today;
+        // leave None rather than deriving it from other fields.
+        cache_write_tokens: None,
+    });
+    (turn_counts, cumulative_counts)
+}
+
 /// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
 ///
 /// Does nothing when `usage` is `None` (goose emitted no usage notification
@@ -3386,7 +3672,7 @@ async fn publish_agent_turn_metric(
     turn_id: &str,
     stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
 ) {
-    use buzz_core::agent_turn_metric::{AgentTurnMetricPayload, TokenCounts};
+    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
     use nostr::{EventBuilder, Kind, Tag};
 
     let (usage, owner_pk) = match (usage, ctx.agent_owner_pubkey.as_ref()) {
@@ -3394,30 +3680,7 @@ async fn publish_agent_turn_metric(
         _ => return,
     };
 
-    let turn_counts = if usage.delta_reliable {
-        Some(TokenCounts {
-            input_tokens: usage.turn_input_tokens,
-            output_tokens: usage.turn_output_tokens,
-            total_tokens: None,
-            cost_usd: usage.turn_cost_usd,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-        })
-    } else {
-        // Defense-in-depth: UsageTracker already sets all turn_* fields to None
-        // when delta_reliable is false, so the None arm here is technically
-        // redundant. The explicit guard prevents a future refactor from
-        // accidentally publishing unreliable per-turn counts.
-        None
-    };
-    let cumulative_counts = Some(TokenCounts {
-        input_tokens: Some(usage.cumulative_input_tokens),
-        output_tokens: Some(usage.cumulative_output_tokens),
-        total_tokens: None,
-        cost_usd: usage.cumulative_cost_usd,
-        cache_read_tokens: None,
-        cache_write_tokens: None,
-    });
+    let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let payload = AgentTurnMetricPayload {
         harness: ctx.harness_name.clone(),
@@ -4134,6 +4397,572 @@ mod tests {
     fn test_parse_dm_response_missing_messages_key() {
         let json = json!({ "data": [] });
         assert!(parse_dm_response(json, 12).is_none());
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_marks_query_window_truncated() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let agent_hex = agent.public_key().to_hex();
+        let json = json!([
+            {
+                "id": root_id,
+                "pubkey": "rootpub",
+                "content": "root",
+                "created_at": 1000
+            },
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": agent_hex,
+                "content": "newest agent reply",
+                "created_at": 4000
+            },
+            {
+                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pubkey": "humanpub",
+                "content": "middle reply",
+                "created_at": 3000
+            },
+            {
+                "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "pubkey": "oldpub",
+                "content": "sentinel omitted reply",
+                "created_at": 2000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
+            .expect("should parse");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 3); // root + 2 displayed replies
+                assert_eq!(total, 4); // root + displayed replies + sentinel
+                assert!(truncated);
+                assert_eq!(messages[0].content, "root");
+                assert_eq!(messages[1].content, "middle reply");
+                assert_eq!(messages[2].content, "newest agent reply");
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "sentinel omitted reply"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_not_truncated_below_limit() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let json = json!([
+            {
+                "id": root_id,
+                "pubkey": "rootpub",
+                "content": "root",
+                "created_at": 1000
+            },
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": "replypub",
+                "content": "reply",
+                "created_at": 2000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
+            .expect("should parse");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(total, 2);
+                assert!(!truncated);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_keeps_agent_reply_outside_recent_window() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let agent_hex = agent.public_key().to_hex();
+        let json = json!([
+            {
+                "id": root_id,
+                "pubkey": "rootpub",
+                "content": "root",
+                "created_at": 1000
+            },
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": "humanpub",
+                "content": "newer human reply",
+                "created_at": 5000
+            },
+            {
+                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pubkey": "humanpub",
+                "content": "middle human reply",
+                "created_at": 4000
+            },
+            {
+                "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "pubkey": "humanpub",
+                "content": "oldest displayed reply without agent pin",
+                "created_at": 3000
+            },
+            {
+                "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "pubkey": agent_hex,
+                "content": "agent reply outside recent window",
+                "created_at": 2000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
+            .expect("should parse");
+        match ctx {
+            ConversationContext::Thread { messages, .. } => {
+                assert_eq!(messages.len(), 3); // root + 2 displayed replies
+                assert_eq!(messages[0].content, "root");
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "agent reply outside recent window"));
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "newer human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "middle human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "oldest displayed reply without agent pin"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_uses_exact_count_when_above_sentinel_minimum() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let agent_pubkey = agent.public_key();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent_pubkey,
+            move |filters| {
+                assert_thread_query_filters(&filters, channel_id, root_id, agent_pubkey, 3);
+                std::future::ready(Ok(json.clone()))
+            },
+            move |filters| {
+                assert_thread_count_filter(&filters, channel_id, root_id);
+                std::future::ready(Ok(json!({ "count": 6 })))
+            },
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(total, 7); // 6 replies + root
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_does_not_add_missing_root_to_exact_count() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Ok(json!({ "count": 6 }))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 2);
+                assert_eq!(total, 6);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_clamps_count_below_sentinel_minimum() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Ok(json!({ "count": 1 }))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(total, 4); // root + displayed replies + sentinel minimum
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_preserves_sentinel_minimum_when_count_fails() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest reply",
+                4000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle reply",
+                3000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(total, 4); // count failure leaves parser's sentinel minimum intact
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_deduplicates_and_pins_agent_reply() {
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newer human reply",
+                5000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle human reply",
+                4000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                &agent_hex,
+                "agent reply outside recent window",
+                2000
+            ),
+            // Same event as the separately fetched author-filtered result; the
+            // parser should deduplicate it before pinning.
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                &agent_hex,
+                "agent reply outside recent window",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Ok(json!({ "count": 3 }))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(total, 4);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|msg| msg.content == "agent reply outside recent window")
+                        .count(),
+                    1,
+                    "separate agent-reply query must not duplicate the same event"
+                );
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "newer human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "middle human reply"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_uses_distinct_fetched_replies_as_minimum() {
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest human reply",
+                5000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle human reply",
+                4000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel human reply",
+                3000
+            ),
+            thread_event(
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                &agent_hex,
+                "older distinct agent reply",
+                2000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent.public_key(),
+            move |_filters| std::future::ready(Ok(json.clone())),
+            |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                truncated,
+            } => {
+                assert!(truncated);
+                assert_eq!(messages.len(), 3);
+                assert_eq!(
+                    total, 5,
+                    "root plus all four distinct fetched replies prove the lower bound"
+                );
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "older distinct agent reply"));
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.content == "newest human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "middle human reply"));
+                assert!(messages
+                    .iter()
+                    .all(|msg| msg.content != "sentinel human reply"));
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    fn assert_thread_query_filters(
+        filters: &[nostr::Filter],
+        channel_id: Uuid,
+        root_id: &str,
+        agent_pubkey: nostr::PublicKey,
+        reply_limit: u64,
+    ) {
+        assert_eq!(
+            filters.len(),
+            3,
+            "root, recent replies, and agent reply filters"
+        );
+
+        let root = serde_json::to_value(&filters[0]).expect("serialize root filter");
+        assert_eq!(root.get("ids"), Some(&json!([root_id])));
+        assert!(root.get("limit").is_none());
+
+        let replies = serde_json::to_value(&filters[1]).expect("serialize replies filter");
+        assert_eq!(replies.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(replies.get("#e"), Some(&json!([root_id])));
+        assert_eq!(replies.get("#h"), Some(&json!([channel_id.to_string()])));
+        assert_eq!(replies.get("limit"), Some(&json!(reply_limit)));
+        assert!(replies.get("authors").is_none());
+
+        let agent = serde_json::to_value(&filters[2]).expect("serialize agent filter");
+        assert_eq!(agent.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(agent.get("#e"), Some(&json!([root_id])));
+        assert_eq!(agent.get("#h"), Some(&json!([channel_id.to_string()])));
+        assert_eq!(agent.get("authors"), Some(&json!([agent_pubkey.to_hex()])));
+        assert_eq!(agent.get("limit"), Some(&json!(1)));
+    }
+
+    fn assert_thread_count_filter(filters: &[nostr::Filter], channel_id: Uuid, root_id: &str) {
+        assert_eq!(filters.len(), 1, "count should query only matching replies");
+
+        let count = serde_json::to_value(&filters[0]).expect("serialize count filter");
+        assert_eq!(count.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(count.get("#e"), Some(&json!([root_id])));
+        assert_eq!(count.get("#h"), Some(&json!([channel_id.to_string()])));
+        assert_eq!(count.get("limit"), Some(&json!(0)));
+        assert!(count.get("ids").is_none());
+        assert!(count.get("authors").is_none());
+    }
+
+    fn thread_event(id: &str, pubkey: &str, content: &str, created_at: u64) -> serde_json::Value {
+        json!({
+            "id": id,
+            "pubkey": pubkey,
+            "content": content,
+            "created_at": created_at
+        })
     }
 
     #[test]
@@ -5201,10 +6030,14 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(100),
             turn_output_tokens: Some(50),
+            turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 100,
             cumulative_output_tokens: 50,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // owner_pubkey = None → early return, no panic.
@@ -5233,10 +6066,14 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(200),
             turn_output_tokens: Some(80),
+            turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 80,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
@@ -5266,10 +6103,14 @@ mod tests {
             delta_reliable: true,
             turn_input_tokens: Some(50),
             turn_output_tokens: Some(20),
+            turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 150,
             cumulative_output_tokens: 70,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
@@ -5299,10 +6140,14 @@ mod tests {
             delta_reliable: false, // first turn from buzz-agent
             turn_input_tokens: None,
             turn_output_tokens: None,
+            turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 400,
             cumulative_output_tokens: 100,
+            cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
@@ -5315,6 +6160,204 @@ mod tests {
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
         )
         .await;
+    }
+
+    /// `build_turn_metric_counts` maps exact turn and cumulative totals from
+    /// `TurnUsage` to the corresponding `TokenCounts.total_tokens` fields.
+    /// Reverting the production fields at the call site to `None` would break
+    /// this test; the test constrains the real code path.
+    #[test]
+    fn test_build_turn_metric_counts_exact_totals_map_through() {
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-total".to_string(),
+            turn_seq: 2,
+            delta_reliable: true,
+            turn_input_tokens: Some(100),
+            turn_output_tokens: Some(30),
+            turn_total_tokens: Some(130), // genuine per-turn total
+            turn_cost_usd: None,
+            turn_cache_read_tokens: None,
+            cumulative_input_tokens: 500,
+            cumulative_output_tokens: 120,
+            cumulative_total_tokens: Some(620), // genuine cumulative total
+            cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
+            model: None,
+        };
+
+        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+
+        // Serialise to JSON — this is what ultimately goes on the wire.
+        let turn_json = serde_json::to_value(turn.as_ref().expect("turn counts present")).unwrap();
+        let cum_json =
+            serde_json::to_value(cumulative.as_ref().expect("cumulative counts present")).unwrap();
+
+        // Per-turn total must be the genuine provider-reported value.
+        assert_eq!(
+            turn_json["totalTokens"],
+            serde_json::json!(130),
+            "per-turn total must map to TokenCounts.totalTokens in wire JSON"
+        );
+        assert_eq!(turn_json["inputTokens"], serde_json::json!(100));
+        assert_eq!(turn_json["outputTokens"], serde_json::json!(30));
+
+        // Cumulative total must be the genuine session total.
+        assert_eq!(
+            cum_json["totalTokens"],
+            serde_json::json!(620),
+            "cumulative total must map to TokenCounts.totalTokens in wire JSON"
+        );
+        assert_eq!(cum_json["inputTokens"], serde_json::json!(500));
+        assert_eq!(cum_json["outputTokens"], serde_json::json!(120));
+    }
+
+    /// When totals are absent, `build_turn_metric_counts` must produce null
+    /// `total_tokens` — never a derived input+output sum (NIP-AM MUST NOT).
+    /// Reverting the production fields to hardcoded `None` would leave this test
+    /// passing but input/output would disagree, making the null-path detectable.
+    #[test]
+    fn test_build_turn_metric_counts_null_totals_never_derived() {
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-nototal".to_string(),
+            turn_seq: 1,
+            delta_reliable: true,
+            turn_input_tokens: Some(200),
+            turn_output_tokens: Some(60),
+            turn_total_tokens: None, // provider did not supply a total
+            turn_cost_usd: None,
+            turn_cache_read_tokens: None,
+            cumulative_input_tokens: 200,
+            cumulative_output_tokens: 60,
+            cumulative_total_tokens: None, // session has no total
+            cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
+            model: None,
+        };
+
+        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+
+        let turn_json = serde_json::to_value(turn.as_ref().expect("turn counts present")).unwrap();
+        let cum_json =
+            serde_json::to_value(cumulative.as_ref().expect("cumulative counts present")).unwrap();
+
+        // total_tokens must be null in the wire JSON.
+        assert!(
+            turn_json["totalTokens"].is_null(),
+            "absent turn total must serialize as null — not derived from in+out"
+        );
+        assert!(
+            cum_json["totalTokens"].is_null(),
+            "absent cumulative total must serialize as null — not derived from in+out"
+        );
+
+        // Input/output must still carry their real values.
+        assert_eq!(
+            turn_json["inputTokens"],
+            serde_json::json!(200),
+            "inputTokens must be present even when total is absent"
+        );
+        assert_eq!(
+            turn_json["outputTokens"],
+            serde_json::json!(60),
+            "outputTokens must be present even when total is absent"
+        );
+
+        // The null total must not equal the input+output sum — it must be genuinely null.
+        let derived_sum = serde_json::json!(200u64 + 60u64);
+        assert_ne!(
+            turn_json["totalTokens"], derived_sum,
+            "total_tokens must never equal input+output when provider omitted it"
+        );
+    }
+
+    /// A payload with nonzero `accumulatedCachedInputTokens` on the second turn
+    /// must produce a kind:44200 payload where `cumulative.cacheReadTokens` is
+    /// nonzero and `turn.cacheReadTokens` reflects the per-turn delta.
+    /// This is the acceptance-criterion test: it proves the threading is live,
+    /// not hardcoded to None.
+    #[test]
+    fn test_build_turn_metric_counts_cache_read_tokens_thread_through() {
+        // Wire-parse a buzz-agent payload with cache, run it through the tracker,
+        // and verify the published TokenCounts carry the cache field.
+        let raw1 = serde_json::json!({
+            "sessionId": "cache-sess",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 15_091,
+                "accumulatedOutputTokens": 156,
+                "accumulatedCachedInputTokens": 5_033,
+            }
+        });
+        let raw2 = serde_json::json!({
+            "sessionId": "cache-sess",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 28_500,
+                "accumulatedOutputTokens": 310,
+                "accumulatedCachedInputTokens": 11_000,
+            }
+        });
+
+        let mut tracker = crate::usage::UsageTracker::default();
+
+        // Turn 1 — establish baseline (delta unreliable, but cumulative still present).
+        tracker.begin_turn("cache-sess");
+        if let crate::usage::GooseSessionUpdateVariant::UsageUpdate(p) =
+            serde_json::from_value::<crate::usage::GooseSessionUpdateNotification>(raw1)
+                .unwrap()
+                .update
+        {
+            tracker.record("cache-sess", &p);
+        }
+        let t1 = tracker.take().expect("turn 1");
+
+        // Turn 1: cumulative must carry the cache count; turn delta is None (no baseline).
+        let (turn1, cum1) = crate::pool::build_turn_metric_counts(&t1);
+        // delta_reliable = false on first turn → no turn counts.
+        assert!(turn1.is_none(), "first turn: no reliable turn counts");
+        let cum1 = cum1.expect("cumulative always present");
+        assert_eq!(
+            cum1.cache_read_tokens,
+            Some(5_033),
+            "cumulative.cacheReadTokens must be 5033 after turn 1"
+        );
+
+        // Turn 2 — delta reliable.
+        tracker.begin_turn("cache-sess");
+        if let crate::usage::GooseSessionUpdateVariant::UsageUpdate(p) =
+            serde_json::from_value::<crate::usage::GooseSessionUpdateNotification>(raw2)
+                .unwrap()
+                .update
+        {
+            tracker.record("cache-sess", &p);
+        }
+        let t2 = tracker.take().expect("turn 2");
+
+        let (turn2, cum2) = crate::pool::build_turn_metric_counts(&t2);
+
+        let turn2 = turn2.expect("reliable turn counts on turn 2");
+        // Per-turn cache delta: 11_000 - 5_033 = 5_967.
+        assert_eq!(
+            turn2.cache_read_tokens,
+            Some(5_967),
+            "turn.cacheReadTokens must be the per-turn delta"
+        );
+        // cache_write_tokens is always None — buzz-agent doesn't emit it.
+        assert!(
+            turn2.cache_write_tokens.is_none(),
+            "cache_write_tokens must be None — not emitted by buzz-agent"
+        );
+
+        let cum2 = cum2.expect("cumulative always present");
+        assert_eq!(
+            cum2.cache_read_tokens,
+            Some(11_000),
+            "cumulative.cacheReadTokens must be 11_000 after turn 2"
+        );
+        assert!(
+            cum2.cache_write_tokens.is_none(),
+            "cache_write_tokens must be None on cumulative too"
+        );
     }
 
     fn make_prompt_context_no_owner() -> PromptContext {

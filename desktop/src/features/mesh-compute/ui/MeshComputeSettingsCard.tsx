@@ -107,7 +107,9 @@ export function MeshComputeSettingsCard() {
 
   // One-shot hardware-aware catalog fetch. Purely additive: when it fails
   // (stub build, survey error) the card falls back to the free-text field.
-  // Keep an empty draft empty so the UI can explicitly ask the member to choose.
+  // When there is no saved choice, make the curated recommendation the actual
+  // default so a new member can turn Share Compute on directly. An explicit
+  // saved draft always wins.
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -115,6 +117,11 @@ export function MeshComputeSettingsCard() {
         const value = await meshModelCatalog();
         if (cancelled) return;
         setCatalog(value);
+        setModelInput((current) => {
+          if (current.trim() !== "" || !value.recommended) return current;
+          writeDraft(MODEL_DRAFT_STORAGE_KEY, value.recommended);
+          return value.recommended;
+        });
       } catch {
         // Non-fatal — picker just doesn't render.
       }

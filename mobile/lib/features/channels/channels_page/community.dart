@@ -66,7 +66,12 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
             child: communitiesAsync.when(
               loading: () => const SizedBox(
                 height: 120,
-                child: Center(child: CircularProgressIndicator()),
+                child: Center(
+                  child: BuzzLoadingIndicator(
+                    size: 40,
+                    semanticLabel: 'Loading communities',
+                  ),
+                ),
               ),
               error: (e, _) => Padding(
                 padding: const EdgeInsets.all(Grid.xs),

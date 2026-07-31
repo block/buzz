@@ -25,7 +25,8 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// `None` if none was found).
 ///
 /// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
+/// Returns `Some(cmds)` when the adapter is missing or (for codex) below its
+/// minimum supported version.
 ///
 /// For the codex **outdated** case the returned sequence is a two-step
 /// reinstall: first uninstall the old `@zed-industries/codex-acp` package
@@ -235,10 +236,12 @@ pub async fn install_acp_runtime(
     // returns (Guard impl Drop) — so Phase 2's restart path runs outside
     // the guard and cannot re-enter the mutex.
     let runtime_id_clone = runtime_id.clone();
-    let install_result =
-        tokio::task::spawn_blocking(move || install_acp_runtime_blocking(&runtime_id_clone))
-            .await
-            .map_err(|e| format!("install task panicked: {e}"))??;
+    let app_clone = app.clone();
+    let install_result = tokio::task::spawn_blocking(move || {
+        install_acp_runtime_blocking(&runtime_id_clone, &app_clone)
+    })
+    .await
+    .map_err(|e| format!("install task panicked: {e}"))??;
 
     if !install_result.success {
         return Ok(install_result);
@@ -258,12 +261,21 @@ pub async fn install_acp_runtime(
         steps: install_result.steps,
         restarted_count,
         failed_restart_count,
+        log_path: install_result.log_path,
     })
 }
 
 /// Err(_) = infrastructure failure (panic, concurrency guard).
 /// Ok({success: false}) = an install step failed (stderr captured in steps).
-fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult, String> {
+///
+/// The reporter is built here rather than by the caller so this run's log
+/// session starts only once the concurrency guard is held and the runtime id is
+/// resolved to its canonical catalog form: a rejected install must not rotate a
+/// running one's log, and the log filename is derived from that id.
+fn install_acp_runtime_blocking(
+    runtime_id: &str,
+    app: &tauri::AppHandle,
+) -> Result<InstallRuntimeResult, String> {
     // Re-fetch the login-shell PATH so a Node.js installation that happened
     // after app launch (or after a previous failed install) is visible to this
     // run and to the subsequent discover_acp_providers call.
@@ -296,6 +308,8 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     let runtime = crate::managed_agents::known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
 
+    let reporter = InstallReporter::for_run(app, runtime.id);
+
     let mut steps = Vec::new();
 
     // Phase 1: Install CLI if missing and commands are available.
@@ -305,16 +319,11 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
             for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd);
+                let result = run_install_command_with_retry("cli", cmd, &reporter);
                 let success = result.success;
                 steps.push(result);
                 if !success {
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
+                    return Ok(reporter.failed(steps));
                 }
             }
         }
@@ -339,13 +348,8 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
             cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
         if use_managed_npm {
             if let Err(step) = ensure_managed_node_runtime_blocking() {
-                steps.push(*step);
-                return Ok(InstallRuntimeResult {
-                    success: false,
-                    steps,
-                    restarted_count: 0,
-                    failed_restart_count: 0,
-                });
+                reporter.record_step(&mut steps, *step);
+                return Ok(reporter.failed(steps));
             }
         }
 
@@ -358,40 +362,31 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
                 Ok(Some(command)) => command,
                 Ok(None) => cmd.to_string(),
                 Err(step) => {
-                    steps.push(*step);
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
+                    reporter.record_step(&mut steps, *step);
+                    return Ok(reporter.failed(steps));
                 }
             };
 
-            let mut result = run_install_command_with_retry("adapter", &planned);
+            let mut result = run_install_command_with_retry("adapter", &planned, &reporter);
             if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
                 result.hint = npm_eacces_hint(&result.stderr, cmd);
             }
             let success = result.success;
             steps.push(result);
             if !success {
-                return Ok(InstallRuntimeResult {
-                    success: false,
-                    steps,
-                    restarted_count: 0,
-                    failed_restart_count: 0,
-                });
+                return Ok(reporter.failed(steps));
             }
         }
     }
 
-    post_install_verification::run(runtime_id, &mut steps);
+    post_install_verification::run(runtime_id, &mut steps, &reporter);
 
     Ok(InstallRuntimeResult {
         success: steps.iter().all(|step| step.success),
         steps,
         restarted_count: 0,
         failed_restart_count: 0,
+        log_path: reporter.log_path(),
     })
 }
 
@@ -1015,8 +1010,11 @@ fn build_install_command(command: &str) -> Result<std::process::Command, String>
 }
 
 // ── install command execution ─────────────────────────────────────────────────
+mod install_capture;
 mod install_exec;
+mod install_report;
 use install_exec::run_install_command_with_retry;
+use install_report::InstallReporter;
 
 // ── managed Node/npm runtime ──────────────────────────────────────────────────
 mod managed_node;
@@ -1152,7 +1150,8 @@ mod tests {
     /// plan_adapter_install is the pure install-plan seam used by
     /// install_acp_runtime_blocking. These tests verify:
     ///   - A 0.x binary (AdapterOutdated) → uninstall-then-install sequence returned
-    ///   - A 1.x binary (Available) → None (no reinstall)
+    ///   - A current 1.x binary (Available) → None (no reinstall)
+    ///   - A 1.x binary below the floor → install plan returned
     ///   - Missing binary (None path) → catalog install commands returned
     #[cfg(unix)]
     #[test]
@@ -1192,10 +1191,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("codex-acp");
-        // Simulate 1.x adapter: outputs version and exits 0
+        // Simulate the minimum supported adapter version.
         std::fs::write(
             &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
         )
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
@@ -1206,7 +1205,32 @@ mod tests {
 
         assert!(
             plan.is_none(),
-            "1.x codex adapter must not trigger install plan (no reinstall needed)"
+            "current codex adapter must not trigger install plan (no reinstall needed)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_updates_older_1x_codex_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        // A 1.x adapter below MIN_CODEX_ACP_VERSION must still be reinstalled.
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
+        )
+        .expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
+
+        assert!(
+            plan.is_some(),
+            "older 1.x codex adapter must trigger update plan"
         );
     }
 

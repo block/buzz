@@ -22,11 +22,8 @@ import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/thre
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
-import {
-  buildVideoReviewCommentsByRootId,
-  buildVideoReviewContextForMessage,
-  hasVideoAttachment,
-} from "@/features/messages/lib/videoReviewContext";
+import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
+import type { buildVideoReviewContextForMessage } from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -170,40 +167,21 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       buildMainTimelineEntries(messages, undefined, threadSummaries, profiles),
     [mainEntries, messages, profiles, threadSummaries],
   );
-  const reviewCommentsByRootId = React.useMemo(
-    () =>
-      messages.some(hasVideoAttachment)
-        ? buildVideoReviewCommentsByRootId(messages)
-        : new Map<string, TimelineMessage[]>(),
-    [messages],
-  );
   // Contexts are memoized per message id so MessageRow/Markdown memo
   // comparisons hold across unrelated timeline re-renders (typing
   // indicators, presence updates) — a fresh context object per render would
   // defeat the memo and re-render every video message on every pass.
   const videoReviewContextById = React.useMemo(() => {
-    const contexts = new Map<
-      string,
-      NonNullable<ReturnType<typeof buildVideoReviewContextForMessage>>
-    >();
-    for (const message of messages) {
-      const comments = reviewCommentsByRootId.get(message.id) ?? [];
-      const context = buildVideoReviewContextForMessage({
-        channelId,
-        channelName,
-        channelType,
-        comments,
-        isSendingVideoReviewComment,
-        message,
-        onSendVideoReviewComment,
-        onToggleReaction,
-        profiles,
-      });
-      if (context) {
-        contexts.set(message.id, context);
-      }
-    }
-    return contexts;
+    return buildVideoReviewContextsByMessageId({
+      channelId,
+      channelName,
+      channelType,
+      isSendingVideoReviewComment,
+      messages,
+      onSendVideoReviewComment,
+      onToggleReaction,
+      profiles,
+    });
   }, [
     channelId,
     channelName,
@@ -213,7 +191,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     onSendVideoReviewComment,
     onToggleReaction,
     profiles,
-    reviewCommentsByRootId,
   ]);
 
   // The flattened item stream, memoized on the entries and the unread boundary

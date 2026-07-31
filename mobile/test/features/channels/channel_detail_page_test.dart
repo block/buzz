@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -13,6 +15,7 @@ import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
+import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -23,6 +26,7 @@ import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
@@ -152,6 +156,7 @@ Widget _buildTestable({
   String? initialMessageId,
   String? initialThreadRootId,
   Map<String, List<NostrEvent>> threadReplies = const {},
+  Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   RelaySessionNotifier? relaySessionNotifier,
 }) {
@@ -184,6 +189,9 @@ Widget _buildTestable({
       channelMembersProvider(_channelId).overrideWith(
         (ref) async => loadMembers != null ? loadMembers() : members,
       ),
+      channelBotPubkeysProvider(
+        _channelId,
+      ).overrideWith((ref) async => const <String>{}),
       if (createChannelActions != null)
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
@@ -192,6 +200,10 @@ Widget _buildTestable({
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) async => entry.value),
+      for (final entry in pendingThreadReplies.entries)
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) => entry.value),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -203,16 +215,15 @@ Widget _buildTestable({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+        child: child!,
+      ),
       navigatorObservers: navigatorObservers,
-      home: Builder(
-        builder: (context) => MediaQuery(
-          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
-          child: ChannelDetailPage(
-            channel: resolvedChannel,
-            initialMessageId: initialMessageId,
-            initialThreadRootId: initialThreadRootId,
-          ),
-        ),
+      home: ChannelDetailPage(
+        channel: resolvedChannel,
+        initialMessageId: initialMessageId,
+        initialThreadRootId: initialThreadRootId,
       ),
     ),
   );
@@ -680,7 +691,11 @@ void main() {
         _buildTestable(
           messages: messages,
           users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'alice': const UserProfile(
+              pubkey: 'alice',
+              displayName: 'Alice',
+              nip05Handle: 'alice@example.com',
+            ),
             'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
           },
         ),
@@ -690,31 +705,117 @@ void main() {
       expect(findRichText('Hello world!'), findsOneWidget);
       expect(findRichText('Hey Alice!'), findsOneWidget);
       expect(find.text('Alice'), findsOneWidget);
+      expect(find.text('alice@example.com'), findsOneWidget);
       expect(find.text('Bob'), findsOneWidget);
       final messageAvatars = find.byType(CircleAvatar);
       expect(messageAvatars, findsNWidgets(2));
       for (final avatar in messageAvatars.evaluate()) {
         expect(
           tester.getSize(find.byWidget(avatar.widget)),
-          const Size.square(36),
+          const Size.square(messageAvatarSize),
         );
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      final titleStyle = Theme.of(
-        tester.element(aliceName),
-      ).textTheme.titleSmall;
-      expect(aliceText.style?.fontSize, titleStyle?.fontSize);
+      expect(aliceText.style?.fontSize, messageUsernameTextStyle.fontSize);
+      expect(aliceText.style?.fontWeight, messageUsernameTextStyle.fontWeight);
+      expect(aliceText.style?.height, messageUsernameTextStyle.height);
+      final aliceUsername = tester.widget<Text>(
+        find.byKey(const ValueKey('message-username-msg1')),
+      );
+      final aliceTimestamp = tester.widget<Text>(
+        find.byKey(const ValueKey('message-timestamp-msg1')),
+      );
+      expect(aliceUsername.style?.fontSize, messageMetadataTextStyle.fontSize);
+      expect(aliceUsername.style?.fontWeight, FontWeight.w400);
+      expect(aliceUsername.style?.height, messageMetadataTextStyle.height);
+      expect(aliceTimestamp.style?.fontSize, messageMetadataTextStyle.fontSize);
+      expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
       final helloContent = findRichText('Hello world!');
       final helloText = tester.widget<RichText>(helloContent);
-      final bodyStyle = Theme.of(
-        tester.element(helloContent),
-      ).textTheme.bodyLarge;
       expect(
         effectiveFontSizeForText(helloText.text, 'Hello world!'),
-        bodyStyle?.fontSize,
+        messageBodyTextStyle.fontSize,
+      );
+      final messageList = tester.widget<ScrollablePositionedList>(
+        find.byKey(const ValueKey('channel-message-list')),
+      );
+      expect(messageList.padding!.bottom, 0);
+      final newestMessageGroup = tester.widget<Padding>(
+        find.byKey(const ValueKey('channel-message-group-msg2')),
+      );
+      expect(
+        newestMessageGroup.padding,
+        const EdgeInsets.only(bottom: Grid.xs),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
       );
     });
+
+    testWidgets(
+      'keeps image galleries body-aligned and flush with the trailing edge',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        const firstImage = 'https://example.com/media/first.png';
+        const secondImage = 'https://example.com/media/second.png';
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'gallery',
+                pubkey: 'alice',
+                content:
+                    'Gallery\n'
+                    '![First]($firstImage)\n'
+                    '![Second]($secondImage)',
+                extraTags: const [
+                  ['imeta', 'url $firstImage', 'm image/png'],
+                  ['imeta', 'url $secondImage', 'm image/png'],
+                ],
+              ),
+            ],
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final carousel = find.byKey(const ValueKey('message-media-carousel'));
+        final imageCount = find.byKey(
+          const ValueKey('message-media-carousel-count'),
+        );
+        final carouselRect = tester.getRect(carousel);
+        final imageCountRect = tester.getRect(imageCount);
+
+        expect(carouselRect.left, imageCountRect.left);
+        expect(carouselRect.right, tester.view.physicalSize.width);
+        expect(carouselRect.top - imageCountRect.bottom, Grid.half + 2);
+
+        final messageMaterial = find
+            .ancestor(
+              of: find.byKey(const ValueKey('message-row-gallery')),
+              matching: find.byType(Material),
+            )
+            .first;
+        expect(
+          tester.widget<Material>(messageMaterial).clipBehavior,
+          Clip.none,
+        );
+      },
+    );
 
     testWidgets('uses larger participant avatars in reply summaries', (
       tester,
@@ -767,9 +868,62 @@ void main() {
           const Size.square(32),
         );
       }
+      final summaryPadding = tester.widget<Padding>(
+        find.byKey(const ValueKey('thread-summary-root')),
+      );
+      expect(
+        summaryPadding.padding,
+        const EdgeInsets.only(
+          left: messageAvatarSize + messageAvatarContentGap,
+          top: Grid.half,
+          bottom: Grid.xs,
+        ),
+      );
     });
 
-    testWidgets('can jump back to latest when newer messages are offscreen', (
+    testWidgets('constrains reply summaries at accessibility text sizes', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final lastReplyAt =
+          DateTime.now().millisecondsSinceEpoch ~/ 1000 - 59 * 60;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'root',
+              pubkey: 'alice',
+              content: 'Thread head',
+              createdAt: lastReplyAt - 300,
+            ),
+            for (var i = 0; i < 3; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: 'participant-$i',
+                content: 'Reply $i',
+                createdAt: lastReplyAt - 2 + i,
+                extraTags: const [
+                  ['e', 'root', '', 'reply'],
+                ],
+              ),
+          ],
+          channel: _testChannel.copyWith(archivedAt: DateTime.now()),
+          textScaler: const TextScaler.linear(2),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final summaryText = tester.widget<RichText>(findRichText('3 replies'));
+      expect(summaryText.maxLines, 2);
+      expect(summaryText.overflow, TextOverflow.ellipsis);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
     ) async {
       final initialMessages = [
@@ -794,9 +948,21 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final listView = tester.widget<ScrollablePositionedList>(
-        find.byKey(const ValueKey('channel-message-list')),
-      );
+      final messageList = find.byKey(const ValueKey('channel-message-list'));
+      final messageListElement = tester.element(messageList);
+      UserScrollNotification(
+        metrics: FixedScrollMetrics(
+          minScrollExtent: 0,
+          maxScrollExtent: 100,
+          pixels: 0,
+          viewportDimension: 100,
+          axisDirection: AxisDirection.down,
+          devicePixelRatio: 1,
+        ),
+        context: messageListElement,
+        direction: ScrollDirection.reverse,
+      ).dispatch(messageListElement);
+      final listView = tester.widget<ScrollablePositionedList>(messageList);
       listView.itemScrollController!.jumpTo(index: 39);
       await tester.pumpAndSettle();
       expect(
@@ -821,6 +987,189 @@ void main() {
 
       expect(findRichText('Newest live update'), findsOneWidget);
     });
+
+    testWidgets(
+      'keeps follow mode off while a tall newest message stays visible',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final tallMessage = List.generate(
+          12,
+          (index) => 'Newest message line $index',
+        ).join('\n');
+        final initialMessages = [
+          for (var i = 0; i < 12; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: i.isEven ? 'alice' : 'bob',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+          _textMsg(
+            id: 'tall-newest',
+            pubkey: 'alice',
+            content: tallMessage,
+            createdAt: 20_000,
+          ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        await tester.drag(messageList, const Offset(0, 120));
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Newest message line 0'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+
+        messagesNotifier.setMessages([
+          ...initialMessages,
+          _textMsg(
+            id: 'newest-live',
+            pubkey: 'alice',
+            content: 'Newest live update',
+            createdAt: 30_000,
+          ),
+        ]);
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Newest live update'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('preserves an initial message deep-link position', (
+      tester,
+    ) async {
+      final initialMessages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          initialMessageId: 'msg5',
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 5'), findsOneWidget);
+      expect(findRichText('Message 39'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsOneWidget,
+      );
+
+      messagesNotifier.setMessages([
+        ...initialMessages,
+        _textMsg(
+          id: 'newest',
+          pubkey: 'alice',
+          content: 'Newest live update',
+          createdAt: 2000,
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 5'), findsOneWidget);
+      expect(findRichText('Newest live update'), findsNothing);
+    });
+
+    testWidgets(
+      'keeps a deep-linked message in view when its page arrives after a '
+      'small scroll near the latest message',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        // The deep-link target lives in an older page that has not loaded yet.
+        final messagesNotifier = _FakeMessagesNotifier([
+          for (var i = 30; i < 60; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+        ]);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            initialMessageId: 'msg3',
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Small scrolls that keep the newest message visible, so isAtLatest
+        // stays true while the scroll offset becomes non-zero. This lets a
+        // later programmatic jumpTo dispatch ScrollEndNotification.
+        //
+        // Each drag must clear `kDragSlopDefault`; below it `tester.drag`
+        // sends a single sub-slop move, which a message bubble now claims as
+        // a tap and pushes the thread page over this list.
+        for (final dy in const [30.0, 30.0, 30.0]) {
+          await tester.drag(
+            find.byKey(const ValueKey('channel-message-list')),
+            Offset(0, dy),
+          );
+          await tester.pumpAndSettle();
+        }
+
+        // The older page containing the deep-link target arrives.
+        messagesNotifier.setMessages([
+          for (var i = 0; i < 60; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+        ]);
+        await tester.pumpAndSettle();
+
+        // The deep-link jump must stick rather than snapping back to newest.
+        expect(findRichText('Message 3'), findsOneWidget);
+        expect(findRichText('Message 59'), findsNothing);
+      },
+    );
 
     testWidgets('groups consecutive messages from same author', (tester) async {
       final messages = [
@@ -925,22 +1274,29 @@ void main() {
       expect(find.text('Alice'), findsOneWidget);
       final createdAction = findRichText('created this channel');
       expect(createdAction, findsOneWidget);
-      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
+      expect(
+        tester.getSize(find.byType(CircleAvatar)),
+        const Size.square(messageAvatarSize),
+      );
       final nameRect = tester.getRect(find.text('Alice'));
       final nameText = tester.widget<Text>(find.text('Alice'));
-      final nameStyle = Theme.of(
-        tester.element(find.text('Alice')),
-      ).textTheme.titleSmall;
-      expect(nameText.style?.fontSize, nameStyle?.fontSize);
-      final timestampRect = tester.getRect(find.text(formatMessageTime(1000)));
-      expect(timestampRect.left - nameRect.right, Grid.xxs);
+      expect(nameText.style?.fontSize, systemMessageHeadingTextStyle.fontSize);
+      expect(
+        nameText.style?.fontWeight,
+        systemMessageHeadingTextStyle.fontWeight,
+      );
+      expect(
+        find.byKey(const ValueKey('system-message-username-alice')),
+        findsNothing,
+      );
+      final timestampRect = tester.getRect(
+        find.byKey(const ValueKey('system-message-timestamp-alice')),
+      );
+      expect(timestampRect.left, greaterThan(nameRect.right));
       final createdText = tester.widget<RichText>(createdAction);
-      final bodyStyle = Theme.of(
-        tester.element(createdAction),
-      ).textTheme.bodyLarge;
       expect(
         effectiveFontSizeForText(createdText.text, 'created this channel'),
-        bodyStyle?.fontSize,
+        systemMessageBodyTextStyle.fontSize,
       );
     });
 
@@ -964,7 +1320,10 @@ void main() {
 
       expect(find.text('Bob'), findsOneWidget);
       expect(findRichText('joined the channel'), findsOneWidget);
-      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
+      expect(
+        tester.getSize(find.byType(CircleAvatar)),
+        const Size.square(messageAvatarSize),
+      );
     });
 
     testWidgets('renders member_joined (added by other) system event', (
@@ -989,20 +1348,26 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Bob'), findsOneWidget);
-      final addedAction = findRichText('was added by Alice');
+      final addedAction = findRichText('added by Alice');
       expect(addedAction, findsOneWidget);
       expect(find.text('Alice added Bob to the channel'), findsNothing);
-      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
-      final nameRect = tester.getRect(find.text('Bob'));
-      final timestampRect = tester.getRect(find.text(formatMessageTime(1000)));
-      expect(timestampRect.left - nameRect.right, Grid.xxs);
-      final addedText = tester.widget<RichText>(addedAction);
-      final bodyStyle = Theme.of(
-        tester.element(addedAction),
-      ).textTheme.bodyLarge;
       expect(
-        effectiveFontSizeForText(addedText.text, 'was added by Alice'),
-        bodyStyle?.fontSize,
+        tester.getSize(find.byType(CircleAvatar)),
+        const Size.square(messageAvatarSize),
+      );
+      final nameRect = tester.getRect(find.text('Bob'));
+      expect(
+        find.byKey(const ValueKey('system-message-username-bob')),
+        findsNothing,
+      );
+      final timestampRect = tester.getRect(
+        find.byKey(const ValueKey('system-message-timestamp-bob')),
+      );
+      expect(timestampRect.left, greaterThan(nameRect.right));
+      final addedText = tester.widget<RichText>(addedAction);
+      expect(
+        effectiveFontSizeForText(addedText.text, 'added by Alice'),
+        systemMessageBodyTextStyle.fontSize,
       );
     });
 
@@ -1070,7 +1435,7 @@ void main() {
 
       expect(find.text('Bob'), findsOneWidget);
       expect(
-        findRichText('was added by Alice, along with Carol, Dave, Erin, and '),
+        findRichText('added by Alice, along with Carol, Dave, Erin, and '),
         findsOneWidget,
       );
       expect(find.byKey(const Key('membership-overflow')), findsOneWidget);
@@ -1113,7 +1478,55 @@ void main() {
 
       final avatarRect = tester.getRect(find.byType(CircleAvatar));
       final reactionRect = tester.getRect(find.byType(ReactionRow));
-      expect(reactionRect.left, avatarRect.left + 36 + Grid.xxs);
+      expect(
+        reactionRect.left,
+        avatarRect.left + messageAvatarSize + messageAvatarContentGap,
+      );
+    });
+
+    testWidgets('a reacted message offers the + picker in the timeline', (
+      tester,
+    ) async {
+      // Desktop puts the picker trigger beside existing reactions on every row,
+      // so reacting doesn't require discovering the long-press sheet.
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(id: 'msg1', pubkey: 'alice', content: 'ship it'),
+            _reaction(id: 'reaction-1', targetId: 'msg1'),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('add-reaction-pill')));
+      // Not pumpAndSettle: with no dataset asset in a widget test the sheet
+      // shows its loading spinner, which animates forever.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(EmojiPickerSheet), findsOneWidget);
+    });
+
+    testWidgets('an unreacted message keeps the timeline free of chrome', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [_textMsg(id: 'msg1', pubkey: 'alice', content: 'ship it')],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // No reactions, no row — the + only trails reactions that already exist.
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsNothing);
     });
 
     testWidgets('renders member_left system event', (tester) async {
@@ -1134,6 +1547,51 @@ void main() {
 
       expect(find.text('Bob left the channel'), findsOneWidget);
     });
+
+    testWidgets(
+      'constrains generic system timestamps at accessibility text sizes',
+      (tester) async {
+        tester.view.physicalSize = const Size(240, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _systemMsg(
+                id: 'sys-accessible',
+                payload: {
+                  'type': 'topic_changed',
+                  'actor': 'alice',
+                  'topic': 'Release planning',
+                },
+                createdAt:
+                    DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/
+                    1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            textScaler: const TextScaler.linear(3),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final timestampFinder = find.byKey(
+          const ValueKey('system-message-timestamp-sys-accessible'),
+        );
+        final timestamp = tester.widget<Text>(timestampFinder);
+        expect(timestamp.maxLines, 1);
+        expect(timestamp.overflow, TextOverflow.ellipsis);
+        expect(
+          tester.getSize(timestampFinder).width,
+          lessThanOrEqualTo(Grid.xxl),
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets('renders member_removed system event', (tester) async {
       final messages = [
@@ -1410,6 +1868,25 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Alice is typing…'), findsOneWidget);
+
+      final indicator = tester.widget<Container>(
+        find.byKey(const ValueKey('channel-typing-indicator')),
+      );
+      final decoration = indicator.decoration! as BoxDecoration;
+      expect(
+        indicator.padding,
+        const EdgeInsets.symmetric(horizontal: Grid.xxs, vertical: Grid.xxs),
+      );
+      expect(
+        decoration.color,
+        AppTheme.light().colorScheme.surfaceContainerHighest,
+      );
+      expect(decoration.border, isA<Border>());
+      expect(
+        tester.widget<Text>(find.text('Alice is typing…')).style?.color,
+        AppTheme.light().colorScheme.primary,
+      );
+      expect(tester.widget<SmallAvatar>(find.byType(SmallAvatar)).size, 24);
     });
 
     testWidgets('shows two typers', (tester) async {
@@ -1851,6 +2328,322 @@ void main() {
       expect(find.byType(DayDivider), findsNWidgets(2));
       expect(find.text(formatDayHeading(rootCreatedAt)), findsOneWidget);
       expect(find.text(formatDayHeading(nextDayCreatedAt)), findsOneWidget);
+      // The list runs top-down (head first), so tail spacing lives on the list
+      // and reply groups carry none.
+      final threadList = tester.widget<ScrollablePositionedList>(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      expect(threadList.reverse, isFalse);
+      expect(threadList.padding!.bottom, Grid.xs);
+      final newestThreadGroup = tester.widget<Padding>(
+        find.byKey(const ValueKey('thread-message-group-reply-next-day')),
+      );
+      expect(newestThreadGroup.padding, EdgeInsets.zero);
+
+      // The head sits above its replies rather than jammed against the
+      // composer, matching desktop's thread panel.
+      final headY = tester
+          .getTopLeft(
+            find.byKey(const ValueKey('thread-message-group-thread-root')),
+          )
+          .dy;
+      final oldestReplyY = tester
+          .getTopLeft(
+            find.byKey(const ValueKey('thread-message-group-reply-same-day')),
+          )
+          .dy;
+      final newestReplyY = tester
+          .getTopLeft(
+            find.byKey(const ValueKey('thread-message-group-reply-next-day')),
+          )
+          .dy;
+      expect(headY, lessThan(oldestReplyY));
+      expect(oldestReplyY, lessThan(newestReplyY));
+    });
+
+    testWidgets(
+      'initial thread hydration keeps the head visible instead of following the tail',
+      (tester) async {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsOneWidget,
+        );
+
+        completer.complete(replies);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('a reaction landing while the thread is open shows up there', (
+      tester,
+    ) async {
+      // The thread's own relay query is one-shot and asks only for content
+      // kinds, so it can never carry a reaction that arrives afterwards. Until
+      // the live channel events were folded in, the pill (and its burst) only
+      // appeared after leaving the thread and coming back, which refetched.
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final reply = _textMsg(
+        id: 'reply-1',
+        pubkey: 'bob',
+        content: 'A reply',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          messagesNotifier: messagesNotifier,
+          threadReplies: {
+            'thread-root': [reply],
+          },
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('reaction-pill-👍')), findsNothing);
+
+      // The reaction arrives over the channel socket, as it does on device.
+      messagesNotifier.setMessages([
+        rootEvent,
+        _reaction(id: 'reaction-1', targetId: 'reply-1'),
+      ]);
+      await tester.pumpAndSettle();
+
+      // Still on the thread route — no pop needed for the pill to appear.
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(find.byKey(const ValueKey('reaction-pill-👍')), findsOneWidget);
+    });
+
+    testWidgets('a live deletion does not restore the routed thread head', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final reply = _textMsg(
+        id: 'reply-1',
+        pubkey: 'bob',
+        content: 'A reply',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          messagesNotifier: messagesNotifier,
+          threadReplies: {
+            'thread-root': [reply],
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Thread root'), findsOneWidget);
+
+      messagesNotifier.setMessages([
+        rootEvent,
+        _deletion(id: 'delete-root', targetIds: ['thread-root']),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Thread root'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('thread-message-deleted')),
+        findsOneWidget,
+      );
+      expect(find.text('This message was deleted'), findsOneWidget);
+    });
+
+    testWidgets('thread replies earn the + only once they carry a reaction', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final bareReply = _textMsg(
+        id: 'reply-bare',
+        pubkey: 'bob',
+        content: 'No reactions here',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+      final reactedReply = _textMsg(
+        id: 'reply-reacted',
+        pubkey: 'bob',
+        content: 'This one has a reaction',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            rootEvent,
+            _reaction(id: 'reaction-1', targetId: 'reply-reacted'),
+          ],
+          threadReplies: {
+            'thread-root': [bareReply, reactedReply],
+          },
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The head keeps a standing +; the bare reply gets none, so a thread
+      // reads as quietly as the channel does. Two + pills, not three: the head
+      // and the reacted reply.
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsNWidgets(2));
+      final headRow = find.descendant(
+        of: find.byKey(const ValueKey('thread-message-group-thread-root')),
+        matching: find.byKey(const ValueKey('add-reaction-pill')),
+      );
+      expect(headRow, findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('thread-message-group-reply-bare')),
+          matching: find.byKey(const ValueKey('add-reaction-pill')),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('thread-message-group-reply-reacted')),
+          matching: find.byKey(const ValueKey('add-reaction-pill')),
+        ),
+        findsOneWidget,
+      );
     });
   });
 }

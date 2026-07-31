@@ -189,7 +189,10 @@ class _SliverChannelsList extends HookConsumerWidget {
     }
 
     return SliverPadding(
-      padding: const EdgeInsets.only(top: Grid.xxs, bottom: 80),
+      padding: EdgeInsets.only(
+        top: Grid.xxs,
+        bottom: MediaQuery.paddingOf(context).bottom,
+      ),
       sliver: SliverList.list(
         children: [
           if (visibleChannels.isEmpty)

@@ -376,7 +376,7 @@ pub enum TransferResult {
 /// Default maximum number of communities a single pubkey can own. Enforced at
 /// the relay layer — the authoritative layer — so that concurrent transfers or
 /// transfer-vs-create races cannot both pass a preflight count.
-pub const MAX_COMMUNITIES_PER_OWNER: i64 = 3;
+pub const MAX_COMMUNITIES_PER_OWNER: i64 = 5;
 
 /// Effective per-owner community limit for this deployment.
 ///

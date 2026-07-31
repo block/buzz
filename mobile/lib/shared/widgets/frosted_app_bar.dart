@@ -61,6 +61,9 @@ class FrostedAppBar extends StatelessWidget {
   /// can pop, a back button is shown automatically.
   final Widget? leading;
 
+  /// Whether to infer a back button from the current navigator.
+  final bool automaticallyImplyLeading;
+
   /// Widget displayed in the center/title area.
   final Widget? title;
 
@@ -95,6 +98,7 @@ class FrostedAppBar extends StatelessWidget {
   const FrostedAppBar({
     super.key,
     this.leading,
+    this.automaticallyImplyLeading = true,
     this.title,
     this.titleStyle,
     this.titleContentHeight = 0,
@@ -119,7 +123,7 @@ class FrostedAppBar extends StatelessWidget {
 
     final effectiveLeading =
         leading ??
-        (canPop
+        (automaticallyImplyLeading && canPop
             ? SizedBox(
                 width: 48,
                 height: 48,
