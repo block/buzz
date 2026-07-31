@@ -204,7 +204,9 @@ function RuntimeActions({
   const setupAction = runtimeRowSetupAction(runtime, isGooseUpdateAvailable);
   const isWorking = isInstalling || isConnecting;
   const workingLabel =
-    isInstalling && setupAction === "Update" ? "updating" : "installing";
+    isInstalling && runtime.id === "goose" && isGooseUpdateAvailable
+      ? "updating"
+      : "installing";
 
   return (
     <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
@@ -337,7 +339,6 @@ export function HarnessRow({
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
   const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
-  const setupAction = runtimeRowSetupAction(runtime, isGooseUpdateAvailable);
 
   const del = useDeleteCustomHarnessMutation();
   // Blast-radius data for the delete confirmation — only fetched while the
@@ -372,7 +373,9 @@ export function HarnessRow({
           error:
             error instanceof Error
               ? error.message
-              : `${setupAction ?? "Install"} failed.`,
+              : runtime.id === "goose" && isGooseUpdateAvailable
+                ? "Update failed."
+                : "Install failed.",
         });
       },
     });
