@@ -3,17 +3,26 @@ import test from "node:test";
 
 import { availableMediaDevices } from "./mediaDevices.ts";
 
-/** Swap `globalThis.navigator` for the duration of `run`. */
+/**
+ * Swap `globalThis.navigator` for the duration of `run`, and swallow the
+ * missing-API diagnostic so it does not pollute test output. The
+ * once-per-process behaviour of that warning is covered separately in
+ * `mediaDevicesWarning.test.mjs`, which needs its own file to see the latch
+ * unset.
+ */
 function withNavigator(value, run) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const originalWarn = console.warn;
   Object.defineProperty(globalThis, "navigator", {
     value,
     configurable: true,
     writable: true,
   });
+  console.warn = () => {};
   try {
     return run();
   } finally {
+    console.warn = originalWarn;
     if (descriptor) {
       Object.defineProperty(globalThis, "navigator", descriptor);
     } else {
