@@ -106,6 +106,7 @@ Future<List<String>> _pumpPicker(
   required SharedPreferences prefs,
   List<CustomEmoji> customEmoji = _customEmoji,
   EmojiDataset? dataset,
+  bool includeCustomEmoji = true,
 }) async {
   final selected = <String>[];
   await tester.pumpWidget(
@@ -116,7 +117,10 @@ Future<List<String>> _pumpPicker(
         emojiDatasetOrEmptyProvider.overrideWithValue(dataset ?? _dataset),
         customEmojiListProvider.overrideWithValue(customEmoji),
       ],
-      child: EmojiPickerSheet(onSelect: selected.add),
+      child: EmojiPickerSheet(
+        includeCustomEmoji: includeCustomEmoji,
+        onSelect: selected.add,
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -227,6 +231,23 @@ void main() {
         find.byKey(const ValueKey('emoji-tile-custom-partyparrot')),
         findsOneWidget,
       );
+    });
+
+    testWidgets('callers can limit selection to standard emoji', (
+      tester,
+    ) async {
+      await _pumpPicker(
+        tester,
+        prefs: await _prefs(),
+        includeCustomEmoji: false,
+      );
+
+      expect(find.byTooltip('Custom'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('emoji-tile-custom-partyparrot')),
+        findsNothing,
+      );
+      expect(find.byKey(const ValueKey('emoji-tile-grinning')), findsOneWidget);
     });
 
     testWidgets('custom emoji sit in the same cell as native glyphs', (

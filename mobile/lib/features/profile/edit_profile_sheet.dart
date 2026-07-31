@@ -9,11 +9,19 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../channels/emoji_picker.dart';
 import 'profile_provider.dart';
 import 'user_profile.dart';
 
 const _profileAvatarMaxDimension = 512.0;
 const _profileAvatarImageQuality = 85;
+const _emojiAvatarColors = [
+  (hex: '#F4B942', color: Color(0xFFF4B942)),
+  (hex: '#E66A6A', color: Color(0xFFE66A6A)),
+  (hex: '#9B72CF', color: Color(0xFF9B72CF)),
+  (hex: '#5B8DEF', color: Color(0xFF5B8DEF)),
+  (hex: '#4EAD8C', color: Color(0xFF4EAD8C)),
+];
 
 typedef PickProfileAvatarImage =
     Future<XFile?> Function({
@@ -79,6 +87,14 @@ class _EditProfileSheet extends HookConsumerWidget {
     final displayName = useState(currentProfile?.displayName ?? '');
     final about = useState(currentProfile?.about ?? '');
     final avatarUrl = useState(currentProfile?.avatarUrl ?? '');
+    final initialEmojiAvatar = useMemoized(
+      () => parseEmojiAvatarDataUrl(currentProfile?.avatarUrl),
+      [currentProfile?.avatarUrl],
+    );
+    final selectedEmoji = useState(initialEmojiAvatar?.emoji);
+    final selectedEmojiColor = useState(
+      initialEmojiAvatar?.color ?? _emojiAvatarColors.first.hex,
+    );
     final isUploading = useState(false);
     final isSaving = useState(false);
     final errorMessage = useState<String?>(null);
@@ -112,12 +128,39 @@ class _EditProfileSheet extends HookConsumerWidget {
       errorMessage.value = null;
       try {
         final url = await ref.read(profileAvatarPickerProvider)();
-        if (url != null) avatarUrl.value = url;
+        if (url != null) {
+          selectedEmoji.value = null;
+          avatarUrl.value = url;
+        }
       } catch (_) {
         errorMessage.value = 'Couldn\u2019t upload that photo. Try again.';
       } finally {
         isUploading.value = false;
       }
+    }
+
+    void chooseEmoji() {
+      if (isUploading.value || isSaving.value) return;
+      showEmojiPicker(
+        context: context,
+        includeCustomEmoji: false,
+        onSelect: (emoji) {
+          selectedEmoji.value = emoji;
+          avatarUrl.value = emojiAvatarDataUrl(emoji, selectedEmojiColor.value);
+        },
+      );
+    }
+
+    void chooseEmojiColor(String color) {
+      final emoji = selectedEmoji.value;
+      if (emoji == null || isUploading.value || isSaving.value) return;
+      selectedEmojiColor.value = color;
+      avatarUrl.value = emojiAvatarDataUrl(emoji, color);
+    }
+
+    void removeAvatar() {
+      selectedEmoji.value = null;
+      avatarUrl.value = '';
     }
 
     Future<void> save() async {
@@ -208,15 +251,64 @@ class _EditProfileSheet extends HookConsumerWidget {
                               : 'Choose photo',
                         ),
                       ),
+                      TextButton.icon(
+                        onPressed: isUploading.value || isSaving.value
+                            ? null
+                            : chooseEmoji,
+                        icon: const Icon(LucideIcons.smilePlus, size: 18),
+                        label: const Text('Use emoji'),
+                      ),
                       if (avatarUrl.value.isNotEmpty)
                         TextButton(
                           onPressed: isUploading.value || isSaving.value
                               ? null
-                              : () => avatarUrl.value = '',
+                              : removeAvatar,
                           child: const Text('Remove'),
                         ),
                     ],
                   ),
+                  if (selectedEmoji.value != null) ...[
+                    const SizedBox(height: Grid.half),
+                    Semantics(
+                      label: 'Emoji avatar color',
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          for (final (index, entry)
+                              in _emojiAvatarColors.indexed)
+                            Semantics(
+                              button: true,
+                              selected: selectedEmojiColor.value == entry.hex,
+                              label: 'Avatar color ${index + 1}',
+                              child: InkWell(
+                                key: ValueKey('avatar-color-${entry.hex}'),
+                                customBorder: const CircleBorder(),
+                                onTap: () => chooseEmojiColor(entry.hex),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(Grid.half),
+                                  child: Container(
+                                    width: 32,
+                                    height: 32,
+                                    decoration: BoxDecoration(
+                                      color: entry.color,
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color:
+                                            selectedEmojiColor.value ==
+                                                entry.hex
+                                            ? context.colors.onSurface
+                                            : Colors.transparent,
+                                        width: 2,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
