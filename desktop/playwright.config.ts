@@ -38,6 +38,7 @@ export default defineConfig({
         "**/dev-mode-sub-channels.spec.ts",
         "**/dev-mode-unread.spec.ts",
         "**/dev-mode-media.spec.ts",
+        "**/dev-mode-reactions.spec.ts",
         "**/badge.spec.ts",
         "**/channel-browser.spec.ts",
         "**/channel-add-screenshots.spec.ts",

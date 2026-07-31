@@ -129,7 +129,7 @@ function ThreadInlineReplies({
           <DevMessageRow
             key={reply.localKey ?? reply.id}
             event={reply}
-            isSelf={reply.pubkey === currentPubkey}
+            currentPubkey={currentPubkey}
             reactions={reactions.get(reply.id)}
             resolveColor={resolveColor}
             resolveIsAgent={resolveIsAgent}
@@ -277,7 +277,7 @@ function PromptCard({
       ) : null}
       <DevMessageRow
         event={root}
-        isSelf={root.pubkey === currentPubkey}
+        currentPubkey={currentPubkey}
         reactions={rootReactions}
         resolveColor={resolveColor}
         resolveIsAgent={resolveIsAgent}

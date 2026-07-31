@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import type { AuthorColorResolver } from "@/features/dev-mode/lib/authorColors";
 import { useChannelRefs } from "@/features/dev-mode/lib/channelRefs";
 import { renderDevMarkdown } from "@/features/dev-mode/lib/devMarkdown";
@@ -7,14 +9,25 @@ import {
   matchLeadingMention,
   type MentionStyle,
 } from "@/features/dev-mode/lib/highlightContent";
-import type { MessageReaction } from "@/features/dev-mode/lib/messageReactions";
+import {
+  applyReactionToggle,
+  groupReactions,
+  type MessageReaction,
+  type ReactionGroup,
+} from "@/features/dev-mode/lib/messageReactions";
 import type {
   AgentResolver,
   NameResolver,
 } from "@/features/dev-mode/lib/useMemberNameResolver";
+import { useToggleReactionMutation } from "@/features/messages/hooks";
+import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
+import { emojiDisplayName } from "@/shared/lib/emojiName";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 function formatTime(createdAt: number) {
@@ -24,54 +37,178 @@ function formatTime(createdAt: number) {
   });
 }
 
-function ReactionChips({
+function reactionTitle(
+  group: ReactionGroup,
+  resolveName: NameResolver,
+  mine: boolean,
+): string {
+  const names = [...new Set(group.pubkeys.map(resolveName))].join(", ");
+  const base = `${emojiDisplayName(group.emoji)} — ${names}`;
+  return mine ? `${base} (click to remove)` : base;
+}
+
+function ReactionGlyph({ group }: { group: ReactionGroup }) {
+  if (!group.emojiUrl) {
+    return <>{group.emoji}</>;
+  }
+  // Relay media must go through the localhost proxy (VPN bypass) like every
+  // other relay-hosted <img>.
+  return (
+    <img
+      alt={group.emoji}
+      src={rewriteRelayUrl(group.emojiUrl)}
+      className="inline-block h-4 w-4 -translate-y-px object-contain align-text-bottom"
+      draggable={false}
+    />
+  );
+}
+
+function DevReactions({
+  eventId,
+  canReact,
   reactions,
+  currentPubkey,
   resolveName,
 }: {
-  reactions: MessageReaction[];
+  eventId: string;
+  canReact: boolean;
+  reactions: MessageReaction[] | undefined;
+  currentPubkey: string | null;
   resolveName: NameResolver;
 }) {
-  const byEmoji = new Map<string, string[]>();
-  for (const { emoji, pubkey } of reactions) {
-    const bucket = byEmoji.get(emoji);
-    if (bucket) {
-      bucket.push(pubkey);
-    } else {
-      byEmoji.set(emoji, [pubkey]);
-    }
+  const customEmoji = useCustomEmoji();
+  const toggleReaction = useToggleReactionMutation();
+  const [pickerOpen, setPickerOpen] = React.useState(false);
+  // Re-render when the media proxy port resolves so a first-paint
+  // buzz-media:// fallback src upgrades to the loopback proxy URL.
+  useMediaProxyPort();
+
+  // Reactions published without the NIP-30 tag (e.g. via the CLI) still
+  // resolve their image through the community palette.
+  const sourceGroups = React.useMemo(
+    () =>
+      groupReactions(reactions).map((group) =>
+        group.emojiUrl
+          ? group
+          : { ...group, emojiUrl: reactionEmojiUrl(group.emoji, customEmoji) },
+      ),
+    [reactions, customEmoji],
+  );
+
+  // Optimistic overlay: valid only while the source reactions haven't
+  // changed under us; any relay update (including our own echo) wins.
+  const [optimistic, setOptimistic] = React.useState<{
+    source: MessageReaction[] | undefined;
+    groups: ReactionGroup[];
+  } | null>(null);
+  const groups =
+    optimistic && optimistic.source === reactions
+      ? optimistic.groups
+      : sourceGroups;
+
+  const toggle = (emoji: string) => {
+    if (!canReact || !currentPubkey) return;
+    const remove =
+      groups
+        .find((group) => group.emoji === emoji)
+        ?.pubkeys.includes(currentPubkey) ?? false;
+    setOptimistic({
+      source: reactions,
+      groups: applyReactionToggle(
+        groups,
+        emoji,
+        currentPubkey,
+        reactionEmojiUrl(emoji, customEmoji),
+      ),
+    });
+    toggleReaction.mutate(
+      { eventId, emoji, remove },
+      { onError: () => setOptimistic(null) },
+    );
+  };
+
+  if (groups.length === 0 && !canReact) {
+    return null;
   }
+
   return (
-    <span className="flex shrink-0 select-none items-baseline gap-1 self-start">
-      {[...byEmoji.entries()].map(([emoji, pubkeys]) => (
-        <span
-          key={emoji}
-          className="text-xs text-muted-foreground"
-          title={[...new Set(pubkeys.map(resolveName))].join(", ")}
-        >
-          {emoji}
-          {pubkeys.length > 1 ? ` ${pubkeys.length}` : ""}
-        </span>
-      ))}
+    <span className="flex min-w-0 select-none flex-wrap items-baseline gap-2">
+      {groups.map((group) => {
+        const mine =
+          currentPubkey !== null && group.pubkeys.includes(currentPubkey);
+        return (
+          <button
+            key={group.emoji}
+            aria-label={`Toggle ${group.emoji} reaction`}
+            aria-pressed={mine}
+            className={cn(
+              "text-xs",
+              mine ? "text-primary" : "text-muted-foreground",
+              canReact && "cursor-pointer hover:text-foreground",
+            )}
+            onClick={() => toggle(group.emoji)}
+            title={reactionTitle(group, resolveName, mine)}
+            type="button"
+          >
+            <ReactionGlyph group={group} />
+            {group.pubkeys.length > 1 ? ` ${group.pubkeys.length}` : ""}
+          </button>
+        );
+      })}
+      {canReact ? (
+        <Popover onOpenChange={setPickerOpen} open={pickerOpen}>
+          <PopoverTrigger asChild>
+            <button
+              aria-label="Add reaction"
+              className={cn(
+                "cursor-pointer px-1 text-xs text-muted-foreground/70 hover:text-foreground",
+                pickerOpen
+                  ? "opacity-100"
+                  : "opacity-0 focus-visible:opacity-100 group-hover/devrow:opacity-100",
+              )}
+              data-testid={`dev-mode-add-reaction-${eventId}`}
+              type="button"
+            >
+              +
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="start"
+            className="w-auto overflow-hidden rounded-2xl border-0 bg-transparent p-0 shadow-none"
+            side="bottom"
+            sideOffset={4}
+          >
+            <EmojiPicker
+              autoFocus
+              onSelect={(emoji) => {
+                toggle(emoji);
+                setPickerOpen(false);
+              }}
+            />
+          </PopoverContent>
+        </Popover>
+      ) : null}
     </span>
   );
 }
 
 export function DevMessageRow({
   event,
-  isSelf,
+  currentPubkey,
   reactions,
   resolveName,
   resolveColor,
   resolveIsAgent,
 }: {
   event: RelayEvent;
-  isSelf: boolean;
+  currentPubkey: string | null;
   /** Emoji reacted onto this message — agents react while working, so this doubles as the loading state. */
   reactions?: MessageReaction[];
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
   resolveIsAgent: AgentResolver;
 }) {
+  const isSelf = event.pubkey === currentPubkey;
   const { channels, openChannel } = useChannelRefs();
   // Stable per-event identity so the media renderer's memo holds.
   const imetaByUrl = React.useMemo(
@@ -104,7 +241,7 @@ export function DevMessageRow({
     : event.content;
 
   return (
-    <div className="min-w-0 py-1 text-sm leading-6">
+    <div className="group/devrow min-w-0 py-1 text-sm leading-6">
       <div className="flex min-w-0 items-baseline gap-2">
         <span
           className={cn(
@@ -126,9 +263,13 @@ export function DevMessageRow({
         <span className="shrink-0 select-none text-xs text-muted-foreground/50">
           {formatTime(event.created_at)}
         </span>
-        {reactions && reactions.length > 0 ? (
-          <ReactionChips reactions={reactions} resolveName={resolveName} />
-        ) : null}
+        <DevReactions
+          canReact={currentPubkey !== null && !event.pending}
+          currentPubkey={currentPubkey}
+          eventId={event.id}
+          reactions={reactions}
+          resolveName={resolveName}
+        />
       </div>
       <div
         className={cn(
