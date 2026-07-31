@@ -19,6 +19,8 @@ import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
+import '../../shared/emoji/emoji_only.dart';
 import 'media_viewer_page.dart';
 import 'message_media.dart';
 
@@ -105,6 +107,12 @@ class MessageContent extends HookConsumerWidget {
 
   final int? maxLines;
 
+  /// Render a body that is nothing but emoji at [kEmojiOnlyFontSize], the way
+  /// desktop's `MessageRow` does. Off by default: previews, search hits, and
+  /// notification rows want a message to occupy its usual line height whatever
+  /// it contains.
+  final bool scaleEmojiOnly;
+
   /// Allows a multi-image carousel to reclaim leading space reserved by the
   /// surrounding message layout, while keeping its image count aligned with
   /// the message body.
@@ -127,15 +135,20 @@ class MessageContent extends HookConsumerWidget {
     this.onMediaMore,
     this.baseStyle,
     this.maxLines,
+    this.scaleEmojiOnly = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final style =
+    final baseTextStyle =
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
+    final resolvedMentionNames = mentionNames;
+    final resolvedAgentMentionPubkeys = {
+      ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
+    };
     final imetaByUrl = parseImetaTags(tags);
     final trailingGallery = maxLines == null
         ? _extractTrailingImageGallery(content, imetaByUrl)
@@ -145,6 +158,33 @@ class MessageContent extends HookConsumerWidget {
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
     );
+    final mentionPresentationKey = [
+      for (final entry
+          in (resolvedMentionNames.entries.toList()
+            ..sort((a, b) => a.key.compareTo(b.key))))
+        '${entry.key}\u0000${entry.value}',
+      ...(resolvedAgentMentionPubkeys.toList()..sort()),
+    ].join('\u0001');
+
+    // Decided here rather than by the caller: this is where the event's own
+    // emoji tags and the community palette have already been merged, and a
+    // `:shortcode:` only counts as emoji if it resolves against that palette.
+    final emojiOnly =
+        scaleEmojiOnly &&
+        isEmojiOnlyMessage(
+          markdownContent,
+          nativeEmoji: ref.watch(nativeEmojiGlyphsProvider),
+          customEmoji: customEmoji,
+        );
+    final style = emojiOnly
+        ? baseTextStyle?.copyWith(
+            fontSize: kEmojiOnlyFontSize,
+            height: kEmojiOnlyHeight,
+          )
+        : baseTextStyle;
+    final inlineCustomEmojiSize = emojiOnly
+        ? kEmojiOnlyCustomEmojiSize
+        : kCustomEmojiInlineSize;
 
     final finalContent = useMemoized(() {
       // Convert autolinks and bare URLs to standard markdown links,
@@ -191,7 +231,7 @@ class MessageContent extends HookConsumerWidget {
           mentionBuf.write('`${mentionParts[i]}`');
         } else {
           var segment = mentionParts[i];
-          for (final name in mentionNames.values) {
+          for (final name in resolvedMentionNames.values) {
             if (name.contains(' ')) {
               final normalizedName = _markdownMentionName(name);
               segment = segment.replaceAllMapped(
@@ -212,29 +252,35 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [markdownContent, mentionNames]);
+    }, [markdownContent, resolvedMentionNames]);
 
-    final markdown = GptMarkdown(
-      finalContent,
-      style: style,
-      followLinkColor: false,
-      codeBuilder: (context, name, code, closed) =>
-          _MessageCodeBlock(name: name, code: code),
-      linkBuilder: (context, linkText, url, linkStyle) =>
-          _buildLink(context, ref, linkText, url, linkStyle, style),
-      imageBuilder: (context, imageUrl) =>
-          _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
-      maxLines: maxLines,
-      inlineComponents: [
-        _MentionMd(
-          mentionNames: mentionNames,
-          agentMentionPubkeys: agentMentionPubkeys,
-          onMentionTap: onMentionTap,
-        ),
-        CustomEmojiMd(customEmoji),
-        _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
-        ...MarkdownComponent.inlineComponents,
-      ],
+    final markdown = KeyedSubtree(
+      key: ValueKey('$finalContent\u0000$mentionPresentationKey'),
+      child: GptMarkdown(
+        finalContent,
+        style: style,
+        followLinkColor: false,
+        codeBuilder: (context, name, code, closed) =>
+            _MessageCodeBlock(name: name, code: code),
+        linkBuilder: (context, linkText, url, linkStyle) =>
+            _buildLink(context, ref, linkText, url, linkStyle, style),
+        imageBuilder: (context, imageUrl) =>
+            _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+        maxLines: maxLines,
+        inlineComponents: [
+          _MentionMd(
+            mentionNames: resolvedMentionNames,
+            agentMentionPubkeys: resolvedAgentMentionPubkeys,
+            onMentionTap: onMentionTap,
+          ),
+          CustomEmojiMd(customEmoji, size: inlineCustomEmojiSize),
+          _ChannelLinkMd(
+            channelNames: channelNames,
+            onChannelTap: onChannelTap,
+          ),
+          ...MarkdownComponent.inlineComponents,
+        ],
+      ),
     );
     if (trailingGallery == null) return markdown;
 

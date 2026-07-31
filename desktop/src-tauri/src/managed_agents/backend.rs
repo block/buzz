@@ -286,7 +286,7 @@ fn redact_secrets(s: &str) -> String {
 /// (would match every short token in normal log output). Entries are
 /// applied in decreasing length order so superstrings get scrubbed before
 /// substrings — protects against partial overlap leaks.
-fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
+pub(crate) fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
     let mut result = s.to_string();
 
     // Extras: longest first to avoid partial-overlap leaks. We use
@@ -305,9 +305,23 @@ fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
 
     // Then prefix-based scrubbing. This loop *can* re-scan because each
     // replacement shortens the buffer past the matched prefix — the
-    // replacement marker `[REDACTED]` does not contain `nsec1` or
-    // `sprt_tok_`, so progress is guaranteed.
-    for prefix in &["nsec1", "sprt_tok_"] {
+    // replacement marker `[REDACTED]` contains none of these prefixes, so
+    // progress is guaranteed. Any prefix added here must preserve that.
+    //
+    // GitHub tokens are recognised by shape as well as by variable name: a
+    // token reaches output from outside our environment too — embedded in a
+    // git remote URL an installer echoes, say — where no name-based rule can
+    // see it.
+    for prefix in &[
+        "nsec1",
+        "sprt_tok_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+    ] {
         while let Some(pos) = result.find(prefix) {
             let end = result[pos..]
                 .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
@@ -561,6 +575,29 @@ mod tests {
         // Don't scrub values shorter than 4 chars — too noisy.
         let r = redact_secrets_with("error code: 42", &["42"]);
         assert!(r.contains("42"));
+    }
+
+    /// GitHub tokens are recognised by shape, so one that never passed through
+    /// our environment — embedded in a remote URL an installer echoes — is
+    /// still scrubbed. The scan runs to the next whitespace or quote, so the
+    /// rest of the URL goes with it; over-redaction is the safe direction.
+    #[test]
+    fn redact_secrets_with_scrubs_github_token_prefixes() {
+        for token in [
+            "ghp_abcdefghij0123456789",
+            "gho_abcdefghij0123456789",
+            "ghu_abcdefghij0123456789",
+            "ghs_abcdefghij0123456789",
+            "ghr_abcdefghij0123456789",
+            "github_pat_abcdefghij0123456789",
+        ] {
+            let r =
+                redact_secrets_with(&format!("cloning https://{token}@github.com/o/r now"), &[]);
+            assert!(!r.contains(token), "leaked {token}: {r}");
+            assert!(r.contains("[REDACTED]"), "got: {r}");
+            assert!(r.contains("cloning"), "scan must stop at whitespace: {r}");
+            assert!(r.ends_with(" now"), "scan must stop at whitespace: {r}");
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@ import {
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { runtimeSetupDetailText } from "@/features/agents/ui/runtimeSetupDetailText";
+import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import {
   getRuntimeDisplayLabel,
   RuntimeIcon,
@@ -401,13 +402,14 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
   const isReady = entry.availability === "available";
   const docsUrl = entry.installInstructionsUrl.trim();
   const setupDetailText = runtimeSetupDetailText(entry);
+  const installOutputLine = useInstallOutputLine(entry.id, install.isPending);
 
   function handleInstall() {
     setInstallError(null);
     install.mutate(entry.id, {
       onSuccess: (result) => {
         if (!result.success) {
-          setInstallError(getInstallErrorMessage(result.steps));
+          setInstallError(getInstallErrorMessage(result));
         }
       },
       onError: (error) => {
@@ -507,6 +509,16 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
               {setupDetailText}
             </p>
           </div>
+        ) : null}
+
+        {install.isPending && installOutputLine ? (
+          <p
+            aria-live="polite"
+            className="truncate rounded-lg border border-border/60 bg-muted/40 px-3 py-1.5 font-mono text-xs text-muted-foreground"
+            data-testid={`harness-catalog-install-output-${entry.id}`}
+          >
+            {installOutputLine}
+          </p>
         ) : null}
 
         {installError ? (

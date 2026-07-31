@@ -1324,7 +1324,7 @@ async fn test_persona_http_query_cross_author_gate() {
 ///
 /// A foreign authenticated caller counting `{kinds:[30175],authors:[victim]}`
 /// must count only shared heads — not unshared ones — on both the fast SQL
-/// path (prevented by `needs_persona_filtering`) and the fallback path.
+/// path (prevented by `needs_shared_gate_filtering`) and the fallback path.
 #[tokio::test]
 #[ignore]
 async fn test_persona_http_count_cross_author_gate() {
@@ -1403,7 +1403,7 @@ async fn test_persona_http_count_cross_author_gate() {
 /// event is returned.
 ///
 /// Verifies at `312014d5e`: this test fails there because `query_events` did
-/// not have the `persona_reader` SQL clause and the private rows starved the
+/// not have the `shared_gated_reader` SQL clause and the private rows starved the
 /// shared one off the page.
 #[tokio::test]
 #[ignore]

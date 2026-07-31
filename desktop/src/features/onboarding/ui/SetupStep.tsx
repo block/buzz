@@ -8,6 +8,7 @@ import {
   useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
+import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import { runtimeSetupDetailText } from "@/features/agents/ui/runtimeSetupDetailText";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
@@ -514,6 +515,7 @@ function RuntimeCard({
   const installMutation = useInstallAcpRuntimeMutation();
   const installError = installResults[runtime.id]?.error ?? null;
   const isInstalling = installMutation.isPending;
+  const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
   const isAvailable = runtime.availability === "available";
   const isReady = runtimeIsReadyForOnboarding(runtime);
 
@@ -530,7 +532,7 @@ function RuntimeCard({
           [runtime.id]: result.success
             ? { error: null, success: true }
             : {
-                error: getInstallErrorMessage(result.steps),
+                error: getInstallErrorMessage(result),
                 success: false,
               },
         }));
@@ -576,7 +578,18 @@ function RuntimeCard({
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {!isAvailable && runtimeDetailText(runtime) ? (
+        {isInstalling && installOutputLine ? (
+          // Takes the detail text's slot rather than adding a row: the card is
+          // fixed-height, and during an install the live line is the more
+          // useful of the two.
+          <p
+            aria-live="polite"
+            className="max-w-[13rem] truncate font-mono text-2xs leading-4 text-muted-foreground"
+            data-testid={`onboarding-runtime-install-output-${runtime.id}`}
+          >
+            {installOutputLine}
+          </p>
+        ) : !isAvailable && runtimeDetailText(runtime) ? (
           <p
             aria-hidden={installError ? "true" : undefined}
             className={cn(

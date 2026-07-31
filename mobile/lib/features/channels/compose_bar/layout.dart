@@ -59,6 +59,10 @@ class _ComposeBarLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return _DragDownToDismissKeyboard(child: _buildBar(context));
+  }
+
+  Widget _buildBar(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
         color: context.colors.surfaceContainerHighest,
@@ -240,6 +244,63 @@ class _ComposeBarLayout extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Drag the compose bar downward to put the keyboard away.
+///
+/// Continues the gesture the message list starts: once your finger reaches the
+/// composer, keep pulling down and the keyboard goes with it. Uses a raw
+/// [Listener] rather than a `GestureDetector` on purpose — a gesture recognizer
+/// here would enter the arena against the `TextField` and could steal taps,
+/// caret placement, and selection drags. A [Listener] only observes.
+class _DragDownToDismissKeyboard extends HookWidget {
+  final Widget child;
+
+  const _DragDownToDismissKeyboard({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    // A ref, not state: pointer travel must not rebuild the composer, which
+    // would churn the TextField mid-gesture.
+    final downwardTravel = useRef(0.0);
+    final startedInEditable = useRef(false);
+
+    return Listener(
+      onPointerDown: (event) {
+        downwardTravel.value = 0;
+        final hitTest = HitTestResult();
+        RendererBinding.instance.hitTestInView(
+          hitTest,
+          event.position,
+          event.viewId,
+        );
+        startedInEditable.value = hitTest.path.any(
+          (entry) => entry.target is RenderEditable,
+        );
+      },
+      onPointerCancel: (_) {
+        downwardTravel.value = 0;
+        startedInEditable.value = false;
+      },
+      onPointerUp: (_) {
+        downwardTravel.value = 0;
+        startedInEditable.value = false;
+      },
+      onPointerMove: (event) {
+        if (startedInEditable.value) return;
+        final dy = event.delta.dy;
+        if (dy <= 0) {
+          downwardTravel.value = 0;
+          return;
+        }
+        downwardTravel.value += dy;
+        if (downwardTravel.value < keyboardDismissDragThreshold) return;
+        downwardTravel.value = 0;
+        dismissKeyboard(context);
+      },
+      child: child,
     );
   }
 }

@@ -251,6 +251,23 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
     Ok(true)
 }
 
+/// Sign an STT transcript event and produce the guarded POST body.
+///
+/// Factored out of the transcription loop so egress boundary 5 (huddle STT)
+/// has a directly testable seam: the NIP-49 egress guard runs here, before
+/// any bytes can reach the network.
+pub(crate) fn sign_and_guard_stt_body(
+    builder: nostr::EventBuilder,
+    keys: &nostr::Keys,
+) -> Result<Vec<u8>, String> {
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("sign event: {e}"))?;
+    let body_bytes = event.as_json().into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "huddle STT publish")?;
+    Ok(body_bytes)
+}
+
 /// Spawn a tokio task that reads text_rx and posts kind:9 events.
 ///
 /// Fix 1: `agent_pubkeys_arc` is an `Arc<Mutex<Vec<String>>>` cloned from
@@ -310,14 +327,13 @@ pub(crate) fn spawn_transcription_task(
             // the kind event and build NIP-98 auth after the wait so both
             // timestamps are fresh — single clean order: wait → sign → auth → send.
             crate::relay_admission::wait_for_rate_limit().await;
-            let event = match builder.sign_with_keys(&keys) {
-                Ok(e) => e,
+            let body_bytes = match sign_and_guard_stt_body(builder, &keys) {
+                Ok(b) => b,
                 Err(e) => {
-                    eprintln!("buzz-desktop: STT sign event: {e}");
+                    eprintln!("buzz-desktop: STT publish: {e}");
                     continue;
                 }
             };
-            let body_bytes = event.as_json().into_bytes();
             let url = format!("{relay_base_url}/events");
             let auth_header = match crate::relay::build_nip98_auth_header_for_keys(
                 &keys,

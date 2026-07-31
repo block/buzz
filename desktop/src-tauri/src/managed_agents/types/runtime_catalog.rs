@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 pub enum AcpAvailabilityStatus {
     Available,
     AdapterMissing,
-    /// Adapter binary is present but is from the deprecated package (< 1.0). Reinstall required.
+    /// Adapter binary is present but unsupported — either the deprecated
+    /// package or a version below the supported floor. Reinstall required.
     AdapterOutdated,
     /// Vendor CLI is present but below Buzz's minimum supported version.
     CliOutdated,

@@ -609,6 +609,10 @@ pub struct InstallRuntimeResult {
     /// Number of agents whose stop succeeded but respawn failed.
     /// Mirrors `GlobalAgentConfigSaveResult.failed_restart_count`.
     pub failed_restart_count: u32,
+    /// Install log file for this run, when one was written. The UI surfaces it
+    /// on failure so a user can read the full retry history instead of only the
+    /// last step's truncated output. `None` when no log could be opened.
+    pub log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
