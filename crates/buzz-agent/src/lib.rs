@@ -54,10 +54,9 @@ struct App {
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Cached model catalog for Databricks providers. Populated lazily on the
-    /// first successful `session/new` discovery call. When discovery fails (e.g.
-    /// auth missing or a transient network error) the cell is intentionally left
-    /// empty so the next `session/new` call retries — a transient failure never
-    /// pins the degraded fallback catalog for the process lifetime.
+    /// first successful `session/new` discovery call. Failed discovery is never
+    /// cached: authentication errors reject session creation, while non-auth errors
+    /// use the configured model for that response and retry on the next session.
     models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
 }
 
@@ -385,8 +384,9 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         Arc::from(prompt)
     };
     // Resolve the model catalog before spawning MCP servers or registering a
-    // session. Discovery is part of session construction: if it fails, no
-    // resource owned by a session that was never returned may survive.
+    // session. Authentication failures reject before allocation so Desktop can
+    // drive sign-in. Other catalog failures must not make the invocation path
+    // unavailable; return the configured model without caching the fallback.
     let available_models: Vec<Value> = {
         use crate::config::Provider;
         match app.cfg.provider {
@@ -398,9 +398,19 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                 .await
                 {
                     Ok(models) => models,
-                    Err(error) => {
+                    Err(error @ AgentError::LlmAuth(_)) => {
                         return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
                             .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Databricks model catalog unavailable; using configured model"
+                        );
+                        vec![ModelEntry {
+                            id: app.cfg.model.clone(),
+                            name: app.cfg.model.clone(),
+                        }]
                     }
                 };
                 models

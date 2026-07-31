@@ -7,8 +7,10 @@
 //!
 //! - Static bearer (`DATABRICKS_TOKEN`): returned immediately.
 //! - PKCE cache hit: returned from disk without a network round-trip.
-//! - PKCE cache empty / no token: returns `Err(AgentError::LlmAuth)` — the
-//!   caller degrades gracefully; no browser, no hang.
+//! - PKCE cache empty / no token: returns `Err(AgentError::LlmAuth)`.
+//!
+//! This helper never opens a browser. Callers choose whether to reject, degrade,
+//! or start a separate interactive authentication flow.
 
 use std::sync::Arc;
 
@@ -35,7 +37,7 @@ pub struct ModelEntry {
 pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
     &["databricks-gpt-5-5", "databricks-claude-opus-4-7"];
 
-const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (known fallback)";
+const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (default catalog)";
 
 fn authenticated_empty_v2_catalog() -> Vec<ModelEntry> {
     DATABRICKS_V2_KNOWN_MODELS
@@ -77,7 +79,7 @@ pub(crate) fn is_chat_capable_endpoint(name: &str) -> bool {
 ///
 /// Returns a non-empty `Vec<ModelEntry>` on success. Returns
 /// `Err(AgentError::LlmAuth)` when no token is available (no static token,
-/// no PKCE cache) — callers should degrade gracefully rather than hanging.
+/// no PKCE cache). The helper itself never starts interactive authentication.
 ///
 /// # Panics
 /// Never panics.
@@ -111,7 +113,7 @@ async fn discover_databricks_models_with_token_source(
                 let fresh = token_source.refresh_now(&bearer).await?;
                 if fresh == bearer {
                     return Err(AgentError::LlmAuth(
-                        "Databricks rejected the configured token; sign in again".into(),
+                        "Databricks rejected the configured credential".into(),
                     ));
                 }
                 bearer = fresh;

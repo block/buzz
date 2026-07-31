@@ -577,6 +577,13 @@ fn is_databricks_provider_matches_both_variants() {
 }
 
 #[test]
+fn databricks_interactive_auth_requires_explicit_intent_and_no_static_token() {
+    assert!(should_start_interactive_auth("", true));
+    assert!(!should_start_interactive_auth("", false));
+    assert!(!should_start_interactive_auth("static-token", true));
+}
+
+#[test]
 fn model_discovery_error_converts_dangling_sentinel_to_sentence() {
     // get_agent_models is a user-facing surface: a dangling harness must
     // render as a sentence, never as the raw DANGLING_HARNESS_ID: sentinel.

@@ -41,11 +41,16 @@ pub(super) fn databricks_static_token_error(
     format!("Databricks rejected DATABRICKS_TOKEN; update it in agent settings: {message}")
 }
 
+pub(super) fn should_start_interactive_auth(api_key: &str, allow_interactive_auth: bool) -> bool {
+    api_key.is_empty() && allow_interactive_auth
+}
+
 pub(super) async fn discover_databricks_models(
     _client: &reqwest::Client,
     provider: &DiscoveryProvider,
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
+    allow_interactive_auth: bool,
 ) -> Result<Option<AgentModelsResponse>, String> {
     let provider_name = match provider.as_deref() {
         Some(provider_name) if is_databricks_provider(Some(provider_name)) => provider_name,
@@ -62,12 +67,13 @@ pub(super) async fn discover_databricks_models(
         api_key.clone(),
         host.clone(),
     );
-    let token_for_redaction = env_or_process_value(env, "DATABRICKS_TOKEN").unwrap_or_default();
-    let redaction_env = redaction_env_with_value(env, "DATABRICKS_TOKEN", &token_for_redaction);
+    let redaction_env = redaction_env_with_value(env, "DATABRICKS_TOKEN", &api_key);
 
     let entries = match buzz_agent_pkg::discover_databricks_models(&config).await {
         Ok(entries) => entries,
-        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) if api_key.is_empty() => {
+        Err(buzz_agent_pkg::AgentError::LlmAuth(_))
+            if should_start_interactive_auth(&api_key, allow_interactive_auth) =>
+        {
             let _auth = AUTH_GATE.lock().await;
             match buzz_agent_pkg::discover_databricks_models(&config).await {
                 Ok(entries) => entries,
@@ -100,8 +106,13 @@ pub(super) async fn discover_databricks_models(
                 }
             }
         }
-        Err(buzz_agent_pkg::AgentError::LlmAuth(error)) => {
+        Err(buzz_agent_pkg::AgentError::LlmAuth(error)) if !api_key.is_empty() => {
             return Err(databricks_static_token_error(&error, &redaction_env));
+        }
+        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
+            return Err(
+                "Databricks sign-in is required; open the model picker to sign in".to_string(),
+            );
         }
         Err(error) => {
             return Err(format_redacted_error(

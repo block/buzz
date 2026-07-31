@@ -137,6 +137,7 @@ pub async fn get_agent_models(
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
+        true,
     )
     .await?
     {
@@ -307,9 +308,14 @@ pub async fn discover_agent_models(
         return Ok(models);
     }
 
-    if let Some(models) =
-        discover_databricks_models(&state.http_client, &effective_provider, &merged_env, None)
-            .await?
+    if let Some(models) = discover_databricks_models(
+        &state.http_client,
+        &effective_provider,
+        &merged_env,
+        None,
+        false,
+    )
+    .await?
     {
         return Ok(models);
     }
@@ -685,7 +691,9 @@ async fn discover_anthropic_models(
 mod databricks;
 use databricks::discover_databricks_models;
 #[cfg(test)]
-use databricks::{databricks_static_token_error, is_databricks_provider};
+use databricks::{
+    databricks_static_token_error, is_databricks_provider, should_start_interactive_auth,
+};
 
 /// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
 /// to `record`, enforcing the linked-instance write guard: a definition-linked

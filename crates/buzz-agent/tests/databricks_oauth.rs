@@ -467,6 +467,15 @@ impl Drop for AgentHarness {
 
 impl AgentHarness {
     async fn spawn_provider(provider: &str, base_url: &str, model: &str) -> Self {
+        Self::spawn_provider_with_max_sessions(provider, base_url, model, 1).await
+    }
+
+    async fn spawn_provider_with_max_sessions(
+        provider: &str,
+        base_url: &str,
+        model: &str,
+        max_sessions: usize,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
         cmd.env("BUZZ_AGENT_PROVIDER", provider)
@@ -476,7 +485,7 @@ impl AgentHarness {
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "2")
-            .env("BUZZ_AGENT_MAX_SESSIONS", "1")
+            .env("BUZZ_AGENT_MAX_SESSIONS", max_sessions.to_string())
             .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -982,6 +991,57 @@ async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
         1,
         "a static token cannot refresh, so discovery must not issue a duplicate request"
     );
+}
+
+#[tokio::test]
+async fn non_auth_discovery_failure_uses_configured_model_without_caching_fallback() {
+    use axum::http::StatusCode;
+
+    let attempts = Arc::new(AtomicU64::new(0));
+    let attempts_for_route = attempts.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/api/ai-gateway/v2/endpoints",
+        get(move || {
+            let attempts = attempts_for_route.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::SERVICE_UNAVAILABLE, "catalog unavailable")
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let configured_model = "configured-model";
+    let mut h =
+        AgentHarness::spawn_provider_with_max_sessions("databricks_v2", &host, configured_model, 2)
+            .await;
+    let initialize = h
+        .send(
+            "initialize",
+            json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+        )
+        .await;
+    assert!(h.recv_for(initialize).await.get("result").is_some());
+
+    for expected_attempts in 1..=2 {
+        let request = h
+            .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+            .await;
+        let response = h.recv_for(request).await;
+        assert!(
+            response["result"]["sessionId"].is_string(),
+            "non-auth catalog failure blocked session creation: {response}"
+        );
+        assert_eq!(
+            response["result"]["models"]["availableModels"],
+            json!([{"modelId": configured_model, "name": configured_model}])
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
+    }
 }
 
 #[tokio::test]
