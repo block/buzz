@@ -179,6 +179,12 @@ type MockBridgeOptions = {
   /** Catalog responses for successive discovery calls. The final response repeats. */
   acpRuntimesCatalogSequence?: Record<string, unknown>[][];
   acpRuntimesDelayMs?: number;
+  /** Goose update-check responses in call order. The final response repeats. */
+  gooseUpdateStatuses?: Array<{
+    status: "up_to_date" | "update_available";
+    installed_version: string;
+    latest_version: string;
+  }>;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;
   /** When set, the `delete_custom_harness` mock command throws with this message. */

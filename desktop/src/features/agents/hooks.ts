@@ -39,6 +39,7 @@ import {
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
+import { shouldRefreshGooseUpdateStatus } from "@/shared/api/tauriGooseUpdates";
 import {
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
@@ -46,6 +47,7 @@ import {
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
 import { bootstrapManagedAgentRuntimePairs } from "@/features/agents/managedAgentRuntimeHooks";
+import { gooseUpdateStatusQueryKey } from "@/features/agents/gooseUpdateHooks";
 import {
   createPersona,
   deletePersona,
@@ -233,6 +235,13 @@ export function useInstallAcpRuntimeMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
+    onSuccess: (result, runtimeId) => {
+      if (shouldRefreshGooseUpdateStatus(runtimeId, result.success)) {
+        void queryClient.invalidateQueries({
+          queryKey: gooseUpdateStatusQueryKey,
+        });
+      }
+    },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });

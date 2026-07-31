@@ -176,6 +176,7 @@ function RuntimeActions({
   authMethods,
   connectingMethodId,
   isConnecting,
+  isGooseUpdateAvailable,
   isInstalling,
   onConnect,
   onDelete,
@@ -186,6 +187,7 @@ function RuntimeActions({
   authMethods: AcpAuthMethod[];
   connectingMethodId: string | null;
   isConnecting: boolean;
+  isGooseUpdateAvailable: boolean;
   isInstalling: boolean;
   onConnect: (method: AcpAuthMethod) => void;
   onDelete?: () => void;
@@ -199,7 +201,7 @@ function RuntimeActions({
   // must not claim otherwise.
   const isAuthNeeded =
     isAvailable && runtime.authStatus.status === "logged_out";
-  const setupAction = runtimeRowSetupAction(runtime);
+  const setupAction = runtimeRowSetupAction(runtime, isGooseUpdateAvailable);
   const isWorking = isInstalling || isConnecting;
   const workingLabel =
     isInstalling && setupAction === "Update" ? "updating" : "installing";
@@ -302,9 +304,11 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
  * — for custom harnesses — edit and delete with the blast-radius guard.
  */
 export function HarnessRow({
+  isGooseUpdateAvailable,
   resetEpoch,
   runtime,
 }: {
+  isGooseUpdateAvailable: boolean;
   resetEpoch: number;
   runtime: AcpRuntimeCatalogEntry;
 }) {
@@ -333,7 +337,7 @@ export function HarnessRow({
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
   const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
-  const setupAction = runtimeRowSetupAction(runtime);
+  const setupAction = runtimeRowSetupAction(runtime, isGooseUpdateAvailable);
 
   const del = useDeleteCustomHarnessMutation();
   // Blast-radius data for the delete confirmation — only fetched while the
@@ -427,6 +431,7 @@ export function HarnessRow({
             authMethods={authMethods}
             connectingMethodId={connectMutation.variables?.methodId ?? null}
             isConnecting={connectMutation.isPending}
+            isGooseUpdateAvailable={isGooseUpdateAvailable}
             isInstalling={isInstalling}
             onConnect={(method) => {
               setTerminalLaunchMethodId(null);
