@@ -207,8 +207,8 @@ export function useTtsSubscription(
           if (oldest !== undefined) seenEventIds.delete(oldest);
         }
 
-        // Preserve arrival order while the initial authoritative membership
-        // lookup is pending. A failed lookup clears this buffer fail-closed.
+        // Preserve arrival order until initial membership and TTS state are
+        // both known. A failed lookup clears this buffer fail-closed.
         const routeId = allocateTtsRouteId();
         if (!agentsLoaded) {
           console.debug(
