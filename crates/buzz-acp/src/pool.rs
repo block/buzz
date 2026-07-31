@@ -66,6 +66,12 @@ pub struct TaskMeta {
     /// tasks only — all prompt tasks install a steer channel regardless
     /// of the agent's name.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    /// Event IDs delivered into this turn via the native steer path.
+    ///
+    /// These events are consumed from the queue without entering a
+    /// `FlushBatch`, so `run_prompt_task`'s `ReactionGuard` never sees them.
+    /// Their pickup reactions are cleared when this exact turn ends.
+    pub steered_event_ids: Vec<String>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -643,10 +649,10 @@ impl AgentPool {
         &mut self.task_map
     }
 
-    /// Try to send a goose-native steer request to the in-flight task for
+    /// Try to send a non-cancelling native steer request to the in-flight task for
     /// `channel_id`.
     ///
-    /// Returns `Ok(())` if the request was accepted by the read loop's
+    /// Returns the exact task id if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
     /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
     /// (already-in-flight write, or read loop torn down). Callers must
@@ -665,22 +671,48 @@ impl AgentPool {
     /// and this call, or the channel was never in flight). This is
     /// semantically a soft no-op — the caller should release any withheld
     /// event and let normal dispatch handle delivery.
+    ///
+    /// The task id must be threaded through the ack watcher so a late ack
+    /// cannot attach reaction cleanup to a successor turn on the same channel.
     pub fn send_steer(
         &mut self,
         channel_id: Uuid,
         request: SteerRequest,
-    ) -> Result<(), SteerError> {
-        let meta = self
+    ) -> Result<tokio::task::Id, SteerError> {
+        let (task_id, meta) = self
             .task_map
-            .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .iter_mut()
+            .find(|(_, m)| m.channel_id == Some(channel_id))
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
             .as_ref()
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+            .map_err(|e| SteerError::Transport(e.to_string()))?;
+        Ok(*task_id)
+    }
+
+    /// Attach a natively steered event to the exact turn that accepted it.
+    ///
+    /// Returns `false` when the turn already ended, signalling that the caller
+    /// must clear the pickup reaction immediately.
+    pub fn record_steered_event(&mut self, task_id: tokio::task::Id, event_id: &str) -> bool {
+        match self.task_map.get_mut(&task_id) {
+            Some(meta) => {
+                meta.steered_event_ids.push(event_id.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take all reaction-cleanup ids from in-flight tasks during shutdown.
+    pub fn drain_all_steered_event_ids(&mut self) -> Vec<String> {
+        self.task_map
+            .values_mut()
+            .flat_map(|meta| std::mem::take(&mut meta.steered_event_ids))
+            .collect()
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -1417,7 +1449,7 @@ pub async fn run_prompt_task(
     let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
 
     // Collects event IDs up front. On drop (any exit path — normal, early
-    // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
+    // return, or panic), spawns best-effort cleanup of pickup reactions.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
     let reaction_ids: Vec<String> = batch
         .as_ref()
@@ -1878,17 +1910,6 @@ pub async fn run_prompt_task(
         return;
     };
 
-    // 💬 — fire-and-forget so the prompt fires immediately.
-    // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
-    // A brief race where 💬 appears slightly after the agent starts is acceptable.
-    if !reaction_ids.is_empty() {
-        let rest = ctx.rest_client.clone();
-        let ids = reaction_ids.clone();
-        tokio::spawn(async move {
-            react_working(&rest, &ids).await;
-        });
-    }
-
     // Slash-command pass-through sends the bare command as the first text
     // block (so connector detection fires), then each prompt section as its
     // own block. Per-section blocks let the observer size trimmer elide a
@@ -2301,7 +2322,7 @@ pub async fn run_prompt_task(
             );
         }
     }
-    // _reaction_guard drops here → spawns clear_reactions for all exit paths.
+    // _reaction_guard drops here → clears pickup reactions on all exit paths.
 }
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
@@ -3361,15 +3382,12 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
 }
 
 //
-// Two-phase lifecycle visible to users:
-//   👀  "seen"    — event was queued and an agent will handle it
-//   💬  "working" — agent is actively prompting
+// Single pickup lifecycle visible to users:
+//   🐱  "picked up" — event was queued and remains marked while the turn runs
 //
-// 💬 is awaited inline in `run_prompt_task` before the prompt fires, so
-// add-before-remove ordering is structural. 👀 is fire-and-forget from
-// `main.rs` at queue-push time for immediate responsiveness; on rare
-// fast-failure paths the guard's cleanup may race with the 👀 add,
-// leaving a cosmetic stale 👀 (see `ReactionGuard` docs).
+// The cat is fire-and-forget from `lib.rs` at queue-push time for immediate
+// responsiveness. On rare fast-failure paths the guard's cleanup may race
+// with the add, leaving a cosmetic stale cat (see `ReactionGuard` docs).
 //
 // Cleanup is fire-and-forget via `ReactionGuard` (spawned on drop).
 // Failures are debug-logged and ignored — reactions are cosmetic.
@@ -3377,18 +3395,15 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
 /// Drop guard that spawns reaction cleanup on any exit path.
 ///
 /// Created at the top of `run_prompt_task`. On drop — normal return, early
-/// return, or panic — spawns fire-and-forget removal of both 👀 and 💬.
+/// return, or panic — spawns fire-and-forget removal of the pickup reaction.
 ///
 /// ## Ordering
 ///
-/// 💬 (`react_working`) is fire-and-forget (spawned before the prompt fires).
-/// A brief race where 💬 appears slightly after the agent starts is acceptable.
-///
-/// 👀 (`react_seen`) is fire-and-forget from `main.rs` at queue-push time.
+/// 🐱 is fire-and-forget from `lib.rs` at queue-push time.
 /// On rare fast-failure paths (e.g., `session_new` error on an idle agent),
-/// the cleanup spawn may race with the 👀 add, leaving a stale 👀. This is
+/// the cleanup spawn may race with the add, leaving a stale cat. This is
 /// accepted as a cosmetic edge case — the message will be retried and the
-/// stale 👀 is harmless.
+/// stale reaction is harmless.
 struct ReactionGuard {
     rest: Option<crate::relay::RestClient>,
     ids: Vec<String>,
@@ -3413,7 +3428,7 @@ impl Drop for ReactionGuard {
         if let Some(rest) = self.rest.take() {
             let ids = std::mem::take(&mut self.ids);
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(clear_reactions(rest, ids));
+                handle.spawn(clear_pickup_reactions(rest, ids));
             }
             // If no runtime is available, reactions are left as-is — they are
             // cosmetic indicators and the stale state is harmless.
@@ -3742,8 +3757,8 @@ async fn publish_agent_turn_metric(
     }
 }
 
-const REACTION_SEEN: &str = "👀";
-const REACTION_WORKING: &str = "💬";
+pub(crate) const REACTION_PICKUP: &str = "🐱";
+const REACTIONS_TO_CLEAR: [&str; 3] = [REACTION_PICKUP, "👀", "💬"];
 
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
@@ -3929,32 +3944,24 @@ pub(crate) async fn reaction_remove(rest: &crate::relay::RestClient, event_id: &
 /// Prevents unbounded parallelism when a large batch of events arrives.
 const REACTION_CONCURRENCY: usize = 10;
 
-/// Add 💬 to all events, capped at `REACTION_CONCURRENCY` concurrent requests.
-/// Awaited inline before the prompt fires.
-async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
-    for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
+/// Fire-and-forget: remove the current pickup reaction and the two legacy
+/// indicators from all events. Spawned on turn completion and queue drain.
+pub(crate) async fn clear_pickup_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
+    let requests: Vec<_> = event_ids
+        .iter()
+        .flat_map(|event_id| {
+            REACTIONS_TO_CLEAR
+                .iter()
+                .map(move |emoji| (event_id.as_str(), *emoji))
+        })
+        .collect();
+
+    for chunk in requests.chunks(REACTION_CONCURRENCY) {
         futures_util::future::join_all(
             chunk
                 .iter()
-                .map(|eid| reaction_add(rest, eid, REACTION_WORKING)),
+                .map(|(event_id, emoji)| reaction_remove(&rest, event_id, emoji)),
         )
-        .await;
-    }
-}
-
-/// Fire-and-forget: remove both 👀 and 💬 from all events. Spawned on turn complete.
-/// Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to avoid
-/// unbounded HTTP fan-out on large batches.
-async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
-    // Each event needs two removals (👀 and 💬); pair them and chunk by
-    // REACTION_CONCURRENCY pairs so the total concurrent requests stay bounded.
-    for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
-        futures_util::future::join_all(chunk.iter().flat_map(|eid| {
-            [
-                reaction_remove(&rest, eid, REACTION_SEEN),
-                reaction_remove(&rest, eid, REACTION_WORKING),
-            ]
-        }))
         .await;
     }
 }
@@ -5097,15 +5104,14 @@ mod tests {
     }
 
     #[test]
-    fn test_pct_encode_emoji() {
-        // 👀 = U+1F440 = F0 9F 91 80 in UTF-8
-        assert_eq!(pct_encode("👀"), "%F0%9F%91%80");
+    fn test_pickup_reaction_contract_is_single_cat() {
+        assert_eq!(REACTION_PICKUP, "🐱");
+        assert_eq!(pct_encode(REACTION_PICKUP), "%F0%9F%90%B1");
     }
 
     #[test]
-    fn test_pct_encode_emoji_speech_balloon() {
-        // 💬 = U+1F4AC = F0 9F 92 AC in UTF-8
-        assert_eq!(pct_encode("💬"), "%F0%9F%92%AC");
+    fn test_cleanup_reaction_set_includes_cat_and_legacy_indicators() {
+        assert_eq!(REACTIONS_TO_CLEAR, ["🐱", "👀", "💬"]);
     }
 
     #[test]
@@ -6748,5 +6754,100 @@ mod tests {
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+
+    fn insert_steer_meta_for_test(
+        pool: &mut AgentPool,
+        channel_id: Uuid,
+        steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    ) -> tokio::task::Id {
+        let task_id = pool.join_set.spawn(std::future::pending()).id();
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "steer-test-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx,
+                steered_event_ids: Vec::new(),
+            },
+        );
+        task_id
+    }
+
+    #[tokio::test]
+    async fn send_steer_returns_exact_accepting_task_id() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        let expected_task_id = insert_steer_meta_for_test(&mut pool, channel_id, Some(steer_tx));
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+
+        let actual_task_id = pool
+            .send_steer(
+                channel_id,
+                SteerRequest {
+                    prompt_blocks: vec!["delta".to_string()],
+                    ack_tx,
+                },
+            )
+            .expect("in-flight turn accepts steer");
+
+        assert_eq!(actual_task_id, expected_task_id);
+        assert!(steer_rx.recv().await.is_some());
+        pool.join_set.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn record_steered_event_attaches_to_exact_turn() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let task_id = insert_steer_meta_for_test(&mut pool, Uuid::new_v4(), None);
+
+        assert!(pool.record_steered_event(task_id, "aaa"));
+        assert!(pool.record_steered_event(task_id, "bbb"));
+        assert_eq!(
+            pool.task_map()
+                .get(&task_id)
+                .expect("task meta remains present")
+                .steered_event_ids,
+            vec!["aaa".to_string(), "bbb".to_string()]
+        );
+        pool.join_set.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn late_steer_ack_does_not_bind_to_successor_turn() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let ended_task = insert_steer_meta_for_test(&mut pool, channel_id, None);
+        pool.task_map_mut().remove(&ended_task);
+        let successor_task = insert_steer_meta_for_test(&mut pool, channel_id, None);
+
+        assert!(!pool.record_steered_event(ended_task, "stale"));
+        assert!(pool
+            .task_map()
+            .get(&successor_task)
+            .expect("successor remains in flight")
+            .steered_event_ids
+            .is_empty());
+        pool.join_set.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_takes_all_steered_ids_once() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let first = insert_steer_meta_for_test(&mut pool, Uuid::new_v4(), None);
+        let second = insert_steer_meta_for_test(&mut pool, Uuid::new_v4(), None);
+        assert!(pool.record_steered_event(first, "e1"));
+        assert!(pool.record_steered_event(second, "e2"));
+        assert!(pool.record_steered_event(second, "e3"));
+
+        let mut drained = pool.drain_all_steered_event_ids();
+        drained.sort();
+        assert_eq!(drained, vec!["e1", "e2", "e3"]);
+        assert!(pool.drain_all_steered_event_ids().is_empty());
+        pool.join_set.shutdown().await;
     }
 }
