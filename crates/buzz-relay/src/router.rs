@@ -188,8 +188,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     merged
         .layer(middleware::from_fn(track_metrics))
-        .layer(http_trace_layer())
+        # CORS sits inside the HTTP trace layer so rejected preflights still
+        # produce a span/log line instead of vanishing silently (#3636).
         .layer(build_cors_layer(&state.config.cors_origins))
+        .layer(http_trace_layer())
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
