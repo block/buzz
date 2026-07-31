@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   classifySpeakableAgentText,
-  createInitialMembershipGate,
+  createInitialTtsReadinessGate,
   createLatestStateGate,
   createOrderedSpeaker,
   routeLiveAgentText,
@@ -221,21 +221,43 @@ test("a live TTS state event supersedes a delayed bootstrap result", () => {
   assert.deepEqual(applied, [false]);
 });
 
-test("buffers initial live events until membership resolves in order", () => {
+test("buffers initial live events until membership and TTS state resolve", () => {
   const delivered = [];
-  const gate = createInitialMembershipGate((event) => delivered.push(event));
+  const gate = createInitialTtsReadinessGate((event) => delivered.push(event));
   gate.push("first");
   gate.push("second");
   assert.deepEqual(delivered, []);
-  gate.succeed();
+  gate.markMembershipKnown();
+  assert.deepEqual(delivered, []);
+  gate.markTtsStateKnown();
   gate.push("third");
   assert.deepEqual(delivered, ["first", "second", "third"]);
+});
+
+test("preserves the first agent reply when membership resolves before TTS state", async () => {
+  const spoken = [];
+  const speaker = createOrderedSpeaker(
+    async (text) => spoken.push(text),
+    assert.fail,
+    false,
+  );
+  const gate = createInitialTtsReadinessGate((text) =>
+    speaker.enqueue(text, 1),
+  );
+
+  gate.push("first agent reply");
+  gate.markMembershipKnown();
+  speaker.setEnabled(true);
+  gate.markTtsStateKnown();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(spoken, ["first agent reply"]);
 });
 
 test("drops the initial buffer fail-closed when membership lookup fails", () => {
   const delivered = [];
   const dropped = [];
-  const gate = createInitialMembershipGate(
+  const gate = createInitialTtsReadinessGate(
     (event) => delivered.push(event),
     (event) => dropped.push(event),
   );

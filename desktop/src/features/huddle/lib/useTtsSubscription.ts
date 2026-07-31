@@ -5,7 +5,7 @@ import * as React from "react";
 import { buildHuddleTtsLiveFilter } from "@/shared/api/relayChannelFilters";
 import { relayClient } from "@/shared/api/relayClient";
 import {
-  createInitialMembershipGate,
+  createInitialTtsReadinessGate,
   createLatestStateGate,
   createOrderedSpeaker,
   routeLiveAgentText,
@@ -114,7 +114,7 @@ export function useTtsSubscription(
         );
       }
     };
-    const initialMembershipGate = createInitialMembershipGate(
+    const initialReadinessGate = createInitialTtsReadinessGate(
       deliver,
       ({ routeId }) => {
         console.debug(
@@ -131,7 +131,7 @@ export function useTtsSubscription(
         for (const pk of pubkeys) agentPubkeys.add(pk);
         agentsLoaded = true;
         if (initial) {
-          initialMembershipGate.succeed();
+          initialReadinessGate.markMembershipKnown();
         }
       } catch (e) {
         // Fail-closed on ALL failures, including refresh after prior success.
@@ -140,7 +140,7 @@ export function useTtsSubscription(
         agentPubkeys.clear();
         agentsLoaded = false;
         if (initial) {
-          initialMembershipGate.fail();
+          initialReadinessGate.fail();
         }
         console.error("[huddle] Failed to load agent pubkeys:", e);
       }
@@ -159,6 +159,7 @@ export function useTtsSubscription(
         if (!disposed) {
           ttsStateKnown = true;
           speakInOrder.setEnabled(state.tts_enabled);
+          initialReadinessGate.markTtsStateKnown();
         }
       },
     );
@@ -177,11 +178,13 @@ export function useTtsSubscription(
             if (!disposed) applyBootstrap(state);
           })
           .catch((err) => {
+            if (!ttsStateKnown) initialReadinessGate.fail();
             console.warn("[huddle] Failed to load TTS state:", err);
           });
       })
       .catch((err) => {
         speakInOrder.setEnabled(false);
+        initialReadinessGate.fail();
         console.warn("[huddle] Failed to listen for TTS state:", err);
       });
 
@@ -212,7 +215,7 @@ export function useTtsSubscription(
             `[huddle] tts stage=eligibility status=deferred reason=membership_unavailable route_id=${routeId}`,
           );
         }
-        initialMembershipGate.push({ event, routeId });
+        initialReadinessGate.push({ event, routeId });
       })
       .then((dispose) => {
         if (disposed) {
