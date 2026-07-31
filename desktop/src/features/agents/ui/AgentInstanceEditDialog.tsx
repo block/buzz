@@ -80,7 +80,7 @@ import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import {
-  OPENAI_COMPAT_BASE_URL_ENV_KEY,
+  isOpenAiCompatBaseUrlOwned,
   usePersonaProviderStructuredEnv,
 } from "./PersonaProviderStructuredEnvFields";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
@@ -447,9 +447,10 @@ export function AgentInstanceEditDialog({
     requiredEnvKeys,
   });
   const { advancedRequiredEnvKeys } = apiKeyFieldState;
-  const baseUrlPersonaSatisfied =
-    !(OPENAI_COMPAT_BASE_URL_ENV_KEY in envVars) &&
-    (inheritedEnvVars[OPENAI_COMPAT_BASE_URL_ENV_KEY] ?? "").length > 0;
+  const baseUrlPersonaSatisfied = isOpenAiCompatBaseUrlOwned(
+    envVars,
+    inheritedEnvVars,
+  );
   const structuredEnv = usePersonaProviderStructuredEnv({
     apiKey: apiKeyFieldState,
     apiKeyLabel:

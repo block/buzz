@@ -18,8 +18,8 @@ const BAKED_DEFAULTS = [
 // pre-existing spec rather than one written alongside it.
 //
 // Mock-boundary caveat: the e2eBridge `update_managed_agent` handler echoes
-// name/model/systemPrompt/envVars/respondTo/respondToAllowlist into the
-// mock store — it does NOT
+// name/model/provider/systemPrompt/envVars/respondTo/respondToAllowlist into
+// the mock store — it does NOT
 // model the diff-based partial-update wire semantics (change-detected-or-omit,
 // tri-state provider, harnessOverride derivation), and it ignores
 // agentCommand/harnessOverride entirely. This spec therefore pins UI behavior

@@ -388,6 +388,7 @@ export function AgentConfigFields({
   React.useEffect(() => {
     onValidityChange?.(configIsValid);
   }, [configIsValid, onValidityChange]);
+
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
@@ -413,6 +414,7 @@ export function AgentConfigFields({
     modelIsOptional,
     showCustomModelOption,
   });
+
   // Mount-time healing policy: onboarding page 4 edits the root config during
   // first-run (no higher layers to inherit from), so acting on open is safe
   // and intentional there — it heals stale state and picks a valid model.
@@ -430,6 +432,7 @@ export function AgentConfigFields({
   const mayMutateDependentFieldsRef = React.useRef(false);
   mayMutateDependentFieldsRef.current =
     healOnMount || userEditedProviderRef.current;
+
   const autoSelectedModelScopeRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!autoSelectModelOnProviderChange) return;
