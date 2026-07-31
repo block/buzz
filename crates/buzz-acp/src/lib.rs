@@ -22,7 +22,7 @@ use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -1312,6 +1312,16 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    // Capture a startup watermark BEFORE initializing the agent pool and connecting
+    // to the relay. `initialize_agent_pool` can take 10+ seconds while spawning
+    // workers. Capturing the watermark *before* pool init ensures events that land
+    // while the pool is spinning up are covered by `since = watermark - 5s` on the
+    // first channel REQ, closing the cold-start race window.
+    let startup_watermark: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     let mut pool = if config.lazy_pool {
         AgentPool::from_slots((0..config.agents).map(|_| None).collect())
     } else {
@@ -1319,16 +1329,6 @@ async fn tokio_main() -> Result<()> {
     };
     let mut pool_ready = !config.lazy_pool;
     let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
-
-    // Capture a startup watermark BEFORE connecting to the relay. This timestamp
-    // is used for membership notification replay (via startup_watermark) and as
-    // the initial subscribe_since for channels discovered at startup. The Subscribe
-    // handler falls back to subscribe_since when last_seen is None, closing the
-    // blind spot between "agents ready" and "first REQ sent".
-    let startup_watermark: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
@@ -1440,8 +1440,11 @@ async fn tokio_main() -> Result<()> {
                 name: "mentions".into(),
                 channels: filter::ChannelScope::All("all".into()),
                 kinds: config.kinds_override.clone().unwrap_or_else(|| {
+                    // Keep in sync with config::resolve_channel_filters Mentions defaults.
+                    // 40003 must be included: a first-time @mention can arrive only on edit.
                     vec![
                         KIND_STREAM_MESSAGE,
+                        KIND_STREAM_MESSAGE_EDIT,
                         KIND_WORKFLOW_APPROVAL_REQUESTED,
                         KIND_STREAM_REMINDER,
                     ]
