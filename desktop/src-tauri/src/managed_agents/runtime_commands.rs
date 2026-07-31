@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
@@ -422,6 +422,57 @@ async fn probe_agent_relay_access(
     publish_agent_directory_entry(state, &record, &api_base, &keys, &memberships).await;
 
     Ok((record, key, requested_relay_url))
+}
+
+/// Minimum gap between directory refreshes for the same agent.
+///
+/// The refresh is cheap (one query + one replaceable event) but the callers
+/// are UI-driven and can fire on every channel switch, so throttle per agent.
+const DIRECTORY_REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Last directory refresh per agent pubkey, for [`DIRECTORY_REFRESH_MIN_INTERVAL`].
+static DIRECTORY_REFRESH_AT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn directory_refresh_due(agent_pubkey: &str) -> bool {
+    let Ok(mut seen) = DIRECTORY_REFRESH_AT.lock() else {
+        return true;
+    };
+    let now = std::time::Instant::now();
+    match seen.get(agent_pubkey) {
+        Some(last) if now.duration_since(*last) < DIRECTORY_REFRESH_MIN_INTERVAL => false,
+        _ => {
+            seen.insert(agent_pubkey.to_string(), now);
+            true
+        }
+    }
+}
+
+/// Refresh the directory entry of every locally managed agent.
+///
+/// Only the machine holding an agent's key can sign its entry, so when someone
+/// *else* adds our agent to a channel we never learn about it through
+/// `add_channel_members`. This command lets the UI ask for a refresh at points
+/// where a stale entry would be visible — the agent would otherwise stay
+/// unmentionable in that channel until its next restart.
+///
+/// Throttled per agent and best-effort: safe to call liberally.
+#[tauri::command]
+pub async fn refresh_agent_directory_entries(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let Ok(records) = load_managed_agents(&app) else {
+        return Ok(());
+    };
+    for record in records {
+        if !directory_refresh_due(&record.pubkey) {
+            continue;
+        }
+        refresh_agent_directory_entry(&app, &state, &record.pubkey.clone()).await;
+    }
+    Ok(())
 }
 
 /// Refresh a locally managed agent's kind:10100 directory entry after its

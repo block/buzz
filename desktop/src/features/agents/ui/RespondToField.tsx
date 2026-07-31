@@ -222,9 +222,22 @@ export function CreateAgentRespondToField({
       {mode === "anyone" ? accessWarning : null}
       {mode === "owner-only" ? (
         <p className="text-xs text-muted-foreground">
-          Only you can send instructions.
+          Only you can send instructions. The agent stays out of everyone else's
+          @-mention suggestions.
         </p>
       ) : null}
+      {mode === "anyone" ? (
+        <p className="text-xs text-muted-foreground">
+          Anyone you share a channel with can @-mention the agent, including
+          from their own devices. Add it to a channel first — outside your
+          shared channels it stays invisible to them.
+        </p>
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        The agent runs on the computer that started it, and only that computer
+        can update where it can be reached. Others reach it over the relay, so
+        it answers only while that computer is awake and the app is open.
+      </p>
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
