@@ -8,16 +8,33 @@ import * as React from "react";
  *   spawns a channel per prompt with an agent tagged (Tab cycles the target
  *   agent), plus keyboard-driven session navigation.
  *
- * Session-only on purpose: the app always launches in standard mode, and dev
- * mode is opted into per session (⌘⇧D or the top-chrome Dev Mode button).
+ * Persisted in localStorage. Device-level UI preference, not community-scoped.
+ * First launch (nothing stored) lands in standard mode; dev mode is opted
+ * into via ⌘⇧D or the top-chrome Dev Mode button and then sticks.
  */
 export type DisplayStyle = "standard" | "developer";
+
+const STORAGE_KEY = "buzz.displayStyle";
 
 const DEFAULT_DISPLAY_STYLE: DisplayStyle = "standard";
 
 const listeners = new Set<() => void>();
 
-let displayStyle: DisplayStyle = DEFAULT_DISPLAY_STYLE;
+let displayStyle = readStoredDisplayStyle();
+
+function parseDisplayStyle(value: string | null | undefined): DisplayStyle {
+  return value === "standard" || value === "developer"
+    ? value
+    : DEFAULT_DISPLAY_STYLE;
+}
+
+function readStoredDisplayStyle(): DisplayStyle {
+  try {
+    return parseDisplayStyle(globalThis.localStorage?.getItem(STORAGE_KEY));
+  } catch {
+    return DEFAULT_DISPLAY_STYLE;
+  }
+}
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
@@ -42,6 +59,12 @@ export function getDisplayStyle(): DisplayStyle {
 /** Update the display style and notify all subscribed components. */
 export function setDisplayStyle(style: DisplayStyle): void {
   displayStyle = style;
+
+  try {
+    globalThis.localStorage?.setItem(STORAGE_KEY, style);
+  } catch {
+    // Persistence is best-effort; the in-memory value still applies.
+  }
 
   for (const listener of listeners) {
     listener();
