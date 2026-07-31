@@ -2741,6 +2741,15 @@ mod track_c_tests {
         assert_eq!(bytes.as_ref(), plaintext);
     }
 
+    #[test]
+    fn git_body_limit_response_maps_length_errors_to_413() {
+        let response = git_body_limit_response(
+            Box::new(std::io::Error::other("LengthLimitError")),
+            5_242_880,
+        );
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     /// Without a gzip `Content-Encoding`, the body is passed through byte
     /// for byte (the common small-clone / already-inflated case).
     #[tokio::test]
