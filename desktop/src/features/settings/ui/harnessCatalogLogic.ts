@@ -154,6 +154,22 @@ export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
 }
 
 /**
+ * Optional setup action rendered directly on a runtime row.
+ *
+ * Goose is the only ready runtime with an explicit manual CLI update. This is
+ * independent from availability: the row stays Ready while Update is offered.
+ */
+export function runtimeRowSetupAction(
+  entry: AcpRuntimeCatalogEntry,
+): "Install" | "Update" | null {
+  if (!entry.canAutoInstall || entry.nodeRequired) return null;
+  if (entry.availability === "available") {
+    return entry.id === "goose" ? "Update" : null;
+  }
+  return entry.availability === "adapter_outdated" ? "Update" : "Install";
+}
+
+/**
  * Body copy for the confirmation dialog shown before replacing an
  * already-installed (but outdated) adapter.
  *

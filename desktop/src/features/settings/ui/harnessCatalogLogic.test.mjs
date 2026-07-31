@@ -9,6 +9,7 @@ import {
   filterCatalogEntries,
   groupCatalogEntries,
   isYourHarnessEntry,
+  runtimeRowSetupAction,
   stableRowOrder,
   yourHarnessEntries,
 } from "./harnessCatalogLogic.ts";
@@ -396,5 +397,48 @@ describe("catalogPrimaryAction", () => {
 
   it("none when nothing is actionable", () => {
     assert.deepEqual(catalogPrimaryAction(entry({})), { kind: "none" });
+  });
+});
+
+// ── runtimeRowSetupAction ───────────────────────────────────────────────────
+
+describe("runtimeRowSetupAction", () => {
+  it("offers Update for available Goose without changing readiness", () => {
+    assert.equal(
+      runtimeRowSetupAction(
+        entry({
+          id: "goose",
+          availability: "available",
+          canAutoInstall: true,
+        }),
+      ),
+      "Update",
+    );
+  });
+
+  it("does not offer Update for other available runtimes", () => {
+    assert.equal(
+      runtimeRowSetupAction(
+        entry({
+          id: "claude",
+          availability: "available",
+          canAutoInstall: true,
+        }),
+      ),
+      null,
+    );
+  });
+
+  it("keeps Install for missing Goose", () => {
+    assert.equal(
+      runtimeRowSetupAction(
+        entry({
+          id: "goose",
+          availability: "not_installed",
+          canAutoInstall: true,
+        }),
+      ),
+      "Install",
+    );
   });
 });

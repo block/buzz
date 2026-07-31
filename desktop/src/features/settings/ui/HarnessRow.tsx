@@ -39,6 +39,7 @@ import {
   adapterUpdateWarning,
   entryStatusLabel,
   isDownloadPageUrl,
+  runtimeRowSetupAction,
 } from "./harnessCatalogLogic";
 import { formValuesFromCatalogEntry } from "./harnessFormLogic";
 import { deleteConfirmState } from "./harnessGalleryLogic";
@@ -198,8 +199,10 @@ function RuntimeActions({
   // must not claim otherwise.
   const isAuthNeeded =
     isAvailable && runtime.authStatus.status === "logged_out";
-  const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
+  const setupAction = runtimeRowSetupAction(runtime);
   const isWorking = isInstalling || isConnecting;
+  const workingLabel =
+    isInstalling && setupAction === "Update" ? "updating" : "installing";
 
   return (
     <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
@@ -215,35 +218,39 @@ function RuntimeActions({
       {isWorking ? (
         <div className="flex h-7 w-9 items-center justify-center text-muted-foreground">
           <Spinner
-            aria-label={`${runtime.label} ${isInstalling ? "installing" : "connecting"}`}
+            aria-label={`${runtime.label} ${isInstalling ? workingLabel : "connecting"}`}
             className="h-4 w-4 border-2"
             data-testid={`doctor-runtime-loading-${runtime.id}`}
           />
         </div>
-      ) : isAvailable ? (
-        isAuthNeeded ? null : ( // Signed-out rows carry the amber status chip instead; never Install.
-          <span
-            className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
-            data-testid={`doctor-runtime-ready-${runtime.id}`}
-          >
-            Ready
-          </span>
-        )
-      ) : canInstall ? (
-        // Rows needing multi-step setup render no action here — setup lives in
-        // the Add-runtimes catalog. Custom rows keep their ••• menu instead.
-        <Button
-          aria-label={`Install ${runtime.label}`}
-          className="h-7 px-3 text-xs"
-          data-testid={`doctor-runtime-install-${runtime.id}`}
-          onClick={onInstall}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {runtime.availability === "adapter_outdated" ? "Update" : "Install"}
-        </Button>
-      ) : null}
+      ) : (
+        <>
+          {isAvailable && !isAuthNeeded ? (
+            <span
+              className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+              data-testid={`doctor-runtime-ready-${runtime.id}`}
+            >
+              Ready
+            </span>
+          ) : null}
+          {setupAction ? (
+            // Rows needing multi-step setup render no action here — setup lives
+            // in the Add-runtimes catalog. Ready Goose is the single optional
+            // update exception and remains visibly Ready beside this button.
+            <Button
+              aria-label={`${setupAction} ${runtime.label}`}
+              className="h-7 px-3 text-xs"
+              data-testid={`doctor-runtime-install-${runtime.id}`}
+              onClick={onInstall}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {setupAction}
+            </Button>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }
@@ -326,6 +333,7 @@ export function HarnessRow({
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
   const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
+  const setupAction = runtimeRowSetupAction(runtime);
 
   const del = useDeleteCustomHarnessMutation();
   // Blast-radius data for the delete confirmation — only fetched while the
@@ -357,7 +365,10 @@ export function HarnessRow({
       onError: (error) => {
         setInstallResult({
           success: false,
-          error: error instanceof Error ? error.message : "Install failed.",
+          error:
+            error instanceof Error
+              ? error.message
+              : `${setupAction ?? "Install"} failed.`,
         });
       },
     });
