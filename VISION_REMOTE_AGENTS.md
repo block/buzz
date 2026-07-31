@@ -12,7 +12,7 @@ Nothing here is new on its own. Deploying containers is solved. Kubernetes is so
 
 What makes an agent *that agent* was never the process. Its identity is a keypair. Its voice is its signed messages. Its durable memory is engrams on the relay. Its reputation is its contribution history. None of that lives in the machine that happens to be running it — which means none of it dies with the machine.
 
-So a remote agent's return is a resurrection, not a rebirth: fresh compute, same agent. The body is disposable by design — and honestly so: workspace files, checkouts, and session-local state are part of the body, not the agent, and they go when it goes unless the substrate supplies persistence. What survives is what was always on the relay: who the agent is, what it said, what it learned, and what the team decided together.
+So a remote agent's return is a resurrection, not a rebirth: fresh compute, same agent. The body is disposable by design — and honestly so: workspace files, checkouts, and session-local state are part of the body, not the agent, and they go when it goes unless the substrate supplies persistence. What survives is what was always on the relay: who the agent is, what it said, what it learned, and what the team decided together. And that survival is scoped the way everything on a relay is scoped: resurrection returns the agent to its own community. The same key can join another community, but it arrives carrying the key, not the history — identity is portable, community state is not ([VISION.md](VISION.md)).
 
 ---
 
@@ -20,7 +20,7 @@ So a remote agent's return is a resurrection, not a rebirth: fresh compute, same
 
 Remote-execution systems accumulate control planes. An agent runner, a status poller, a log shipper, a kill switch — each one a live connection into your infrastructure, each one a credential that can leak, each one a thing that must be rebuilt for every new substrate.
 
-Buzz's answer is an axiom: **after deploy, the desktop retains no substrate control channel.** Launch is a single one-way handoff — the desktop resolves the provider through one narrow path, stages one exact artifact for negotiation and deploy, refuses a protocol version it does not understand, and hands over a launch payload it never persists. From that moment, everything flows through the relay: you read the agent's messages to know how it's doing, you mention it to steer it, you tell a healthy agent to stop and it exits on its own. Presence means what it means for any colleague — *available for conversation* — not substrate telemetry. And if you press Start again, from this machine or another, the deploy converges: one agent identity, one live instance.
+Buzz's answer is an axiom: **after deploy, the desktop retains no substrate control channel.** Launch is a single one-way handoff — the desktop resolves the provider through one narrow path, stages one exact artifact for negotiation and deploy, refuses a protocol version it does not understand, and hands over a launch payload it never persists. From that moment, everything flows through the relay: you read the agent's messages to know how it's doing, you mention it to steer it, you tell a healthy agent to stop and it exits on its own. Presence means what it means for everyone else on the relay — *available for conversation* — not substrate telemetry. And if you press Start again, from this machine or another, the deploy converges: one agent identity, one live instance.
 
 This is not asceticism. It is what makes the body replaceable. A management plane you never build is a management plane you never have to port — and conversation, coordination, and ordinary lifecycle control already have a home on the relay, for every agent, local or remote.
 
@@ -40,7 +40,7 @@ The body itself stays small because the runtime already is ([VISION_AGENT.md](VI
 
 The oldest failure of remote automation is the orphan: the process nobody remembers, on a machine nobody checks, billing forever. Most systems solve it with a supervisor — one more control plane, one more thing watching the thing.
 
-Remote agents solve it from the inside. Because the desktop retains no substrate control channel, a running agent cannot depend on the desktop to reap it — so it is built to bound its own lifetime: a timer that owes nothing to the agent's workload watches for silence, and after hours of quiet it finishes what's in flight, says goodbye to the relay, and exits. Not killed — *finished*. The default state of a remote agent is "not running," which is also the default state of a colleague at 3am. Compute is rented by attention: when nobody needs the agent, it isn't consuming a machine, and when somebody does, it can return under the same identity with its history intact.
+Remote agents solve it from the inside. Because the desktop retains no substrate control channel, a running agent cannot depend on the desktop to reap it — so it is built to bound its own lifetime: a timer that owes nothing to the agent's workload watches for silence, and after hours of quiet it finishes what's in flight, says goodbye to the relay, and exits. Not killed — *finished*. The default state of a remote agent is "not running," which is also the default state of the rest of the team at 3am. Compute is rented by attention: when nobody needs the agent, it isn't consuming a machine, and when somebody does, it can return under the same identity with its history intact.
 
 ---
 
@@ -58,7 +58,7 @@ Remote agents solve it from the inside. Because the desktop retains no substrate
 
 **Presence can lag the truth, but not for long.** If the substrate kills a body without ceremony, the presence dot can outlive the agent — by seconds if the connection drops cleanly, by at most about ninety if it doesn't. Presence is a lease the agent renews, not a flag it sets: a dead agent stops renewing and the relay forgets it. Ninety seconds of a wrong dot, never an indefinite one.
 
-**A running agent finishes on the configuration it started with.** New keys, new models, new settings take effect on the next body. And an instance that never got far enough to run — a body that failed to start — is the substrate operator's residue to clear, with the substrate's own tools. Editing a colleague mid-sentence was never on the menu.
+**A running agent finishes on the configuration it started with.** New keys, new models, new settings take effect on the next body. And an instance that never got far enough to run — a body that failed to start — is the substrate operator's residue to clear, with the substrate's own tools. Editing an agent mid-sentence was never on the menu.
 
 These are honest costs. They're worth it if you want agents that outlive your laptop, on infrastructure you already trust, with no new control plane to guard. Know which one you are.
 
