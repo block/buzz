@@ -698,25 +698,28 @@ function SetupStepContent({
       />
 
       <OnboardingFooter>
-        <Button
-          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
-          data-testid="onboarding-setup-next"
-          disabled={readyRuntimeIds.length === 0}
-          onClick={() => actions.next(readyRuntimeIds)}
-          type="button"
-        >
-          Next
-        </Button>
-
-        <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
-          data-testid="onboarding-setup-skip"
-          onClick={() => actions.next([])}
-          type="button"
-          variant="ghost"
-        >
-          Skip for now
-        </Button>
+        {/* Relative row keeps the primary CTA truly centered while Skip
+            hangs off its right edge without shifting the center. */}
+        <div className="relative flex items-center justify-center">
+          <Button
+            className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
+            data-testid="onboarding-setup-next"
+            disabled={readyRuntimeIds.length === 0}
+            onClick={() => actions.next(readyRuntimeIds)}
+            type="button"
+          >
+            Next
+          </Button>
+          <Button
+            className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 text-sm fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
+            data-testid="onboarding-setup-skip"
+            onClick={() => actions.next([])}
+            type="button"
+            variant="ghost"
+          >
+            Skip for now
+          </Button>
+        </div>
 
         <Button
           className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
