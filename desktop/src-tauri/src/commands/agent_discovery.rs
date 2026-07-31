@@ -1083,7 +1083,8 @@ fn parse_relay_agents(agents: serde_json::Value) -> Vec<RelayAgentInfo> {
     let serde_json::Value::Array(items) = agents else {
         return Vec::new();
     };
-    items
+    let total = items.len();
+    let parsed: Vec<RelayAgentInfo> = items
         .into_iter()
         .filter_map(|item| {
             let pubkey_hint = item
@@ -1101,7 +1102,17 @@ fn parse_relay_agents(agents: serde_json::Value) -> Vec<RelayAgentInfo> {
                 }
             }
         })
-        .collect()
+        .collect();
+    // One aggregate line per query so a poisoned directory is visible at a
+    // glance without counting per-entry warns.
+    let skipped = total - parsed.len();
+    if skipped > 0 {
+        tracing::warn!(
+            "list_relay_agents: kept {kept} of {total} agent profiles, skipped {skipped} unparseable",
+            kept = parsed.len()
+        );
+    }
+    parsed
 }
 
 #[cfg(test)]
