@@ -513,10 +513,9 @@ function MessageComposerImpl({
     if (editTargetRef.current && onEditSaveRef.current) {
       if (isSendingRef.current || isUploadingRef.current) return;
       const currentPendingImeta = media.pendingImetaRef.current;
-      const hasMedia = currentPendingImeta.length > 0;
-      // Empty text + zero attachments is a no-op (don't let edit become an
-      // effective deletion).
-      if (!trimmed && !hasMedia) return;
+      // No empty-edit guard here: clearing an edit to empty (no text, no
+      // attachments) flows through to onEditSave as empty content, which
+      // deletes the message instead of publishing it (see handleEditSave).
 
       // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
       // because edit semantics use `[]` as the explicit "wipe all

@@ -2,7 +2,8 @@
 //!
 //! Mental model:
 //!   add_agent_to_huddle → kind:9000 to ephemeral channel
-//!                       → kind:9000 to parent channel (best-effort)
+//!                       → preserve existing parent membership, or
+//!                         kind:9000 to parent channel (best-effort)
 //!
 //! ACP spawning is NOT needed here: the running agent process auto-subscribes
 //! when it receives the kind:9000 membership notification. Huddle-specific
@@ -11,7 +12,10 @@
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::{app_state::AppState, events, relay::submit_event};
+use crate::{
+    app_state::AppState, events, huddle::relay_api::fetch_channel_members_with_roles,
+    relay::submit_event,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -61,8 +65,9 @@ with the next one.
 /// The field exists for forward compatibility with future batch-add operations
 /// where partial success may be meaningful.
 ///
-/// `parent_added` reflects whether the parent-channel add succeeded;
-/// `parent_error` carries the error string when it didn't.
+/// `parent_added` reflects whether the parent already contained the agent or
+/// the parent-channel add succeeded; `parent_error` carries the error string
+/// when neither condition could be confirmed.
 #[derive(Debug, Serialize)]
 pub struct AgentAddResult {
     /// Always `true` — invariant guaranteed by [`add_agent_to_huddle`].
@@ -91,17 +96,33 @@ pub async fn add_agent_to_huddle(
     let add_eph = events::build_add_member(ephemeral_channel_id, agent_pubkey, Some("bot"))?;
     submit_event(add_eph, state).await?;
 
-    // 2. Add agent to parent channel — so agent has full context.
-    //    Best-effort: capture the error but don't propagate it.
-    let (parent_added, parent_error) = {
+    // 2. Preserve any active parent membership, regardless of role. Rewriting
+    //    an existing DM member as `bot` is both unnecessary and forbidden for
+    //    non-admins. Otherwise add the agent so it has full context.
+    //    Best-effort: capture a real error but don't propagate it.
+    let parent_channel_id_string = parent_channel_id.to_string();
+    let parent_already_contains_agent =
+        fetch_channel_members_with_roles(&parent_channel_id_string, state)
+            .await
+            .is_ok_and(|members| contains_member(&members, agent_pubkey));
+
+    let (parent_added, parent_error) = if parent_already_contains_agent {
+        (true, None)
+    } else {
         let add_parent = events::build_add_member(parent_channel_id, agent_pubkey, Some("bot"))?;
         match submit_event(add_parent, state).await {
             Ok(_) => (true, None),
             Err(e) => {
-                eprintln!(
-                    "buzz-desktop: add agent to parent channel failed (may already be member): {e}"
-                );
-                (false, Some(e))
+                let active_after_error =
+                    fetch_channel_members_with_roles(&parent_channel_id_string, state)
+                        .await
+                        .is_ok_and(|members| contains_member(&members, agent_pubkey));
+                if active_after_error {
+                    (true, None)
+                } else {
+                    eprintln!("buzz-desktop: add agent to parent channel failed: {e}");
+                    (false, Some(e))
+                }
             }
         }
     };
@@ -111,4 +132,27 @@ pub async fn add_agent_to_huddle(
         parent_added,
         parent_error,
     })
+}
+
+fn contains_member(members: &[(String, Option<String>)], pubkey: &str) -> bool {
+    members
+        .iter()
+        .any(|(member_pubkey, _)| member_pubkey.eq_ignore_ascii_case(pubkey))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contains_member;
+
+    #[test]
+    fn existing_parent_membership_is_preserved_regardless_of_role() {
+        let members = vec![
+            ("agent-member".to_owned(), Some("member".to_owned())),
+            ("agent-bot".to_owned(), Some("bot".to_owned())),
+        ];
+
+        assert!(contains_member(&members, "AGENT-MEMBER"));
+        assert!(contains_member(&members, "agent-bot"));
+        assert!(!contains_member(&members, "missing"));
+    }
 }

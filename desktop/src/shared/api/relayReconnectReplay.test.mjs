@@ -5,6 +5,7 @@ import {
   buildReconnectReplayFilter,
   replayLiveSubscriptions,
   REPLAY_BATCH_SIZE,
+  shouldPageReconnectReplay,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
 
@@ -111,6 +112,31 @@ test("reconnect replay caps large steady-state limits", () => {
     limit: 500,
     since: 123,
   });
+});
+
+test("reconnect replay preserves the live-only zero-history contract", () => {
+  const filter = {
+    kinds: [9],
+    "#h": ["channel-1"],
+    limit: 0,
+  };
+
+  assert.deepEqual(replayFilter(filter, 123), {
+    kinds: [9],
+    "#h": ["channel-1"],
+    limit: 0,
+    since: 123,
+  });
+});
+
+test("live-only subscriptions do not page reconnect history", () => {
+  const filter = {
+    kinds: [9],
+    "#h": ["channel-1"],
+    limit: 0,
+  };
+
+  assert.equal(shouldPageReconnectReplay(filter), false);
 });
 
 test("reconnect replay keeps the stricter existing since window", () => {

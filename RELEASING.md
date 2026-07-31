@@ -5,7 +5,7 @@ Mobile uses immutable release-candidate tags cut directly from remote `main`:
 
 | Lane | Entry point | Artifact |
 |------|-------------|----------|
-| Desktop | `Prepare Desktop Release` / `just release-desktop` | Signed desktop app (macOS/Linux) |
+| Desktop | `Prepare Desktop Release` | Packaged desktop app (signed/notarized macOS, unsigned Windows, and Linux) |
 | Relay | `just release-relay` | `ghcr.io/block/buzz` container image |
 | Mobile | `scripts/mobile-release.sh candidate X.Y.Z` | Exact `mobile-vX.Y.Z-rc.N` source identity |
 
@@ -16,13 +16,22 @@ remains manual because OSS CI cannot trigger private CI.
 
 ## Quick Start
 
+Desktop releases are prepared from the current remote `main` by GitHub Actions:
+
 ```sh
-# Desktop release (next patch version)
-just release-desktop
+gh workflow run prepare-desktop-release.yml \
+  --repo block/buzz \
+  --ref main \
+  -f version=0.5.3
+```
 
-# Desktop explicit version
-just release-desktop 0.4.0
+The equivalent GitHub UI path is **Actions → Prepare Desktop Release → Run
+workflow**, select `main`, enter the version without a `v` prefix, and run it.
+The local `just release-desktop <version>` recipe uses the same candidate script,
+but the Actions workflow is the canonical operator path because it runs with the
+release App identity and does not depend on an operator checkout.
 
+```sh
 # Relay release
 just release-relay
 just release-relay 0.4.0
@@ -31,8 +40,9 @@ just release-relay 0.4.0
 scripts/mobile-release.sh candidate 0.5.0
 ```
 
-Desktop uses an immutable generated candidate PR; relay continues using its metadata PR. Mobile does not. Each
-`mobile-vX.Y.Z-rc.N` tag is an immutable candidate and the artifact of record.
+Desktop uses an immutable generated candidate PR; relay continues using its
+metadata PR. Mobile does not. Each `mobile-vX.Y.Z-rc.N` tag is an immutable
+candidate and the artifact of record.
 There is no mobile release branch, stable mobile tag alias, finalization step,
 or mobile GitHub Release.
 
@@ -42,11 +52,26 @@ or mobile GitHub Release.
 
 ### Desktop
 
-1. Run **Prepare Desktop Release** with a version (or `just release-desktop <version>`). Automation records current `origin/main`, regenerates `version-bump/<version>` as one deterministic candidate commit, and opens or updates the PR.
-2. Review the full-SHA changelog, CI, recorded base, and candidate SHA. Any regeneration creates a new head and requires fresh approval.
-3. Merge with **Create a merge commit**. Squash and rebase are invalid for desktop release PRs.
-4. `auto-tag-on-release-pr-merge` proves that merge parent 2 is the exact approved candidate, then tags that candidate `desktop-v<version>`.
-5. The tag triggers `release.yml`. It creates a draft, builds and stages every platform, publishes the complete versioned release, and updates the rolling updater manifest last for stable versions.
+1. Run **Prepare Desktop Release** with an explicit version. Automation fetches
+   the current `origin/main`, regenerates `version-bump/<version>` as one
+   deterministic candidate commit, records the frozen base and proposed
+   `desktop-v<version>` tag in `.release/desktop-candidate.json`, updates every
+   desktop manifest and lockfile, writes a full-SHA changelog, and opens or
+   updates the PR.
+2. Review the recorded base and candidate SHA, the complete changelog, and CI.
+   The candidate must receive an approval on its exact current head. Any
+   regeneration changes that head and therefore requires a fresh approval.
+3. Merge with **Create a merge commit**. Squash and rebase are invalid for
+   desktop release PRs. Repository settings and the `main` ruleset must allow
+   merge commits for this option to exist.
+4. `auto-tag-on-release-pr-merge` verifies the two-parent merge, exact candidate
+   approval, and every required check, then tags the reviewed candidate—not the
+   merge commit—as `desktop-v<version>`.
+5. The tag triggers `release.yml`. It builds and stages Apple Silicon and Intel
+   macOS, Windows, and Linux artifacts; publishes the versioned release only
+   after the complete set succeeds; then updates the rolling updater manifest
+   last for stable versions. A failed platform leaves no partially published
+   versioned release.
 
 ### Relay
 
@@ -143,12 +168,15 @@ for distributable builds or builds from an immutable release tag.
 
 ---
 
-## Manual Release Retry
+## Release Retry
 
-The **Release** workflow's manual dispatch is only a retry mechanism for an
-existing immutable `desktop-v<version>` tag. Select that tag in the ref picker and
-provide the matching semver version without the `desktop-v` prefix. It cannot build
-from `main` or another caller-selected source ref.
+`release.yml` has no manual dispatch and cannot build from `main` or another
+caller-selected ref. If a run for an existing immutable
+`desktop-v<version>` tag fails, rerun that failed workflow from GitHub Actions
+(or use `gh run rerun <run-id> --failed --repo block/buzz`). A stable rerun also
+repairs `buzz-desktop-latest/latest.json` if the original run published the
+versioned release but failed during that final rolling-manifest upload. Do not
+recreate, move, or push the immutable tag again.
 
 Mobile intentionally has no branch or arbitrary-ref fallback. The private
 Buildkite pipeline accepts only an exact candidate tag.
@@ -183,9 +211,11 @@ GitHub Release or a stable `mobile-vX.Y.Z` alias.
 
 The release workflow builds **two separate macOS DMGs**: Apple
 Silicon (`darwin-aarch64`, the `release` job) and Intel
-(`darwin-x86_64`, the `release-macos-x64` job), plus Linux `.deb` and
-`.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
-the same `desktop-v<version>` release. Intel users download the `_x64.dmg`.
+(`darwin-x86_64`, the `release-macos-x64` job), an unsigned Windows x64
+NSIS installer (its filename includes `_alpha-unsigned`), and Linux `.deb` and
+`.AppImage` packages. Both macOS DMGs are codesigned, notarized, and attached
+to the same `desktop-v<version>` release. Intel users
+download the `_x64.dmg`.
 
 The Linux AppImage is post-processed by `desktop/scripts/fix-appimage.sh`,
 which strips infra libraries over-bundled by linuxdeploy (they crash on
@@ -205,18 +235,25 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
   repository
 - `gh` CLI version 2.87.0 or newer, authenticated with permission to dispatch
   the candidate workflow
+- Repository settings and the `main` ruleset configured to allow **merge
+  commits**; desktop release PRs cannot be squash- or rebase-merged
 - Release tag ruleset [`14378754`](https://github.com/block/buzz/rules/14378754)
-  active for `mobile-v*`, with creation, update, deletion, and non-fast-forward
-  protections and `buzz-release-bot` as its sole always-bypass actor
+  active for `desktop-v*` and `mobile-v*`, with creation, update, deletion, and
+  non-fast-forward protections and `buzz-release-bot` as its sole always-bypass
+  actor
 - The `buzz-release-bot` App credentials configured for GitHub Actions
-- The following **GitHub Actions secrets** must also be configured for the
+- The following **GitHub Actions variables and secrets** configured for the
   desktop release lane:
 
-  | Secret | Purpose |
-  |--------|---------|
-  | `BUZZ_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
-  | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key |
-  | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key |
+  | Name | Kind | Purpose |
+  |------|------|---------|
+  | `BUZZ_RELEASE_TAGGER_CLIENT_ID` | Variable | GitHub App client ID used to prepare candidates and create tags |
+  | `BUZZ_RELEASE_TAGGER_PRIVATE_KEY` | Secret | GitHub App private key |
+  | `OSX_CODESIGN_ROLE` | Secret | macOS signing role used by `block/apple-codesign-action` |
+  | `CODESIGN_S3_BUCKET` | Secret | macOS signing exchange bucket |
+  | `BUZZ_UPDATER_PUBLIC_KEY` or `SPROUT_UPDATER_PUBLIC_KEY` | Secret | Tauri updater public key |
+  | `TAURI_SIGNING_PRIVATE_KEY` | Secret | Tauri updater private key |
+  | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Secret | Password for the private key |
 
 Mobile candidate publication requires workflow-dispatch access and the existing
 release App because strict tag protection denies direct human creation. The App
@@ -231,10 +268,26 @@ actor list.
 
 ## Troubleshooting
 
-### `just release-desktop` fails with "must be on main branch"
+### The release PR does not offer **Create a merge commit**
+
+The immutable desktop flow cannot release until both the repository merge
+settings and the `main` ruleset allow merge commits. Do not squash the PR: the
+auto-tagger deliberately rejects a one-parent squash commit. Enable merge
+commits, then merge the already-approved exact candidate head with **Create a
+merge commit**.
+
+### `Prepare Desktop Release` fails before opening a PR
+
+Check the workflow run first. Confirm `BUZZ_RELEASE_TAGGER_CLIENT_ID` and
+`BUZZ_RELEASE_TAGGER_PRIVATE_KEY` are configured and that the release App can
+write contents and pull requests. Rerunning the preparer regenerates the
+candidate from the then-current `origin/main`; if its head changes, obtain a new
+approval before merging.
+
+### Local `just release-desktop` fails with "must be on main branch"
 Switch to `main` and pull latest before running the release recipe.
 
-### `just release-desktop` fails with "working tree is dirty"
+### Local `just release-desktop` fails with "working tree is dirty"
 Commit or stash your changes before running the release recipe.
 
 ### New commits land after publishing a mobile candidate

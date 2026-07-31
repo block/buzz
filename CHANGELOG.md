@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.5.3
+
+### Desktop and shared changes
+
+- feat(desktop): import local Pocket voices ([#3259](https://github.com/block/buzz/pull/3259)) ([`c104eecfb38620de2c35c7e20a716f8658b5a6b1`](https://github.com/block/buzz/commit/c104eecfb38620de2c35c7e20a716f8658b5a6b1))
+- fix(desktop): open profiles from avatars ([#3751](https://github.com/block/buzz/pull/3751)) ([`39ce3dfc3cf2d12f0d6c64b4cd4293df86567663`](https://github.com/block/buzz/commit/39ce3dfc3cf2d12f0d6c64b4cd4293df86567663))
+- refactor(voice): extract reusable Pocket primitives + Pocket voice settings (relands #2467 + #3208) ([#3910](https://github.com/block/buzz/pull/3910)) ([`61ba9dfaa00852925058d1a024322fa53663a5bc`](https://github.com/block/buzz/commit/61ba9dfaa00852925058d1a024322fa53663a5bc))
+- feat(desktop): auto-enable huddle transcription for agents ([#3180](https://github.com/block/buzz/pull/3180)) ([`4632c55041c5d423d572a6f6411bb7b279c26f67`](https://github.com/block/buzz/commit/4632c55041c5d423d572a6f6411bb7b279c26f67))
+- feat(agent): optional reply guard reminds a silent turn to publish ([#3763](https://github.com/block/buzz/pull/3763)) ([`081f805d5ea25841ab885c7b67a568618a34aa59`](https://github.com/block/buzz/commit/081f805d5ea25841ab885c7b67a568618a34aa59))
+- feat(desktop): upgrade Pocket TTS model ([#3266](https://github.com/block/buzz/pull/3266)) ([`d48b0e0eec4d2958f90a3cafa9d974450abe8501`](https://github.com/block/buzz/commit/d48b0e0eec4d2958f90a3cafa9d974450abe8501))
+- feat(desktop): delete a message by clearing its edit to empty ([#3813](https://github.com/block/buzz/pull/3813)) ([`d88313f369acfa17973029787ee4c0bbea07fa51`](https://github.com/block/buzz/commit/d88313f369acfa17973029787ee4c0bbea07fa51))
+- feat(relay): raise hosted community limit to five ([#3829](https://github.com/block/buzz/pull/3829)) ([`10d5a26414dc90dc89fd27de74b21e105d4fa622`](https://github.com/block/buzz/commit/10d5a26414dc90dc89fd27de74b21e105d4fa622))
+- feat(desktop): locally stored NIP-49 encrypted key backup ([#2937](https://github.com/block/buzz/pull/2937)) ([`468647a51f858b29d27eaf9fd07bf90294f99d39`](https://github.com/block/buzz/commit/468647a51f858b29d27eaf9fd07bf90294f99d39))
+- fix(catalog): update Amp tagline ([#3806](https://github.com/block/buzz/pull/3806)) ([`f3e5e812677f6f14bffe16a7aa02642d56faca4b`](https://github.com/block/buzz/commit/f3e5e812677f6f14bffe16a7aa02642d56faca4b))
+- fix(desktop): channel topic and membership metadata cleanup ([#3642](https://github.com/block/buzz/pull/3642)) ([`9e8fcfda099652926b921bca7fcc9bfecab0e140`](https://github.com/block/buzz/commit/9e8fcfda099652926b921bca7fcc9bfecab0e140))
+- fix(desktop): align data deletion labels ([#2230](https://github.com/block/buzz/pull/2230)) ([`ede26863345a518ec46edd6d7692e0281883491b`](https://github.com/block/buzz/commit/ede26863345a518ec46edd6d7692e0281883491b))
+- fix(desktop): allow linux-only media items as dead code off-linux ([#3811](https://github.com/block/buzz/pull/3811)) ([`36571f4adcfdcf3714a17bd968c58c78bcbdd9ef`](https://github.com/block/buzz/commit/36571f4adcfdcf3714a17bd968c58c78bcbdd9ef))
+- fix(desktop): report authenticated relay recovery ([#3812](https://github.com/block/buzz/pull/3812)) ([`74cd5712191bffd84ae688d59bb8b451c6eec1b0`](https://github.com/block/buzz/commit/74cd5712191bffd84ae688d59bb8b451c6eec1b0))
+- fix(desktop): don't gate hover affordances on the hover media query ([#3657](https://github.com/block/buzz/pull/3657)) ([`29dfe4821ed577489a1879fd2a9bfe2a621a52b3`](https://github.com/block/buzz/commit/29dfe4821ed577489a1879fd2a9bfe2a621a52b3))
+- feat(relay): gate kind 30178 team-catalog reads behind the shared tag ([#3358](https://github.com/block/buzz/pull/3358)) ([`114d40d9d37f05eff83ee90347ed93fb3da512c5`](https://github.com/block/buzz/commit/114d40d9d37f05eff83ee90347ed93fb3da512c5))
+- test(desktop): click visible thread collapse guide ([#3800](https://github.com/block/buzz/pull/3800)) ([`b9e4ed616f39b812bc964e79c7a40223c4e93832`](https://github.com/block/buzz/commit/b9e4ed616f39b812bc964e79c7a40223c4e93832))
+- feat(desktop): raise the install ceiling and make installs observable ([#3368](https://github.com/block/buzz/pull/3368)) ([`d40a33290e75791aa7ecf3ce7a252b66c2e35966`](https://github.com/block/buzz/commit/d40a33290e75791aa7ecf3ce7a252b66c2e35966))
+- Add Devin as a preset ACP harness ([#3225](https://github.com/block/buzz/pull/3225)) ([`1b3ff96a5764303998fa629ff852e81f1a88d7ad`](https://github.com/block/buzz/commit/1b3ff96a5764303998fa629ff852e81f1a88d7ad))
+- feat(desktop): improve agent activity header ui ([#3321](https://github.com/block/buzz/pull/3321)) ([`4d47aa83455a9fd024121a596154cd311dca1d76`](https://github.com/block/buzz/commit/4d47aa83455a9fd024121a596154cd311dca1d76))
+- perf(presence): reduce heartbeat frequency ([#3783](https://github.com/block/buzz/pull/3783)) ([`bf139e8d0bdba10df9a5adbf16843140e0a78a59`](https://github.com/block/buzz/commit/bf139e8d0bdba10df9a5adbf16843140e0a78a59))
+- Tighten continuation message rows ([#3724](https://github.com/block/buzz/pull/3724)) ([`6e419b9f1c873549a7b40996970e0da7352adafb`](https://github.com/block/buzz/commit/6e419b9f1c873549a7b40996970e0da7352adafb))
+- Fix video reviews in thread replies ([#3719](https://github.com/block/buzz/pull/3719)) ([`f48f3f055fdd6030d3832f615f8c0d8e5a81261a`](https://github.com/block/buzz/commit/f48f3f055fdd6030d3832f615f8c0d8e5a81261a))
+- Make relay reconnect backoff authoritative ([#3774](https://github.com/block/buzz/pull/3774)) ([`cca8839034eb571a7ce943c3ace7f85a82330898`](https://github.com/block/buzz/commit/cca8839034eb571a7ce943c3ace7f85a82330898))
+- feat(desktop): add password-protected backups in settings ([#3701](https://github.com/block/buzz/pull/3701)) ([`bd0bff24bfd2cffa2b3b3a995f7628af5e460a5c`](https://github.com/block/buzz/commit/bd0bff24bfd2cffa2b3b3a995f7628af5e460a5c))
+- fix(desktop): reuse profiles when joining communities ([#2155](https://github.com/block/buzz/pull/2155)) ([`f44b5a2477f3979ae66e49153b11be36538cf859`](https://github.com/block/buzz/commit/f44b5a2477f3979ae66e49153b11be36538cf859))
+- fix(catalog): update Amp description ([#3758](https://github.com/block/buzz/pull/3758)) ([`61b96c9828d1dd54106b570d87a54edbc92bb9c4`](https://github.com/block/buzz/commit/61b96c9828d1dd54106b570d87a54edbc92bb9c4))
+- feat(catalog): resolve publisher display name in catalog detail pane ([#3640](https://github.com/block/buzz/pull/3640)) ([`02be413b823c356587e6e9f4d07f6cb06bb41c3c`](https://github.com/block/buzz/commit/02be413b823c356587e6e9f4d07f6cb06bb41c3c))
+- feat(mesh): upgrade embedded mesh to v0.74 and harden shared compute (split 1/2 of #3467) ([#3741](https://github.com/block/buzz/pull/3741)) ([`4933672eb4589e7208b312829ebddcd10dfa9dd3`](https://github.com/block/buzz/commit/4933672eb4589e7208b312829ebddcd10dfa9dd3))
+- Refine agent sharing dialog ([#3699](https://github.com/block/buzz/pull/3699)) ([`9a386a0defbf2b355ee17646c7c11817a535b85f`](https://github.com/block/buzz/commit/9a386a0defbf2b355ee17646c7c11817a535b85f))
+- desktop: enable getUserMedia in the Linux WebKitGTK webview ([#3607](https://github.com/block/buzz/pull/3607)) ([`c9aa55505c544c608ff71648bbfd21b235637f19`](https://github.com/block/buzz/commit/c9aa55505c544c608ff71648bbfd21b235637f19))
+- fix: align responsive agent views ([#3688](https://github.com/block/buzz/pull/3688)) ([`73589408db6fd96b87ac570935d414ecc4120f53`](https://github.com/block/buzz/commit/73589408db6fd96b87ac570935d414ecc4120f53))
+- Add macOS agent menu-bar menu ([#3565](https://github.com/block/buzz/pull/3565)) ([`d0a24bcb5210326da4c0b1e749ee3935621b329c`](https://github.com/block/buzz/commit/d0a24bcb5210326da4c0b1e749ee3935621b329c))
+- Fix pending message feedback ([#3543](https://github.com/block/buzz/pull/3543)) ([`4672ee55c4e4a7916c31bfeae5df2fb4384bed10`](https://github.com/block/buzz/commit/4672ee55c4e4a7916c31bfeae5df2fb4384bed10))
+- fix(desktop): remove remaining Projects panel fills ([#3742](https://github.com/block/buzz/pull/3742)) ([`c55e421a0629c74b9ffd96ee3ccde36f006196ed`](https://github.com/block/buzz/commit/c55e421a0629c74b9ffd96ee3ccde36f006196ed))
+- desktop: restore direct community member adds ([#3634](https://github.com/block/buzz/pull/3634)) ([`310df2ec33fbb075edf226ba18bf9a96d90ba81b`](https://github.com/block/buzz/commit/310df2ec33fbb075edf226ba18bf9a96d90ba81b))
+- fix(desktop): explain open agent access ([#2561](https://github.com/block/buzz/pull/2561)) ([`7fb008f9347b933b9a1da20a7afb070912b430e8`](https://github.com/block/buzz/commit/7fb008f9347b933b9a1da20a7afb070912b430e8))
+- fix(desktop): remove Projects overview card fills ([#3416](https://github.com/block/buzz/pull/3416)) ([`3b8567a05d4c40e667d061666feb7aa7bc38212d`](https://github.com/block/buzz/commit/3b8567a05d4c40e667d061666feb7aa7bc38212d))
+- fix(git): channel binding tooling + author remediation for unbound repos ([#3626](https://github.com/block/buzz/pull/3626)) ([`788b3c002bd2509455444f57f8a03a054b4b496a`](https://github.com/block/buzz/commit/788b3c002bd2509455444f57f8a03a054b4b496a))
+- feat: configure S3 URL addressing style ([#3400](https://github.com/block/buzz/pull/3400)) ([`7012d86d52fd188b27c7beedeaa132d9c1f61fa8`](https://github.com/block/buzz/commit/7012d86d52fd188b27c7beedeaa132d9c1f61fa8))
+- feat: add first-class OpenRouter provider support ([#1975](https://github.com/block/buzz/pull/1975)) ([`ab55fee81896d2b03edf5d2ca5012b715be2b93d`](https://github.com/block/buzz/commit/ab55fee81896d2b03edf5d2ca5012b715be2b93d))
+- feat(agent,acp): wire provider total_tokens through NIP-AM publish chain ([#3593](https://github.com/block/buzz/pull/3593)) ([`f95fdc1a102e17c6718a44323d9a2feaed702db7`](https://github.com/block/buzz/commit/f95fdc1a102e17c6718a44323d9a2feaed702db7))
+
+### Other repository changes
+
+- fix(release): make immutable desktop release operable ([#3943](https://github.com/block/buzz/pull/3943)) ([`052174a148f9f6bcbb2b5a1d20ce0317645e49f8`](https://github.com/block/buzz/commit/052174a148f9f6bcbb2b5a1d20ce0317645e49f8))
+- docs: add VISION_REMOTE_AGENTS.md ([#3924](https://github.com/block/buzz/pull/3924)) ([`689617af7ad420c3266d5d2eb437757371327089`](https://github.com/block/buzz/commit/689617af7ad420c3266d5d2eb437757371327089))
+- fix(relay): align NIP-11 max_limit with REQ ceiling ([#3635](https://github.com/block/buzz/pull/3635)) ([`23f0c26b1ceba8e07bf3c160a1e08c7bda82ccd9`](https://github.com/block/buzz/commit/23f0c26b1ceba8e07bf3c160a1e08c7bda82ccd9))
+- fix(db): isolate usage metrics advisory-lock test on scratch DB ([#3670](https://github.com/block/buzz/pull/3670)) ([`dba97eecd9d8659c9c816cd6666fa6d687b6bca1`](https://github.com/block/buzz/commit/dba97eecd9d8659c9c816cd6666fa6d687b6bca1))
+- feat(release): make desktop releases immutable ([#3568](https://github.com/block/buzz/pull/3568)) ([`1dfd89ea67b4ebce0c4d10390f280ed4e7ddde8a`](https://github.com/block/buzz/commit/1dfd89ea67b4ebce0c4d10390f280ed4e7ddde8a))
+- Render mobile agent mention chips ([#3702](https://github.com/block/buzz/pull/3702)) ([`06582ee6f09e5f7454e4d8895d80a45c3cdb5e8a`](https://github.com/block/buzz/commit/06582ee6f09e5f7454e4d8895d80a45c3cdb5e8a))
+- fix(acp): preserve truncated thread context ([#3340](https://github.com/block/buzz/pull/3340)) ([`53771c8f5439f9c5c26876f0229bfcfe5da9b170`](https://github.com/block/buzz/commit/53771c8f5439f9c5c26876f0229bfcfe5da9b170))
+- docs(nips): specify kind:30621 multi-repo projects (NIP-MP) ([#3163](https://github.com/block/buzz/pull/3163)) ([`33bf7caa6ea474ccde2932c1ed05a90d7345c6e0`](https://github.com/block/buzz/commit/33bf7caa6ea474ccde2932c1ed05a90d7345c6e0))
+- feat(mobile): desktop-parity emoji and thread experience ([#3485](https://github.com/block/buzz/pull/3485)) ([`85edc0572a8540dedfa6562d40f0f875af0b5f61`](https://github.com/block/buzz/commit/85edc0572a8540dedfa6562d40f0f875af0b5f61))
+- fix(cli): resolve agents from owner records ([#3178](https://github.com/block/buzz/pull/3178)) ([`262f2392e3b7e09c78d582fb384672034d8551d5`](https://github.com/block/buzz/commit/262f2392e3b7e09c78d582fb384672034d8551d5))
+- feat(replica): portable heartbeat-token fence with snapshot-local reader routing ([#3268](https://github.com/block/buzz/pull/3268)) ([`63496cc1d4c6f1b7c613801bdcc694169dcf391a`](https://github.com/block/buzz/commit/63496cc1d4c6f1b7c613801bdcc694169dcf391a))
+
+[Compare v0.5.2...desktop-v0.5.3](https://github.com/block/buzz/compare/v0.5.2...desktop-v0.5.3)
+
 ## v0.5.2
 
 - feat(cli): mirror Desktop mention delivery ([#3330](https://github.com/block/buzz/pull/3330)) ([`7adc46268`](https://github.com/block/buzz/commit/7adc46268d5e93f0b1d4dc8e700af22815dcac1b))
