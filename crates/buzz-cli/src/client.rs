@@ -60,15 +60,36 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
+/// MIME types accepted for general-purpose uploads (`buzz upload`, attachments).
 const ALLOWED_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
-    "image/apng",
     "image/gif",
     "image/webp",
     "video/mp4",
 ];
+
+/// MIME types accepted **only** on the sticker asset upload path.
+///
+/// `sniff_sticker_asset` deliberately reclassifies an animated PNG as
+/// `image/apng` — the type the sonar sticker validators and the relay-side
+/// sticker checks expect. It is kept out of [`ALLOWED_MIMES`] because plain
+/// file uploads never produce it (`infer` reports APNG bytes as `image/png`),
+/// and general uploads should not silently gain a new accepted type.
+const STICKER_ONLY_MIMES: &[&str] = &["image/apng"];
+
+/// Returns `true` when `mime` may be uploaded through the general file path.
+fn is_allowed_upload_mime(mime: &str) -> bool {
+    ALLOWED_MIMES.contains(&mime)
+}
+
+/// Returns `true` when `mime` may be uploaded through the sticker asset path.
+///
+/// A superset of [`is_allowed_upload_mime`] that additionally accepts the
+/// sticker-only types in [`STICKER_ONLY_MIMES`].
+fn is_allowed_sticker_upload_mime(mime: &str) -> bool {
+    is_allowed_upload_mime(mime) || STICKER_ONLY_MIMES.contains(&mime)
+}
 
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
@@ -1096,14 +1117,20 @@ impl BuzzClient {
         .to_string())
     }
 
-    /// Upload a file to the relay's Blossom endpoint.
-    /// Returns a BlobDescriptor on success.
-    pub async fn upload_bytes(
+    /// Upload in-memory sticker asset bytes to the relay's Blossom endpoint.
+    ///
+    /// Gated by [`is_allowed_sticker_upload_mime`] rather than the general
+    /// [`ALLOWED_MIMES`] list, so an animated PNG classified as `image/apng`
+    /// by `sniff_sticker_asset` is not rejected locally before it reaches the
+    /// relay. Callers sniff and validate the sticker MIME set (WebP, PNG,
+    /// APNG, GIF) upstream.
+    /// Returns a `BlobDescriptor` on success.
+    pub async fn upload_sticker_bytes(
         &self,
         bytes: Vec<u8>,
         mime: &str,
     ) -> Result<BlobDescriptor, CliError> {
-        if !ALLOWED_MIMES.contains(&mime) {
+        if !is_allowed_sticker_upload_mime(mime) {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
@@ -1220,7 +1247,7 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
+        if !is_allowed_upload_mime(&mime) {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
@@ -2404,9 +2431,48 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id, extract_relay_response_field,
+        is_allowed_sticker_upload_mime, is_allowed_upload_mime, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn sticker_uploads_accept_apng() {
+        // `sniff_sticker_asset` classifies animated PNGs as `image/apng`; the
+        // sticker upload path must not reject them before they reach the relay.
+        assert!(is_allowed_sticker_upload_mime("image/apng"));
+        for mime in ["image/webp", "image/png", "image/gif"] {
+            assert!(
+                is_allowed_sticker_upload_mime(mime),
+                "sticker upload must accept {mime}"
+            );
+        }
+    }
+
+    #[test]
+    fn general_uploads_do_not_gain_apng() {
+        assert!(!is_allowed_upload_mime("image/apng"));
+        for mime in [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "video/mp4",
+        ] {
+            assert!(
+                is_allowed_upload_mime(mime),
+                "general upload must accept {mime}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_upload_paths_reject_unknown_types() {
+        for mime in ["application/pdf", "text/html", "application/octet-stream"] {
+            assert!(!is_allowed_upload_mime(mime));
+            assert!(!is_allowed_sticker_upload_mime(mime));
+        }
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {

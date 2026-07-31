@@ -53,6 +53,7 @@ mod qr_download;
 mod relay_members;
 mod relay_reconnect;
 mod social;
+mod sticker_relay;
 mod stickers;
 mod team_snapshot;
 mod teams;

@@ -221,6 +221,49 @@ test("relay-origin store: a reset between a failed attempt and its late success 
   resetMediaCaches();
 });
 
+test("sticker cache URLs: the origin gate applies to absolute URLs, not to bare paths", async () => {
+  // `RELAY_STICKER_RE` captures the origin in group 1 only when the input is
+  // absolute. Origin-less cache paths are relay-relative by construction and
+  // must be proxied, but an absolute URL on a foreign host (e.g. a markdown
+  // image pointing at another relay) must be loaded from its own origin —
+  // proxying it would fetch the wrong asset or 404.
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(4242);
+        if (command === "get_relay_http_url") {
+          return Promise.resolve("https://relay.example");
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?stickerGate=${Date.now()}`);
+    const cachePath = `/media/sticker/${HASH}/hello/wave/${"b".repeat(64)}`;
+    const proxied = `http://127.0.0.1:4242/media/sticker/${HASH}/hello/wave/${"b".repeat(64)}`;
+
+    // Let the eager poll resolve both the port and the relay origin.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(mediaUrl.getCachedRelayOrigin(), "https://relay.example");
+
+    // Relative cache path → proxied.
+    assert.equal(mediaUrl.rewriteRelayUrl(cachePath), proxied);
+    // Absolute URL on our own relay → proxied.
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(`https://relay.example${cachePath}`),
+      proxied,
+    );
+    // Absolute URL on a foreign host → untouched.
+    const foreign = `https://other-relay.example${cachePath}`;
+    assert.equal(mediaUrl.rewriteRelayUrl(foreign), foreign);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test("withDeadline: a never-settling invoke resolves to null at the deadline", async () => {
   // The poll loop bounds each invoke by the remaining budget so a wedged IPC
   // bridge (a promise that never settles) can't hang startup past the timeout.

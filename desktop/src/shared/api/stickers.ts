@@ -389,12 +389,63 @@ export async function fetchStickerCatalog(): Promise<StickerPack[]> {
   });
 }
 
+/**
+ * Events requested per page of the published-pack walk.
+ *
+ * Deliberately distinct from {@link MAX_STICKER_CATALOG_PACKS}: that constant
+ * caps how many packs may be *approved* into one catalog snapshot, and reusing
+ * it as the query limit made the approval queue silently invisible for every
+ * pack past the newest 500 — precisely while the catalog still had room.
+ */
+const STICKER_PACK_PAGE_SIZE = 500;
+
+/**
+ * Hard bound on pages walked, so a relay that keeps returning full pages can
+ * never spin this forever.
+ */
+const MAX_STICKER_PACK_PAGES = 40;
+
+/**
+ * Read every published sticker pack in the workspace, page by page.
+ *
+ * `StickerSettingsCard` derives the whole admin approval queue from this list,
+ * so a single `limit`-capped fetch makes older packs permanently unapprovable.
+ * Paging walks backwards through `created_at` using the only cursor a WS `REQ`
+ * filter carries — `until` — which the relay treats as *inclusive*, so
+ * consecutive pages overlap on tied timestamps. Two things follow, and both are
+ * load-bearing:
+ *
+ * - dedupe by event id, because the boundary events repeat; and
+ * - stop when a page contributes nothing new, because a page whose events all
+ *   share one `created_at` would otherwise be requested forever.
+ */
 export async function fetchAllStickerPacks(): Promise<StickerPack[]> {
-  const events = await relayClient.fetchEvents({
-    kinds: [KIND_STICKER_PACK],
-    limit: MAX_STICKER_CATALOG_PACKS,
-  });
-  return events
+  const byId = new Map<string, RelayEvent>();
+  let until: number | undefined;
+
+  for (let page = 0; page < MAX_STICKER_PACK_PAGES; page += 1) {
+    const events = await relayClient.fetchEvents({
+      kinds: [KIND_STICKER_PACK],
+      limit: STICKER_PACK_PAGE_SIZE,
+      ...(until === undefined ? {} : { until }),
+    });
+
+    const sizeBefore = byId.size;
+    let oldestCreatedAt = Number.POSITIVE_INFINITY;
+    for (const event of events) {
+      byId.set(event.id, event);
+      oldestCreatedAt = Math.min(oldestCreatedAt, event.created_at);
+    }
+
+    // A short page is the end of the list; a page of only-repeats means the
+    // cursor cannot advance past a run of tied timestamps.
+    if (events.length < STICKER_PACK_PAGE_SIZE || byId.size === sizeBefore) {
+      break;
+    }
+    until = oldestCreatedAt;
+  }
+
+  return [...byId.values()]
     .map(parseStickerPack)
     .filter((pack): pack is StickerPack => pack !== null)
     .sort((a, b) => a.title.localeCompare(b.title));

@@ -5,7 +5,6 @@
 
 use std::time::Duration;
 
-use buzz_ws_client::{NostrWsConnection, RelayMessage};
 use serde::Serialize;
 use serde_json::json;
 use tauri::State;
@@ -15,6 +14,7 @@ use crate::app_state::AppState;
 use crate::relay::relay_api_base_url_with_override;
 
 use super::media::{do_upload, sanitize_filename, BlobDescriptor};
+use super::sticker_relay::{fetch_events, validate_relay_hint, RelayHint};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -246,14 +246,15 @@ const PACK_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct NostrStickerPackLink {
     address: sonar_stickers::PackAddress,
-    relays: Vec<String>,
+    relays: Vec<RelayHint>,
 }
 
 /// Parse a Sonar sticker pack link
 /// (`https://…/stickers?a=30031:<author>:<identifier>&relay=wss://…`) or a
-/// bare `30031:<author>:<identifier>` coordinate. Relay hints must be ws(s)
-/// URLs and are capped so a crafted link cannot fan the app out to dozens of
-/// sockets.
+/// bare `30031:<author>:<identifier>` coordinate. Relay hints must pass
+/// [`validate_relay_hint`] (wss-only outside local development, no
+/// credentials) and are capped so a crafted link cannot fan the app out to
+/// dozens of sockets.
 fn parse_nostr_sticker_pack_link(input: &str) -> Result<NostrStickerPackLink, String> {
     const INVALID: &str = "Enter a Sonar sticker pack link \
         (https://…/stickers?a=30031:…) or a 30031:<author>:<identifier> coordinate.";
@@ -277,12 +278,7 @@ fn parse_nostr_sticker_pack_link(input: &str) -> Result<NostrStickerPackLink, St
             sonar_stickers::PackAddress::parse(&coordinate).map_err(|_| INVALID.to_string())?;
         let mut valid_relays = Vec::with_capacity(relays.len());
         for relay in &relays {
-            let parsed =
-                url::Url::parse(relay).map_err(|_| format!("Invalid relay hint: {relay}"))?;
-            if !matches!(parsed.scheme(), "wss" | "ws") {
-                return Err(format!("Relay hints must be ws(s) URLs: {relay}"));
-            }
-            valid_relays.push(relay.clone());
+            valid_relays.push(validate_relay_hint(relay)?);
         }
         valid_relays.truncate(MAX_PACK_LINK_RELAYS);
         return Ok(NostrStickerPackLink {
@@ -302,7 +298,7 @@ fn parse_nostr_sticker_pack_link(input: &str) -> Result<NostrStickerPackLink, St
 /// pack wins, so offline or censoring relays fall through to the next one.
 async fn fetch_nostr_sticker_pack(
     address: &sonar_stickers::PackAddress,
-    relays: &[String],
+    relays: &[RelayHint],
 ) -> Result<sonar_stickers::StickerPack, String> {
     for relay in relays {
         if let Ok(Some(pack)) = fetch_nostr_sticker_pack_from_relay(address, relay).await {
@@ -321,25 +317,34 @@ fn replaces_head(candidate: &nostr::Event, current: &nostr::Event) -> bool {
         || (candidate.created_at == current.created_at && candidate.id < current.id)
 }
 
+/// Keep `candidate` only if it is the requested kind and author, carries a
+/// valid signature, and beats the current head. Relay responses are otherwise
+/// unauthenticated: a hostile hint can return an event that merely claims the
+/// requested kind and pubkey with a forged ID or signature, and the importer
+/// republishes the pack under the importing user's identity.
+fn accept_pack_candidate(
+    candidate: nostr::Event,
+    address: &sonar_stickers::PackAddress,
+    head: &mut Option<nostr::Event>,
+) {
+    if candidate.kind.as_u16() != sonar_stickers::STICKER_PACK_KIND
+        || candidate.pubkey.to_hex() != address.author_pubkey_hex
+        || candidate.verify().is_err()
+    {
+        return;
+    }
+    if head
+        .as_ref()
+        .is_none_or(|current| replaces_head(&candidate, current))
+    {
+        *head = Some(candidate);
+    }
+}
+
 async fn fetch_nostr_sticker_pack_from_relay(
     address: &sonar_stickers::PackAddress,
-    relay: &str,
+    relay: &RelayHint,
 ) -> Result<Option<sonar_stickers::StickerPack>, String> {
-    // One deadline for the whole per-relay fetch (connect + REQ + query
-    // loop). Without it each hint could burn PACK_FETCH_TIMEOUT twice
-    // (connect, then a fresh query deadline) plus an unbounded send_raw,
-    // stalling the import UI for minutes across several slow hints.
-    let deadline = tokio::time::Instant::now() + PACK_FETCH_TIMEOUT;
-    let budget = || {
-        deadline
-            .checked_duration_since(tokio::time::Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| "relay fetch timed out".to_string())
-    };
-    let mut conn = tokio::time::timeout(budget()?, NostrWsConnection::connect(relay))
-        .await
-        .map_err(|_| "relay connect timed out".to_string())?
-        .map_err(|error| error.to_string())?;
     let subscription_id = "sonar-sticker-import";
     let request = json!([
         "REQ",
@@ -351,45 +356,13 @@ async fn fetch_nostr_sticker_pack_from_relay(
             "limit": 4,
         }
     ]);
-    tokio::time::timeout(budget()?, conn.send_raw(&request))
-        .await
-        .map_err(|_| "relay request timed out".to_string())?
-        .map_err(|error| error.to_string())?;
+    // PACK_FETCH_TIMEOUT is the whole per-hint budget (DNS, connect, request,
+    // read loop), so a link full of slow hints cannot multiply it.
+    let events = fetch_events(relay, &request, subscription_id, PACK_FETCH_TIMEOUT).await?;
     let mut newest: Option<nostr::Event> = None;
-    while let Ok(remaining) = budget() {
-        let message = match conn.next_event(remaining).await {
-            Ok(message) => message,
-            Err(_) => break,
-        };
-        match message {
-            // NostrWsConnection only deserializes; a hostile relay hint can
-            // return an event claiming the requested kind+pubkey with a
-            // forged ID/signature, so `event.verify()` must pass before the
-            // event is trusted, and only the canonical head is kept.
-            RelayMessage::Event {
-                subscription_id: id,
-                event,
-            } if id == subscription_id
-                && event.kind.as_u16() == sonar_stickers::STICKER_PACK_KIND
-                && event.pubkey.to_hex() == address.author_pubkey_hex
-                && event.verify().is_ok()
-                && newest
-                    .as_ref()
-                    .is_none_or(|current| replaces_head(&event, current)) =>
-            {
-                newest = Some(*event);
-            }
-            RelayMessage::Eose {
-                subscription_id: id,
-            } if id == subscription_id => break,
-            RelayMessage::Closed {
-                subscription_id: id,
-                ..
-            } if id == subscription_id => break,
-            _ => {}
-        }
+    for event in events {
+        accept_pack_candidate(event, address, &mut newest);
     }
-    let _ = conn.disconnect().await;
     let Some(event) = newest else {
         return Ok(None);
     };
@@ -533,7 +506,11 @@ mod tests {
         assert_eq!(parsed.address.author_pubkey_hex, AUTHOR);
         assert_eq!(parsed.address.identifier, "signal-abc");
         assert_eq!(
-            parsed.relays,
+            parsed
+                .relays
+                .iter()
+                .map(|relay| relay.url.clone())
+                .collect::<Vec<_>>(),
             vec![
                 "wss://relay.damus.io".to_string(),
                 "wss://nos.lol".to_string()
@@ -570,8 +547,68 @@ mod tests {
             "https://sonarprivacy.xyz/stickers?a=30031:{AUTHOR}:x&relay=https%3A%2F%2Fevil.example"
         ))
         .is_err());
+        // plaintext ws hint to a non-loopback host (SSRF / downgrade)
+        assert!(parse_nostr_sticker_pack_link(&format!(
+            "https://sonarprivacy.xyz/stickers?a=30031:{AUTHOR}:x&relay=ws%3A%2F%2F10.0.0.1%3A3000"
+        ))
+        .is_err());
+        // relay hint carrying credentials
+        assert!(parse_nostr_sticker_pack_link(&format!(
+            "https://sonarprivacy.xyz/stickers?a=30031:{AUTHOR}:x&relay=wss%3A%2F%2Fu%3Ap%40relay.example"
+        ))
+        .is_err());
         // garbage
         assert!(parse_nostr_sticker_pack_link("hello world").is_err());
+    }
+
+    #[test]
+    fn pack_candidates_must_carry_a_valid_signature_from_the_requested_author() {
+        let keys = nostr::Keys::generate();
+        let address = sonar_stickers::PackAddress::parse(&format!(
+            "30031:{}:pack",
+            keys.public_key().to_hex()
+        ))
+        .expect("address");
+
+        let mut head = None;
+        let mut forged = signed_pack_event(&keys, 300, "pack");
+        forged.content = "forged pack".into();
+        accept_pack_candidate(forged, &address, &mut head);
+        assert!(head.is_none(), "forged signature must be rejected");
+
+        // Correctly signed, but by a different key than the link's author.
+        let impostor = nostr::Keys::generate();
+        accept_pack_candidate(
+            signed_pack_event(&impostor, 300, "pack"),
+            &address,
+            &mut head,
+        );
+        assert!(head.is_none(), "wrong author must be rejected");
+
+        let genuine = signed_pack_event(&keys, 100, "pack");
+        accept_pack_candidate(genuine.clone(), &address, &mut head);
+        assert_eq!(head.as_ref().map(|event| event.id), Some(genuine.id));
+    }
+
+    #[test]
+    fn pack_candidates_resolve_the_canonical_head_regardless_of_arrival_order() {
+        let keys = nostr::Keys::generate();
+        let address = sonar_stickers::PackAddress::parse(&format!(
+            "30031:{}:pack",
+            keys.public_key().to_hex()
+        ))
+        .expect("address");
+        let a = signed_pack_event(&keys, 100, "pack-a");
+        let b = signed_pack_event(&keys, 100, "pack-b");
+        let expected = a.id.min(b.id);
+
+        for order in [vec![a.clone(), b.clone()], vec![b, a]] {
+            let mut head = None;
+            for event in order {
+                accept_pack_candidate(event, &address, &mut head);
+            }
+            assert_eq!(head.map(|event| event.id), Some(expected));
+        }
     }
 
     #[test]

@@ -32,6 +32,56 @@ static STICKER_FETCH_LIMIT: LazyLock<tokio::sync::Semaphore> =
 static STICKER_FETCH_LOCKS: LazyLock<DashMap<String, Arc<tokio::sync::Mutex<()>>>> =
     LazyLock::new(DashMap::new);
 
+/// Refcounted handle to the per-object-key sticker fetch mutex.
+///
+/// The mutex deduplicates concurrent origin materialization for one object key.
+/// The handle owns an `Arc` clone and evicts the map entry on drop once no other
+/// holder remains, so the process-global map does not grow with catalog turnover
+/// (packs are added and removed across tenants for the life of the process).
+///
+/// Eviction is race-free because DashMap evaluates a `remove_if` predicate while
+/// holding the shard write lock that `entry` also requires, and both the `Arc`
+/// clone in [`StickerFetchLock::acquire`] and the count check in `Drop` happen
+/// under that lock. A concurrent acquirer therefore either bumps the strong count
+/// before the predicate runs — removal is skipped and it shares our mutex — or
+/// inserts a fresh mutex after removal, which is only reachable when no other
+/// holder existed. Two live handles for the same key can never observe different
+/// mutexes, so the deduplication guarantee holds. Dropping is also the only
+/// eviction path, which keeps a cancelled request (client disconnect drops the
+/// handler future) from leaving an orphaned entry behind.
+struct StickerFetchLock {
+    key: String,
+    mutex: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl StickerFetchLock {
+    fn acquire(key: &str) -> Self {
+        let mutex = STICKER_FETCH_LOCKS
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        Self {
+            key: key.to_string(),
+            mutex,
+        }
+    }
+
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.mutex.lock().await
+    }
+}
+
+impl Drop for StickerFetchLock {
+    fn drop(&mut self) {
+        // Two references — the map entry plus this handle — mean we are the last
+        // holder. The `ptr_eq` check keeps us from evicting a replacement entry
+        // if the map ever hands back a different allocation for this key.
+        STICKER_FETCH_LOCKS.remove_if(&self.key, |_, m| {
+            Arc::ptr_eq(m, &self.mutex) && Arc::strong_count(m) == 2
+        });
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StickerAssetError {
     #[error("sticker not found")]
@@ -589,55 +639,44 @@ pub(crate) async fn get_verified_sticker(
     let extension = sticker_extension(&resolved.mime).ok_or(StickerAssetError::InvalidAsset)?;
     let object_key = format!("{}.{}", sticker_ref.plaintext_sha256, extension);
 
-    // Fast path: serve cached bytes without taking the per-object fetch lock,
-    // so concurrent reads of a popular cached sticker are not serialized.
+    // Fast path: a cached object is served without taking the per-object fetch
+    // lock, so simultaneous viewers of a popular sticker are not serialized
+    // behind a mutex that only guards origin materialization.
     let bytes = match read_cached_sticker(&state, &object_key).await? {
         Some(bytes) => bytes,
         None => {
-            // Cache miss: serialize upstream fetches for this object key.
-            let fetch_lock = STICKER_FETCH_LOCKS
-                .entry(object_key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone();
-            let fetch_result: Result<Vec<u8>, StickerAssetError> = async {
-                let _fetch_guard = fetch_lock.lock().await;
-                // Re-check the cache: another request may have materialized
-                // the object while we waited on the lock.
-                if let Some(bytes) = read_cached_sticker(&state, &object_key).await? {
-                    return Ok(bytes);
-                }
-                let _network_permit = STICKER_FETCH_LIMIT
-                    .acquire()
-                    .await
-                    .map_err(|_| StickerAssetError::Internal)?;
-                let bytes = fetch_sticker_bytes(&resolved.url).await?;
-                verify_sticker_bytes(&bytes, &sticker_ref.plaintext_sha256, &resolved)?;
+            // Cache miss: one origin fetch per object key, not one per viewer.
+            // The handle evicts its map entry when the last holder drops it.
+            let fetch_lock = StickerFetchLock::acquire(&object_key);
+            let _fetch_guard = fetch_lock.lock().await;
+            // Re-check under the lock: another request may have materialized the
+            // object while we waited.
+            match read_cached_sticker(&state, &object_key).await? {
+                Some(bytes) => bytes,
+                None => {
+                    let _network_permit = STICKER_FETCH_LIMIT
+                        .acquire()
+                        .await
+                        .map_err(|_| StickerAssetError::Internal)?;
+                    let bytes = fetch_sticker_bytes(&resolved.url).await?;
+                    verify_sticker_bytes(&bytes, &sticker_ref.plaintext_sha256, &resolved)?;
 
-                // Approval or the current pack head may have changed while the network
-                // request was in flight. Re-resolve before publishing cache bytes.
-                let current = resolve_approved_sticker(&state, &tenant, &sticker_ref).await?;
-                if current.approved_event_id != resolved.approved_event_id
-                    || current.url != resolved.url
-                {
-                    return Err(StickerAssetError::NotFound);
+                    // Approval or the current pack head may have changed while the network
+                    // request was in flight. Re-resolve before publishing cache bytes.
+                    let current = resolve_approved_sticker(&state, &tenant, &sticker_ref).await?;
+                    if current.approved_event_id != resolved.approved_event_id
+                        || current.url != resolved.url
+                    {
+                        return Err(StickerAssetError::NotFound);
+                    }
+                    state
+                        .media_storage
+                        .put(&object_key, &bytes, &resolved.mime)
+                        .await
+                        .map_err(|_| StickerAssetError::Internal)?;
+                    bytes
                 }
-                state
-                    .media_storage
-                    .put(&object_key, &bytes, &resolved.mime)
-                    .await
-                    .map_err(|_| StickerAssetError::Internal)?;
-                Ok(bytes)
             }
-            .await;
-            // Drop our clone, then evict the lock entry when no other waiter
-            // holds a reference, so the map does not grow unbounded with the
-            // sticker catalog. Count == 1 means only the map itself references
-            // the Arc: a concurrent `entry()` either bumps the count (removal
-            // is skipped) or inserts a fresh mutex after removal (safe — the
-            // cache re-check above still deduplicates the upstream fetch).
-            drop(fetch_lock);
-            STICKER_FETCH_LOCKS.remove_if(&object_key, |_, m| Arc::strong_count(m) == 1);
-            fetch_result?
         }
     };
 
@@ -1367,6 +1406,89 @@ mod tests {
             upload_route_mode("/media"),
             Err(MediaError::NotFound)
         ));
+    }
+
+    #[test]
+    fn sticker_fetch_lock_is_shared_and_evicted_by_the_last_holder() {
+        let key = "sticker-fetch-lock-refcount.webp";
+        let first = StickerFetchLock::acquire(key);
+        let second = StickerFetchLock::acquire(key);
+        assert!(
+            Arc::ptr_eq(&first.mutex, &second.mutex),
+            "concurrent holders must share one mutex or dedup breaks"
+        );
+
+        drop(first);
+        assert!(
+            STICKER_FETCH_LOCKS.contains_key(key),
+            "entry must survive while another holder exists"
+        );
+
+        drop(second);
+        assert!(
+            !STICKER_FETCH_LOCKS.contains_key(key),
+            "last holder must evict the entry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sticker_fetch_lock_serializes_concurrent_holders() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let key = "sticker-fetch-lock-serialize.webp";
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let in_flight = in_flight.clone();
+                let peak = peak.clone();
+                tokio::spawn(async move {
+                    let fetch_lock = StickerFetchLock::acquire(key);
+                    let _guard = fetch_lock.lock().await;
+                    let held = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(held, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.expect("fetch lock task");
+        }
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            1,
+            "fetch lock must serialize origin materialization per object key"
+        );
+        assert!(
+            !STICKER_FETCH_LOCKS.contains_key(key),
+            "entry must not outlive the requests that created it"
+        );
+    }
+
+    #[tokio::test]
+    async fn sticker_fetch_lock_entry_is_evicted_when_the_request_is_cancelled() {
+        let key = "sticker-fetch-lock-cancel.webp";
+        {
+            let mut held = Box::pin(async {
+                let fetch_lock = StickerFetchLock::acquire(key);
+                let _guard = fetch_lock.lock().await;
+                std::future::pending::<()>().await;
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), held.as_mut())
+                    .await
+                    .is_err(),
+                "the future must still be holding the lock"
+            );
+            assert!(STICKER_FETCH_LOCKS.contains_key(key));
+        }
+        assert!(
+            !STICKER_FETCH_LOCKS.contains_key(key),
+            "a dropped (cancelled) request must not orphan its lock entry"
+        );
     }
 
     #[test]

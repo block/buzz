@@ -428,7 +428,9 @@ async fn upload_assets(
         if uploaded.contains_key(&asset.sha256) {
             continue;
         }
-        let descriptor = client.upload_bytes(asset.bytes, &asset.mime).await?;
+        let descriptor = client
+            .upload_sticker_bytes(asset.bytes, &asset.mime)
+            .await?;
         if descriptor.sha256 != asset.sha256 {
             return Err(CliError::Other(
                 "relay returned a different hash for uploaded sticker".into(),

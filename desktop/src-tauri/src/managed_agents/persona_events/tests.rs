@@ -840,7 +840,7 @@ mod flush_barrier {
 
         let keys = nostr::Keys::generate();
         let target = nostr::Keys::generate().public_key().to_hex();
-        let stale = crate::events::build_archive_identity_request(
+        let stale = crate::identity_archive_events::build_archive_identity_request(
             &target,
             "agent deleted",
             Some("retired"),
