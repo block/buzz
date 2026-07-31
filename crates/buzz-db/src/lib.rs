@@ -706,6 +706,26 @@ impl Db {
     /// the reason names the mechanism rather than a diagnosis).
     const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
 
+    /// Bound every statement issued on a reader connection (#3651).
+    ///
+    /// Once a routed read acquires its reader connection, nothing bounded
+    /// any subsequent statement: a replica path that goes dark
+    /// mid-transaction (LB failover, security-group change, standby
+    /// promotion, Aurora failover) converted a routed read into an
+    /// indefinitely hung request the writer-fallback could never reclaim.
+    /// With no `statement_timeout` anywhere in the repo, `MIDTX_STATEMENT`
+    /// hangs ran past a 15s probe cap.
+    ///
+    /// Set a per-session `statement_timeout` at connect so any single
+    /// statement on a reader connection aborts instead of hanging the
+    /// request. 2s is comfortably above any legitimate routed read on a
+    /// read-only session yet far below a hung request; on timeout Postgres
+    /// sends an error, the acquire / read path fails, and the caller's
+    /// fallback to the writer regains control. Collector/timer overhead and
+    /// the (already sub-second) reader acquire are unaffected — this bounds
+    /// only in-flight SQL work.
+    const READER_STATEMENT_TIMEOUT_MS: u32 = 2_000;
+
     /// Connect the read-replica pool **lazily** — no connection is
     /// attempted at construction, so a reader that is down at boot cannot
     /// crash the relay (it starts all-writer with the fence closed and
@@ -720,6 +740,13 @@ impl Db {
     ///
     /// No floor guard: replica sessions are read-only, the trigger never
     /// fires there (see [`Db::connect_pool`]).
+    ///
+    /// Arms a per-session `statement_timeout` on every reader connection
+    /// ([`Db::READER_STATEMENT_TIMEOUT_MS`]) so a replica that goes dark
+    /// mid-transaction fails the statement (and the request falls back to
+    /// the writer) instead of hanging indefinitely (#3651). Sessions on a
+    /// read-only pool can never write, so this cannot abort a committed
+    /// write; it only bounds in-flight SQL work.
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
@@ -727,6 +754,17 @@ impl Db {
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            // `SET` cannot take bind parameters; `set_config` can. Session
+            // scope (the trailing `false`) keeps it local to this connection.
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                        .bind(Self::READER_STATEMENT_TIMEOUT_MS.to_string())
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect_lazy(url)?)
     }
 
@@ -6667,6 +6705,32 @@ mod tests {
             pool.options().get_acquire_timeout(),
             Db::READER_ACQUIRE_TIMEOUT
         );
+    }
+
+    /// #3651: the reader pool must arm a per-session `statement_timeout` so a
+    /// replica that goes dark mid-transaction fails the statement instead of
+    /// hanging the request indefinitely. The bound is `READER_STATEMENT_TIMEOUT_MS`;
+    /// this wiring test pins the value (so a future tweak can't silently remove
+    /// the bound) and proves `connect_read_pool` still constructs lazily with
+    /// the `after_connect` hook armed — `connect_lazy` never dials the network,
+    /// so this needs no live replica.
+    #[tokio::test]
+    async fn connect_read_pool_arms_statement_timeout() {
+        // 2s: comfortably above any legitimate routed read on a read-only
+        // session, far below a hung request.
+        assert_eq!(Db::READER_STATEMENT_TIMEOUT_MS, 2_000);
+
+        let config = DbConfig {
+            max_connections: 20,
+            read_max_connections: Some(5),
+            ..DbConfig::default()
+        };
+        // Unroutable per RFC 5737 TEST-NET-1: proves nothing is dialed at
+        // construction time, even with `after_connect` armed.
+        let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 5)
+            .expect("lazy construction must not dial the replica even with after_connect");
+        assert_eq!(pool.options().get_max_connections(), 5);
+        assert_eq!(pool.options().get_min_connections(), 0);
     }
 
     /// Channel window: head fetch (no cursor) reads the WRITER; cursor pages
