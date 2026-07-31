@@ -82,19 +82,30 @@ function UnreadCountBadge({
   );
 }
 
-function UnreadDotBadge({
+/**
+ * Relevant unread thread activity renders as a dot: the unread lives in a
+ * thread, not the main timeline, so the channel row must not promise a new
+ * top-level message the way the solid numeric badge does. The count stays in
+ * the accessible name; visually the dot survives opening the channel until
+ * the thread itself is read.
+ */
+function ThreadUnreadDot({
   channelName,
   className,
+  count,
 }: {
   channelName: string;
   className?: string;
+  count: number;
 }) {
   return (
     <span
       className={cn("h-2 w-2 shrink-0 rounded-full bg-primary", className)}
-      data-testid={`channel-unread-dot-${channelName}`}
+      data-testid={`channel-thread-unread-${channelName}`}
     >
-      <span className="sr-only">unread</span>
+      <span className="sr-only">
+        {count} unread thread {count === 1 ? "reply" : "replies"}
+      </span>
     </span>
   );
 }
@@ -250,6 +261,7 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
+  hasThreadOnlyUnread,
   unreadCount = 0,
   activeWorking,
   isMuted,
@@ -261,6 +273,7 @@ export function ChannelMenuButton({
   label?: string;
   isActive: boolean;
   hasUnread: boolean;
+  hasThreadOnlyUnread?: boolean;
   unreadCount?: number;
   activeWorking?: ActiveChannelTurnSummary;
   isMuted?: boolean;
@@ -321,15 +334,22 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {hasUnread && !isActive && channel.channelType !== "dm" ? (
-        unreadCount > 0 ? (
-          <UnreadCountBadge
+      {hasUnread &&
+      !isActive &&
+      channel.channelType !== "dm" &&
+      unreadCount > 0 ? (
+        hasThreadOnlyUnread ? (
+          <ThreadUnreadDot
             channelName={channel.name}
             className="ml-auto"
             count={unreadCount}
           />
         ) : (
-          <UnreadDotBadge channelName={channel.name} className="ml-auto" />
+          <UnreadCountBadge
+            channelName={channel.name}
+            className="ml-auto"
+            count={unreadCount}
+          />
         )
       ) : null}
     </SidebarMenuButton>
@@ -349,6 +369,7 @@ export function SidebarSection({
   selectedChannelId,
   title,
   testId,
+  threadOnlyUnreadChannelIds,
   unreadChannelCounts,
   unreadChannelIds,
   onHideDm,
@@ -373,6 +394,7 @@ export function SidebarSection({
   selectedChannelId: string | null;
   title: string;
   testId: string;
+  threadOnlyUnreadChannelIds?: ReadonlySet<string>;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   onHideDm?: (channelId: string) => void;
@@ -442,6 +464,9 @@ export function SidebarSection({
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       dmParticipants={dmParticipantsByChannelId?.[channel.id]}
                       hasUnread={unreadChannelIds.has(channel.id)}
+                      hasThreadOnlyUnread={threadOnlyUnreadChannelIds?.has(
+                        channel.id,
+                      )}
                       unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={

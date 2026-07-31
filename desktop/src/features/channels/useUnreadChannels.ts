@@ -10,11 +10,12 @@ import {
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
   makeObservedUnreadEvent,
-  mapsEqual,
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
+  unreadBadgeObservedEventsAreThreadOnly,
   type ObservedUnreadEvent,
 } from "@/features/channels/unreadChannelCounts";
+import { useStableMap, useStableSet } from "@/shared/hooks/useStableReference";
 import { useReadState } from "@/features/channels/readState/useReadState";
 import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
 import {
@@ -123,14 +124,6 @@ export function resolveChannelReadMarker(
 
 export function resolveObservedUnreadRootId(tags: string[][]): string | null {
   return isBroadcastReply(tags) ? null : getThreadReference(tags).rootId;
-}
-
-function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const item of a) {
-    if (!b.has(item)) return false;
-  }
-  return true;
 }
 
 export function useUnreadChannels(
@@ -831,6 +824,7 @@ export function useUnreadChannels(
         return {
           unreadChannelIds: new Set<string>(),
           highPriorityUnreadChannelIds: new Set<string>(),
+          threadOnlyUnreadChannelIds: new Set<string>(),
           unreadChannelCounts: new Map<string, number>(),
           unreadChannelNotificationCount: 0,
         };
@@ -838,6 +832,7 @@ export function useUnreadChannels(
 
       const unread = new Set<string>();
       const highPriority = new Set<string>();
+      const threadOnly = new Set<string>();
       const counts = new Map<string, number>();
       let unreadChannelNotificationCount = 0;
 
@@ -878,6 +873,18 @@ export function useUnreadChannels(
           readAtForObservedEvent,
         );
         counts.set(channel.id, badgeCount);
+        if (
+          unreadBadgeObservedEventsAreThreadOnly(
+            observedEvents,
+            readAtForObservedEvent,
+          )
+        ) {
+          // Every unread badge event is a plain thread reply — the sidebar
+          // demotes the badge to the thread glyph. Forced-unread channels
+          // never reach here (they continue above) so they keep the solid
+          // badge.
+          threadOnly.add(channel.id);
+        }
         unreadChannelNotificationCount += countUnreadAppBadgeObservedEvents(
           observedEvents,
           readAtForObservedEvent,
@@ -901,6 +908,7 @@ export function useUnreadChannels(
       return {
         unreadChannelIds: unread,
         highPriorityUnreadChannelIds: highPriority,
+        threadOnlyUnreadChannelIds: threadOnly,
         unreadChannelCounts: counts,
         unreadChannelNotificationCount,
       };
@@ -914,37 +922,16 @@ export function useUnreadChannels(
       readStateVersion,
     ]);
 
-  // Stabilize Set references: only replace when contents actually change,
-  // so downstream memos don't re-run on every render when sets are equal.
-  const prevUnreadRef = React.useRef<ReadonlySet<string>>(new Set());
-  const prevHighPriorityRef = React.useRef<ReadonlySet<string>>(new Set());
-  const prevUnreadCountsRef = React.useRef<ReadonlyMap<string, number>>(
-    new Map(),
-  );
-
-  const unreadChannelIds = setsEqual(
-    rawUnread.unreadChannelIds,
-    prevUnreadRef.current,
-  )
-    ? prevUnreadRef.current
-    : rawUnread.unreadChannelIds;
-  prevUnreadRef.current = unreadChannelIds;
-
-  const highPriorityUnreadChannelIds = setsEqual(
+  // Stabilize Set/Map references: only replace when contents actually
+  // change, so downstream memos don't re-run when contents are equal.
+  const unreadChannelIds = useStableSet(rawUnread.unreadChannelIds);
+  const highPriorityUnreadChannelIds = useStableSet(
     rawUnread.highPriorityUnreadChannelIds,
-    prevHighPriorityRef.current,
-  )
-    ? prevHighPriorityRef.current
-    : rawUnread.highPriorityUnreadChannelIds;
-  prevHighPriorityRef.current = highPriorityUnreadChannelIds;
-
-  const unreadChannelCounts = mapsEqual(
-    rawUnread.unreadChannelCounts,
-    prevUnreadCountsRef.current,
-  )
-    ? prevUnreadCountsRef.current
-    : rawUnread.unreadChannelCounts;
-  prevUnreadCountsRef.current = unreadChannelCounts;
+  );
+  const threadOnlyUnreadChannelIds = useStableSet(
+    rawUnread.threadOnlyUnreadChannelIds,
+  );
+  const unreadChannelCounts = useStableMap(rawUnread.unreadChannelCounts);
   const unreadChannelNotificationCount =
     rawUnread.unreadChannelNotificationCount;
 
@@ -994,6 +981,7 @@ export function useUnreadChannels(
     unreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
+    threadOnlyUnreadChannelIds,
     unreadChannelNotificationCount,
     markAllChannelsRead,
     markChannelRead,
