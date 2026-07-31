@@ -448,7 +448,25 @@ export function ProjectsView() {
   }
 
   if (projects.length === 0) {
-    return <EmptyState />;
+    return (
+      <>
+        <CreateProjectDialog
+          isCreating={createProjectMutation.isPending}
+          onCreate={async (input) => {
+            const project = await createProjectMutation.mutateAsync(input);
+            toast.success(`Project "${project.name}" created.`);
+            handleRepositoryScopeChange("all");
+            handleFilterChange("repositories");
+          }}
+          onOpenChange={setCreateProjectOpen}
+          open={createProjectOpen}
+        />
+        <EmptyState
+          isCreating={createProjectMutation.isPending}
+          onCreateProject={() => setCreateProjectOpen(true)}
+        />
+      </>
+    );
   }
 
   const repositoryItems =
