@@ -165,6 +165,26 @@ check existing reply handlers for the pattern.
 by the ACP harness into managed agent subprocesses. In development, set
 `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
 
+### Harness MCP configuration (`BUZZ_ACP_MCP_SERVERS`)
+
+`buzz-acp` derives one MCP server from `--mcp-command` (the dev MCP).
+`BUZZ_ACP_MCP_SERVERS` adds more, as a JSON array of
+`{name, command, args, env:[{name,value}]}` objects merged with that one:
+
+```bash
+export BUZZ_ACP_MCP_SERVERS='[{"name":"razorpay","command":"/usr/bin/rzp","args":["--stdio"],"env":[]}]'
+```
+
+Malformed JSON is logged and ignored — a bad value degrades to the dev MCP
+alone rather than taking the agent's tools down with it.
+
+A channel's server set can also be changed at runtime via the owner-signed
+`update_mcp_servers` observer control frame. That applies at the channel's
+next turn boundary through `session/resume`: same session ID, transcript
+preserved, never cancelling an in-flight turn. Channels managed this way also
+get `strictMcpConfig`, so they run exactly the listed servers; unmanaged
+channels keep the agent's own global MCP config untouched.
+
 ### Building the CLI
 
 ```bash

@@ -3473,6 +3473,81 @@ mod tests {
         );
     }
 
+    /// Protocol-level continuity contract: an MCP change is applied by
+    /// `session/resume` on the SAME session id, with exactly one `session/new`
+    /// and no `session/cancel`. Recall of early-turn content is a model-level
+    /// property and can only be shown against a live agent — see the manual
+    /// runbook in the PR description.
+    #[tokio::test]
+    async fn an_mcp_change_resumes_the_same_session_without_a_new_one() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}'
+            read -t 2 NEW
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_fixed","_receivedRequest":'"$NEW"'}}'
+            read -t 2 RESUME
+            echo '{"jsonrpc":"2.0","id":2,"result":{"_receivedRequest":'"$RESUME"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(
+            client.resume_supported(),
+            "the scripted agent advertises resume; without it the harness would rotate instead"
+        );
+
+        let created = client
+            .session_new_full("/tmp", vec![], None, None, false)
+            .await
+            .expect("session/new should succeed");
+        assert_eq!(created.session_id, "ses_fixed");
+
+        let resumed = client
+            .session_resume(
+                &created.session_id,
+                "/tmp",
+                vec![McpServer {
+                    name: "razorpay".into(),
+                    command: "/usr/bin/rzp".into(),
+                    args: vec![],
+                    env: vec![],
+                }],
+            )
+            .await
+            .expect("session/resume should succeed");
+
+        let methods = [
+            created.raw["_receivedRequest"]["method"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            resumed["_receivedRequest"]["method"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        ];
+        assert_eq!(
+            methods.iter().filter(|m| *m == "session/new").count(),
+            1,
+            "an MCP change must never mint a new session — that is the whole point: {methods:?}"
+        );
+        assert!(
+            !methods.iter().any(|m| m == "session/cancel"),
+            "an MCP change must never cancel an in-flight turn: {methods:?}"
+        );
+
+        let resume_params = &resumed["_receivedRequest"]["params"];
+        assert_eq!(resume_params["sessionId"].as_str(), Some("ses_fixed"));
+        assert_eq!(
+            resume_params["mcpServers"][0]["name"].as_str(),
+            Some("razorpay"),
+            "the new server set must ride on the resume"
+        );
+    }
+
     #[tokio::test]
     async fn initialize_records_resume_supported_when_advertised() {
         let script = r#"
