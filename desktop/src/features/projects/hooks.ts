@@ -5,7 +5,8 @@ import { relayClient } from "@/shared/api/relayClient";
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
-import { getIdentity } from "@/shared/api/tauriIdentity";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { getUserProfile } from "@/shared/api/tauriProfiles";
 import {
   getProjectLocalRepoDiff,
   getProjectRepoDiff,
@@ -41,6 +42,7 @@ import type {
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
 import { resolveProjectDefaultBranch } from "./lib/projectBranches";
 import { effectiveCloneUrls } from "./lib/projectCloneUrl";
+import { isProjectHiddenByDeletion } from "./lib/projectDeletionFilter";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import type {
@@ -169,17 +171,6 @@ function isHiddenLocally(project: Project): boolean {
   return readHiddenProjectCards().includes(projectCoordinate(project));
 }
 
-function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
-  const coordinate = projectCoordinate(project);
-  // NIP-09: a deletion is only valid when signed by the author of the
-  // referenced event — otherwise anyone could hide someone else's project.
-  return deletionEvents.some(
-    (event) =>
-      event.pubkey.toLowerCase() === project.owner.toLowerCase() &&
-      event.tags.some((tag) => tag[0] === "a" && tag[1] === coordinate),
-  );
-}
-
 /**
  * Converts a kind:30617 repo announcement into a `Project`.
  *
@@ -262,7 +253,8 @@ export async function fetchProjects(): Promise<Project[]> {
     .map((event) => eventToProject(event, getCachedRelayOrigin()))
     .filter(
       (project) =>
-        !isHiddenLocally(project) && !isDeletedByA(project, deletionEvents),
+        !isHiddenLocally(project) &&
+        !isProjectHiddenByDeletion(project, deletionEvents),
     )
     .sort((a, b) => b.createdAt - a.createdAt);
 }
@@ -312,7 +304,7 @@ async function fetchProject(projectId: string): Promise<Project | null> {
     limit: 10,
   });
 
-  if (isDeletedByA(project, deletionEvents)) return null;
+  if (isProjectHiddenByDeletion(project, deletionEvents)) return null;
   const repoState = await fetchRepoState(project);
   return {
     ...project,
@@ -666,7 +658,15 @@ async function fetchProjectActivitySummaries(
 
 async function deleteProject(project: Project): Promise<void> {
   const identity = await getIdentity();
-  if (identity.pubkey.toLowerCase() !== project.owner.toLowerCase()) {
+  const currentPubkey = identity.pubkey;
+  const ownsRepo =
+    currentPubkey.toLowerCase() === project.owner.toLowerCase();
+  let ownsAgentRepo = false;
+  if (!ownsRepo) {
+    const ownerProfile = await getUserProfile(project.owner);
+    ownsAgentRepo = ownsAuthorAgent(ownerProfile, currentPubkey);
+  }
+  if (!ownsRepo && !ownsAgentRepo) {
     throw new Error("Only branch owners can delete branches.");
   }
 
