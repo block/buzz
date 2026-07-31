@@ -29,6 +29,9 @@ import {
   useMeshDownloadProgress,
 } from "../hooks/useMeshDownloadProgress";
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
+import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
+import { deriveMeshShareToggle } from "../shareToggleState";
+import { deriveServingIndicator } from "../servingUsage";
 
 const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
 const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
@@ -104,7 +107,9 @@ export function MeshComputeSettingsCard() {
 
   // One-shot hardware-aware catalog fetch. Purely additive: when it fails
   // (stub build, survey error) the card falls back to the free-text field.
-  // Keep an empty draft empty so the UI can explicitly ask the member to choose.
+  // When there is no saved choice, make the curated recommendation the actual
+  // default so a new member can turn Share Compute on directly. An explicit
+  // saved draft always wins.
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -112,6 +117,11 @@ export function MeshComputeSettingsCard() {
         const value = await meshModelCatalog();
         if (cancelled) return;
         setCatalog(value);
+        setModelInput((current) => {
+          if (current.trim() !== "" || !value.recommended) return current;
+          writeDraft(MODEL_DRAFT_STORAGE_KEY, value.recommended);
+          return value.recommended;
+        });
       } catch {
         // Non-fatal — picker just doesn't render.
       }
@@ -121,24 +131,47 @@ export function MeshComputeSettingsCard() {
     };
   }, []);
 
-  // Mirror the running node's modelId back into the field so the card shows
-  // what's actually being served, even after a fresh app load.
+  // Mirror only a SERVE runtime's model into the field. A client reports the
+  // remote model it is consuming; copying that value here both loses the
+  // member's local sharing choice and can cause this machine to download the
+  // remote member's much larger model when sharing is enabled.
   React.useEffect(() => {
-    if (status?.state === "running" && status.modelId && modelInput === "") {
+    if (
+      status?.state === "running" &&
+      status.mode === "serve" &&
+      status.modelId &&
+      status.modelId !== modelInput
+    ) {
       setModelInput(status.modelId);
       writeDraft(MODEL_DRAFT_STORAGE_KEY, status.modelId);
     }
-  }, [status?.state, status?.modelId, modelInput]);
+  }, [status?.state, status?.mode, status?.modelId, modelInput]);
 
-  const isOn = status?.state === "running" || status?.state === "starting";
-  const controlsDisabled = isOn || actionInFlight;
+  // The Share toggle reflects ONLY serve-mode occupancy. A client-mode runtime
+  // (this machine consuming a peer's compute) shares the single runtime slot
+  // and also reports state:"running" — but it must NOT light this switch, and
+  // toggling off must never tear down that unrelated consume session.
+  const { isSharing, isConsuming, slotOccupied } =
+    deriveMeshShareToggle(status);
+  // Host-side "who is using the compute I'm sharing" — only polled while
+  // actively sharing (serve mode). Read-only; reads the node's own metrics.
+  const servingUsage = useMeshServingUsage(isSharing);
+  const servingIndicator = deriveServingIndicator(servingUsage, isSharing);
+  // A consuming client may be intentionally replaced by a serve runtime, so
+  // keep the local model controls available in client mode. Serve and unknown
+  // occupants remain locked until stopped/recovered.
+  const controlsDisabled = actionInFlight || (slotOccupied && !isConsuming);
   const refClass = classifyModelRef(modelInput);
-  const canStart =
-    refClass.kind !== "unknown" &&
-    !actionInFlight &&
-    status?.state !== "starting";
+  const canStart = refClass.kind !== "unknown" && !actionInFlight;
 
   async function handleToggle(next: boolean) {
+    // Never let the Share switch tear down a consume session. The switch is
+    // already disabled while consuming, but status can be stale between polls,
+    // so refuse a stop that isn't stopping OUR serve node as a belt-and-braces
+    // guard (the backend enforces this authoritatively too).
+    if (!next && !isSharing) {
+      return;
+    }
     setActionError(null);
     setPendingAction(next ? "start" : "stop");
     setActionInFlight(true);
@@ -202,12 +235,45 @@ export function MeshComputeSettingsCard() {
             >
               Share this machine
             </label>
-            <StatusLine pendingAction={pendingAction} status={status} />
+            <StatusLine
+              isConsuming={isConsuming}
+              pendingAction={pendingAction}
+              status={status}
+            />
+            {servingIndicator.show ? (
+              <p
+                className={
+                  servingIndicator.hasRemoteConsumers
+                    ? "mt-0.5 text-2xs text-emerald-600 dark:text-emerald-400"
+                    : "mt-0.5 text-2xs text-muted-foreground"
+                }
+                data-testid="mesh-serving-usage"
+                title={servingIndicator.detail ?? undefined}
+              >
+                {servingIndicator.label}
+                {servingIndicator.detail ? (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · {servingIndicator.detail}
+                  </span>
+                ) : null}
+              </p>
+            ) : null}
           </div>
           <Switch
-            checked={isOn}
+            checked={isSharing}
             data-testid="mesh-share-compute-toggle"
-            disabled={actionInFlight || (!isOn && !canStart)}
+            disabled={
+              // A serve node can always be stopped. An off node or consuming
+              // client can start sharing once a valid local model is selected.
+              // Unknown occupants remain protected from replacement.
+              actionInFlight ||
+              (isSharing
+                ? false
+                : slotOccupied && !isConsuming
+                  ? true
+                  : !canStart)
+            }
             id="mesh-share-compute-toggle"
             onCheckedChange={handleToggle}
           />
@@ -488,9 +554,11 @@ function CatalogPicker({
 }
 
 function StatusLine({
+  isConsuming,
   pendingAction,
   status,
 }: {
+  isConsuming: boolean;
   pendingAction: "start" | "stop" | null;
   status: MeshNodeStatus | null;
 }) {
@@ -499,6 +567,17 @@ function StatusLine({
   }
   if (pendingAction === "stop") {
     return <p className="text-sm text-muted-foreground">Stopping…</p>;
+  }
+  // A client-mode runtime owns the single slot: this machine is consuming a
+  // peer's compute, not sharing. The switch stays off, but remains available
+  // so the member can replace the client with a serving runtime.
+  if (isConsuming) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This machine is currently using another member's shared compute. Turn on
+        sharing to switch to the selected local model; Buzz may briefly restart.
+      </p>
+    );
   }
   if (!status) {
     return <p className="text-sm text-muted-foreground">Checking status…</p>;

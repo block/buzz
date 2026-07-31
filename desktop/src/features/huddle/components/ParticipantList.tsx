@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -86,19 +87,25 @@ export function HuddleParticipantsControl({
                 className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5"
                 key={pubkey}
               >
-                {profile?.displayName || profile?.avatarUrl ? (
-                  <ProfileAvatar
-                    avatarUrl={profile.avatarUrl ?? null}
-                    label={profile.displayName || pubkey.slice(0, 6)}
-                    className={cn(
-                      "h-8 w-8 rounded-full text-2xs",
-                      isActive &&
-                        "ring-2 ring-green-500 ring-offset-1 ring-offset-background",
-                    )}
-                  />
-                ) : (
-                  <HexAvatar pubkey={pubkey} isActive={isActive} size="lg" />
-                )}
+                <UserProfilePopover
+                  pubkey={pubkey}
+                  triggerAriaLabel={`Open profile for ${displayName}`}
+                  triggerElement="span"
+                >
+                  {profile?.displayName || profile?.avatarUrl ? (
+                    <ProfileAvatar
+                      avatarUrl={profile.avatarUrl ?? null}
+                      label={profile.displayName || truncatePubkey(pubkey)}
+                      className={cn(
+                        "h-8 w-8 rounded-full text-2xs",
+                        isActive &&
+                          "ring-2 ring-green-500 ring-offset-1 ring-offset-background",
+                      )}
+                    />
+                  ) : (
+                    <HexAvatar pubkey={pubkey} isActive={isActive} size="lg" />
+                  )}
+                </UserProfilePopover>
 
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">

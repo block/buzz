@@ -21,6 +21,7 @@ import test from "node:test";
 import {
   CANONICAL_CONFIG_BEHAVIORS,
   resolveDisclosure,
+  shouldRevealDependentConfigFields,
   shouldRenderModelControl,
   shouldShowModelStatusMessage,
 } from "./AgentConfigFields.tsx";
@@ -58,6 +59,48 @@ test("onboarding-essential hides power tools but never the effort field", () => 
     showRequiredIndicators: false,
     showUnavailableEffortOptions: false,
   });
+});
+
+test("progressive defaults keep full disclosure", () => {
+  assert.deepEqual(
+    resolveDisclosure("progressive-defaults"),
+    resolveDisclosure("full"),
+  );
+});
+
+test("progressive defaults wait for a provider only when the harness needs one", () => {
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "progressive-defaults",
+      providerFieldVisible: true,
+      providerValue: "",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "progressive-defaults",
+      providerFieldVisible: true,
+      providerValue: "anthropic",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "progressive-defaults",
+      providerFieldVisible: false,
+      providerValue: "",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRevealDependentConfigFields({
+      disclosure: "full",
+      providerFieldVisible: true,
+      providerValue: "",
+    }),
+    true,
+  );
 });
 
 // ── shouldShowModelStatusMessage ──────────────────────────────────────────────

@@ -771,6 +771,26 @@ fn openai_text_with_usage(content: &str, input_tokens: u64, output_tokens: u64) 
     })
 }
 
+/// An OpenAI chat completion response WITH i/o usage but WITHOUT `total_tokens`.
+/// Simulates a provider that omits the genuine total from its usage block.
+/// buzz-agent must treat this turn's total as Unknown and poison the cumulative.
+fn openai_text_with_usage_no_total(content: &str, input_tokens: u64, output_tokens: u64) -> Value {
+    json!({
+        "id": "cc-nt", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": content },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            // total_tokens deliberately absent — simulates Anthropic or any
+            // provider that does not report a genuine total.
+        },
+    })
+}
+
 /// Returns true when `v` is a `_goose/unstable/session/update` usage_update
 /// notification.
 fn is_usage_update(v: &Value) -> bool {
@@ -1121,5 +1141,166 @@ async fn steer_rejected_on_empty_prompt() {
         }
     }
     assert!(saw_reject, "empty steer prompt was not rejected");
+    h.shutdown().await;
+}
+
+// ─── Session-boundary total accumulation ────────────────────────────────────
+
+/// Once a usage-bearing turn lacks a provider total, the session cumulative
+/// becomes Unknown and `accumulatedTotalTokens` must be absent from subsequent
+/// `usage_update` notifications — even if later turns supply a total.
+///
+/// Sequence: turn 1 has total, turn 2 lacks total → session poisoned, turn 3
+/// has total → still poisoned. Only turn 1 must carry `accumulatedTotalTokens`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_total_poisoned_by_missing_total_and_stays_poisoned() {
+    let url = spawn_fake_llm(vec![
+        openai_text_with_usage("t1", 10, 5), // total present → Exact(15)
+        openai_text_with_usage_no_total("t2", 20, 8), // total absent  → Unknown
+        openai_text_with_usage("t3", 15, 6), // total present → still Unknown
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    // ── Turn 1: total present ───────────────────────────────────────────────
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"t1"}]}),
+        )
+        .await;
+    let (frames1, _) = recv_until_with_drain(&mut h, |v| v["id"] == p1).await;
+    let usage1 = frames1
+        .iter()
+        .find(|v| is_usage_update(v))
+        .expect("usage_update for turn 1");
+    assert_eq!(
+        usage1["params"]["update"]["accumulatedTotalTokens"],
+        json!(15u64),
+        "turn 1 has genuine total; accumulatedTotalTokens must be 15"
+    );
+
+    // ── Turn 2: total absent — session is now poisoned ──────────────────────
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"t2"}]}),
+        )
+        .await;
+    let (frames2, _) = recv_until_with_drain(&mut h, |v| v["id"] == p2).await;
+    let usage2 = frames2
+        .iter()
+        .find(|v| is_usage_update(v))
+        .expect("usage_update for turn 2");
+    assert!(
+        usage2["params"]["update"]["accumulatedTotalTokens"].is_null()
+            || usage2["params"]["update"]
+                .get("accumulatedTotalTokens")
+                .is_none(),
+        "turn 2 lacked total; accumulatedTotalTokens must be absent/null; got: {usage2:#?}"
+    );
+
+    // ── Turn 3: total present, but session is still poisoned ─────────────────
+    let p3 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"t3"}]}),
+        )
+        .await;
+    let (frames3, _) = recv_until_with_drain(&mut h, |v| v["id"] == p3).await;
+    let usage3 = frames3
+        .iter()
+        .find(|v| is_usage_update(v))
+        .expect("usage_update for turn 3");
+    assert!(
+        usage3["params"]["update"]["accumulatedTotalTokens"].is_null()
+            || usage3["params"]["update"].get("accumulatedTotalTokens").is_none(),
+        "session is poisoned; accumulatedTotalTokens must remain absent even after a total-bearing turn; got: {usage3:#?}"
+    );
+
+    // i/o counters are unaffected by total poisoning.
+    assert_eq!(
+        usage3["params"]["update"]["accumulatedInputTokens"],
+        json!(45u64),
+        "poisoned total must not discard input accumulation"
+    );
+    assert_eq!(
+        usage3["params"]["update"]["accumulatedOutputTokens"],
+        json!(19u64),
+        "poisoned total must not discard output accumulation"
+    );
+
+    h.shutdown().await;
+}
+
+/// A new session starts fresh and can accumulate an exact total independently
+/// of any previous session. This verifies `accumulated_total_state` is reset
+/// to `Unseen` on `session/new`, not inherited from a prior session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_session_resets_total_accumulation() {
+    // Session A: two turns both with totals → Exact should accumulate.
+    // Session B (new session/new call): starts fresh.
+    let url = spawn_fake_llm(vec![
+        // Session A, turn 1
+        openai_text_with_usage("s1t1", 10, 5),
+        // Session A, turn 2
+        openai_text_with_usage("s1t2", 20, 8),
+        // Session B, turn 1
+        openai_text_with_usage("s2t1", 30, 10),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid_a = init_session(&mut h).await;
+
+    // Session A, turn 1
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid_a, "prompt": [{"type":"text","text":"s1t1"}]}),
+        )
+        .await;
+    let (frames1, _) = recv_until_with_drain(&mut h, |v| v["id"] == p1).await;
+    let u1 = frames1.iter().find(|v| is_usage_update(v)).expect("usage1");
+    assert_eq!(
+        u1["params"]["update"]["accumulatedTotalTokens"],
+        json!(15u64),
+        "session A turn 1 accumulated total"
+    );
+
+    // Session A, turn 2 — cumulative total is 15+28=43
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid_a, "prompt": [{"type":"text","text":"s1t2"}]}),
+        )
+        .await;
+    let (frames2, _) = recv_until_with_drain(&mut h, |v| v["id"] == p2).await;
+    let u2 = frames2.iter().find(|v| is_usage_update(v)).expect("usage2");
+    assert_eq!(
+        u2["params"]["update"]["accumulatedTotalTokens"],
+        json!(43u64),
+        "session A turn 2 cumulative total must be 15+28=43"
+    );
+
+    // Start a new session — must reset accumulated_total_state to Unseen.
+    let sid_b = init_session(&mut h).await;
+    assert_ne!(sid_a, sid_b, "sessions must have distinct IDs");
+
+    // Session B, turn 1 — total 30+10=40. Must NOT start from 43.
+    let p3 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid_b, "prompt": [{"type":"text","text":"s2t1"}]}),
+        )
+        .await;
+    let (frames3, _) = recv_until_with_drain(&mut h, |v| v["id"] == p3).await;
+    let u3 = frames3.iter().find(|v| is_usage_update(v)).expect("usage3");
+    assert_eq!(
+        u3["params"]["update"]["accumulatedTotalTokens"],
+        json!(40u64),
+        "new session must start fresh — accumulated total must be 40, not 83"
+    );
+
     h.shutdown().await;
 }

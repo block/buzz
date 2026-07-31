@@ -73,52 +73,6 @@ class _EphemeralBadge extends StatelessWidget {
   }
 }
 
-class _ConnectionBanner extends StatelessWidget {
-  final SessionStatus status;
-
-  const _ConnectionBanner({required this.status});
-
-  @override
-  Widget build(BuildContext context) {
-    if (status == SessionStatus.connected ||
-        status == SessionStatus.disconnected) {
-      return const SizedBox.shrink();
-    }
-
-    final isConnecting = status == SessionStatus.connecting;
-    final message = isConnecting ? 'Connecting…' : 'Reconnecting…';
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
-        vertical: Grid.quarter + 2,
-      ),
-      color: context.colors.surfaceContainerHighest,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: context.colors.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(width: Grid.xxs),
-          Text(
-            message,
-            style: context.textTheme.labelSmall?.copyWith(
-              color: context.colors.onSurfaceVariant,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _ErrorView extends StatelessWidget {
   final Object error;
   final VoidCallback onRetry;

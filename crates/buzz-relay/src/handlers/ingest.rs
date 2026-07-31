@@ -31,9 +31,9 @@ use buzz_core::kind::{
     KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
+    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -183,6 +183,19 @@ pub enum IngestError {
     Internal(String),
 }
 
+fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestError {
+    use super::relay_admin::RelayAdminError;
+    match error {
+        // Same wire prefix and HTTP status (403) as every other durable
+        // restriction refusal — see the write-path gate below and `auth.rs`.
+        RelayAdminError::Banned => {
+            IngestError::AuthFailed("blocked: you are banned from this community".to_string())
+        }
+        RelayAdminError::Rejected(reason) => IngestError::Rejected(format!("invalid: {reason}")),
+        RelayAdminError::Internal(reason) => IngestError::Internal(format!("error: {reason}")),
+    }
+}
+
 fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
     match error {
         super::push_lease::AcceptError::Validation(reason) => {
@@ -201,7 +214,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | super::push_lease::KIND_PUSH_LEASE => {
+        | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
@@ -406,10 +419,12 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_AGENT_PROFILE
             // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
             | KIND_PERSONA
-            // NIP-AP: team (30176) + managed-agent (30177) definitions: owner-authored,
-            // keyed by (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
+            // NIP-AP: team (30176) + managed-agent (30177) definitions and the
+            // team-catalog projection (30178): owner-authored, keyed by
+            // (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
             | KIND_TEAM
             | KIND_MANAGED_AGENT
+            | KIND_TEAM_CATALOG
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -1016,53 +1031,132 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate the envelope of a kind:30175 persona event.
+/// Enforce the `shared`-tag shape shared by every kind in
+/// [`buzz_core::kind::SHARED_GATED_KINDS`]: at most one `shared` tag, and if
+/// present it must be exactly `["shared", "true"]`.
 ///
-/// Enforces:
-/// * exactly one `d` tag with a non-empty value matching the slug grammar
-///   `^[a-z0-9][a-z0-9_-]{0,63}$`.
+/// This ensures no ambiguous heads: either an event has no `shared` tag
+/// (author-only) or exactly `["shared", "true"]` (community-readable). Any
+/// other value (`"false"`, `"1"`, extra elements, duplicate tags) is rejected
+/// at ingest so read-path helpers — including the SQL-level `tags @>
+/// '[["shared","true"]]'` containment clause, which would otherwise match a
+/// three-element superset — can treat stored events as unambiguously one or the
+/// other.
 ///
-/// Without this, an empty d-tag collapses every persona into the
-/// `(pubkey, 30175, "")` slot — last-write-wins data loss.
-fn validate_persona_envelope(event: &Event) -> Result<(), String> {
-    let mut d_tags: Vec<&str> = Vec::new();
+/// `label` names the kind in error messages (e.g. `"persona event"`).
+fn validate_shared_tag(event: &Event, label: &str) -> Result<(), String> {
+    let mut shared_count = 0usize;
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
-        if parts.len() >= 2 && parts[0].as_str() == "d" {
-            d_tags.push(&parts[1]);
+        if !parts.is_empty() && parts[0].as_str() == "shared" {
+            if parts.len() != 2 || parts[1].as_str() != "true" {
+                return Err(format!(
+                    "{label} `shared` tag must be exactly [\"shared\",\"true\"] (got {:?})",
+                    parts.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+                ));
+            }
+            shared_count += 1;
         }
     }
+    if shared_count > 1 {
+        return Err(format!(
+            "{label} must have at most one `shared` tag (got {shared_count})"
+        ));
+    }
+    Ok(())
+}
+
+/// Return the event's single `d` tag value, requiring exactly one tag whose
+/// value is non-empty, at most 64 characters, and free of Unicode control
+/// characters and whitespace.
+///
+/// Without this check an empty `d` tag collapses every event of the kind into
+/// the `(pubkey, kind, "")` slot — last-write-wins data loss. The character
+/// bound keeps the value usable as a NIP-33 coordinate (`<kind>:<pubkey>:<d>`)
+/// and as a log field: an embedded newline or tab would break line-oriented
+/// consumers of both.
+///
+/// Tags are counted by their first element alone, so a valueless `["d"]`
+/// counts. Skipping it would let `["d"]` plus `["d", "team-1"]` pass the
+/// exactly-one rule, and a NIP-33 consumer that reads `["d"]` as an
+/// empty-valued first `d` tag would then address the event at `""` where this
+/// relay addresses it at `"team-1"`.
+///
+/// `label` names the kind in error messages (e.g. `"persona event"`).
+fn single_bounded_d_tag<'a>(event: &'a Event, label: &str) -> Result<&'a str, String> {
+    let d_tags: Vec<Option<&str>> = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(|name| name.as_str()) == Some("d"))
+                .then(|| parts.get(1).map(|value| value.as_str()))
+        })
+        .collect();
     if d_tags.len() != 1 {
         return Err(format!(
-            "persona event must have exactly one `d` tag (got {})",
+            "{label} must have exactly one `d` tag (got {})",
             d_tags.len()
         ));
     }
-    let d = d_tags[0];
+    let d = d_tags[0].unwrap_or_default();
     if d.is_empty() {
-        return Err("persona event `d` tag must not be empty".to_string());
+        return Err(format!("{label} `d` tag must not be empty"));
     }
-    // Slug grammar: ^[a-z0-9][a-z0-9_-]{0,63}$
-    if d.len() > 64 {
+    let char_count = d.chars().count();
+    if char_count > 64 {
         return Err(format!(
-            "persona event `d` tag too long ({} chars, max 64)",
-            d.len()
+            "{label} `d` tag too long ({char_count} chars, max 64)"
         ));
     }
+    if d.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!(
+            "{label} `d` tag must not contain control characters or whitespace"
+        ));
+    }
+    Ok(d)
+}
+
+/// Validate the envelope of a kind:30175 persona event.
+///
+/// Enforces the shared-gated `shared`-tag shape ([`validate_shared_tag`]) plus
+/// exactly one `d` tag matching the persona slug grammar
+/// `^[a-z0-9][a-z0-9_-]{0,63}$`.
+fn validate_persona_envelope(event: &Event) -> Result<(), String> {
+    const LABEL: &str = "persona event";
+    validate_shared_tag(event, LABEL)?;
+    let d = single_bounded_d_tag(event, LABEL)?;
+    // Slug grammar: ^[a-z0-9][a-z0-9_-]{0,63}$
     let bytes = d.as_bytes();
     if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
-        return Err(
-            "persona event `d` tag must start with a lowercase letter or digit".to_string(),
-        );
+        return Err(format!(
+            "{LABEL} `d` tag must start with a lowercase letter or digit"
+        ));
     }
     if !bytes[1..]
         .iter()
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
     {
-        return Err(
-            "persona event `d` tag must match [a-z0-9_-] after the first character".to_string(),
-        );
+        return Err(format!(
+            "{LABEL} `d` tag must match [a-z0-9_-] after the first character"
+        ));
     }
+    Ok(())
+}
+
+/// Validate the envelope of a kind:30178 team-catalog event.
+///
+/// Enforces the shared-gated `shared`-tag shape ([`validate_shared_tag`]) plus
+/// exactly one non-empty, bounded `d` tag.
+///
+/// Deliberately NOT the persona slug grammar: a team's `d` tag is its stable
+/// local id, which is either a UUID or a built-in identifier such as
+/// `builtin-team:welcome` — the colon is not slug-legal, and rewriting ids to
+/// fit would break NIP-33 addressing against the team's own kind:30176 head.
+fn validate_team_catalog_envelope(event: &Event) -> Result<(), String> {
+    const LABEL: &str = "team-catalog event";
+    validate_shared_tag(event, LABEL)?;
+    single_bounded_d_tag(event, LABEL)?;
     Ok(())
 }
 
@@ -1598,7 +1692,10 @@ async fn ingest_event_inner(
     // is the durable backstop the fan-out's best-effort delivery relies on.
     // Moderation commands enforce bans inside their handler and remain exempt
     // here only so timeouts do not disarm the tool used to lift them. Relay-admin
-    // commands retain their separate authorization policy.
+    // commands (9030–9033) are exempt for the same reason — a timed-out admin
+    // must still be able to administer the roster — and likewise enforce the
+    // durable ban inside `relay_admin::handle_relay_admin_event`. Any kind added
+    // to this exemption owes the same handler-local ban check.
     //
     // Scope: this gate checks the *authoring* pubkey only, with no NIP-OA
     // owner→agent cascade. That cascade lives at the auth seam for bans, where
@@ -1805,10 +1902,13 @@ async fn ingest_event_inner(
     }
 
     // Handled directly — these mutate relay_members and do NOT get stored.
+    // The handler enforces the durable community ban itself: the write-path
+    // gate above exempts relay-admin kinds so timed-out admins keep their
+    // administrative capability, which leaves bans to the handler.
     if is_relay_admin_kind(event.kind.as_u16() as u32) {
         crate::handlers::relay_admin::handle_relay_admin_event(tenant, state, &event)
             .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+            .map_err(map_relay_admin_error)?;
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2022,6 +2122,11 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_PERSONA {
         validate_persona_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_TEAM_CATALOG {
+        validate_team_catalog_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
@@ -2436,7 +2541,12 @@ async fn ingest_event_inner(
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await
         {
-            warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
+            // error!, not warn!: the event was accepted but its side effects
+            // (channel creation, git repo seeding, …) did not run — the relay
+            // is now in a state the client believes it isn't. Production runs
+            // RUST_LOG=error, so warn! made these failures invisible during
+            // the #3527 triage.
+            error!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
         }
     }
 
@@ -2515,6 +2625,62 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    /// A banned relay admin must be refused with the same wire prefix and
+    /// transport status as every other durable-restriction refusal:
+    /// `blocked:` and (via `bridge.rs`'s `AuthFailed` arm) HTTP 403 — never
+    /// `invalid:`/400, which reads as "your request was malformed" and lets a
+    /// client retry-loop against an authorization decision.
+    #[test]
+    fn relay_admin_ban_maps_to_blocked_auth_failure() {
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
+        match mapped {
+            IngestError::AuthFailed(msg) => {
+                assert_eq!(msg, "blocked: you are banned from this community");
+            }
+            other => panic!("banned admin must map to AuthFailed (HTTP 403), got {other:?}"),
+        }
+    }
+
+    /// Validation/authorization failures keep the pre-existing `invalid:`
+    /// prefix and 400 status — this is the arm the whole 9030-series relied on
+    /// before the ban category existed, so it must not regress.
+    #[test]
+    fn relay_admin_rejection_keeps_invalid_prefix() {
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Rejected(
+            "actor not authorized: must be admin or owner".to_string(),
+        ));
+        match mapped {
+            IngestError::Rejected(msg) => {
+                assert_eq!(
+                    msg, "invalid: actor not authorized: must be admin or owner",
+                    "existing relay-admin rejections must keep their exact wire text"
+                );
+            }
+            other => panic!("validation failure must map to Rejected, got {other:?}"),
+        }
+    }
+
+    /// A restriction-lookup outage is a server fault, not a client one. It
+    /// must fail closed as `error:`/500 so a Postgres blip can neither admit a
+    /// banned admin nor be reported to an innocent one as a bad request.
+    #[test]
+    fn relay_admin_internal_maps_to_error_not_client_fault() {
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Internal(
+            "internal error checking restriction state: pool timed out".to_string(),
+        ));
+        match mapped {
+            IngestError::Internal(msg) => {
+                assert!(
+                    msg.starts_with("error: "),
+                    "internal failures need the `error:` NIP-01 prefix, got {msg:?}"
+                );
+            }
+            other => {
+                panic!("restriction DB failure must map to Internal (HTTP 500), got {other:?}")
+            }
+        }
+    }
 
     #[derive(Debug, Default)]
     struct VecTracer {
@@ -3492,6 +3658,24 @@ mod tests {
     }
 
     #[test]
+    fn persona_envelope_rejects_valueless_d_tag() {
+        // A lone ["d"] carries no value; it must fail as a missing value, not
+        // be skipped as though the event had no `d` tag at all.
+        let ev = make_persona(&[&["d"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_valueless_plus_valued_d_tags() {
+        // Counting only tags with a value would see one `d` here and accept the
+        // event, breaking the exactly-one rule.
+        let ev = make_persona(&[&["d"], &["d", "slug-a"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("exactly one `d` tag"), "got: {err}");
+    }
+
+    #[test]
     fn persona_envelope_rejects_too_long() {
         let slug = "a".repeat(65);
         let ev = make_persona(&[&["d", &slug]]);
@@ -3532,6 +3716,234 @@ mod tests {
         let ev = make_persona(&[&["d", "has.dot"]]);
         let err = validate_persona_envelope(&ev).unwrap_err();
         assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    // ─── persona shared-tag envelope tests ───────────────────────────────────
+
+    #[test]
+    fn persona_envelope_accepts_shared_true() {
+        // A persona event with exactly one ["shared","true"] tag must be accepted.
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "true"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_no_shared_tag() {
+        // The shared tag is optional; omitting it is the author-only default.
+        let ev = make_persona(&[&["d", "my-persona"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_false() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "false"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_wrong_value() {
+        let ev = make_persona(&[&["d", "my-persona"], &["shared", "yes"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_missing_value() {
+        // A "shared" tag with no value argument must be rejected.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("\"true\""),
+            "expected 'true' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_duplicate_shared_tags() {
+        // More than one shared tag, even if both are "true", must be rejected.
+        let ev = make_persona(&[
+            &["d", "my-persona"],
+            &["shared", "true"],
+            &["shared", "true"],
+        ]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("at most one"),
+            "expected 'at most one' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_three_elements() {
+        // ["shared","true","extra"] must be rejected — only exactly two elements
+        // are valid so the SQL containment check tags @> '[["shared","true"]]'
+        // cannot match a three-element stored tag.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared", "true", "extra"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("[\"shared\",\"true\"]"),
+            "expected exact-shape error, got: {err}"
+        );
+    }
+
+    // ─── team-catalog (30178) envelope tests ─────────────────────────────────
+
+    fn make_team_catalog(tags: &[&[&str]]) -> Event {
+        make_event_with_tags(
+            KIND_TEAM_CATALOG,
+            r#"{"v":1,"name":"Team","members":[]}"#,
+            tags,
+        )
+    }
+
+    #[test]
+    fn team_catalog_envelope_accepts_uuid_d_tag() {
+        let ev = make_team_catalog(&[&["d", "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"]]);
+        assert!(validate_team_catalog_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn team_catalog_envelope_accepts_builtin_colon_d_tag() {
+        // Built-in team ids carry a colon (`builtin-team:welcome`), which the
+        // persona slug grammar forbids. The catalog `d` tag must accept them so
+        // a built-in team can be shared under its real local id.
+        let ev = make_team_catalog(&[&["d", "builtin-team:welcome"]]);
+        assert!(validate_team_catalog_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn team_catalog_envelope_accepts_shared_true() {
+        let ev = make_team_catalog(&[&["d", "team-1"], &["shared", "true"]]);
+        assert!(validate_team_catalog_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_missing_d_tag() {
+        let ev = make_team_catalog(&[]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("exactly one `d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_empty_d_tag() {
+        // An empty d-tag collapses every team into the (pubkey, 30178, "") slot.
+        let ev = make_team_catalog(&[&["d", ""]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_duplicate_d_tags() {
+        let ev = make_team_catalog(&[&["d", "team-1"], &["d", "team-2"]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("exactly one `d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_valueless_d_tag() {
+        // A lone ["d"] carries no value; it must fail as a missing value, not
+        // be skipped as though the event had no `d` tag at all.
+        let ev = make_team_catalog(&[&["d"]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_valueless_plus_valued_d_tags() {
+        // Counting only tags with a value would see one `d` here and accept the
+        // event. A NIP-33 consumer that reads ["d"] as an empty-valued first
+        // `d` tag would then address this event at "" where we address it at
+        // "team-1".
+        let ev = make_team_catalog(&[&["d"], &["d", "team-1"]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("exactly one `d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_bounds_d_tag_by_chars_not_bytes() {
+        // 64 multi-byte characters is 192 bytes; the documented bound is
+        // characters, so this must be accepted.
+        let d = "é".repeat(64);
+        assert!(d.len() > 64, "fixture must exceed the bound in bytes");
+        let ev = make_team_catalog(&[&["d", &d]]);
+        assert!(validate_team_catalog_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_too_long_d_tag() {
+        let d = "a".repeat(65);
+        let ev = make_team_catalog(&[&["d", &d]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("too long"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_accepts_max_length_d_tag() {
+        let d = "a".repeat(64);
+        let ev = make_team_catalog(&[&["d", &d]]);
+        assert!(validate_team_catalog_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_whitespace_d_tag() {
+        // A newline in the d-tag would break the NIP-33 coordinate and any
+        // line-oriented log consumer.
+        let ev = make_team_catalog(&[&["d", "team\n1"]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("control characters"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_shared_false() {
+        let ev = make_team_catalog(&[&["d", "team-1"], &["shared", "false"]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("\"true\""), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_shared_three_elements() {
+        // Same exact-shape rule as personas: a three-element tag would match the
+        // SQL containment clause `tags @> '[["shared","true"]]'` as a superset.
+        let ev = make_team_catalog(&[&["d", "team-1"], &["shared", "true", "extra"]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("[\"shared\",\"true\"]"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_envelope_rejects_duplicate_shared_tags() {
+        let ev = make_team_catalog(&[&["d", "team-1"], &["shared", "true"], &["shared", "true"]]);
+        let err = validate_team_catalog_envelope(&ev).unwrap_err();
+        assert!(err.contains("at most one"), "got: {err}");
+    }
+
+    #[test]
+    fn team_catalog_is_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_TEAM_CATALOG, &dummy).unwrap(),
+            Scope::UsersWrite,
+        );
+    }
+
+    #[test]
+    fn team_catalog_is_global_only() {
+        assert!(is_global_only_kind(KIND_TEAM_CATALOG));
+        assert!(!requires_h_channel_scope(KIND_TEAM_CATALOG));
     }
 
     // ─── agent_turn_metric envelope tests ────────────────────────────────────

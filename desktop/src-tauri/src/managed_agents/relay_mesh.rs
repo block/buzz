@@ -1,10 +1,9 @@
-#[cfg(feature = "mesh-llm")]
-use super::{ManagedAgentRecord, RelayMeshConfig};
-
 pub const RELAY_MESH_API_BASE_URL: &str = "http://127.0.0.1:9337/v1";
 pub const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "buzz-mesh-local";
 pub const RELAY_MESH_PROVIDER_ID: &str = "relay-mesh";
 pub const RELAY_MESH_AUTO_MODEL_ID: &str = "auto";
+#[cfg(feature = "mesh-llm")]
+pub const RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV: &str = "BUZZ_AGENT_PREFER_MESH_FOR_AUTO";
 
 /// Translate the native Buzz shared compute provider into the OpenAI-compatible
 /// transport understood by buzz-agent. These are derived runtime details, not
@@ -35,74 +34,74 @@ pub fn apply_relay_mesh_env(
         RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
     );
     env.insert("OPENAI_COMPAT_API".to_string(), "chat".to_string());
-    // Keep the requested response inside smaller local-model context windows,
-    // and spend that budget on an answer/tool call instead of hidden reasoning.
-    // Without both settings Qwen3 either fails the router's fit check at the
-    // agent default (32K) or can consume a tight cap before serializing a tool.
+    // Buzz owns the meaning of relay-mesh `auto`: buzz-agent dynamically uses
+    // mesh-llm's virtual Mixture-of-Agents model whenever the live catalog says
+    // at least two distinct models are available, and otherwise keeps the
+    // router's normal single-model `auto` behavior.
     env.insert(
-        "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
-        "4096".to_string(),
+        RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV.to_string(),
+        "1".to_string(),
     );
-    env.insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "none".to_string());
+    // Keep the requested response inside smaller local-model context windows.
+    // These are defaults, not policy: the effective agent/persona/global env
+    // may deliberately choose a smaller cap or a different effort. This function
+    // runs after those layers during readiness, so never clobber their values.
+    insert_default_if_unset(env, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096");
+    // Mesh agents run on small local models, which are the ones most likely to
+    // do the work and then end the turn without publishing it — the failure the
+    // reply guard exists to catch. Everywhere else it stays opt-in and unset.
+    // A default, not policy: an explicit `0` from the agent/persona/global env
+    // survives (see `insert_default_if_unset`, and the copy-forward list in
+    // `relay_mesh_process_env` that preserves it through the spawn path).
+    insert_default_if_unset(env, "BUZZ_AGENT_REQUIRE_REPLY", "1");
+    // Deliberately no BUZZ_AGENT_THINKING_EFFORT default: mesh translates
+    // `reasoning_effort` into the chat template's `enable_thinking` flag, so any
+    // value we pick overrides each model's own template default — and the right
+    // value is model-specific. Measured with the real prompt and toolset:
+    // gemma-4-E4B delivers 0/8 at `none` but 6/6 with the field absent, while
+    // Qwen3-8B delivers 8/8 either way and burns ~4x the output tokens once
+    // thinking is on (121 -> ~470), risking the 4096 cap. Omitting the field
+    // lets every model use its own default; explicit agent/persona/global
+    // values still apply.
 }
 
-/// Resolve a record's relay-mesh config, typed field first.
-///
-/// Source of truth is the typed `record.relay_mesh` field. For records saved
-/// before that field existed, fall back to detecting the relay-mesh preset
-/// from `env_vars` (the legacy discriminator). New records carry the typed
-/// field and need no env-var sniffing at all.
 #[cfg(feature = "mesh-llm")]
-pub fn relay_mesh_config(record: &ManagedAgentRecord) -> Option<RelayMeshConfig> {
-    if record.provider.as_deref() == Some(RELAY_MESH_PROVIDER_ID) {
-        let model_ref = record
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(RELAY_MESH_AUTO_MODEL_ID)
-            .to_string();
-        return Some(RelayMeshConfig { model_ref });
+fn insert_default_if_unset(
+    env: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) {
+    if env.get(key).is_none_or(|current| current.trim().is_empty()) {
+        env.insert(key.to_string(), value.to_string());
     }
-    if let Some(config) = &record.relay_mesh {
-        return Some(config.clone());
-    }
-    relay_mesh_model_id_from_env(record).map(|model_ref| RelayMeshConfig { model_ref })
 }
 
-/// Returns the relay-mesh model id for agents whose provider env points at the
-/// local mesh client endpoint created by Buzz's relay-mesh preset.
-///
-/// Prefer [`relay_mesh_config`]; this remains as a convenience for call sites
-/// that only need the model id.
+/// Build the final Mesh-specific process overrides from the already-resolved
+/// harness environment. Only user-owned generation controls are seeded: the
+/// derived provider/base URL/model values remain authoritative, and unrelated
+/// credentials (notably `OPENAI_API_KEY`) must not be copied back after the
+/// spawn path removes them.
 #[cfg(feature = "mesh-llm")]
-pub fn relay_mesh_model_id(record: &ManagedAgentRecord) -> Option<String> {
-    relay_mesh_config(record).map(|config| config.model_ref)
-}
-
-/// Legacy env-var discriminator: detects the relay-mesh preset purely from the
-/// four preset env vars. Used as a fallback for records saved before the typed
-/// `relay_mesh` field existed.
-#[cfg(feature = "mesh-llm")]
-fn relay_mesh_model_id_from_env(record: &ManagedAgentRecord) -> Option<String> {
-    let base_url = record.env_vars.get("OPENAI_COMPAT_BASE_URL")?.trim();
-    if base_url.trim_end_matches('/') != RELAY_MESH_API_BASE_URL {
-        return None;
+pub fn relay_mesh_process_env(
+    effective_env: &std::collections::BTreeMap<String, String>,
+    model: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    for key in [
+        "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
+        "BUZZ_AGENT_THINKING_EFFORT",
+        // Must be copied forward for the user's value to survive: this map is
+        // written onto the command *after* the layered user env, so a key absent
+        // here is re-defaulted by `apply_relay_mesh_env` below and an explicit
+        // `BUZZ_AGENT_REQUIRE_REPLY=0` would be silently overridden back to `1`.
+        "BUZZ_AGENT_REQUIRE_REPLY",
+    ] {
+        if let Some(value) = effective_env.get(key) {
+            env.insert(key.to_string(), value.clone());
+        }
     }
-    let provider = record.env_vars.get("BUZZ_AGENT_PROVIDER")?.trim();
-    if provider != "openai" {
-        return None;
-    }
-    let api_key = record.env_vars.get("OPENAI_COMPAT_API_KEY")?.trim();
-    if api_key != RELAY_MESH_API_KEY_PLACEHOLDER {
-        return None;
-    }
-    record
-        .env_vars
-        .get("OPENAI_COMPAT_MODEL")
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    apply_relay_mesh_env(&mut env, Some(RELAY_MESH_PROVIDER_ID), Some(model));
+    env
 }
 
 #[cfg(all(test, feature = "mesh-llm"))]
@@ -110,85 +109,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
-
-    fn fixture() -> ManagedAgentRecord {
-        ManagedAgentRecord {
-            pubkey: "p".into(),
-            name: "n".into(),
-            persona_id: None,
-            private_key_nsec: "nsec1fake".into(),
-            auth_tag: Some("tag".into()),
-            relay_url: "ws://localhost:3000".into(),
-            avatar_url: None,
-            acp_command: "buzz-acp".into(),
-            agent_command: "goose".into(),
-            agent_command_override: None,
-            agent_args: vec![],
-            mcp_command: String::new(),
-            turn_timeout_seconds: 320,
-            idle_timeout_seconds: None,
-            max_turn_duration_seconds: None,
-            parallelism: 1,
-            system_prompt: None,
-            model: None,
-            env_vars: BTreeMap::new(),
-            start_on_app_launch: false,
-            auto_restart_on_config_change: true,
-            runtime_pid: None,
-            backend: BackendKind::Local,
-            backend_agent_id: None,
-            provider_binary_path: None,
-            team_id: None,
-            persona_team_dir: None,
-            persona_name_in_team: None,
-            persona_source_version: None,
-            provider: None,
-            created_at: "now".into(),
-            updated_at: "now".into(),
-            last_started_at: None,
-            last_stopped_at: None,
-            last_exit_code: None,
-            last_error: None,
-            last_error_code: None,
-            respond_to: RespondTo::OwnerOnly,
-            respond_to_allowlist: vec![],
-            display_name: None,
-            slug: None,
-            runtime: None,
-            name_pool: Vec::new(),
-            is_builtin: false,
-            is_active: true,
-            source_team: None,
-            source_team_persona_slug: None,
-            definition_respond_to: None,
-            definition_respond_to_allowlist: Vec::new(),
-            definition_parallelism: None,
-            relay_mesh: None,
-        }
-    }
 
     #[test]
-    fn relay_mesh_model_id_detects_mesh_preset_env() {
-        let mut rec = fixture();
-        rec.env_vars = BTreeMap::from([
-            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
-            (
-                "OPENAI_COMPAT_BASE_URL".to_string(),
-                "http://127.0.0.1:9337/v1/".to_string(),
-            ),
-            ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
-            (
-                "OPENAI_COMPAT_API_KEY".to_string(),
-                RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
-            ),
-        ]);
-
-        assert_eq!(relay_mesh_model_id(&rec).as_deref(), Some("Qwen3"));
-    }
-
-    #[test]
-    fn native_provider_uses_context_safe_non_reasoning_budget() {
+    fn native_provider_uses_context_safe_tool_calling_budget() {
         let mut env = BTreeMap::new();
         apply_relay_mesh_env(
             &mut env,
@@ -200,100 +123,135 @@ mod tests {
             env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
             Some("4096")
         );
+        // Must stay unset: any value we pick overrides the model's own chat
+        // template default, and the right value is model-specific ("none"
+        // stops gemma tool-calling; enabling thinking makes Qwen3 burn ~4x the
+        // output budget).
+        assert_eq!(env.get("BUZZ_AGENT_THINKING_EFFORT"), None);
+        assert_eq!(
+            env.get(RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn native_provider_preserves_explicit_generation_controls() {
+        let mut env = BTreeMap::from([
+            (
+                "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+                "2048".to_string(),
+            ),
+            ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string()),
+        ]);
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
+            Some("2048")
+        );
         assert_eq!(
             env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
-            Some("none")
+            Some("high")
         );
     }
 
     #[test]
-    fn relay_mesh_model_id_ignores_non_mesh_openai_env() {
-        let mut rec = fixture();
-        rec.env_vars = BTreeMap::from([
-            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
-            (
-                "OPENAI_COMPAT_BASE_URL".to_string(),
-                "https://api.openai.com/v1".to_string(),
-            ),
-            ("OPENAI_COMPAT_MODEL".to_string(), "gpt-5".to_string()),
-        ]);
+    fn native_provider_enables_reply_guard_by_default() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
 
-        assert_eq!(relay_mesh_model_id(&rec), None);
-    }
-
-    #[test]
-    fn relay_mesh_model_id_ignores_user_openai_on_same_local_port() {
-        let mut rec = fixture();
-        rec.env_vars = BTreeMap::from([
-            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
-            (
-                "OPENAI_COMPAT_BASE_URL".to_string(),
-                "http://127.0.0.1:9337/v1".to_string(),
-            ),
-            ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
-            ("OPENAI_COMPAT_API_KEY".to_string(), "real-key".to_string()),
-        ]);
-
-        assert_eq!(relay_mesh_model_id(&rec), None);
-    }
-
-    #[test]
-    fn native_provider_fields_are_authoritative() {
-        // The whole point: a typed record needs no env-var sniffing to be
-        // recognized as a relay-mesh agent.
-        let mut rec = fixture();
-        rec.provider = Some(RELAY_MESH_PROVIDER_ID.to_string());
-        rec.model = Some("Qwen3".to_string());
-        assert!(rec.env_vars.is_empty());
         assert_eq!(
-            relay_mesh_config(&rec),
-            Some(RelayMeshConfig {
-                model_ref: "Qwen3".to_string()
-            })
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("1"),
+            "mesh agents opt into the reply guard automatically"
         );
-        assert_eq!(relay_mesh_model_id(&rec).as_deref(), Some("Qwen3"));
     }
 
     #[test]
-    fn native_provider_fields_win_over_legacy_config() {
-        let mut rec = fixture();
-        rec.provider = Some(RELAY_MESH_PROVIDER_ID.to_string());
-        rec.model = Some("native-model".to_string());
-        rec.relay_mesh = Some(RelayMeshConfig {
-            model_ref: "typed-model".to_string(),
-        });
-        rec.env_vars = BTreeMap::from([
-            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
-            (
-                "OPENAI_COMPAT_BASE_URL".to_string(),
-                "http://127.0.0.1:9337/v1".to_string(),
-            ),
-            ("OPENAI_COMPAT_MODEL".to_string(), "env-model".to_string()),
-            (
-                "OPENAI_COMPAT_API_KEY".to_string(),
-                RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
-            ),
-        ]);
-        assert_eq!(relay_mesh_model_id(&rec).as_deref(), Some("native-model"));
+    fn native_provider_preserves_explicit_reply_guard_opt_out() {
+        let mut env = BTreeMap::from([("BUZZ_AGENT_REQUIRE_REPLY".to_string(), "0".to_string())]);
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("0"),
+            "an explicit opt-out is a user decision, not a value to re-default"
+        );
     }
 
     #[test]
-    fn legacy_record_falls_back_to_env_sniff() {
-        // Records saved before the typed field still resolve via env vars.
-        let mut rec = fixture();
-        rec.relay_mesh = None;
-        rec.env_vars = BTreeMap::from([
-            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
+    fn non_mesh_provider_leaves_reply_guard_unset() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(&mut env, Some("anthropic"), Some("claude-haiku-4.5"));
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY"),
+            None,
+            "the guard stays opt-in everywhere except mesh"
+        );
+        assert!(env.is_empty(), "non-mesh providers get no mesh env at all");
+    }
+
+    /// The spawn path writes this map onto the command *after* the layered user
+    /// env, so an explicit opt-out only survives if it is copied forward. Without
+    /// the copy-forward, `apply_relay_mesh_env` re-defaults it to `1` here and
+    /// silently overrides the user at spawn while readiness still shows `0`.
+    #[test]
+    fn process_env_preserves_explicit_reply_guard_opt_out() {
+        let effective_env =
+            BTreeMap::from([("BUZZ_AGENT_REQUIRE_REPLY".to_string(), "0".to_string())]);
+
+        let env = relay_mesh_process_env(&effective_env, "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn process_env_enables_reply_guard_when_user_is_silent() {
+        let env = relay_mesh_process_env(&BTreeMap::new(), "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn process_env_seeds_controls_without_restoring_unrelated_credentials() {
+        let effective_env = BTreeMap::from([
             (
-                "OPENAI_COMPAT_BASE_URL".to_string(),
-                "http://127.0.0.1:9337/v1".to_string(),
+                "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+                "1024".to_string(),
             ),
-            ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
-            (
-                "OPENAI_COMPAT_API_KEY".to_string(),
-                RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
-            ),
+            ("OPENAI_API_KEY".to_string(), "must-not-leak".to_string()),
         ]);
-        assert_eq!(relay_mesh_model_id(&rec).as_deref(), Some("Qwen3"));
+
+        let env = relay_mesh_process_env(&effective_env, "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
+            Some("1024")
+        );
+        assert_eq!(
+            env.get("OPENAI_COMPAT_MODEL").map(String::as_str),
+            Some("Gemma-4")
+        );
+        assert!(!env.contains_key("OPENAI_API_KEY"));
     }
 }

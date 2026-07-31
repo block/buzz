@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
-import '../custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
 import 'channel_window.dart';
 
 enum SystemEventType {
@@ -94,16 +94,17 @@ class SystemEvent {
           return '$actor joined the channel';
         }
         final target = resolveLabel(targetPubkey);
-        return '$actor added $target to the channel';
+        return '$target was added by $actor';
       }(),
       SystemEventType.memberLeft => '$actor left the channel',
       SystemEventType.memberRemoved => () {
         final target = resolveLabel(targetPubkey);
         return '$actor removed $target from the channel';
       }(),
-      SystemEventType.topicChanged => '$actor changed the topic to "$topic"',
+      SystemEventType.topicChanged =>
+        '$actor ${_describeTextFieldChange('topic', topic)}',
       SystemEventType.purposeChanged =>
-        '$actor changed the purpose to "$purpose"',
+        '$actor ${_describeTextFieldChange('purpose', purpose)}',
       SystemEventType.channelCreated => '$actor created this channel',
       SystemEventType.channelArchived => '$actor archived this channel',
       SystemEventType.channelUnarchived => '$actor unarchived this channel',
@@ -111,6 +112,25 @@ class SystemEvent {
       SystemEventType.huddleEnded => '$actor ended the huddle',
     };
   }
+}
+
+/// Caption fragment for a channel topic or purpose change, e.g.
+/// `changed the topic to "Release planning"` or `cleared the topic`.
+///
+/// A blank value means the field was cleared: the relay reports a clear as a
+/// `topic_changed` / `purpose_changed` event carrying an empty string, not as a
+/// separate event type. Without this branch the timeline renders
+/// `changed the topic to ""`, which reads as if the topic were set to two quote
+/// marks. Whitespace-only values are treated as cleared for the same reason.
+///
+/// Mirrors `describeChannelTextFieldChange` in
+/// `desktop/src/features/messages/lib/systemEventCopy.ts`.
+String _describeTextFieldChange(String field, String? value) {
+  final trimmed = value?.trim();
+  if (trimmed == null || trimmed.isEmpty) {
+    return 'cleared the $field';
+  }
+  return 'changed the $field to "$trimmed"';
 }
 
 @immutable
@@ -171,6 +191,11 @@ class TimelineMessage {
     this.parentId,
     this.rootId,
   });
+
+  /// Attachment messages stay visually distinct from surrounding messages,
+  /// even when several are sent by the same author in quick succession.
+  bool get hasAttachments =>
+      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta');
 }
 
 @immutable
@@ -180,11 +205,13 @@ class ThreadSummary {
 
   /// Up to 3 most recent unique participant pubkeys.
   final List<String> participantPubkeys;
+  final int? lastReplyAt;
 
   const ThreadSummary({
     required this.threadHeadId,
     required this.replyCount,
     required this.participantPubkeys,
+    this.lastReplyAt,
   });
 }
 
@@ -195,6 +222,107 @@ class MainTimelineEntry {
   final ThreadSummary? summary;
 
   const MainTimelineEntry({required this.message, this.summary});
+}
+
+const _membershipGroupWindowSeconds = 5 * 60;
+
+@immutable
+class _MembershipChange {
+  final String? actor;
+  final bool isSelfJoin;
+
+  const _MembershipChange({required this.actor, required this.isSelfJoin});
+}
+
+_MembershipChange? _membershipChange(MainTimelineEntry entry) {
+  final event = entry.message.systemEvent;
+  if (!entry.message.isSystem || event?.type != SystemEventType.memberJoined) {
+    return null;
+  }
+
+  final actor = event?.actorPubkey?.trim().toLowerCase();
+  final target = event?.targetPubkey?.trim().toLowerCase();
+  if (actor == null || actor.isEmpty || target == null || target.isEmpty) {
+    return null;
+  }
+
+  final isSelfJoin = actor == target;
+  return _MembershipChange(
+    actor: isSelfJoin ? null : actor,
+    isSelfJoin: isSelfJoin,
+  );
+}
+
+bool _membershipChangesCanGroup(
+  _MembershipChange first,
+  _MembershipChange second,
+) {
+  return first.isSelfJoin == second.isSelfJoin &&
+      (first.isSelfJoin || first.actor == second.actor);
+}
+
+bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
+  final first = DateTime.fromMillisecondsSinceEpoch(firstTimestamp * 1000);
+  final second = DateTime.fromMillisecondsSinceEpoch(secondTimestamp * 1000);
+  return first.year == second.year &&
+      first.month == second.month &&
+      first.day == second.day;
+}
+
+/// Groups consecutive membership arrivals using the same display rule as
+/// desktop: matching additions (or self-joins) within a fixed five-minute
+/// window become one render item. Other events and local day boundaries break
+/// the group.
+///
+/// Each inner list is one renderable timeline item. Non-grouped entries are
+/// returned as single-item lists.
+List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
+  List<MainTimelineEntry> entries,
+) {
+  final groupsByStart = <int, int>{};
+
+  for (var end = entries.length - 1; end >= 0;) {
+    final newestEntry = entries[end];
+    final newestChange = _membershipChange(newestEntry);
+    if (newestChange == null) {
+      end -= 1;
+      continue;
+    }
+
+    var start = end;
+    while (start > 0) {
+      final candidate = entries[start - 1];
+      final candidateChange = _membershipChange(candidate);
+      if (candidateChange == null ||
+          !_membershipChangesCanGroup(candidateChange, newestChange) ||
+          !_isSameLocalDay(
+            candidate.message.createdAt,
+            newestEntry.message.createdAt,
+          ) ||
+          newestEntry.message.createdAt < candidate.message.createdAt ||
+          newestEntry.message.createdAt - candidate.message.createdAt >
+              _membershipGroupWindowSeconds) {
+        break;
+      }
+      start -= 1;
+    }
+
+    if (start < end) groupsByStart[start] = end;
+    end = start - 1;
+  }
+
+  final result = <List<MainTimelineEntry>>[];
+  for (var index = 0; index < entries.length;) {
+    final groupEnd = groupsByStart[index];
+    if (groupEnd == null) {
+      result.add([entries[index]]);
+      index += 1;
+      continue;
+    }
+    result.add(entries.sublist(index, groupEnd + 1));
+    index = groupEnd + 1;
+  }
+  return result;
 }
 
 /// Process a chronologically-sorted list of [NostrEvent]s into a list of
@@ -419,6 +547,7 @@ ThreadSummary? _buildSummary(
       threadHeadId: messageId,
       replyCount: relaySummary.replyCount,
       participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
+      lastReplyAt: relaySummary.lastReplyAt,
     );
   }
 
@@ -437,6 +566,7 @@ ThreadSummary? _buildSummary(
     threadHeadId: messageId,
     replyCount: replies.length,
     participantPubkeys: participants.reversed.toList(),
+    lastReplyAt: replies.last.createdAt,
   );
 }
 

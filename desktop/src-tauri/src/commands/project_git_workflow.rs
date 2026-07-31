@@ -32,67 +32,10 @@ pub struct ProjectRepoMergeResult {
     pub status_publication_error: Option<String>,
 }
 
-/// Machine-readable recovery metadata for a failed pull-request merge.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectPullRequestMergeRecovery {
-    action: String,
-    target_branch: String,
-    source_branch: String,
-}
-
-/// Structured pull-request merge failure returned across the Tauri boundary.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectPullRequestMergeError {
-    code: String,
-    message: String,
-    recovery: Option<ProjectPullRequestMergeRecovery>,
-}
-
-impl ProjectPullRequestMergeError {
-    fn new(code: &str, message: impl Into<String>) -> Self {
-        Self {
-            code: code.to_string(),
-            message: message.into(),
-            recovery: None,
-        }
-    }
-
-    fn conflict(target_branch: String, source_branch: String) -> Self {
-        Self {
-            code: "merge_conflict".to_string(),
-            message: "Pull request has merge conflicts.".to_string(),
-            recovery: Some(ProjectPullRequestMergeRecovery {
-                action: "open_terminal".to_string(),
-                target_branch,
-                source_branch,
-            }),
-        }
-    }
-}
-
-impl From<String> for ProjectPullRequestMergeError {
-    fn from(message: String) -> Self {
-        Self::new("merge_failed", message)
-    }
-}
-
-fn classify_merge_error(
-    message: String,
-    has_conflicts: bool,
-    target_branch: &str,
-    source_branch: &str,
-) -> ProjectPullRequestMergeError {
-    if has_conflicts {
-        ProjectPullRequestMergeError::conflict(target_branch.to_string(), source_branch.to_string())
-    } else {
-        ProjectPullRequestMergeError::new(
-            "merge_failed",
-            format!("Pull request merge failed: {message}"),
-        )
-    }
-}
+/// Machine-readable pull-request merge failure types live in
+/// [`super::project_git_merge_error`]; re-imported here for the merge
+/// workflow below.
+use super::project_git_merge_error::{classify_merge_error, ProjectPullRequestMergeError};
 
 struct ProjectRepoMergeGitResult {
     message: String,
@@ -124,6 +67,18 @@ pub struct ProjectPullRequestReviewRequestInput {
     pull_request_id: String,
     reviewers: Vec<String>,
     reviewer_label: String,
+}
+
+/// Repository-scoped metadata for an agent-signed lifecycle status.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPullRequestStatusInput {
+    target_owner: String,
+    repo_address: String,
+    pull_request_id: String,
+    pull_request_author: String,
+    status: String,
+    created_at: u64,
 }
 
 /// A previously signed merged-status event that needs publishing again.
@@ -247,6 +202,44 @@ fn build_merged_status_event(
         .sign_with_keys(keys)
         .map(|event| event.as_json())
         .map_err(|error| format!("sign merged pull request status: {error}"))
+}
+
+fn build_pull_request_status_event(
+    keys: &Keys,
+    repo_address: &str,
+    pull_request_id: &str,
+    pull_request_author: &str,
+    status: &str,
+    created_at: u64,
+) -> Result<String, String> {
+    let owner = keys.public_key().to_hex();
+    let (pull_request_id, pull_request_author) =
+        validate_merge_status_metadata(repo_address, &owner, pull_request_id, pull_request_author)?;
+    let kind = match status {
+        "open" => Kind::Custom(1630),
+        "closed" => Kind::Custom(1632),
+        "draft" => Kind::Custom(1633),
+        _ => return Err("Invalid pull request lifecycle status.".to_string()),
+    };
+    let mut raw_tags = vec![
+        vec!["e", pull_request_id.as_str(), "", "root"],
+        vec!["a", repo_address],
+        vec!["p", owner.as_str()],
+    ];
+    if pull_request_author != owner {
+        raw_tags.push(vec!["p", pull_request_author.as_str()]);
+    }
+    let tags = raw_tags
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("build pull request status tags: {error}"))?;
+    EventBuilder::new(kind, "")
+        .tags(tags)
+        .custom_created_at(Timestamp::from(created_at.max(Timestamp::now().as_secs())))
+        .sign_with_keys(keys)
+        .map(|event| event.as_json())
+        .map_err(|error| format!("sign pull request status: {error}"))
 }
 
 fn build_review_request_event(
@@ -431,6 +424,31 @@ pub async fn clone_project_repository(
     })
     .await
     .map_err(|error| format!("repo clone task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn sign_project_pull_request_status(
+    input: ProjectPullRequestStatusInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target_owner = input.target_owner.trim().to_ascii_lowercase();
+    if normalize_event_id(&target_owner).is_none() {
+        return Err("Invalid target repository owner.".to_string());
+    }
+    let identity = project_owner_identity(&app, &state, &target_owner)?;
+    let event = Event::from_json(build_pull_request_status_event(
+        &identity.keys,
+        &input.repo_address,
+        &input.pull_request_id,
+        &input.pull_request_author,
+        &input.status,
+        input.created_at,
+    )?)
+    .map_err(|error| format!("parse signed pull request status: {error}"))?;
+    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -663,9 +681,9 @@ pub async fn merge_project_pull_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        align_unborn_head_branch, build_merged_status_event, build_review_request_event,
-        classify_merge_error, normalize_commit, same_repository, validate_merge_status_metadata,
-        ProjectPullRequestMergeError,
+        align_unborn_head_branch, build_merged_status_event, build_pull_request_status_event,
+        build_review_request_event, normalize_commit, same_repository,
+        validate_merge_status_metadata,
     };
     use crate::commands::project_git_exec::{build_test_git_auth_config, run_git};
     use nostr::{Event, JsonUtil, Keys, Timestamp};
@@ -708,51 +726,6 @@ mod tests {
             "https://relay.example/git/owner/repo",
             "https://relay.example/git/fork/repo"
         ));
-    }
-
-    #[test]
-    fn merge_conflict_error_has_stable_recovery_metadata() {
-        let error =
-            ProjectPullRequestMergeError::conflict("main".to_string(), "feature/demo".to_string());
-
-        assert_eq!(error.code, "merge_conflict");
-        assert_eq!(error.message, "Pull request has merge conflicts.");
-        let recovery = error.recovery.expect("conflict recovery");
-        assert_eq!(recovery.action, "open_terminal");
-        assert_eq!(recovery.target_branch, "main");
-        assert_eq!(recovery.source_branch, "feature/demo");
-    }
-
-    #[test]
-    fn merge_conflict_error_serializes_for_tauri_clients() {
-        let error =
-            ProjectPullRequestMergeError::conflict("main".to_string(), "feature/demo".to_string());
-        let value = serde_json::to_value(error).expect("serialize merge conflict");
-
-        assert_eq!(value["code"], "merge_conflict");
-        assert_eq!(value["recovery"]["targetBranch"], "main");
-        assert_eq!(value["recovery"]["sourceBranch"], "feature/demo");
-    }
-
-    #[test]
-    fn merge_error_classification_only_recovers_conflicts() {
-        let conflict = classify_merge_error(
-            "CONFLICT (content): Merge conflict in src/main.rs".to_string(),
-            true,
-            "main",
-            "feature/demo",
-        );
-        assert_eq!(conflict.code, "merge_conflict");
-        assert!(conflict.recovery.is_some());
-
-        let other = classify_merge_error(
-            "fatal: refusing to merge unrelated histories".to_string(),
-            false,
-            "main",
-            "feature/demo",
-        );
-        assert_eq!(other.code, "merge_failed");
-        assert!(other.recovery.is_none());
     }
 
     #[test]
@@ -830,6 +803,49 @@ mod tests {
             &owner,
             &"d".repeat(64),
             "not-an-author",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn lifecycle_status_is_signed_by_repository_owner() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let author = "b".repeat(64);
+        let event = Event::from_json(
+            build_pull_request_status_event(
+                &keys,
+                &format!("30617:{owner}:buzz"),
+                &"d".repeat(64),
+                &author,
+                "closed",
+                Timestamp::now().as_secs(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(event.kind.as_u16(), 1632);
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", author.as_str()]));
+        assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn lifecycle_status_rejects_merged_alias() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+
+        assert!(build_pull_request_status_event(
+            &keys,
+            &format!("30617:{owner}:buzz"),
+            &"d".repeat(64),
+            &"b".repeat(64),
+            "merged",
+            Timestamp::now().as_secs(),
         )
         .is_err());
     }

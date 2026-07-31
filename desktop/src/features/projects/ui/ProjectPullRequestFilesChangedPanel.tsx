@@ -33,10 +33,13 @@ import {
   type ProjectPullRequestCommentAnchor,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
+import { canReviewProjectPullRequest } from "@/features/projects/pullRequestReviews";
 import type { ProjectPullRequestComment } from "@/features/projects/projectPullRequests.mjs";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
 import type { ProjectRepoDiff, ProjectRepoDiffFile } from "@/shared/api/types";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProjectPullRequestInlineCommentThread } from "./ProjectPullRequestInlineComments";
 
 function fileName(path: string) {
@@ -59,6 +62,7 @@ type DiffRow = {
 
 type InlineCommentControls = {
   activeAnchor: ProjectPullRequestCommentAnchor | null;
+  canRequestChanges: boolean;
   comments: ProjectPullRequestComment[];
   isSending: boolean;
   onCancel: () => void;
@@ -68,6 +72,7 @@ type InlineCommentControls = {
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    decision?: "request-changes",
   ) => Promise<unknown>;
   profiles?: UserProfileLookup;
 };
@@ -440,12 +445,50 @@ function errorMessage(error: unknown) {
 
 function DiffPreview({
   file,
+  focusedAnchor,
   inlineComments,
 }: {
   file: ProjectRepoDiffFile;
+  focusedAnchor?: ProjectPullRequestCommentAnchor | null;
   inlineComments?: InlineCommentControls;
 }) {
   const rows = diffRows(file);
+  const focusedRowRef = React.useRef<HTMLDivElement | null>(null);
+  const [highlightedAnchor, setHighlightedAnchor] =
+    React.useState<ProjectPullRequestCommentAnchor | null>(null);
+
+  React.useEffect(() => {
+    if (!focusedAnchor || focusedAnchor.path !== file.path) {
+      setHighlightedAnchor(null);
+      return;
+    }
+
+    setHighlightedAnchor(focusedAnchor);
+    let isListeningForInteraction = false;
+    const clearHighlight = () => setHighlightedAnchor(null);
+    const clearHighlightOnKeyDown = (event: KeyboardEvent) => {
+      if (["Alt", "Control", "Meta", "Shift"].includes(event.key)) return;
+      clearHighlight();
+    };
+    const frame = window.requestAnimationFrame(() => {
+      focusedRowRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+      focusedRowRef.current?.focus({ preventScroll: true });
+      window.addEventListener("pointerdown", clearHighlight, true);
+      window.addEventListener("keydown", clearHighlightOnKeyDown, true);
+      isListeningForInteraction = true;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (isListeningForInteraction) {
+        window.removeEventListener("pointerdown", clearHighlight, true);
+        window.removeEventListener("keydown", clearHighlightOnKeyDown, true);
+      }
+    };
+  }, [file.path, focusedAnchor]);
+
   if (rows.length === 0) {
     return (
       <div className="bg-muted/20 px-4 py-4 text-sm text-muted-foreground">
@@ -475,17 +518,27 @@ function DiffPreview({
           inlineComments?.activeAnchor ?? null,
           anchor,
         );
+        const isFocused = anchorsEqual(highlightedAnchor, anchor);
         return (
           <React.Fragment key={row.key}>
             <div
               className={cn(
                 "group grid min-h-5 grid-cols-[3rem_3rem_2rem_1.5rem_minmax(0,1fr)]",
                 diffLineClassName(row.type),
+                isFocused && "bg-primary/10 ring-1 ring-primary/40 ring-inset",
               )}
               data-line={anchor?.line}
               data-path={anchor?.path}
               data-side={anchor?.side}
-              data-testid={anchor ? "project-diff-line" : undefined}
+              data-testid={
+                isFocused
+                  ? "project-diff-focused-line"
+                  : anchor
+                    ? "project-diff-line"
+                    : undefined
+              }
+              ref={isFocused ? focusedRowRef : undefined}
+              tabIndex={isFocused ? -1 : undefined}
             >
               <span className="select-none border-border/40 border-r px-2 text-right text-muted-foreground/70">
                 {row.oldLine ?? " "}
@@ -526,15 +579,17 @@ function DiffPreview({
             {anchor && inlineComments ? (
               <ProjectPullRequestInlineCommentThread
                 activeAnchor={isActive ? anchor : null}
+                canRequestChanges={inlineComments.canRequestChanges}
                 comments={comments}
                 isSending={inlineComments.isSending}
                 onCancel={inlineComments.onCancel}
-                onSubmit={(content, mentionPubkeys, mediaTags) =>
+                onSubmit={(content, mentionPubkeys, mediaTags, decision) =>
                   inlineComments.onSubmit(
                     anchor,
                     content,
                     mentionPubkeys,
                     mediaTags,
+                    decision,
                   )
                 }
                 profiles={inlineComments.profiles}
@@ -600,6 +655,7 @@ function FileTreeItems({
 export function ProjectPullRequestFilesChangedPanel({
   error,
   diff,
+  focusedAnchor,
   isLoading,
   profiles,
   project,
@@ -607,11 +663,13 @@ export function ProjectPullRequestFilesChangedPanel({
 }: {
   error: unknown;
   diff: ProjectRepoDiff | null | undefined;
+  focusedAnchor?: ProjectPullRequestCommentAnchor | null;
   isLoading: boolean;
   profiles?: UserProfileLookup;
   project: Project;
   pullRequest: ProjectPullRequest | null;
 }) {
+  const identityQuery = useIdentityQuery();
   const [activeAnchor, setActiveAnchor] =
     React.useState<ProjectPullRequestCommentAnchor | null>(null);
   const { isPending: isPostingComment, mutateAsync: postComment } =
@@ -630,18 +688,24 @@ export function ProjectPullRequestFilesChangedPanel({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      decision?: "request-changes",
     ) => {
       if (!pullRequest) throw new Error("No pull request selected.");
       try {
         await postComment({
           anchor,
           content,
+          decision,
           mediaTags,
           mentionPubkeys,
           pullRequest,
         });
         setActiveAnchor(null);
-        toast.success("Line comment posted.");
+        toast.success(
+          decision === "request-changes"
+            ? "Changes requested."
+            : "Line comment posted.",
+        );
       } catch (error) {
         toast.error(
           error instanceof Error
@@ -659,6 +723,7 @@ export function ProjectPullRequestFilesChangedPanel({
       diff={pullRequest ? diff : null}
       embedded
       error={error}
+      focusedAnchor={focusedAnchor}
       headerLabel={
         pullRequest
           ? `${pullRequest.title} · ${pullRequest.commit?.slice(0, 7) ?? "PR"}`
@@ -668,6 +733,11 @@ export function ProjectPullRequestFilesChangedPanel({
         pullRequest
           ? {
               activeAnchor,
+              canRequestChanges: canReviewProjectPullRequest(
+                project,
+                pullRequest,
+                identityQuery.data?.pubkey,
+              ),
               comments: inlineComments,
               isSending: isPostingComment,
               onCancel: () => setActiveAnchor(null),
@@ -688,6 +758,7 @@ export function ProjectDiffFilesPanel({
   diff,
   isLoading,
   embedded = false,
+  focusedAnchor,
   headerLabel,
   inlineComments,
   subjectLabel,
@@ -697,13 +768,12 @@ export function ProjectDiffFilesPanel({
   isLoading: boolean;
   /** Render without an outer border, for nesting inside an existing card. */
   embedded?: boolean;
+  focusedAnchor?: ProjectPullRequestCommentAnchor | null;
   headerLabel: string;
   inlineComments?: InlineCommentControls;
   subjectLabel: string;
 }) {
-  const outerBorderClass = embedded
-    ? ""
-    : "rounded-xl border border-border/60 bg-card";
+  const outerBorderClass = embedded ? "" : PROJECT_DETAIL_PANEL_CLASS;
   const [query, setQuery] = React.useState("");
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const files = diff?.files ?? [];
@@ -725,6 +795,12 @@ export function ProjectDiffFilesPanel({
     null;
 
   React.useEffect(() => {
+    if (!focusedAnchor) return;
+    setQuery("");
+    setSelectedPath(focusedAnchor.path);
+  }, [focusedAnchor]);
+
+  React.useEffect(() => {
     if (filteredFiles.length === 0) {
       setSelectedPath(null);
       return;
@@ -741,6 +817,7 @@ export function ProjectDiffFilesPanel({
     return (
       <div
         className={cn("p-4 text-sm text-muted-foreground", outerBorderClass)}
+        data-project-detail-panel={embedded ? undefined : true}
       >
         Loading changed files…
       </div>
@@ -755,6 +832,7 @@ export function ProjectDiffFilesPanel({
           "space-y-1 p-4 text-sm text-muted-foreground",
           outerBorderClass,
         )}
+        data-project-detail-panel={embedded ? undefined : true}
       >
         <p>Could not load changed files for this {subjectLabel}.</p>
         {message ? (
@@ -773,6 +851,7 @@ export function ProjectDiffFilesPanel({
           "p-6 text-center text-sm text-muted-foreground",
           outerBorderClass,
         )}
+        data-project-detail-panel={embedded ? undefined : true}
       >
         No changed files are available for this {subjectLabel} yet.
       </div>
@@ -785,6 +864,7 @@ export function ProjectDiffFilesPanel({
         "grid min-h-0 overflow-hidden lg:grid-cols-[17rem_minmax(0,1fr)]",
         outerBorderClass,
       )}
+      data-project-detail-panel={embedded ? undefined : true}
     >
       <aside className="border-border/50 border-b bg-background/30 lg:border-r lg:border-b-0">
         <div className="space-y-3 p-3">
@@ -854,6 +934,7 @@ export function ProjectDiffFilesPanel({
               </header>
               <DiffPreview
                 file={selectedFile}
+                focusedAnchor={focusedAnchor}
                 inlineComments={inlineComments}
               />
             </article>

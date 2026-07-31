@@ -53,29 +53,11 @@ test("currentStep_falls_back_to_1_for_pages_outside_the_step_list", () => {
 });
 
 // ---------------------------------------------------------------------------
-// BackupStep gating: backupNextDisabled() pure helper
+// BackupStep gating: saving a password-protected backup is recommended, not required
 // ---------------------------------------------------------------------------
 
-test("backup_next_disabled_while_loading", () => {
-  // During a slow keychain read, Next must be blocked — user cannot race past
-  // the key display before it is shown.
-  assert.equal(backupNextDisabled({ isLoading: true, loadError: null }), true);
-});
-
-test("backup_next_disabled_on_load_error", () => {
-  // Error state: only the explicit "Skip for now" ghost advances; Next blocked.
-  assert.equal(
-    backupNextDisabled({ isLoading: false, loadError: "IPC error" }),
-    true,
-  );
-});
-
-test("backup_next_enabled_after_clean_load", () => {
-  // Key shown (or backend cleanly returned none) — user may proceed.
-  assert.equal(
-    backupNextDisabled({ isLoading: false, loadError: null }),
-    false,
-  );
+test("backup_next_is_always_enabled", () => {
+  assert.equal(backupNextDisabled(), false);
 });
 
 // ---------------------------------------------------------------------------

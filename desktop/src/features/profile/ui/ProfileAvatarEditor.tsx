@@ -9,6 +9,7 @@ import { AnimatedAvatarCapture } from "@/features/profile/ui/AnimatedAvatarCaptu
 import { AvatarCustomColorPanel } from "@/features/profile/ui/AvatarCustomColorPanel";
 import { ProfileAvatarUploadPreview } from "@/features/profile/ui/ProfileAvatarUploadPreview";
 import { ProfileAvatarModeTabs } from "@/features/profile/ui/ProfileAvatarModeTabs";
+import { useAvatarSelection } from "@/features/profile/avatarPresentationStore";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -161,14 +162,15 @@ export function ProfileAvatarEditor({
     },
     [mode, onModeChange],
   );
+  const setAvatar = useAvatarSelection(avatarUrl, onUrlChange);
   const handleUploadSuccess = React.useCallback(
     (uploadedUrl: string) => {
       setUrlDraft("");
       onUploadedAvatarChange?.(uploadedUrl);
-      onUrlChange(uploadedUrl);
+      setAvatar(uploadedUrl);
       updateMode("image");
     },
-    [onUploadedAvatarChange, onUrlChange, updateMode],
+    [onUploadedAvatarChange, setAvatar, updateMode],
   );
   const [isAnimatedApplyPending, setIsAnimatedApplyPending] =
     React.useState(false);
@@ -192,14 +194,14 @@ export function ProfileAvatarEditor({
       clearUploadError();
       setUrlDraft("");
       onUploadedAvatarChange?.(animatedUrl);
-      onUrlChange(animatedUrl);
+      setAvatar(animatedUrl);
       onAnimatedAvatarApply?.(animatedUrl);
     },
     [
       clearUploadError,
       onAnimatedAvatarApply,
       onUploadedAvatarChange,
-      onUrlChange,
+      setAvatar,
     ],
   );
   // Done on the animated tab uploads the pending recording first, then
@@ -347,14 +349,14 @@ export function ProfileAvatarEditor({
     }
 
     onUploadedAvatarChange?.(null);
-    onUrlChange(nextAvatarUrl);
+    setAvatar(nextAvatarUrl);
   }, [
     avatarUrl,
     customColorDraft,
     isCustomColorPickerOpen,
     onUploadedAvatarChange,
-    onUrlChange,
     selectedEmoji,
+    setAvatar,
   ]);
 
   const handleFiles = React.useCallback(
@@ -379,14 +381,14 @@ export function ProfileAvatarEditor({
 
     clearUploadError();
     onUploadedAvatarChange?.(null);
-    onUrlChange(nextUrl);
+    setAvatar(nextUrl);
     hasUserEditedUrlDraftRef.current = false;
     updateMode("image");
   }, [
     clearUploadError,
     isInputDisabled,
     onUploadedAvatarChange,
-    onUrlChange,
+    setAvatar,
     updateMode,
     urlDraft,
   ]);
@@ -396,10 +398,10 @@ export function ProfileAvatarEditor({
       setUrlDraft("");
       hasUserEditedUrlDraftRef.current = false;
       onUploadedAvatarChange?.(null);
-      onUrlChange(emojiAvatarDataUrl(emoji, color));
+      setAvatar(emojiAvatarDataUrl(emoji, color));
       onEmojiAvatarChange?.();
     },
-    [onEmojiAvatarChange, onUploadedAvatarChange, onUrlChange, selectedColor],
+    [onEmojiAvatarChange, onUploadedAvatarChange, selectedColor, setAvatar],
   );
 
   const openCustomColorPicker = React.useCallback(() => {
@@ -699,7 +701,7 @@ export function ProfileAvatarEditor({
                         hasUserEditedUrlDraftRef.current = true;
                         setUrlDraft(event.target.value);
                         onUploadedAvatarChange?.(null);
-                        onUrlChange(event.target.value);
+                        setAvatar(event.target.value);
                       }}
                       onFocus={() => {
                         isUrlInputFocusedRef.current = true;

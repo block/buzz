@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart' as file_selector;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -20,6 +21,8 @@ const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
+const _requiresLegacyMediaStoragePermissionMethod =
+    'requiresLegacyMediaStoragePermission';
 const _readClipboardImageMethod = 'readClipboardImage';
 const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
@@ -38,6 +41,17 @@ final _mediaUploadPlatformChannel = MethodChannel(
   _mediaUploadPlatformChannelName,
 );
 
+/// Whether saving media needs Android's pre-scoped-storage runtime permission.
+Future<bool> requiresLegacyMediaStoragePermission() async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return false;
+  }
+  return await _mediaUploadPlatformChannel.invokeMethod<bool>(
+        _requiresLegacyMediaStoragePermissionMethod,
+      ) ??
+      false;
+}
+
 const _allowedImageMimeTypes = {
   'image/jpeg',
   'image/png',
@@ -46,10 +60,15 @@ const _allowedImageMimeTypes = {
 };
 const _allowedVideoMimeTypes = {'video/mp4'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
+const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
+
+/// Selects multiple gallery images for upload in picker order.
+typedef PickGalleryImages = Future<List<XFile>> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
+typedef PickAttachmentFile = Future<XFile?> Function();
 typedef SanitizeImageBytes =
     Future<Uint8List> Function(Uint8List bytes, String mimeType);
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
@@ -83,6 +102,7 @@ class BlobDescriptor {
   final String? thumb;
   final double? duration;
   final String? image;
+  final String? filename;
 
   const BlobDescriptor({
     required this.url,
@@ -95,6 +115,7 @@ class BlobDescriptor {
     this.thumb,
     this.duration,
     this.image,
+    this.filename,
   });
 
   factory BlobDescriptor.fromJson(Map<String, dynamic> json) => BlobDescriptor(
@@ -108,6 +129,21 @@ class BlobDescriptor {
     thumb: json['thumb'] as String?,
     duration: (json['duration'] as num?)?.toDouble(),
     image: json['image'] as String?,
+    filename: json['filename'] as String?,
+  );
+
+  BlobDescriptor withFilename(String value) => BlobDescriptor(
+    url: url,
+    sha256: sha256,
+    size: size,
+    type: type,
+    uploaded: uploaded,
+    dim: dim,
+    blurhash: blurhash,
+    thumb: thumb,
+    duration: duration,
+    image: image,
+    filename: value,
   );
 
   List<String> toImetaTag() => [
@@ -121,17 +157,27 @@ class BlobDescriptor {
     if (thumb != null) 'thumb $thumb',
     if (duration != null) 'duration $duration',
     if (image != null) 'image $image',
+    if (filename != null) 'filename $filename',
   ];
 
-  String toMarkdownImage() =>
-      type.startsWith('video/') ? '![video]($url)' : '![image]($url)';
+  String toMarkdownImage() {
+    if (type.startsWith('video/')) return '![video]($url)';
+    if (type.startsWith('image/')) return '![image]($url)';
+    final label = (filename ?? 'file').replaceAllMapped(
+      RegExp(r'[\\\[\]]'),
+      (match) => '\\${match[0]}',
+    );
+    return '[$label]($url)';
+  }
 }
 
 class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
+  final PickGalleryImages _pickGalleryImages;
   final PickGalleryVideo _pickGalleryVideo;
+  final PickAttachmentFile? _pickAttachmentFile;
   final SanitizeImageBytes _sanitizeImageBytes;
   final TranscodeImageToJpeg _transcodeImageToJpeg;
   final TranscodeVideoToMp4 _transcodeVideoToMp4;
@@ -144,7 +190,9 @@ class MediaUploadService {
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
+    PickGalleryImages? pickGalleryImages,
     required PickGalleryVideo pickGalleryVideo,
+    PickAttachmentFile? pickAttachmentFile,
     SanitizeImageBytes? sanitizeImageBytes,
     TranscodeImageToJpeg? transcodeImageToJpeg,
     TranscodeVideoToMp4? transcodeVideoToMp4,
@@ -154,7 +202,14 @@ class MediaUploadService {
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
+       _pickGalleryImages =
+           pickGalleryImages ??
+           (() async {
+             final image = await pickGalleryImage();
+             return image == null ? const <XFile>[] : [image];
+           }),
        _pickGalleryVideo = pickGalleryVideo,
+       _pickAttachmentFile = pickAttachmentFile,
        _sanitizeImageBytes = sanitizeImageBytes ?? _sanitizePickedImageBytes,
        _transcodeImageToJpeg =
            transcodeImageToJpeg ?? _transcodePickedImageToJpeg,
@@ -175,6 +230,9 @@ class MediaUploadService {
     if (pickedImage == null) return null;
     return uploadImage(pickedImage);
   }
+
+  /// Opens the system picker with multi-selection enabled.
+  Future<List<XFile>> pickGalleryImages() => _pickGalleryImages();
 
   Future<BlobDescriptor> uploadImage(XFile image) async {
     final preparedImage = await _prepareUploadImage(image);
@@ -199,9 +257,11 @@ class MediaUploadService {
     return uploadImage(XFile.fromData(bytes));
   }
 
-  Future<BlobDescriptor?> pickAndUploadVideo() async {
-    final pickedVideo = await _pickGalleryVideo();
-    if (pickedVideo == null) return null;
+  /// Opens the system gallery video picker.
+  Future<XFile?> pickGalleryVideo() => _pickGalleryVideo();
+
+  /// Sanitizes and uploads [pickedVideo] as an MP4 attachment.
+  Future<BlobDescriptor> uploadVideo(XFile pickedVideo) async {
     final length = await pickedVideo.length();
     if (length > _maxVideoSizeBytes) {
       throw Exception(
@@ -234,6 +294,47 @@ class MediaUploadService {
     }
   }
 
+  Future<BlobDescriptor?> pickAndUploadVideo() async {
+    final pickedVideo = await pickGalleryVideo();
+    if (pickedVideo == null) return null;
+    return uploadVideo(pickedVideo);
+  }
+
+  /// Opens the system document picker for a generic file attachment.
+  Future<XFile?> pickAttachmentFile() async {
+    final pickAttachmentFile = _pickAttachmentFile;
+    if (pickAttachmentFile == null) {
+      throw Exception("File attachments aren't available on this device.");
+    }
+    return pickAttachmentFile();
+  }
+
+  /// Uploads [pickedFile] as a size-limited generic attachment.
+  Future<BlobDescriptor> uploadFile(XFile pickedFile) async {
+    final length = await pickedFile.length();
+    if (length == 0) {
+      throw Exception('File is empty.');
+    }
+    if (length > _maxFileSizeBytes) {
+      throw Exception(
+        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
+      );
+    }
+    final bytes = await pickedFile.readAsBytes();
+    final descriptor = await _uploadPreparedBytes(
+      bytes,
+      mimeType: 'application/octet-stream',
+      allowGenericFile: true,
+    );
+    return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+  }
+
+  Future<BlobDescriptor?> pickAndUploadFile() async {
+    final pickedFile = await pickAttachmentFile();
+    if (pickedFile == null) return null;
+    return uploadFile(pickedFile);
+  }
+
   Future<BlobDescriptor> uploadBytes(
     Uint8List bytes, {
     required String mimeType,
@@ -253,8 +354,10 @@ class MediaUploadService {
   Future<BlobDescriptor> _uploadPreparedBytes(
     Uint8List bytes, {
     required String mimeType,
+    bool allowGenericFile = false,
   }) async {
-    if (!_allowedImageMimeTypes.contains(mimeType) &&
+    if (!allowGenericFile &&
+        !_allowedImageMimeTypes.contains(mimeType) &&
         !_allowedVideoMimeTypes.contains(mimeType)) {
       throw Exception('unsupported file type: $mimeType');
     }
@@ -419,6 +522,29 @@ class MediaUploadService {
     }
     return sanitizedBytes;
   }
+}
+
+String _safeAttachmentFilename(String filename) {
+  final segments = filename.split(RegExp(r'[/\\]'));
+  final basename = segments.isEmpty ? '' : segments.last;
+  final sanitized = StringBuffer();
+  var byteLength = 0;
+
+  for (final rune in basename.runes) {
+    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
+      continue;
+    }
+
+    final character = String.fromCharCode(rune);
+    final characterByteLength = utf8.encode(character).length;
+    if (byteLength + characterByteLength > 255) break;
+
+    sanitized.write(character);
+    byteLength += characterByteLength;
+  }
+
+  final safeBasename = sanitized.toString().trim();
+  return safeBasename.isEmpty ? 'file' : safeBasename;
 }
 
 String _sha256Hex(Uint8List bytes) {
@@ -686,7 +812,9 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
       source: ImageSource.gallery,
       requestFullMetadata: false,
     ),
+    pickGalleryImages: () => picker.pickMultiImage(requestFullMetadata: false),
     pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
+    pickAttachmentFile: file_selector.openFile,
   );
   ref.onDispose(service.dispose);
   return service;

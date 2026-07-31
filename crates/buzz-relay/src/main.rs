@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    EnvFilter::new(rust_log.unwrap_or("buzz_relay=info"))
+}
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
@@ -98,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     // spans under the correct service identity.
     let resource = telemetry::service_resource();
     let tracer_init = telemetry::try_init_tracer(resource.clone());
+    let otel_enabled = matches!(&tracer_init, telemetry::TracerInit::Enabled(_));
     let otel_layer = match &tracer_init {
         telemetry::TracerInit::Enabled(p) => {
             use opentelemetry::trace::TracerProvider as _;
@@ -105,11 +110,26 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    let trace_context_lookup = telemetry::TraceContextLookup::default();
+    let trace_context_lookup_layer = otel_enabled.then(|| {
+        trace_context_lookup
+            .clone()
+            .with_filter(tracing_subscriber::filter::LevelFilter::OFF)
+    });
 
     tracing_subscriber::registry()
-        .with(fmt::layer().json().flatten_event(true))
-        .with(EnvFilter::from_default_env().add_directive("buzz_relay=info".parse()?))
-        .with(otel_layer)
+        .with(
+            fmt::layer()
+                .json()
+                .event_format(trace_context_lookup.json_formatter(otel_enabled))
+                .with_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref())),
+        )
+        .with(otel_layer.map(|layer| {
+            layer.with_filter(telemetry::otel_env_filter(
+                std::env::var("BUZZ_OTEL_FILTER").ok().as_deref(),
+            ))
+        }))
+        .with(trace_context_lookup_layer)
         .init();
 
     // Log any exporter-build failure now that the subscriber is installed.
@@ -146,6 +166,9 @@ async fn main() -> anyhow::Result<()> {
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
+        replica_read_max_age_ms: config.replica_read_max_age_ms,
+        max_connections: config.db_pool_size,
+        read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
@@ -153,7 +176,11 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     if db.has_read_pool() {
-        info!("Postgres connected (writer + read replica)");
+        info!("Postgres connected (writer + lazy read replica pool)");
+        // Reader-down at boot must not crash or block the relay; this warn-only
+        // ping is the sole boot-time visibility that the replica is unreachable
+        // (the lazy pool with min_connections=0 dials nothing until first use).
+        db.spawn_read_pool_boot_ping();
     } else {
         info!("Postgres connected");
     }
@@ -978,6 +1005,12 @@ async fn main() -> anyhow::Result<()> {
                             metrics::gauge!("buzz_db_replica_fence_open").set(0.0);
                         }
                     }
+                    // Probe liveness, ungated by staleness: how long since
+                    // the probe last committed a heartbeat token.
+                    if let Some(age) = pool_state.db.fence().heartbeat_age() {
+                        metrics::gauge!("buzz_db_replica_heartbeat_age_seconds")
+                            .set(age.as_secs_f64());
+                    }
                 }
 
                 let rs = pool_state.redis_pool.status();
@@ -1060,6 +1093,52 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod env_filter_tests {
+    use super::log_env_filter;
+    use buzz_relay::telemetry::otel_env_filter;
+    use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn unset_enables_datastore_only_for_otel_filter() {
+        let logs = tracing_subscriber::registry().with(log_env_filter(None));
+        tracing::subscriber::with_default(logs, || {
+            assert!(!tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "buzz_relay", tracing::Level::INFO));
+        });
+
+        let otel = tracing_subscriber::registry().with(otel_env_filter(None));
+        tracing::subscriber::with_default(otel, || {
+            assert!(tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+        });
+    }
+
+    #[test]
+    fn explicit_datastore_off_is_preserved_alone() {
+        assert_eq!(
+            otel_env_filter(Some("buzz_datastore=off")).to_string(),
+            "buzz_datastore=off"
+        );
+    }
+
+    #[test]
+    fn explicit_datastore_debug_is_preserved_alone() {
+        assert_eq!(
+            otel_env_filter(Some("buzz_datastore=debug")).to_string(),
+            "buzz_datastore=debug"
+        );
+    }
+
+    #[test]
+    fn log_and_otel_filters_are_configured_independently() {
+        assert_eq!(log_env_filter(Some("warn")).to_string(), "warn");
+        assert_eq!(
+            otel_env_filter(Some("buzz_relay=debug")).to_string(),
+            "buzz_relay=debug"
+        );
+    }
+}
+
 async fn run_community_revalidator(
     state: Arc<AppState>,
     period: std::time::Duration,
@@ -1127,6 +1206,7 @@ async fn serve(
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let shutdown_flag = Arc::clone(&state.shutting_down);
+    let drain_conn_manager = Arc::clone(&state.conn_manager);
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -1136,6 +1216,16 @@ async fn serve(
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         info!("Starting graceful drain (30s timeout)");
         let _ = tx.send(true);
+        // Tell every connected client to reconnect NOW. Without this, upgraded
+        // WebSocket connections outlive the listener drain: clients ride the
+        // dying pod until the forced exit below and only learn about the
+        // restart from a TCP reset. The 1012 close frame turns a 35s silent
+        // death into an immediate, well-attributed reconnect.
+        let closed = drain_conn_manager.drain_all();
+        info!(
+            connections = closed,
+            "Sent restart close frame to all live WebSocket connections"
+        );
         // Hard timeout: force exit if connections don't drain within 30s.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         tracing::error!("Drain timeout exceeded — forcing exit");
@@ -1414,6 +1504,20 @@ async fn run_usage_metrics_tick(
             warn!("Usage metrics leader demoting: DB collection failed");
             *leader = None;
             return Err(error);
+        }
+        let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        match state
+            .db
+            .reap_expired_relay_invites(invite_retention_cutoff)
+            .await
+        {
+            Ok(deleted) if deleted > 0 => {
+                info!(deleted, "reaped expired relay invites");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "failed to reap expired relay invites");
+            }
         }
         run_storage_sweep_tick(state, emission_scope, &host_map).await;
     }

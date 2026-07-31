@@ -423,7 +423,6 @@ const SidebarRail = React.forwardRef<
   (
     {
       className,
-      onClick,
       onPointerCancel,
       onPointerDown,
       onPointerMove,
@@ -438,7 +437,6 @@ const SidebarRail = React.forwardRef<
       isRailDisabled,
       sidebarWidth,
       state,
-      toggleSidebar,
     } = useSidebar();
     const resizeStateRef = React.useRef<{
       currentWidth: number;
@@ -451,8 +449,6 @@ const SidebarRail = React.forwardRef<
       startWidth: number;
       startX: number;
     } | null>(null);
-    const suppressClickRef = React.useRef(false);
-
     const finishResize = React.useCallback(
       (event: React.PointerEvent<HTMLButtonElement>) => {
         const resizeState = resizeStateRef.current;
@@ -468,13 +464,6 @@ const SidebarRail = React.forwardRef<
         document.body.style.userSelect = resizeState.previousUserSelect;
         setIsResizing(false);
         resizeStateRef.current = null;
-
-        if (resizeState.hasDragged) {
-          suppressClickRef.current = true;
-          window.requestAnimationFrame(() => {
-            suppressClickRef.current = false;
-          });
-        }
       },
       [setIsResizing],
     );
@@ -483,25 +472,9 @@ const SidebarRail = React.forwardRef<
       <button
         ref={ref}
         data-sidebar="rail"
-        aria-label="Resize or toggle sidebar"
+        aria-label="Resize sidebar"
         tabIndex={-1}
-        disabled={isRailDisabled}
-        onClick={(event) => {
-          if (isRailDisabled) {
-            return;
-          }
-
-          if (suppressClickRef.current) {
-            event.preventDefault();
-            event.stopPropagation();
-            return;
-          }
-
-          onClick?.(event);
-          if (!event.defaultPrevented) {
-            toggleSidebar();
-          }
-        }}
+        disabled={isRailDisabled || state !== "expanded"}
         onPointerCancel={(event) => {
           onPointerCancel?.(event);
           finishResize(event);
@@ -572,16 +545,12 @@ const SidebarRail = React.forwardRef<
           onPointerUp?.(event);
           finishResize(event);
         }}
-        title="Drag to resize or click to toggle sidebar"
+        title="Drag to resize sidebar"
         className={cn(
           "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 sm:flex",
           "cursor-col-resize",
           "after:absolute after:bottom-0 after:left-1/2 after:top-6 after:z-10 after:w-px after:-translate-x-1/2 after:bg-transparent after:content-['']",
-          "[[data-state=collapsed]_&]:cursor-pointer",
-          "group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:hover:bg-sidebar",
-          "[[data-side=left][data-collapsible=offcanvas]_&]:-right-2",
-          "[[data-side=right][data-collapsible=offcanvas]_&]:-left-2",
-          "disabled:pointer-events-none disabled:cursor-default",
+          "disabled:pointer-events-none disabled:hidden",
           className,
         )}
         {...props}
