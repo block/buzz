@@ -228,7 +228,8 @@ pub struct Config {
     pub media_uploads_per_minute: u32,
 
     /// Require Blossom kind:24242 `t=get` auth plus relay membership before
-    /// serving media GET/HEAD. Default off for staged client rollout.
+    /// serving media GET/HEAD. Defaults on so private attachment URLs are not
+    /// bearer capabilities after membership is revoked.
     pub require_media_get_auth: bool,
 
     /// Whether tamper-evident event/media audit logging is enabled. Defaults to true.
@@ -783,7 +784,7 @@ impl Config {
                     || v.eq_ignore_ascii_case("yes")
                     || v.eq_ignore_ascii_case("on")
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
@@ -1073,8 +1074,8 @@ mod tests {
             "serve_git_web_gui should default to false"
         );
         assert!(
-            !config.require_media_get_auth,
-            "require_media_get_auth should default to false for staged client rollout"
+            config.require_media_get_auth,
+            "require_media_get_auth should default to true"
         );
         assert_eq!(
             config.media.s3_addressing_style,
