@@ -2093,8 +2093,13 @@ pub async fn run_prompt_task(
                         if let (Some(target), Some(content)) =
                             (&fallback_reply, agent.acp.take_undelivered_turn_message())
                         {
-                            post_agent_content_fallback(&ctx.rest_client, target, &content)
-                                .await;
+                            let outcome =
+                                post_agent_content_fallback(&ctx.rest_client, target, &content)
+                                    .await;
+                            agent.acp.observe(
+                                "delivery_fallback",
+                                content_fallback_activity_payload(&outcome),
+                            );
                         }
                         send_prompt_result(
                             &result_tx,
@@ -2170,7 +2175,12 @@ pub async fn run_prompt_task(
                 if let (Some(target), Some(content)) =
                     (&fallback_reply, agent.acp.take_undelivered_turn_message())
                 {
-                    post_agent_content_fallback(&ctx.rest_client, target, &content).await;
+                    let outcome =
+                        post_agent_content_fallback(&ctx.rest_client, target, &content).await;
+                    agent.acp.observe(
+                        "delivery_fallback",
+                        content_fallback_activity_payload(&outcome),
+                    );
                 }
             }
 
@@ -3912,12 +3922,13 @@ struct FallbackReplyTarget {
 /// send tool — silently dropping the reply. When [`AcpClient`] reports such an
 /// undelivered turn message, this posts it as a threaded reply, mirroring
 /// [`post_failure_notice`]'s build/sign/submit path. Best-effort: any error is
-/// logged and swallowed.
+/// logged and returned to the caller so it can surface the degraded delivery in
+/// the owner-visible Activity feed without failing the turn.
 async fn post_agent_content_fallback(
     rest: &crate::relay::RestClient,
     target: &FallbackReplyTarget,
     content: &str,
-) {
+) -> Result<(), String> {
     let thread_ref = match (
         nostr::EventId::from_hex(&target.root_event_hex),
         nostr::EventId::from_hex(&target.parent_event_hex),
@@ -3939,14 +3950,14 @@ async fn post_agent_content_fallback(
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(channel = %target.channel_id, "content fallback: build failed: {e}");
-            return;
+            return Err(format!("build failed: {e}"));
         }
     };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(channel = %target.channel_id, "content fallback: sign failed: {e}");
-            return;
+            return Err(format!("sign failed: {e}"));
         }
     };
     match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
@@ -3959,10 +3970,43 @@ async fn post_agent_content_fallback(
                 channel = %target.channel_id,
                 "content-delivery fallback: posted undelivered agent content as channel reply"
             );
+            Ok(())
         }
-        Ok(Err(e)) => tracing::warn!(channel = %target.channel_id, "content fallback failed: {e}"),
-        Err(_) => tracing::warn!(channel = %target.channel_id, "content fallback timed out"),
+        Ok(Err(e)) => {
+            tracing::warn!(channel = %target.channel_id, "content fallback failed: {e}");
+            Err(format!("relay publish failed: {e}"))
+        }
+        Err(_) => {
+            tracing::warn!(channel = %target.channel_id, "content fallback timed out");
+            Err("relay publish timed out".to_string())
+        }
     }
+}
+
+/// Build a free-form observer status record understood by the Desktop Activity
+/// transcript. The explicit title/text pair keeps fallback delivery visible to
+/// operators instead of leaving the only signal in harness logs.
+fn content_fallback_activity_payload(outcome: &Result<(), String>) -> serde_json::Value {
+    let (title, text) = match outcome {
+        Ok(()) => (
+            "Delivery fallback",
+            "Agent skipped message publishing; Buzz delivered its plain-text response automatically."
+                .to_string(),
+        ),
+        Err(error) => (
+            "Delivery fallback failed",
+            format!(
+                "Agent skipped message publishing; Buzz could not deliver its plain-text response automatically: {error}"
+            ),
+        ),
+    };
+
+    serde_json::json!({
+        "type": "delivery_fallback",
+        "title": title,
+        "text": text,
+        "posted": outcome.is_ok(),
+    })
 }
 
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
@@ -4085,6 +4129,32 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn content_fallback_activity_reports_degraded_but_successful_delivery() {
+        let payload = content_fallback_activity_payload(&Ok(()));
+
+        assert_eq!(payload["type"], "delivery_fallback");
+        assert_eq!(payload["title"], "Delivery fallback");
+        assert_eq!(payload["posted"], true);
+        assert!(payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("Agent skipped message publishing"));
+    }
+
+    #[test]
+    fn content_fallback_activity_reports_failed_delivery() {
+        let payload = content_fallback_activity_payload(&Err("relay unavailable".to_string()));
+
+        assert_eq!(payload["type"], "delivery_fallback");
+        assert_eq!(payload["title"], "Delivery fallback failed");
+        assert_eq!(payload["posted"], false);
+        assert!(payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("relay unavailable"));
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
