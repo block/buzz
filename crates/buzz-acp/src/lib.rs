@@ -21,8 +21,8 @@ use std::time::Duration;
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    is_ephemeral, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -1906,6 +1906,21 @@ async fn tokio_main() -> Result<()> {
                     match buzz_event {
                         Some(buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
+
+                            // Ephemeral kinds (20000–29999) are UX signals only —
+                            // typing indicators (20002), presence heartbeats (20001),
+                            // etc. They must never start an agent turn: empty content,
+                            // no durable intent, and waking on them burns quota while
+                            // driving a false «is working…» spinner via bot typing /
+                            // observer frames published by the woken harness.
+                            if is_ephemeral(kind_u32) {
+                                tracing::debug!(
+                                    channel_id = %buzz_event.channel_id,
+                                    kind = kind_u32,
+                                    "dropping ephemeral event — never starts a turn"
+                                );
+                                continue;
+                            }
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
                                 || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION

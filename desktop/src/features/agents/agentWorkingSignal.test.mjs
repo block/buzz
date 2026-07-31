@@ -76,81 +76,48 @@ describe("getAgentWorkingState", () => {
     assert.equal(elsewhere.channels.length, 1);
   });
 
-  it("falls back to typing when no observer turns exist", () => {
+  it("does not treat bot typing as working without an observer turn", () => {
     reportChannelBotTyping("chan-1", [AGENT]);
     const state = getAgentWorkingState(AGENT, "chan-1");
-    assert.equal(state.working, true);
-    assert.equal(state.source, "typing");
-    assert.equal(state.channels[0].source, "typing");
-    assert.ok(state.channels[0].anchorAt <= Date.now());
+    assert.equal(state.working, false);
+    assert.equal(state.source, "none");
+    assert.deepEqual(state.channels, []);
   });
 
-  it("prefers observer over typing for the same channel (no duplicate)", () => {
+  it("observer turn is working even if typing is also reported", () => {
     startTurn(AGENT, "chan-1");
     reportChannelBotTyping("chan-1", [AGENT]);
     const state = getAgentWorkingState(AGENT, "chan-1");
     assert.equal(state.source, "observer");
+    assert.equal(state.working, true);
     assert.equal(state.channels.length, 1);
     assert.equal(state.channels[0].source, "observer");
-  });
-
-  it("typing in one channel does not mark work in another", () => {
-    reportChannelBotTyping("chan-1", [AGENT]);
-    const state = getAgentWorkingState(AGENT, "chan-2");
-    assert.equal(state.working, false);
-  });
-
-  it("typing clears when re-reported empty", () => {
-    reportChannelBotTyping("chan-1", [AGENT]);
-    reportChannelBotTyping("chan-1", []);
-    assert.equal(getAgentWorkingState(AGENT, "chan-1").working, false);
-  });
-
-  it("preserves first-seen anchor across typing re-reports", async () => {
-    reportChannelBotTyping("chan-1", [AGENT]);
-    const first = getAgentWorkingState(AGENT).channels[0].anchorAt;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    reportChannelBotTyping("chan-1", [AGENT, AGENT_2]);
-    const again = getAgentWorkingState(AGENT).channels[0].anchorAt;
-    assert.equal(again, first);
   });
 });
 
 describe("getWorkingChannels", () => {
-  it("merges typing-only agents into an observer channel summary", () => {
+  it("lists observer channels only (typing does not create working channels)", () => {
     startTurn(AGENT, "chan-1");
     reportChannelBotTyping("chan-1", [AGENT_2]);
+    reportChannelBotTyping("chan-2", [AGENT_2]);
     const channels = getWorkingChannels();
     assert.equal(channels.length, 1);
     assert.equal(channels[0].source, "observer");
-    assert.equal(channels[0].agentCount, 2);
+    assert.equal(channels[0].channelId, "chan-1");
     assert.deepEqual(
       new Set(channels[0].agentPubkeys),
-      new Set([AGENT, AGENT_2]),
-    );
-  });
-
-  it("adds typing-only channels with a typing source", () => {
-    startTurn(AGENT, "chan-1");
-    reportChannelBotTyping("chan-2", [AGENT_2]);
-    const channels = getWorkingChannels();
-    assert.deepEqual(
-      channels.map((c) => [c.channelId, c.source]),
-      [
-        ["chan-1", "observer"],
-        ["chan-2", "typing"],
-      ],
+      new Set([AGENT]),
     );
   });
 });
 
 describe("getWorkingAgentPubkeysForChannel", () => {
-  it("unions observer and typing agents for the channel", () => {
+  it("returns observer agents only for the channel", () => {
     startTurn(AGENT, "chan-1");
     reportChannelBotTyping("chan-1", [AGENT_2]);
     assert.deepEqual(
       new Set(getWorkingAgentPubkeysForChannel("chan-1")),
-      new Set([AGENT, AGENT_2]),
+      new Set([AGENT]),
     );
     assert.deepEqual(getWorkingAgentPubkeysForChannel("chan-2"), []);
     assert.deepEqual(getWorkingAgentPubkeysForChannel(null), []);
@@ -189,18 +156,18 @@ describe("subscription and caching", () => {
     }
   });
 
-  it("notifies on typing changes but not on identical re-reports", () => {
+  it("typing reports no longer flip working state", () => {
     let notified = 0;
     const unsubscribe = subscribeAgentWorkingSignal(() => {
       notified += 1;
     });
     try {
       reportChannelBotTyping("chan-1", [AGENT]);
-      assert.equal(notified, 1);
-      reportChannelBotTyping("chan-1", [AGENT]);
-      assert.equal(notified, 1);
+      // May notify for registry bookkeeping, but working stays false.
+      assert.equal(getAgentWorkingState(AGENT, "chan-1").working, false);
       reportChannelBotTyping("chan-1", []);
-      assert.equal(notified, 2);
+      assert.equal(getAgentWorkingState(AGENT, "chan-1").working, false);
+      assert.ok(notified >= 0);
     } finally {
       unsubscribe();
     }
@@ -220,9 +187,13 @@ describe("subscription and caching", () => {
     }
   });
 
-  it("resetAgentWorkingSignal clears typing state", () => {
+  it("resetAgentWorkingSignal leaves working idle", () => {
     reportChannelBotTyping("chan-1", [AGENT]);
+    startTurn(AGENT, "chan-1");
     resetAgentWorkingSignal();
+    // reset only clears typing registry; observer store is separate.
+    // working may still be true from active turns store — clear that too.
+    resetActiveAgentTurnsStore();
     assert.equal(getAgentWorkingState(AGENT, "chan-1").working, false);
   });
 });

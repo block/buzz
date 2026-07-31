@@ -14,14 +14,17 @@ import {
  * Every surface that shows a working affordance (sidebar channel badges,
  * profile badges, agent rows, composer activity bar, activity panel header,
  * future thread ingresses) should read from this module instead of picking
- * one of the underlying pipes. The rule is:
+ * one of the underlying pipes.
  *
- *   1. Observer-derived active turns (kind 24200 → activeAgentTurnsStore)
- *      are the primary signal — they carry channel scope and a start anchor.
- *   2. Bot typing indicators (kind 20002, mirrored into this module by the
- *      channel typing hooks) are the fallback for agents whose observer
- *      stream is absent for that scope (e.g. remote harness without relay
- *      observer, or frames not yet arrived).
+ * Working = observer-derived active turns only (kind 24200 →
+ * activeAgentTurnsStore). Those frames are emitted when a real harness turn
+ * is running on a contentful event (kind 9 / other subscribed kinds).
+ *
+ * Bot typing indicators (kind 20002) are intentionally NOT a working signal.
+ * Typing is empty UX ephemera — humans type while composing, and harnesses
+ * may emit typing while already working. Folding typing into "is working…"
+ * produced false spinners on empty typing pings and double-counted real turns.
+ * Human/bot "is typing…" chrome still reads typing entries directly.
  *
  * Scope rule: with a channelId, "working" means working in that channel;
  * without one, "working" means any active work in any channel (the
@@ -99,9 +102,9 @@ export function subscribeAgentWorkingSignal(listener: () => void) {
 }
 
 /**
- * Mirror the current bot typing pubkeys for a channel into the signal.
- * Call with the full current set (empty array clears the channel). First-seen
- * timestamps are preserved across re-reports so elapsed anchors stay stable.
+ * Legacy no-op input path retained for call sites that still mirror bot typing.
+ * Typing is no longer folded into the working signal (observer turns only).
+ * Call sites may keep reporting; entries are ignored for `working` state.
  */
 export function reportChannelBotTyping(
   channelId: string,
@@ -142,21 +145,6 @@ function computeAgentWorkingState(
     anchorAt: turn.anchorAt,
     source: "observer" as const,
   }));
-  const observerChannelIds = new Set(turns.map((turn) => turn.channelId));
-
-  for (const [typingChannelId, entries] of typingByChannel) {
-    if (observerChannelIds.has(typingChannelId)) {
-      continue;
-    }
-    const since = entries.get(key);
-    if (since !== undefined) {
-      channels.push({
-        channelId: typingChannelId,
-        anchorAt: since,
-        source: "typing",
-      });
-    }
-  }
 
   if (channels.length === 0) {
     return IDLE_STATE;
@@ -168,13 +156,8 @@ function computeAgentWorkingState(
     channelId === null
       ? channels
       : channels.filter((channel) => channel.channelId === channelId);
-  const source: AgentWorkingSource = scoped.some(
-    (channel) => channel.source === "observer",
-  )
-    ? "observer"
-    : scoped.length > 0
-      ? "typing"
-      : "none";
+  const source: AgentWorkingSource =
+    scoped.length > 0 ? "observer" : "none";
 
   return { working: source !== "none", source, channels };
 }
@@ -201,10 +184,8 @@ export function getAgentWorkingState(
 }
 
 /**
- * All channels with agent work in progress, aggregated across agents and
- * merged observer-primary: typing-only agents fold into an existing observer
- * summary; channels with only typing get a typing-sourced summary anchored to
- * first-seen typing.
+ * All channels with agent work in progress, aggregated across agents from
+ * observer-derived active turns only.
  */
 export function getWorkingChannels(): WorkingChannelSummary[] {
   if (channelsCache) {
@@ -214,43 +195,6 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
   const byChannel = new Map<string, WorkingChannelSummary>();
   for (const summary of getActiveTurnsByChannel()) {
     byChannel.set(summary.channelId, { ...summary, source: "observer" });
-  }
-
-  for (const [channelId, entries] of typingByChannel) {
-    const existing = byChannel.get(channelId);
-    if (existing) {
-      const known = new Set(
-        existing.agentPubkeys.map((pubkey) => normalizePubkey(pubkey)),
-      );
-      const merged = [...existing.agentPubkeys];
-      for (const pubkey of entries.keys()) {
-        if (!known.has(pubkey)) {
-          merged.push(pubkey);
-        }
-      }
-      if (merged.length !== existing.agentPubkeys.length) {
-        byChannel.set(channelId, {
-          ...existing,
-          agentPubkeys: merged,
-          agentCount: merged.length,
-        });
-      }
-      continue;
-    }
-
-    let anchorAt = Number.POSITIVE_INFINITY;
-    for (const since of entries.values()) {
-      if (since < anchorAt) {
-        anchorAt = since;
-      }
-    }
-    byChannel.set(channelId, {
-      channelId,
-      anchorAt,
-      agentCount: entries.size,
-      agentPubkeys: [...entries.keys()],
-      source: "typing",
-    });
   }
 
   const result = [...byChannel.values()].sort((a, b) =>
@@ -263,8 +207,8 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
 const EMPTY_PUBKEYS: string[] = [];
 
 /**
- * Normalized pubkeys of every agent working in the given channel
- * (observer turns ∪ typing fallback). Stable while subscribed.
+ * Normalized pubkeys of every agent with an observer-backed active turn in
+ * the given channel. Stable while subscribed.
  */
 export function getWorkingAgentPubkeysForChannel(
   channelId: string | null | undefined,
@@ -283,12 +227,6 @@ export function getWorkingAgentPubkeysForChannel(
     }
     for (const pubkey of summary.agentPubkeys) {
       merged.add(normalizePubkey(pubkey));
-    }
-  }
-  const typing = typingByChannel.get(channelId);
-  if (typing) {
-    for (const pubkey of typing.keys()) {
-      merged.add(pubkey);
     }
   }
   const result = merged.size === 0 ? EMPTY_PUBKEYS : [...merged].sort();
