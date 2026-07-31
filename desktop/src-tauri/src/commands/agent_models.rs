@@ -683,9 +683,9 @@ async fn discover_anthropic_models(
 
 #[path = "agent_models_databricks.rs"]
 mod databricks;
+use databricks::discover_databricks_models;
 #[cfg(test)]
-use databricks::databricks_static_token_error;
-use databricks::{discover_databricks_models, is_databricks_provider};
+use databricks::{databricks_static_token_error, is_databricks_provider};
 
 /// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
 /// to `record`, enforcing the linked-instance write guard: a definition-linked
