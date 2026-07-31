@@ -612,6 +612,13 @@ pub fn spawn_agent_child(
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
+    if let Some(runtime) = runtime_meta {
+        crate::commands::numbat_findings::prepare_numbat_monitoring_async(
+            app.clone(),
+            runtime.id.to_string(),
+            record.pubkey.clone(),
+        );
+    }
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }

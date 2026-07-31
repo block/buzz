@@ -1,13 +1,16 @@
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read as _, Seek as _, SeekFrom},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::managed_agents::managed_agents_base_dir;
+use crate::managed_agents::{atomic_write_json_restricted, managed_agents_base_dir};
 
 const NUMBAT_SCHEMA_VERSION: &str = "0.2.0";
 const MAX_BATCH_BYTES: u64 = 1024 * 1024;
@@ -15,6 +18,9 @@ const MAX_BACKLOG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_RECORDS_PER_BATCH: usize = 200;
 const MAX_IDENTIFIER_CHARS: usize = 160;
+const MAX_LOCAL_RECORD_BYTES: u64 = 8 * 1024 * 1024;
+const NUMBAT_INSTALL_TIMEOUT: Duration = Duration::from_secs(10);
+static NUMBAT_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -37,7 +43,15 @@ pub struct NumbatFindingBatch {
     next_offset: u64,
     reset: bool,
     rejected_records: usize,
+    health: NumbatGuardianHealth,
     findings: Vec<NumbatFindingProjection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NumbatGuardianHealth {
+    state: String,
+    detail: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,11 +79,18 @@ struct NumbatBuzzContext {
     turn_id: Option<String>,
 }
 
+fn numbat_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(managed_agents_base_dir(app)?.join("numbat"))
+}
+
 fn numbat_findings_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, String> {
     validate_agent_pubkey(agent_pubkey)?;
-    Ok(managed_agents_base_dir(app)?
-        .join("numbat")
-        .join(format!("{agent_pubkey}.ndjson")))
+    Ok(numbat_dir(app)?.join("live.ndjson"))
+}
+
+fn health_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, String> {
+    validate_agent_pubkey(agent_pubkey)?;
+    Ok(numbat_dir(app)?.join(format!("{agent_pubkey}.health.json")))
 }
 
 fn validate_agent_pubkey(value: &str) -> Result<(), String> {
@@ -111,7 +132,13 @@ fn safe_timestamp(value: String) -> Option<String> {
     Some(value)
 }
 
-fn project_finding(line: &[u8]) -> Option<NumbatFindingProjection> {
+fn project_finding(
+    line: &[u8],
+    expected_agent_pubkey: &str,
+    expected_session_id: &str,
+    expected_channel_id: &str,
+    expected_turn_id: &str,
+) -> Option<NumbatFindingProjection> {
     let record: NumbatFindingRecord = serde_json::from_slice(line).ok()?;
     if record.schema_version != NUMBAT_SCHEMA_VERSION || record.record_type != "finding" {
         return None;
@@ -122,16 +149,21 @@ fn project_finding(line: &[u8]) -> Option<NumbatFindingProjection> {
         _ => return None,
     };
     let rule_id = safe_identifier(record.rule_id)?;
+    let source_agent = safe_identifier(record.source_agent)?;
+    if source_agent != expected_agent_pubkey {
+        return None;
+    }
 
-    let (channel_id, turn_id) = record
-        .buzz_context
-        .map(|context| {
-            (
-                context.channel_id.and_then(safe_identifier),
-                context.turn_id.and_then(safe_identifier),
-            )
-        })
-        .unwrap_or_default();
+    let session_id = record.session_id.and_then(safe_identifier)?;
+    if session_id != expected_session_id {
+        return None;
+    }
+    let source_context = record.buzz_context?;
+    let channel_id = source_context.channel_id.and_then(safe_identifier)?;
+    let turn_id = source_context.turn_id.and_then(safe_identifier)?;
+    if channel_id != expected_channel_id || turn_id != expected_turn_id {
+        return None;
+    }
 
     Some(NumbatFindingProjection {
         finding_id: safe_identifier(record.finding_id)?,
@@ -139,10 +171,10 @@ fn project_finding(line: &[u8]) -> Option<NumbatFindingProjection> {
         rule_id,
         severity,
         detected_at: safe_timestamp(record.detected_at)?,
-        source_agent: safe_identifier(record.source_agent)?,
-        session_id: record.session_id.and_then(safe_identifier),
-        channel_id,
-        turn_id,
+        source_agent,
+        session_id: Some(session_id),
+        channel_id: Some(channel_id),
+        turn_id: Some(turn_id),
         evidence_count: record.cited_event_ids.len().min(1000),
     })
 }
@@ -174,6 +206,8 @@ fn align_to_next_record(file: &mut File, start: u64) -> Result<u64, String> {
 fn read_numbat_findings_from_path(
     path: &Path,
     requested_offset: u64,
+    expected_context: Option<(&str, &str, &str, &str)>,
+    health: NumbatGuardianHealth,
 ) -> Result<NumbatFindingBatch, String> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -182,6 +216,7 @@ fn read_numbat_findings_from_path(
                 next_offset: 0,
                 reset: requested_offset != 0,
                 rejected_records: 0,
+                health,
                 findings: Vec::new(),
             });
         }
@@ -225,9 +260,13 @@ fn read_numbat_findings_from_path(
         }
         if line.len() > MAX_LINE_BYTES {
             rejected_records += 1;
-        } else if let Some(finding) = project_finding(line) {
-            findings.push(finding);
-        } else {
+        } else if let Some((agent_pubkey, session_id, channel_id, turn_id)) = expected_context {
+            if let Some(finding) =
+                project_finding(line, agent_pubkey, session_id, channel_id, turn_id)
+            {
+                findings.push(finding);
+            }
+        } else if serde_json::from_slice::<NumbatFindingRecord>(line).is_err() {
             rejected_records += 1;
         }
 
@@ -240,8 +279,177 @@ fn read_numbat_findings_from_path(
         next_offset,
         reset,
         rejected_records,
+        health,
         findings,
     })
+}
+
+fn write_health(app: &AppHandle, agent_pubkey: &str, health: &NumbatGuardianHealth) {
+    let Ok(dir) = numbat_dir(app) else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() || set_private_permissions(&dir, 0o700).is_err() {
+        return;
+    }
+    let Ok(path) = health_path(app, agent_pubkey) else {
+        return;
+    };
+    if let Ok(bytes) = serde_json::to_vec(health) {
+        let _ = atomic_write_json_restricted(&path, &bytes);
+    }
+}
+
+fn read_health(app: &AppHandle, agent_pubkey: &str) -> NumbatGuardianHealth {
+    if let Ok(path) = health_path(app, agent_pubkey) {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(health) = serde_json::from_slice(&bytes) {
+                return health;
+            }
+        }
+    }
+    NumbatGuardianHealth {
+        state: "disconnected".into(),
+        detail: "Guardian has not been attached to this runtime yet.".into(),
+    }
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("failed to protect Guardian storage: {error}"))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path, _mode: u32) -> Result<(), String> {
+    Err("Guardian evidence storage is disabled because owner-only permissions are unavailable on this platform.".into())
+}
+
+fn run_numbat_install(
+    binary: &Path,
+    runtime: &str,
+    findings: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut child = Command::new(binary)
+        .args([
+            "hook",
+            "install",
+            "--agent",
+            runtime,
+            "--emit",
+            "findings",
+            "--output",
+            "file",
+            "--output-file",
+        ])
+        .arg(findings)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to configure Numbat: {error}"))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("Numbat hook install exited with {status}")),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Numbat hook install timed out after {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to wait for Numbat: {error}"));
+            }
+        }
+    }
+}
+
+/// Idempotently attach Numbat's monitor-only callbacks outside the managed
+/// runtime's spawn critical path. Numbat is callback-based (not a daemon), so
+/// lifecycle management means keeping the hook and its local sink healthy.
+fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str) {
+    let runtime = match runtime {
+        "codex" | "claude" | "goose" => runtime,
+        _ => return,
+    };
+    let Some(binary) = crate::managed_agents::resolve_command("numbat") else {
+        write_health(
+            app,
+            agent_pubkey,
+            &NumbatGuardianHealth {
+                state: "unsupported".into(),
+                detail: "Numbat is not installed on this device.".into(),
+            },
+        );
+        return;
+    };
+    let result = (|| -> Result<(), String> {
+        let dir = numbat_dir(app)?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("failed to create Guardian storage: {error}"))?;
+        set_private_permissions(&dir, 0o700)?;
+        let findings = dir.join("live.ndjson");
+        if findings
+            .metadata()
+            .is_ok_and(|meta| meta.len() > MAX_LOCAL_RECORD_BYTES)
+        {
+            let previous = dir.join("live.previous.ndjson");
+            if previous.exists() {
+                std::fs::remove_file(&previous)
+                    .map_err(|error| format!("failed to rotate Guardian storage: {error}"))?;
+            }
+            std::fs::rename(&findings, previous)
+                .map_err(|error| format!("failed to rotate Guardian storage: {error}"))?;
+        }
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        options
+            .open(&findings)
+            .map_err(|error| format!("failed to open Guardian storage: {error}"))?;
+        set_private_permissions(&findings, 0o600)?;
+
+        let lock = NUMBAT_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Numbat installation lock is unavailable".to_string())?;
+        run_numbat_install(&binary, runtime, &findings, NUMBAT_INSTALL_TIMEOUT)
+    })();
+    let health = match result {
+        Ok(()) => NumbatGuardianHealth {
+            state: "configured".into(),
+            detail: format!(
+                "{runtime} monitoring is configured in detection-only mode; callback activity and managed-agent identity are not yet verified."
+            ),
+        },
+        Err(detail) => NumbatGuardianHealth {
+            state: "disconnected".into(),
+            detail,
+        },
+    };
+    write_health(app, agent_pubkey, &health);
+}
+
+pub(crate) fn prepare_numbat_monitoring_async(
+    app: AppHandle,
+    runtime: String,
+    agent_pubkey: String,
+) {
+    std::thread::spawn(move || prepare_numbat_monitoring(&app, &runtime, &agent_pubkey));
 }
 
 /// Read and privacy-project a bounded batch of local Numbat finding records for
@@ -252,9 +460,22 @@ pub fn read_numbat_findings(
     app: AppHandle,
     agent_pubkey: String,
     offset: Option<u64>,
+    session_id: Option<String>,
+    channel_id: Option<String>,
+    turn_id: Option<String>,
 ) -> Result<NumbatFindingBatch, String> {
     let path = numbat_findings_path(&app, &agent_pubkey)?;
-    read_numbat_findings_from_path(&path, offset.unwrap_or(0))
+    let expected_context = session_id
+        .as_deref()
+        .zip(channel_id.as_deref())
+        .zip(turn_id.as_deref())
+        .map(|((session, channel), turn)| (agent_pubkey.as_str(), session, channel, turn));
+    read_numbat_findings_from_path(
+        &path,
+        offset.unwrap_or(0),
+        expected_context,
+        read_health(&app, &agent_pubkey),
+    )
 }
 
 #[cfg(test)]
@@ -262,6 +483,8 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    const TEST_AGENT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn finding_json(overrides: serde_json::Value) -> String {
         let mut value = serde_json::json!({
@@ -272,7 +495,7 @@ mod tests {
             "title": "Secret access followed by network egress",
             "severity": "high",
             "detected_at": "2026-07-30T14:40:00Z",
-            "source_agent": "codex",
+            "source_agent": TEST_AGENT,
             "session_id": "session-safe-01",
             "buzz_context": {
                 "channel_id": "channel-safe-01",
@@ -295,10 +518,23 @@ mod tests {
         serde_json::to_string(&value).expect("serialize fixture")
     }
 
+    fn test_health() -> NumbatGuardianHealth {
+        NumbatGuardianHealth {
+            state: "configured".into(),
+            detail: "test".into(),
+        }
+    }
+
     #[test]
     fn projection_excludes_sensitive_source_fields() {
-        let projected =
-            project_finding(finding_json(serde_json::json!({})).as_bytes()).expect("finding");
+        let projected = project_finding(
+            finding_json(serde_json::json!({})).as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
+        )
+        .expect("finding");
         let serialized = serde_json::to_string(&projected).expect("serialize projection");
 
         assert_eq!(projected.severity, "high");
@@ -325,11 +561,19 @@ mod tests {
     #[test]
     fn invalid_schema_severity_and_control_text_are_rejected() {
         assert!(project_finding(
-            finding_json(serde_json::json!({"schema_version": "9.9.9"})).as_bytes()
+            finding_json(serde_json::json!({"schema_version": "9.9.9"})).as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
         )
         .is_none());
         assert!(project_finding(
-            finding_json(serde_json::json!({"severity": "emergency"})).as_bytes()
+            finding_json(serde_json::json!({"severity": "emergency"})).as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
         )
         .is_none());
         let sensitive_title = project_finding(
@@ -337,6 +581,10 @@ mod tests {
                 "title": "Leaked /private/key with token super-secret"
             }))
             .as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
         )
         .expect("finding with untrusted source title");
         assert_eq!(sensitive_title.title, "Possible secret exfiltration");
@@ -361,7 +609,18 @@ mod tests {
             write!(file, "{second}").expect("write partial second");
         }
 
-        let first_batch = read_numbat_findings_from_path(&path, 0).expect("first batch");
+        let first_batch = read_numbat_findings_from_path(
+            &path,
+            0,
+            Some((
+                TEST_AGENT,
+                "session-safe-01",
+                "channel-safe-01",
+                "turn-safe-01",
+            )),
+            test_health(),
+        )
+        .expect("first batch");
         assert_eq!(first_batch.findings.len(), 1);
         assert_eq!(first_batch.findings[0].finding_id, "fnd-first");
 
@@ -372,8 +631,18 @@ mod tests {
                 .expect("append");
             writeln!(file).expect("complete second");
         }
-        let second_batch =
-            read_numbat_findings_from_path(&path, first_batch.next_offset).expect("second batch");
+        let second_batch = read_numbat_findings_from_path(
+            &path,
+            first_batch.next_offset,
+            Some((
+                TEST_AGENT,
+                "session-safe-01",
+                "channel-safe-01",
+                "turn-safe-01",
+            )),
+            test_health(),
+        )
+        .expect("second batch");
         assert_eq!(second_batch.findings.len(), 1);
         assert_eq!(second_batch.findings[0].finding_id, "fnd-second");
     }
@@ -384,8 +653,70 @@ mod tests {
         let path = dir.path().join("findings.ndjson");
         std::fs::write(&path, format!("{}\n", finding_json(serde_json::json!({})))).expect("write");
 
-        let batch = read_numbat_findings_from_path(&path, u64::MAX).expect("batch");
+        let batch = read_numbat_findings_from_path(
+            &path,
+            u64::MAX,
+            Some((
+                TEST_AGENT,
+                "session-safe-01",
+                "channel-safe-01",
+                "turn-safe-01",
+            )),
+            test_health(),
+        )
+        .expect("batch");
         assert!(batch.reset);
         assert_eq!(batch.findings.len(), 1);
+    }
+
+    #[test]
+    fn only_projects_exact_complete_source_context() {
+        let projected = project_finding(
+            finding_json(serde_json::json!({})).as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
+        )
+        .expect("matching context");
+        assert_eq!(projected.channel_id.as_deref(), Some("channel-safe-01"));
+        assert_eq!(projected.turn_id.as_deref(), Some("turn-safe-01"));
+
+        assert!(project_finding(
+            finding_json(serde_json::json!({})).as_bytes(),
+            TEST_AGENT,
+            "another-session",
+            "channel-safe-01",
+            "turn-safe-01",
+        )
+        .is_none());
+        assert!(project_finding(
+            finding_json(serde_json::json!({"buzz_context": null})).as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
+        )
+        .is_none());
+        assert!(project_finding(
+            finding_json(serde_json::json!({
+                "buzz_context": {"channel_id": "other", "turn_id": "turn-safe-01"}
+            }))
+            .as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
+        )
+        .is_none());
+
+        assert!(project_finding(
+            finding_json(serde_json::json!({"source_agent": "codex"})).as_bytes(),
+            TEST_AGENT,
+            "session-safe-01",
+            "channel-safe-01",
+            "turn-safe-01",
+        )
+        .is_none());
     }
 }
