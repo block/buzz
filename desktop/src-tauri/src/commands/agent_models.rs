@@ -732,17 +732,32 @@ async fn discover_databricks_models(
     let api_key = env_or_process_value(env, "DATABRICKS_TOKEN").unwrap_or_default();
 
     let agent_provider = databricks_agent_provider(provider_str);
-    let cfg = buzz_agent_pkg::config::Config::for_discovery(agent_provider, api_key, host);
+    let cfg = buzz_agent_pkg::config::Config::for_discovery(
+        agent_provider,
+        api_key.clone(),
+        host.clone(),
+    );
 
     // Build a redaction env so the token never appears in surfaced errors.
     let token_for_redact = env_or_process_value(env, "DATABRICKS_TOKEN").unwrap_or_default();
     let redaction_env = redaction_env_with_value(env, "DATABRICKS_TOKEN", &token_for_redact);
 
     let entries = match buzz_agent_pkg::discover_databricks_models(&cfg).await {
-        Ok(e) => e,
-        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
-            // No token + no PKCE cache → fall through to subprocess.
-            return Ok(None);
+        Ok(entries) => entries,
+        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) if api_key.is_empty() => {
+            buzz_agent_pkg::authenticate_databricks(&host)
+                .await
+                .map_err(|error| format!("Databricks sign-in failed: {error}"))?;
+            buzz_agent_pkg::discover_databricks_models(&cfg)
+                .await
+                .map_err(|error| {
+                    format!("Databricks model discovery failed after sign-in: {error}")
+                })?
+        }
+        Err(buzz_agent_pkg::AgentError::LlmAuth(error)) => {
+            return Err(format!(
+                "Databricks rejected DATABRICKS_TOKEN; update it in agent settings: {error}"
+            ));
         }
         Err(e) => {
             let msg = crate::managed_agents::redact_env_values_in(&e.to_string(), &redaction_env);

@@ -938,3 +938,43 @@ async fn session_set_model_empty_model_id_returns_error() {
         "error message must mention modelId, got: {msg}"
     );
 }
+
+#[tokio::test]
+async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
+    use axum::http::StatusCode;
+    use buzz_agent::config::{Config, Provider};
+    use buzz_agent::discover_databricks_models;
+
+    let requests = Arc::new(AtomicU64::new(0));
+    let requests_for_route = requests.clone();
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/api/ai-gateway/v2/endpoints",
+        get(move || {
+            let requests = requests_for_route.clone();
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::UNAUTHORIZED, "expired token")
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let cfg = Config::for_discovery(Provider::DatabricksV2, "rejected".into(), host);
+    let error = discover_databricks_models(&cfg).await.unwrap_err();
+
+    assert!(
+        error.to_string().starts_with("llm auth:"),
+        "401 must retain auth semantics: {error}"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "a static token cannot refresh, so discovery must not issue a duplicate request"
+    );
+}
