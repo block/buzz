@@ -3119,8 +3119,37 @@ pub async fn publish_nipia_archival_list(
         );
     }
 
+    // Force created_at strictly past the prior snapshot. Nostr timestamps have
+    // one-second resolution, and replaceable-event ties retain the lowest event
+    // id. Without this guard, rapid archive requests can leave a random
+    // intermediate snapshot authoritative even though every archive delta and
+    // canonical database row was accepted.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = {
+        let existing = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await?;
+        next_replaceable_snapshot_timestamp(
+            now,
+            existing
+                .first()
+                .map(|event| event.event.created_at.as_secs()),
+        )
+    };
+
     let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
         .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
 
@@ -3145,6 +3174,12 @@ pub async fn publish_nipia_archival_list(
         "NIP-IA archived identities list published"
     );
     Ok(())
+}
+
+fn next_replaceable_snapshot_timestamp(now: u64, previous: Option<u64>) -> u64 {
+    previous
+        .map(|timestamp| timestamp.saturating_add(1).max(now))
+        .unwrap_or(now)
 }
 
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
@@ -3363,6 +3398,29 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rapid_replaceable_snapshots_receive_strictly_increasing_timestamps() {
+        let now = 1_000;
+        let mut previous = None;
+        let mut timestamps = Vec::new();
+
+        for _ in 0..6 {
+            let timestamp = next_replaceable_snapshot_timestamp(now, previous);
+            timestamps.push(timestamp);
+            previous = Some(timestamp);
+        }
+
+        assert_eq!(timestamps, vec![1_000, 1_001, 1_002, 1_003, 1_004, 1_005]);
+    }
+
+    #[test]
+    fn replaceable_snapshot_timestamp_does_not_regress_behind_wall_clock() {
+        assert_eq!(
+            next_replaceable_snapshot_timestamp(2_000, Some(1_000)),
+            2_000
+        );
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {
