@@ -512,6 +512,20 @@ impl RestClient {
             .map_err(|e| RelayError::Http(e.to_string()))
     }
 
+    /// Query events through a relay-specific raw filter extension.
+    ///
+    /// `nostr::Filter` intentionally drops unknown fields, so callers that use
+    /// authenticated bridge extensions such as `top_level` must preserve the
+    /// raw JSON object on the wire.
+    pub async fn query_raw_filters(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
     /// Submit a signed event via the HTTP bridge: `POST /events` with NIP-98 auth.
     ///
     /// The event must already be signed. Returns the relay response JSON.

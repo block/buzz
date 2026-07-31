@@ -361,7 +361,8 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_IGNORE_SELF")]
     pub no_ignore_self: bool,
 
-    /// Maximum number of context messages to include for thread replies and DMs.
+    /// Maximum number of context messages to include for channels, thread replies,
+    /// and DMs.
     /// Set to 0 to disable automatic context fetching. Max 100.
     #[arg(long, env = "BUZZ_ACP_CONTEXT_MESSAGE_LIMIT", default_value_t = 12,
           value_parser = clap::value_parser!(u32).range(0..=100))]

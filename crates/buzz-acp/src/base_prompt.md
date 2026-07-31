@@ -9,14 +9,13 @@ Otherwise, the `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_
 | Group | Key commands |
 |-------|-------------|
 | `buzz agents` | `draft-create`, `draft-update` |
-| `buzz messages` | `send`, `get`, `thread`, `search` |
+| `buzz messages` | `send` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
 | `buzz reactions` | `add`, `remove` |
 | `buzz dms` | `list`, `open` |
 | `buzz users` | `get`, `set-profile`, `presence` |
 | `buzz workflows` | `list`, `trigger`, `runs` |
-| `buzz feed` | `get` |
 | `buzz social` | `publish`, `notes` |
 | `buzz repos` | `create`, `get`, `list` |
 | `buzz pr` | `open`, `update`, `get`, `list`, `status` |
@@ -73,17 +72,17 @@ All replies and delegations — including task assignments to other agents — g
 - **Never publish a bare acknowledgement.** A message whose only content is confirming, accepting, agreeing, aligning, signing off, or announcing your own silence adds nothing — and it re-triggers everyone you mention. Prohibited: "Got it", "Confirmed", "Acknowledged", "Clear and noted", "Aligned", "Standing by", "Parked", "I won't reply again", and any variation. If your draft contains nothing beyond acknowledgement, send nothing. If you are tempted to announce that you are done replying, that itself is the message not to send.
 - For work that requires follow-up tools, create an open todo **before** sending the pickup acknowledgment. Keep it open until the deliverable is verified and you have sent a completion or blocker message; never end a turn with open todo state unless you have posted that completion or blocker message.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
-- No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
+- Conversation context is delivered by the harness on each routed turn. Do not poll for history; use the supplied context and the current event.
 - Address people by the name in their own message header.
 - Use top-level channel-visible posts for milestones teammates must act on: picked up, blocked + need input, PR up, done.
 - Praise in public; correct in the work, not the person.
 
 ## Startup Recovery
 
-1. `buzz feed get` — surface pending mentions and action items. Filter by type: `mentions`, `needs_action`, `activity`, `agent_activity`.
-2. `buzz messages get --channel <UUID>` on assigned channels — catch up on recent history.
-3. Check `AGENTS.md` in your working directory for team context.
-4. Check `RESEARCH/`, `GUIDES/`, `PLANS/` before searching externally. Use `buzz messages search --query "..."` for cross-channel keyword lookups.
+Conversation history is harness-supplied each turn. Use `mcp__buzz_message_mcp__send_message` for replies when it appears in your tool list; otherwise follow the current turn's `[Context]` instructions.
+
+1. Check `AGENTS.md` in your working directory for team context.
+2. Check `RESEARCH/`, `GUIDES/`, and `PLANS/` before searching externally.
 
 ## Workspace Layout
 

@@ -521,11 +521,11 @@ pub struct PromptContext {
     /// (`include_str!`) is inherently `'static`.
     pub base_prompt: Option<&'static str>,
     pub cwd: String,
-    /// REST client for pre-prompt context fetches (thread/DM history).
+    /// REST client for pre-prompt context fetches (channel/thread/DM history).
     pub rest_client: RestClient,
     /// Shared channel metadata for startup-known and dynamically joined channels.
     pub channel_info: ChannelInfoResolver,
-    /// Max messages to include in thread/DM context. 0 = disabled.
+    /// Max messages to include in channel/thread/DM context. 0 = disabled.
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
@@ -1892,6 +1892,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                secure_messaging: has_secure_buzz_messaging(&ctx.mcp_servers),
             },
         )
     } else {
@@ -2618,10 +2619,9 @@ pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uui
     )
 }
 
-/// Fetch conversation context (thread or DM) for a batch before prompting.
+/// Fetch conversation context (thread, DM, or channel) for a batch before prompting.
 ///
 /// Returns `None` if:
-/// - The event is a plain channel message (not a thread reply, not a DM)
 /// - The REST fetch fails or times out (graceful degradation)
 /// - `context_message_limit` is 0
 ///
@@ -2652,7 +2652,15 @@ async fn fetch_conversation_context(
         return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
     }
 
-    None
+    // Plain channel message: fetch recent top-level channel history.
+    fetch_channel_context(batch.channel_id, limit, &ctx.rest_client).await
+}
+
+/// Whether the configured MCP servers include the send-only buzz-message-mcp.
+pub(crate) fn has_secure_buzz_messaging(mcp_servers: &[McpServer]) -> bool {
+    mcp_servers
+        .iter()
+        .any(|server| server.name == "buzz-message-mcp")
 }
 
 /// Normalize AND validate a pubkey for the batch profile API request.
@@ -2685,7 +2693,8 @@ fn collect_prompt_pubkeys(
 
     let context_messages = match conversation_context {
         Some(ConversationContext::Thread { messages, .. })
-        | Some(ConversationContext::Dm { messages, .. }) => Some(messages),
+        | Some(ConversationContext::Dm { messages, .. })
+        | Some(ConversationContext::Channel { messages, .. }) => Some(messages),
         None => None,
     };
 
@@ -2913,6 +2922,158 @@ async fn fetch_dm_context(
         }
     })
     .await
+}
+
+/// Fetch recent channel messages via Nostr query: stream messages by `#h` tag.
+async fn fetch_channel_context(
+    channel_id: Uuid,
+    limit: u32,
+    rest: &RestClient,
+) -> Option<ConversationContext> {
+    let filter = channel_context_filter(channel_id, limit);
+
+    fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            rest.query_raw_filters(std::slice::from_ref(&filter)),
+        )
+        .await
+        {
+            Ok(Ok(json)) => parse_nostr_channel_response(json, channel_id, limit),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    "channel context fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    "channel context fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await
+}
+
+/// Build the authenticated bridge's server-side top-level channel-window query.
+///
+/// Vanilla Nostr filters cannot express "no reply e-tag". The relay's frozen
+/// `top_level` extension applies that predicate before the row limit and emits
+/// a kind-39006 bounds overlay with the authoritative `has_more` result.
+fn channel_context_filter(channel_id: Uuid, limit: u32) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            buzz_core::kind::KIND_STREAM_MESSAGE_V2,
+        ],
+        "#h": [channel_id.to_string()],
+        "limit": limit,
+        "top_level": true,
+    })
+}
+
+/// Whether a Nostr event JSON value is a supported stream-message kind.
+fn is_supported_stream_message_kind(kind: u32) -> bool {
+    kind == buzz_core::kind::KIND_STREAM_MESSAGE || kind == buzz_core::kind::KIND_STREAM_MESSAGE_V2
+}
+
+/// Extract the `#h` channel tag from a Nostr event JSON value.
+fn event_channel_tag(ev: &serde_json::Value) -> Option<&str> {
+    ev.get("tags")?.as_array()?.iter().find_map(|tag| {
+        let parts = tag.as_array()?;
+        if parts.first()?.as_str()? == "h" && parts.len() >= 2 {
+            parts[1].as_str()
+        } else {
+            None
+        }
+    })
+}
+
+/// Whether an event carries a Nostr thread/reference tag.
+fn event_has_thread_tag(ev: &serde_json::Value) -> bool {
+    ev.get("tags")
+        .and_then(|tags| tags.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array()
+                    .and_then(|parts| parts.first())
+                    .and_then(|part| part.as_str())
+                    == Some("e")
+            })
+        })
+}
+
+/// Read the relay-authored channel-window exhaustion fact.
+fn channel_window_has_more(events: &[serde_json::Value], channel_id: Uuid) -> Option<bool> {
+    let channel_str = channel_id.to_string();
+    events.iter().find_map(|event| {
+        let kind = event.get("kind")?.as_u64()? as u32;
+        if kind != buzz_core::kind::KIND_WINDOW_BOUNDS
+            || event_channel_tag(event) != Some(channel_str.as_str())
+        {
+            return None;
+        }
+        let content = event.get("content")?.as_str()?;
+        serde_json::from_str::<serde_json::Value>(content)
+            .ok()?
+            .get("has_more")?
+            .as_bool()
+    })
+}
+
+/// Parse a Nostr query response (array of events) into channel context.
+///
+/// Validates channel, kind, and top-level status; sorts chronologically (oldest
+/// first); and caps at `limit` messages (keeping the most recent).
+fn parse_nostr_channel_response(
+    json: serde_json::Value,
+    channel_id: Uuid,
+    limit: u32,
+) -> Option<ConversationContext> {
+    let events = json.as_array()?;
+    // Missing/malformed bounds cannot prove exhaustion. Mark the display
+    // conservatively so it never claims the supplied window is complete.
+    let relay_has_more = channel_window_has_more(events, channel_id).unwrap_or(true);
+    let channel_str = channel_id.to_string();
+
+    let mut messages: Vec<(u64, ContextMessage)> = events
+        .iter()
+        .filter(|ev| {
+            let kind = ev.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            if !is_supported_stream_message_kind(kind) {
+                return false;
+            }
+            event_channel_tag(ev) == Some(channel_str.as_str()) && !event_has_thread_tag(ev)
+        })
+        .filter_map(|ev| {
+            let ts = ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            json_to_context_message(ev).map(|msg| (ts, msg))
+        })
+        .collect();
+
+    messages.sort_by_key(|(ts, _)| *ts);
+
+    let valid_count = messages.len();
+    if messages.len() > limit as usize {
+        let skip = messages.len() - limit as usize;
+        messages = messages.split_off(skip);
+    }
+
+    let messages: Vec<ContextMessage> = messages.into_iter().map(|(_, msg)| msg).collect();
+    let truncated = valid_count > limit as usize || relay_has_more;
+
+    if messages.is_empty() {
+        return None;
+    }
+
+    Some(ConversationContext::Channel {
+        messages,
+        truncated,
+    })
 }
 
 /// Parse the legacy REST thread response (used in tests only).
@@ -4209,6 +4370,247 @@ mod tests {
             "next_cursor": null
         });
         assert!(parse_dm_response(json, 12).is_none());
+    }
+
+    #[test]
+    fn test_parse_nostr_channel_response_chronological_order() {
+        let channel_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let json = json!([
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000002",
+                "pubkey": "pub2",
+                "kind": 9,
+                "content": "newer",
+                "created_at": 200,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000001",
+                "pubkey": "pub1",
+                "kind": 9,
+                "content": "older",
+                "created_at": 100,
+                "tags": [["h", channel_id.to_string()]]
+            }
+        ]);
+
+        let ctx = parse_nostr_channel_response(json, channel_id, 12).expect("should parse");
+        match ctx {
+            ConversationContext::Channel { messages, .. } => {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(messages[0].content, "older");
+                assert_eq!(messages[1].content, "newer");
+            }
+            _ => panic!("expected Channel context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_channel_response_filters_wrong_channel_kind_and_thread() {
+        let channel_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let other_channel = Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let json = json!([
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000001",
+                "pubkey": "pub1",
+                "kind": 9,
+                "content": "valid",
+                "created_at": 100,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000002",
+                "pubkey": "pub2",
+                "kind": 9,
+                "content": "wrong channel",
+                "created_at": 200,
+                "tags": [["h", other_channel.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000003",
+                "pubkey": "pub3",
+                "kind": 39000,
+                "content": "metadata only",
+                "created_at": 300,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000004",
+                "pubkey": "pub4",
+                "kind": 9,
+                "content": "thread reply",
+                "created_at": 400,
+                "tags": [
+                    ["h", channel_id.to_string()],
+                    ["e", "root-event-id", "", "reply"]
+                ]
+            }
+        ]);
+
+        let ctx = parse_nostr_channel_response(json, channel_id, 12).expect("should parse");
+        match ctx {
+            ConversationContext::Channel { messages, .. } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "valid");
+            }
+            _ => panic!("expected Channel context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_channel_response_truncates_to_limit() {
+        let channel_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let json = json!([
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000001",
+                "pubkey": "pub1",
+                "kind": 9,
+                "content": "oldest",
+                "created_at": 100,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000002",
+                "pubkey": "pub2",
+                "kind": 9,
+                "content": "middle",
+                "created_at": 200,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000003",
+                "pubkey": "pub3",
+                "kind": 9,
+                "content": "newest",
+                "created_at": 300,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000004",
+                "pubkey": "relay",
+                "kind": 39006,
+                "content": serde_json::json!({
+                    "has_more": true,
+                    "next_cursor": {"created_at": 100, "id": "cursor"}
+                }).to_string(),
+                "created_at": 301,
+                "tags": [["h", channel_id.to_string()]]
+            }
+        ]);
+
+        let ctx = parse_nostr_channel_response(json, channel_id, 2).expect("should parse");
+        match ctx {
+            ConversationContext::Channel {
+                messages,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(messages[0].content, "middle");
+                assert_eq!(messages[1].content, "newest");
+                assert!(truncated);
+            }
+            _ => panic!("expected Channel context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_channel_response_exact_limit_is_not_fabricated_truncation() {
+        let channel_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let json = json!([
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000001",
+                "pubkey": "pub1",
+                "kind": 9,
+                "content": "older",
+                "created_at": 100,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000002",
+                "pubkey": "pub2",
+                "kind": 9,
+                "content": "newer",
+                "created_at": 200,
+                "tags": [["h", channel_id.to_string()]]
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000003",
+                "pubkey": "relay",
+                "kind": 39006,
+                "content": serde_json::json!({
+                    "has_more": false,
+                    "next_cursor": null
+                }).to_string(),
+                "created_at": 201,
+                "tags": [["h", channel_id.to_string()]]
+            }
+        ]);
+
+        let ctx = parse_nostr_channel_response(json, channel_id, 2).expect("should parse");
+        match ctx {
+            ConversationContext::Channel {
+                messages,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 2);
+                assert!(!truncated);
+            }
+            _ => panic!("expected Channel context"),
+        }
+    }
+
+    #[test]
+    fn test_channel_context_filter_uses_server_side_top_level_window() {
+        let channel_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let filter = channel_context_filter(channel_id, 12);
+
+        assert_eq!(filter["#h"], json!([channel_id.to_string()]));
+        assert_eq!(
+            filter["kinds"],
+            json!([
+                buzz_core::kind::KIND_STREAM_MESSAGE,
+                buzz_core::kind::KIND_STREAM_MESSAGE_V2
+            ])
+        );
+        assert_eq!(filter["limit"], json!(12));
+        assert_eq!(filter["top_level"], json!(true));
+    }
+
+    #[test]
+    fn test_parse_nostr_channel_response_missing_bounds_is_conservative() {
+        let channel_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let json = json!([{
+            "id": "0000000000000000000000000000000000000000000000000000000000000001",
+            "pubkey": "pub1",
+            "kind": 9,
+            "content": "message",
+            "created_at": 100,
+            "tags": [["h", channel_id.to_string()]]
+        }]);
+
+        let ctx = parse_nostr_channel_response(json, channel_id, 12).expect("should parse");
+        match ctx {
+            ConversationContext::Channel { truncated, .. } => assert!(truncated),
+            _ => panic!("expected Channel context"),
+        }
+    }
+
+    #[test]
+    fn test_has_secure_buzz_messaging_detects_message_mcp() {
+        use crate::acp::McpServer;
+        assert!(!has_secure_buzz_messaging(&[]));
+        assert!(has_secure_buzz_messaging(&[McpServer {
+            name: "buzz-message-mcp".into(),
+            command: "buzz-message-mcp".into(),
+            args: vec![],
+            env: vec![],
+        }]));
+        assert!(!has_secure_buzz_messaging(&[McpServer {
+            name: "buzz-dev-mcp".into(),
+            command: "buzz-dev-mcp".into(),
+            args: vec![],
+            env: vec![],
+        }]));
     }
 
     #[test]

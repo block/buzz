@@ -2023,6 +2023,20 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
+                            // Relay-synthesized state overlays support clients and
+                            // context fetches; they are never user or agent work.
+                            // Dropping them here prevents wildcard subscriptions
+                            // from turning a thread-summary update into a model
+                            // turn whose reply produces another summary update.
+                            if is_non_promptable_relay_state_kind(kind_u32) {
+                                tracing::debug!(
+                                    channel_id = %buzz_event.channel_id,
+                                    kind = kind_u32,
+                                    "dropping relay-only state event before prompt"
+                                );
+                                continue;
+                            }
+
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
@@ -2745,6 +2759,10 @@ fn is_owner_control_command(
     kind_u32 == KIND_STREAM_MESSAGE
         && event.content.trim() == command
         && event_mentions_agent(event, agent_pubkey_hex)
+}
+
+fn is_non_promptable_relay_state_kind(kind_u32: u32) -> bool {
+    buzz_core::kind::is_relay_only_kind(kind_u32)
 }
 
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
@@ -4787,6 +4805,45 @@ mod author_gate_tests {
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
         );
+    }
+}
+
+#[cfg(test)]
+mod relay_state_gate_tests {
+    use super::*;
+    use buzz_core::kind::{
+        KIND_CHANNEL_SUMMARY, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+        KIND_PRESENCE_SNAPSHOT, KIND_THREAD_SUMMARY, KIND_WINDOW_BOUNDS,
+    };
+
+    #[test]
+    fn relay_state_overlays_never_open_model_turns() {
+        for kind in [
+            KIND_CHANNEL_SUMMARY,
+            KIND_PRESENCE_SNAPSHOT,
+            KIND_THREAD_SUMMARY,
+            KIND_WINDOW_BOUNDS,
+        ] {
+            assert!(
+                is_non_promptable_relay_state_kind(kind),
+                "relay state kind {kind} must be dropped before prompting"
+            );
+        }
+    }
+
+    #[test]
+    fn work_and_membership_notifications_retain_existing_paths() {
+        for kind in [
+            KIND_STREAM_MESSAGE,
+            KIND_WORKFLOW_APPROVAL_REQUESTED,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            KIND_MEMBER_REMOVED_NOTIFICATION,
+        ] {
+            assert!(
+                !is_non_promptable_relay_state_kind(kind),
+                "work or membership kind {kind} must not be swallowed by relay state gating"
+            );
+        }
     }
 }
 

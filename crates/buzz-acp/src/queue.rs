@@ -980,6 +980,11 @@ pub enum ConversationContext {
         total: usize,
         truncated: bool,
     },
+    /// Recent top-level channel messages (not a thread reply, not a DM).
+    Channel {
+        messages: Vec<ContextMessage>,
+        truncated: bool,
+    },
 }
 
 /// A single message in a conversation context section.
@@ -1143,17 +1148,27 @@ pub(crate) fn format_event_block(
 
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
-/// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
-/// while still allowing an explicit human request to post at the channel root or
-/// top level.
-fn append_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
-         If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
-         If the requested destination is ambiguous, ask before sending."
-    ));
+/// Secure agents receive a tool argument, never a terminal command. Other
+/// agents retain the CLI instruction.
+fn append_reply_instruction(s: &mut String, event_id: &str, secure_messaging: bool) {
+    if secure_messaging {
+        s.push_str(&format!(
+            "\nIMPORTANT: For ordinary replies in this turn, call \
+             `mcp__buzz_message_mcp__send_message` with its `reply_to` argument \
+             set to `{event_id}` so the conversation stays threaded. If the \
+             human explicitly asks for a channel-root, top-level, or broadcast \
+             post, omit `reply_to`. If the requested destination is ambiguous, \
+             ask before sending."
+        ));
+    } else {
+        s.push_str(&format!(
+            "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
+             on `buzz messages send` so the conversation stays threaded. \
+             If the human explicitly asks for a channel-root, top-level, \
+             or broadcast post, send that message without `--reply-to`. \
+             If the requested destination is ambiguous, ask before sending."
+        ));
+    }
 }
 
 /// Append a new-thread reply instruction for a human-facing top-level mention.
@@ -1161,14 +1176,25 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
 /// The triggering mention has no thread tags, so the agent's reply becomes the
 /// thread root. Anchoring to the triggering event (rather than leaving the
 /// choice open) prevents replying into a stale/unrelated prior thread.
-fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
-         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
-         (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
-    ));
+fn append_new_thread_reply_instruction(s: &mut String, event_id: &str, secure_messaging: bool) {
+    if secure_messaging {
+        s.push_str(&format!(
+            "\nIMPORTANT: This is a new top-level message. For ordinary replies \
+             in this turn, call `mcp__buzz_message_mcp__send_message` with its \
+             `reply_to` argument set to `{event_id}` — the triggering message \
+             is the thread root. Do NOT reply into any other (older) thread. \
+             If the human explicitly asks for a channel-root, top-level, or \
+             broadcast post, omit `reply_to`."
+        ));
+    } else {
+        s.push_str(&format!(
+            "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
+             this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
+             triggering message is the thread root. Do NOT reply into any other \
+             (older) thread. If the human explicitly asks for a channel-root, \
+             top-level, or broadcast post, send that message without `--reply-to`."
+        ));
+    }
 }
 
 /// Decide whether a turn is human-facing for reply-anchor purposes.
@@ -1223,6 +1249,14 @@ fn resolve_reply_anchor(
     )
 }
 
+/// Hint text when secure messaging (`buzz-message-mcp`) is active.
+const SECURE_CONTEXT_HINT: &str =
+    "Conversation context is harness-supplied; use the send_message tool for replies.";
+
+/// Hint text when secure messaging is active and context was fetched.
+const SECURE_CONTEXT_INCLUDED_HINT: &str =
+    "Channel context included below. Conversation history is harness-supplied; use the send_message tool for replies.";
+
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
@@ -1237,6 +1271,7 @@ fn format_context_hints(
     is_dm: bool,
     has_conversation_context: bool,
     reply_anchor: Option<&str>,
+    secure_messaging: bool,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
@@ -1249,7 +1284,15 @@ fn format_context_hints(
         let is_reply = thread_tags.root_event_id.is_some();
         // DM replies use thread command because /messages excludes thread replies.
         // DM non-replies use get for recent conversation.
-        let ctx_hint = if has_conversation_context && is_reply {
+        let ctx_hint = if secure_messaging {
+            if has_conversation_context && is_reply {
+                "Thread context included below. Conversation history is harness-supplied; use the send_message tool for replies."
+            } else if has_conversation_context {
+                "Conversation context included below. Conversation history is harness-supplied; use the send_message tool for replies."
+            } else {
+                SECURE_CONTEXT_HINT
+            }
+        } else if has_conversation_context && is_reply {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else if has_conversation_context {
             "Conversation context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
@@ -1273,12 +1316,18 @@ fn format_context_hints(
                 }
             }
             if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
+                append_reply_instruction(&mut s, event_id, secure_messaging);
             }
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
-        let ctx_hint = if has_conversation_context {
+        let ctx_hint = if secure_messaging {
+            if has_conversation_context {
+                "Thread context included below. Conversation history is harness-supplied; use the send_message tool for replies."
+            } else {
+                SECURE_CONTEXT_HINT
+            }
+        } else if has_conversation_context {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch thread context."
@@ -1296,18 +1345,29 @@ fn format_context_hints(
         }
         s.push_str(&format!("\n{ctx_hint}"));
         if let Some(event_id) = reply_anchor {
-            append_reply_instruction(&mut s, event_id);
+            append_reply_instruction(&mut s, event_id, secure_messaging);
         }
         s
     } else {
+        let ctx_hint = if secure_messaging {
+            if has_conversation_context {
+                SECURE_CONTEXT_INCLUDED_HINT
+            } else {
+                SECURE_CONTEXT_HINT
+            }
+        } else if has_conversation_context {
+            "Channel context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
+        } else {
+            "Use `buzz messages get --channel <UUID>` for recent messages if needed."
+        };
         let mut s = format!(
             "[Context]\n\
              Scope: channel\n\
              Channel: {channel_display}\n\
-             Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
+             Hint: {ctx_hint}"
         );
         if let Some(event_id) = reply_anchor {
-            append_new_thread_reply_instruction(&mut s, event_id);
+            append_new_thread_reply_instruction(&mut s, event_id, secure_messaging);
         }
         s
     }
@@ -1318,24 +1378,52 @@ fn format_conversation_context(
     ctx: &ConversationContext,
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> String {
-    let (label, messages, total, truncated) = match ctx {
+    let (header, messages) = match ctx {
         ConversationContext::Thread {
             messages,
             total,
             truncated,
-        } => ("Thread Context", messages, total, truncated),
+        } => {
+            let trunc_label = if *truncated { ", truncated" } else { "" };
+            (
+                format!(
+                    "[Thread Context ({} of {total} messages{trunc_label})]",
+                    messages.len()
+                ),
+                messages,
+            )
+        }
         ConversationContext::Dm {
             messages,
             total,
             truncated,
-        } => ("Conversation Context", messages, total, truncated),
+        } => {
+            let trunc_label = if *truncated { ", truncated" } else { "" };
+            (
+                format!(
+                    "[Conversation Context ({} of {total} messages{trunc_label})]",
+                    messages.len()
+                ),
+                messages,
+            )
+        }
+        ConversationContext::Channel {
+            messages,
+            truncated,
+        } => {
+            let qualifier = if *truncated {
+                format!(
+                    "latest {} messages, older history may be omitted",
+                    messages.len()
+                )
+            } else {
+                format!("{} messages", messages.len())
+            };
+            (format!("[Channel Context ({qualifier})]"), messages)
+        }
     };
 
-    let trunc_label = if *truncated { ", truncated" } else { "" };
-    let mut s = format!(
-        "[{label} ({} of {total} messages{trunc_label})]",
-        messages.len()
-    );
+    let mut s = header;
     for (i, msg) in messages.iter().enumerate() {
         s.push_str(&format!(
             "\n[{}] {} ({}): {}",
@@ -1372,6 +1460,9 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// When true, the agent has `buzz-message-mcp` (send-only) and must not
+    /// be directed to CLI history commands (`buzz messages get`, etc.).
+    pub secure_messaging: bool,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1485,6 +1576,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         is_dm,
         args.conversation_context.is_some(),
         reply_anchor.as_deref(),
+        args.secure_messaging,
     ));
 
     // 3. Conversation context (thread or DM).
@@ -3140,6 +3232,220 @@ mod tests {
         assert!(prompt.contains("Scope: dm"));
         assert!(prompt.contains("[Conversation Context (1 of 1 messages)]"));
         assert!(prompt.contains("Can you deploy?"));
+    }
+
+    #[test]
+    fn test_format_prompt_with_channel_context_label_and_order() {
+        let ch = Uuid::new_v4();
+        let event = make_event("please review the tieout");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ctx = ConversationContext::Channel {
+            messages: vec![
+                ContextMessage {
+                    pubkey: "pub1".into(),
+                    timestamp: "2026-03-15T16:00:00Z".into(),
+                    content: "older channel note".into(),
+                },
+                ContextMessage {
+                    pubkey: "pub2".into(),
+                    timestamp: "2026-03-15T16:05:00Z".into(),
+                    content: "newer channel note".into(),
+                },
+            ],
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("[Channel Context (2 messages)]"));
+        let older_pos = prompt.find("older channel note").expect("older message");
+        let newer_pos = prompt.find("newer channel note").expect("newer message");
+        assert!(
+            older_pos < newer_pos,
+            "channel context must be chronological"
+        );
+        assert!(prompt.contains("Channel context included below"));
+    }
+
+    #[test]
+    fn test_format_prompt_top_level_channel_event_includes_human_instruction() {
+        let ch = Uuid::new_v4();
+        let human_instruction = "Review the FY2025 PGC tieout and post blockers.";
+        let event = make_event(human_instruction);
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ctx = ConversationContext::Channel {
+            messages: vec![ContextMessage {
+                pubkey: "pub1".into(),
+                timestamp: "2026-03-15T16:00:00Z".into(),
+                content: "prior status update".into(),
+            }],
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(
+            prompt.contains(human_instruction),
+            "triggering instruction must appear"
+        );
+        assert!(prompt.contains("prior status update"));
+        assert!(prompt.contains("Scope: channel"));
+    }
+
+    #[test]
+    fn test_format_prompt_secure_mode_omits_cli_history_commands() {
+        let ch = Uuid::new_v4();
+        let event = make_event("status?");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ctx = ConversationContext::Channel {
+            messages: vec![ContextMessage {
+                pubkey: "pub1".into(),
+                timestamp: "2026-03-15T16:00:00Z".into(),
+                content: "earlier update".into(),
+            }],
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                secure_messaging: true,
+                base_prompt: Some(include_str!("base_prompt.md")),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("harness-supplied"));
+        assert!(prompt.contains("send_message tool"));
+        assert!(prompt.contains("`reply_to` argument"));
+        assert!(!prompt.contains("use `--reply-to"));
+        assert!(!prompt.contains("buzz messages get"));
+        assert!(!prompt.contains("buzz messages thread"));
+        assert!(!prompt.contains("buzz messages search"));
+        assert!(!prompt.contains("buzz feed get"));
+    }
+
+    #[test]
+    fn test_format_prompt_thread_context_unchanged_in_non_secure_mode() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "yes go ahead",
+            vec![vec![
+                "e".into(),
+                "root123".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ctx = ConversationContext::Thread {
+            messages: vec![ContextMessage {
+                pubkey: "npub1xyz".into(),
+                timestamp: "2026-03-15T16:30:00Z".into(),
+                content: "Let's refactor auth".into(),
+            }],
+            total: 1,
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                secure_messaging: false,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("Scope: thread"));
+        assert!(prompt.contains("buzz messages thread"));
+        assert!(prompt.contains("[Thread Context"));
+    }
+
+    #[test]
+    fn test_format_prompt_dm_context_unchanged_in_non_secure_mode() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hey there");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                secure_messaging: false,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("Scope: dm"));
+        assert!(prompt.contains("buzz messages get"));
     }
 
     #[test]
