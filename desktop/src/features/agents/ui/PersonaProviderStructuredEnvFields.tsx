@@ -107,6 +107,7 @@ export function usePersonaProviderStructuredEnv({
           ? wrap(
               <PersonaProviderBaseUrlField
                 disabled={disabled}
+                errorMessage={baseUrl.errorMessage}
                 inheritedLabel={baseUrl.inheritedLabel}
                 isInherited={baseUrl.isInherited}
                 isInvalid={baseUrl.isInvalid}

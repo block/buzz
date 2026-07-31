@@ -12,10 +12,13 @@ import {
  *
  * Pure view over `envVars[OPENAI_COMPAT_BASE_URL]` — writes go through
  * `onValueChange` into the same env_vars map used by Advanced. Blank is valid
- * (native default); non-empty invalid values surface an inline error.
+ * when unset (native default / backward compat); a whitespace-only value typed
+ * into the field is rejected so requests don't silently hit api.openai.com.
+ * Invalid (non-URL) values surface an inline error.
  */
 export function PersonaProviderBaseUrlField({
   disabled,
+  errorMessage,
   isInherited,
   inheritedLabel,
   isInvalid,
@@ -24,11 +27,13 @@ export function PersonaProviderBaseUrlField({
   value,
 }: {
   disabled: boolean;
+  /** Override the default validation error text (e.g. blank-rejected message). */
+  errorMessage?: string;
   /** True when the URL is satisfied by an inherited layer. */
   isInherited: boolean;
   /** Human-readable source of the inherited value. */
   inheritedLabel: string;
-  /** True when a non-empty local value fails URL validation. */
+  /** True when the local value fails validation (bad URL or blank). */
   isInvalid: boolean;
   /** Display label. */
   label?: string;
@@ -80,7 +85,7 @@ export function PersonaProviderBaseUrlField({
           id={errorId}
           role="alert"
         >
-          Enter a valid http:// or https:// base URL.
+          {errorMessage ?? "Enter a valid http:// or https:// base URL."}
         </p>
       ) : null}
     </div>

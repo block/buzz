@@ -140,6 +140,9 @@ test("providerBaseUrlFieldState_openaiCompat_personaInherited", () => {
 });
 
 test("providerBaseUrlFieldState_openaiCompat_localEmptyShadowsInherited", () => {
+  // Local key is present as "" to shadow inherited global value.
+  // Since the user is on openai-compat and explicitly left the URL blank,
+  // this is now flagged as invalid rather than silently using api.openai.com.
   const state = getProviderBaseUrlFieldState({
     bakedEnvKeys: ["OPENAI_COMPAT_BASE_URL"],
     effectiveEnvVars: { OPENAI_COMPAT_BASE_URL: "" },
@@ -153,7 +156,12 @@ test("providerBaseUrlFieldState_openaiCompat_localEmptyShadowsInherited", () => 
   assert.equal(state.value, "");
   assert.equal(state.isInherited, false);
   assert.equal(state.inheritedLabel, "");
-  assert.equal(state.isValid, true);
+  assert.equal(state.isValid, false);
+  assert.equal(state.isInvalid, true);
+  assert.ok(
+    state.errorMessage?.includes("api.openai.com"),
+    "should warn about api.openai.com fallback",
+  );
 });
 
 test("providerBaseUrlFieldState_openaiCompat_fileInherited", () => {
@@ -202,7 +210,10 @@ test("providerBaseUrlFieldState_openai_doesNotOwnStructuredField", () => {
   assert.equal(state.isInvalid, false);
 });
 
-test("providerBaseUrlFieldState_whitespaceOnlyLocal_isValidAfterNormalize", () => {
+test("providerBaseUrlFieldState_whitespaceOnlyLocal_isRejectedNotSilentlyFallback", () => {
+  // When the key is explicitly present but contains only whitespace, the user
+  // chose openai-compat and left the URL blank — reject it rather than silently
+  // falling back to api.openai.com.
   const state = getProviderBaseUrlFieldState({
     bakedEnvKeys: [],
     effectiveEnvVars: {},
@@ -211,10 +222,47 @@ test("providerBaseUrlFieldState_whitespaceOnlyLocal_isValidAfterNormalize", () =
     provider: "openai-compat",
   });
 
-  // Local key is present but blank after trim → valid native default.
+  assert.equal(state.isValid, false);
+  assert.equal(state.isInvalid, true);
+  assert.equal(state.isInherited, false);
+  assert.equal(
+    state.errorMessage,
+    "Enter a base URL or clear this field — leaving it blank sends requests to api.openai.com.",
+  );
+});
+
+test("providerBaseUrlFieldState_emptyStringLocal_isRejectedNotSilentlyFallback", () => {
+  // Same as whitespace but with explicit empty string — the key IS present.
+  const state = getProviderBaseUrlFieldState({
+    bakedEnvKeys: [],
+    effectiveEnvVars: {},
+    envVars: { OPENAI_COMPAT_BASE_URL: "" },
+    globalEnvVars: {},
+    provider: "openai-compat",
+  });
+
+  assert.equal(state.isValid, false);
+  assert.equal(state.isInvalid, true);
+  assert.ok(
+    state.errorMessage?.includes("api.openai.com"),
+    "error message should mention api.openai.com",
+  );
+});
+
+test("providerBaseUrlFieldState_absentKey_remainsValidBackwardCompat", () => {
+  // Key absent from envVars entirely → backward compat (native default).
+  // This covers CLI/native config paths and new agents before any input.
+  const state = getProviderBaseUrlFieldState({
+    bakedEnvKeys: [],
+    effectiveEnvVars: {},
+    envVars: {},
+    globalEnvVars: {},
+    provider: "openai-compat",
+  });
+
   assert.equal(state.isValid, true);
   assert.equal(state.isInvalid, false);
-  assert.equal(state.isInherited, false);
+  assert.equal(state.errorMessage, undefined);
 });
 
 test("providerBaseUrlFieldState_advancedHideKeys_onlyWhenStructuredFieldOwns", () => {

@@ -41,12 +41,30 @@ export function isValidProviderBaseUrl(value: string): boolean {
   }
 }
 
+/**
+ * When the structured base-URL field is visible (provider is openai-compat),
+ * a whitespace-only value is treated as invalid rather than silently falling
+ * back to api.openai.com. The user chose a custom-endpoint provider — surface
+ * the error so they either enter a real URL or switch provider.
+ *
+ * A truly unset key (not present in envVars at all) is NOT flagged — that path
+ * covers CLI/native configs and backward compatibility.
+ */
+export function isBlankProviderBaseUrlExplicit(
+  value: string,
+  isPresent: boolean,
+): boolean {
+  return isPresent && normalizeProviderBaseUrl(value).length === 0;
+}
+
 export type ProviderBaseUrlFieldState = {
   /** Env key owned by the structured field, or null when not shown. */
   envKey: string | null;
+  /** Validation error message (undefined when valid). */
+  errorMessage: string | undefined;
   inheritedLabel: string;
   isInherited: boolean;
-  /** True when a non-empty local value fails URL validation. */
+  /** True when the local value fails validation (bad URL or blank-but-present). */
   isInvalid: boolean;
   /** Inverse of isInvalid — form gates use this. */
   isValid: boolean;
@@ -81,6 +99,7 @@ export function getProviderBaseUrlFieldState({
   if (!providerOwnsBaseUrlField(provider)) {
     return {
       envKey: null,
+      errorMessage: undefined,
       inheritedLabel: "",
       isInherited: false,
       isInvalid: false,
@@ -124,10 +143,17 @@ export function getProviderBaseUrlFieldState({
             ? "Set in runtime config"
             : "";
 
-  const isValid = isValidProviderBaseUrl(value);
+  const blankExplicit = isBlankProviderBaseUrlExplicit(value, localOverride);
+  const isValid = isValidProviderBaseUrl(value) && !blankExplicit;
+  const errorMessage = blankExplicit
+    ? "Enter a base URL or clear this field — leaving it blank sends requests to api.openai.com."
+    : !isValidProviderBaseUrl(value)
+      ? "Enter a valid http:// or https:// base URL."
+      : undefined;
 
   return {
     envKey,
+    errorMessage,
     inheritedLabel,
     isInherited: source !== null,
     isInvalid: !isValid,
