@@ -43,8 +43,15 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Buzz needs camera access so you can take photos to attach to messages and scan QR codes for device pairing.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Buzz connects to self-hosted relays and pairs devices on your local network.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Buzz needs photo library access so you can attach images to messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
