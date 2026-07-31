@@ -133,7 +133,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     final config = ref.read(relayConfigProvider);
-    final url = Uri.parse(config.baseUrl).resolve('/query').toString();
+    final url = Uri.parse(config.httpUrl).resolve('/query').toString();
     final bodyBytes = utf8.encode(
       jsonEncode(filters.map((filter) => filter.toJson()).toList()),
     );
