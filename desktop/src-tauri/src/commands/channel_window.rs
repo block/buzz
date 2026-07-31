@@ -1,6 +1,6 @@
 use tauri::State;
 
-use crate::commands::timeline_kinds::TIMELINE_KINDS;
+use crate::commands::query_kinds::TIMELINE_KINDS;
 use crate::{app_state::AppState, models::ChannelPageCursor, relay::query_relay};
 
 fn build_channel_window_filter(

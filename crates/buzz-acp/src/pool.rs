@@ -2837,10 +2837,13 @@ where
     // #h=channel plus a sentinel, and (3) the agent's newest reply for pinning.
     let root_filter = nostr::Filter::new().id(nostr::EventId::from_hex(root_event_id).ok()?);
     let replies_filter = nostr::Filter::new()
-        .kinds([
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
-        ])
+        // Conversational kinds — surfaces are context an agent must read, not
+        // just publish.
+        .kinds(
+            buzz_core::kind::CONVERSATIONAL_KINDS
+                .iter()
+                .map(|k| nostr::Kind::Custom(*k as u16)),
+        )
         .custom_tags(e_tag, [root_event_id])
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit.saturating_add(1) as usize);
@@ -2960,10 +2963,13 @@ async fn fetch_dm_context(
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
     let ch_str = channel_id.to_string();
     let filter = nostr::Filter::new()
-        .kinds([
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
-        ])
+        // Conversational kinds — surfaces are context an agent must read, not
+        // just publish.
+        .kinds(
+            buzz_core::kind::CONVERSATIONAL_KINDS
+                .iter()
+                .map(|k| nostr::Kind::Custom(*k as u16)),
+        )
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit as usize);
 
@@ -4930,14 +4936,21 @@ mod tests {
         assert!(root.get("limit").is_none());
 
         let replies = serde_json::to_value(&filters[1]).expect("serialize replies filter");
-        assert_eq!(replies.get("kinds"), Some(&json!([9, 40002])));
+        // Conversational kinds — surfaces are context an agent must read.
+        assert_eq!(
+            replies.get("kinds"),
+            Some(&json!(buzz_core::kind::CONVERSATIONAL_KINDS))
+        );
         assert_eq!(replies.get("#e"), Some(&json!([root_id])));
         assert_eq!(replies.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(replies.get("limit"), Some(&json!(reply_limit)));
         assert!(replies.get("authors").is_none());
 
         let agent = serde_json::to_value(&filters[2]).expect("serialize agent filter");
-        assert_eq!(agent.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(
+            agent.get("kinds"),
+            Some(&json!(buzz_core::kind::CONVERSATIONAL_KINDS))
+        );
         assert_eq!(agent.get("#e"), Some(&json!([root_id])));
         assert_eq!(agent.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(agent.get("authors"), Some(&json!([agent_pubkey.to_hex()])));
@@ -4948,7 +4961,10 @@ mod tests {
         assert_eq!(filters.len(), 1, "count should query only matching replies");
 
         let count = serde_json::to_value(&filters[0]).expect("serialize count filter");
-        assert_eq!(count.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(
+            count.get("kinds"),
+            Some(&json!(buzz_core::kind::CONVERSATIONAL_KINDS))
+        );
         assert_eq!(count.get("#e"), Some(&json!([root_id])));
         assert_eq!(count.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(count.get("limit"), Some(&json!(0)));

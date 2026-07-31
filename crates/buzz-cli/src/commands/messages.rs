@@ -879,6 +879,7 @@ pub async fn cmd_send_surface(
     channel_id: &str,
     spec_arg: &str,
     reply_to: Option<&str>,
+    mentions: &[String],
 ) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
     if let Some(r) = &reply_to {
@@ -889,7 +890,15 @@ pub async fn cmd_send_surface(
         Some(r) => Some(resolve_thread_ref(client, r).await?),
         None => None,
     };
-    let builder = buzz_sdk::build_surface(channel_uuid, &spec, thread_ref.as_ref(), &[])
+    // A surface's content is JSON, so there is no @-mention text to parse —
+    // mentions are explicit. Accept hex, npub, or a display name.
+    let mut mention_pubkeys = Vec::with_capacity(mentions.len());
+    for mention in mentions {
+        mention_pubkeys.push(resolve_author(client, mention).await?);
+    }
+    let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
+
+    let builder = buzz_sdk::build_surface(channel_uuid, &spec, thread_ref.as_ref(), &mention_refs)
         .map_err(crate::validate::sdk_err)?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1045,7 +1054,8 @@ pub async fn dispatch(
             channel,
             spec,
             reply_to,
-        } => cmd_send_surface(client, &channel, &spec, reply_to.as_deref()).await,
+            mention,
+        } => cmd_send_surface(client, &channel, &spec, reply_to.as_deref(), &mention).await,
         MessagesCmd::EditSurface { event, spec } => cmd_edit_surface(client, &event, &spec).await,
         MessagesCmd::Delete {
             event,

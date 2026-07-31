@@ -36,7 +36,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use nostr::EventId;
@@ -410,7 +410,9 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
 
         // Ignore non-message kinds (relay housekeeping, etc.).
-        if kind_u32 != KIND_STREAM_MESSAGE && kind_u32 != KIND_WORKFLOW_APPROVAL_REQUESTED {
+        if !buzz_core::kind::CONVERSATIONAL_KINDS.contains(&kind_u32)
+            && kind_u32 != KIND_WORKFLOW_APPROVAL_REQUESTED
+        {
             continue;
         }
 
@@ -524,7 +526,7 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
     let kinds = config
         .kinds_override
         .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+        .unwrap_or_else(|| buzz_core::kind::kinds_with(&[KIND_WORKFLOW_APPROVAL_REQUESTED]));
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by

@@ -1,3 +1,5 @@
+import { surfacePreviewText } from "@/features/surfaces/spec";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
 import * as React from "react";
 
 import {
@@ -22,6 +24,17 @@ import {
   resolveSlotSound,
 } from "@/features/notifications/lib/sound";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+
+// Surface events carry spec JSON as content — never show raw JSON in an OS
+// notification. Mirrors the home-feed/inbox preview path.
+function notificationContent(event: {
+  kind?: number;
+  content: string;
+}): string {
+  return event.kind === KIND_SURFACE
+    ? surfacePreviewText(event.content)
+    : event.content;
+}
 
 export function useAppShellDesktopNotifications({
   channels,
@@ -58,7 +71,10 @@ export function useAppShellDesktopNotifications({
       }
 
       const channelName = channel.name?.trim() || "Direct message";
-      const body = truncateNotificationBody(event.content, "New message");
+      const body = truncateNotificationBody(
+        notificationContent(event),
+        "New message",
+      );
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
       void sendDesktopNotification({
@@ -67,7 +83,7 @@ export function useAppShellDesktopNotifications({
         target: {
           channelId: channel.id,
           channelName,
-          content: event.content,
+          content: notificationContent(event),
           createdAt: event.created_at,
           eventId: event.id,
           kind: event.kind,
@@ -103,7 +119,10 @@ export function useAppShellDesktopNotifications({
       // channelLabel is "#name" for the toast title; channelName is the raw
       // name stored in the navigation target for click-through routing.
       const channelLabel = channelName ? `#${channelName}` : null;
-      const body = truncateNotificationBody(event.content, "New reply");
+      const body = truncateNotificationBody(
+        notificationContent(event),
+        "New reply",
+      );
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
       void sendDesktopNotification({
@@ -112,7 +131,7 @@ export function useAppShellDesktopNotifications({
         target: {
           channelId,
           channelName,
-          content: event.content,
+          content: notificationContent(event),
           createdAt: event.created_at,
           eventId: event.id,
           kind: event.kind,

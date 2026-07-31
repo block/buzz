@@ -15,6 +15,8 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { Markdown } from "@/shared/ui/markdown";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
+import SurfaceMessage from "@/features/surfaces/ui/SurfaceMessage";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import { formatRelativeTime } from "../lib/time";
@@ -111,14 +113,20 @@ function ReplyRow({
         ) : null}
       </div>
       <div className="mt-1.5 pl-8">
-        <Markdown
-          channelNames={channelNames}
-          className="text-sm"
-          content={reply.content}
-          imetaByUrl={parseImetaTags(reply.tags)}
-          mentionNames={replyMentionNames}
-          mentionPubkeysByName={replyMentionPubkeysByName}
-        />
+        {reply.kind === KIND_SURFACE ? (
+          // Surfaces are data-only specs — render the native card, never the
+          // markdown pipeline (which would print raw JSON).
+          <SurfaceMessage content={reply.content} />
+        ) : (
+          <Markdown
+            channelNames={channelNames}
+            className="text-sm"
+            content={reply.content}
+            imetaByUrl={parseImetaTags(reply.tags)}
+            mentionNames={replyMentionNames}
+            mentionPubkeysByName={replyMentionPubkeysByName}
+          />
+        )}
       </div>
     </div>
   );

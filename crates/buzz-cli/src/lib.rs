@@ -435,6 +435,10 @@ pub enum MessagesCmd {
         /// Event ID to reply to (surface as a thread reply)
         #[arg(long)]
         reply_to: Option<String>,
+        /// Mention someone on the card — pubkey hex, npub, or display name.
+        /// Repeatable. Surface content is JSON, so mentions are explicit.
+        #[arg(long = "mention")]
+        mention: Vec<String>,
     },
     /// Replace a surface card's spec in place (live update — full-spec replacement)
     #[command(

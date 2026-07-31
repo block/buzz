@@ -155,6 +155,7 @@ JSON
 
 - Nodes: `heading`, `text` (plain, no markdown), `badge`, `keyValue` (`items:[{label,value,tone?}]`), `statGrid` (`stats:[{label,value,delta?,tone?}]`), `table` (`columns` + `rows`, ≤12×100), `progress` (`value` 0–100). Tones: `default|success|warning|danger|info`.
 - `fallbackText` is required — it is what non-rendering clients show.
+- **To notify someone, pass `--mention <pubkey|npub|name>`** (repeatable). Card content is JSON, so `@name` inside the spec is NOT parsed as a mention.
 - **Save the returned `event_id`** — live-update the card with `buzz messages edit-surface --event <id> --spec <new-json>` (full-spec replacement; only the author can edit).
 - Limits: ≤32 nodes, ≤32 KiB JSON, text ≤4096 chars, labels/values ≤512 chars. Validation errors name the exact field — fix and resend.
 

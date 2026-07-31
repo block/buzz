@@ -27,7 +27,9 @@ use crate::{
 /// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
 /// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
 /// kind) but still passes through the p-gate before it runs.
-use crate::commands::timeline_kinds::TIMELINE_KINDS;
+use crate::commands::query_kinds::{
+    forum_thread_kinds, mention_kinds, thread_parent_kinds, TIMELINE_KINDS,
+};
 
 #[tauri::command]
 pub async fn get_feed(
@@ -56,20 +58,7 @@ pub async fn get_feed(
 
     // Mentions: messages that reference me via #p.
     let mut mention_filter = serde_json::json!({
-        "kinds": [
-            9,
-            40002,
-            1,
-            45001,
-            45003,
-            buzz_core_pkg::kind::KIND_GIT_PULL_REQUEST,
-            buzz_core_pkg::kind::KIND_GIT_PR_UPDATE,
-            buzz_core_pkg::kind::KIND_GIT_ISSUE,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_OPEN,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_MERGED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_CLOSED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_DRAFT,
-        ],
+        "kinds": mention_kinds(),
         "#p": [my_pubkey],
         "limit": cap,
     });
@@ -237,9 +226,9 @@ pub async fn get_forum_thread(
     let events = query_relay(
         &state,
         &[
-            serde_json::json!({ "ids": [event_id.clone()], "kinds": [9, 40002, 45001, 45003] }),
+            serde_json::json!({ "ids": [event_id.clone()], "kinds": forum_thread_kinds() }),
             serde_json::json!({
-                "kinds": [9, 45003],
+                "kinds": forum_thread_kinds(),
                 "#e": [event_id.clone()],
                 "#h": [channel_id.clone()],
             }),
@@ -477,7 +466,7 @@ async fn resolve_thread_ref(
         state,
         &[serde_json::json!({
             "ids": [parent_event_id],
-            "kinds": [9, 40002, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+            "kinds": thread_parent_kinds(),
             "limit": 1
         })],
     )

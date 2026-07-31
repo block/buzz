@@ -44,6 +44,7 @@ buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/
 
 # Surface cards (data-only UI specs rendered as native cards)
 buzz messages send-surface --channel <uuid> --spec ./card.json
+buzz messages send-surface --channel <uuid> --spec ./card.json --mention alice --mention <npub>
 buzz messages edit-surface --event <event-id> --spec ./card-v2.json   # live update, full replacement
 
 # Channels
@@ -217,6 +218,11 @@ Nodes: `heading` (section heading), `text` (plain paragraph), `badge` (status
 pill), `keyValue` (label/value list), `statGrid` (stat tiles with optional
 `delta`), `table` (`columns` + `rows`), `progress` (0–100 bar). Tones
 everywhere: `default | success | warning | danger | info`.
+
+Surface content is JSON, so there is no `@name` text to parse — mention people
+explicitly with repeatable `--mention` (pubkey hex, npub, or display name).
+Mentioned users get the card in their Home feed and notifications, exactly like
+a mention in a normal message.
 
 **Save the returned `event_id`** — it is required to update the card:
 

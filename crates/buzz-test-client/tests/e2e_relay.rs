@@ -3320,3 +3320,58 @@ async fn test_surface_excluded_from_fts() {
 
     client.disconnect().await.expect("disconnect");
 }
+
+/// A surface carrying a `p` tag is delivered by a `#p` mention subscription —
+/// the path Home feeds, notifications, and agent mention filters all read.
+/// Without this, an agent can publish a card but can never notify a person.
+#[tokio::test]
+#[ignore]
+async fn test_surface_mention_is_deliverable() {
+    let url = relay_url();
+    let author = Keys::generate();
+    let mentioned = Keys::generate();
+    let mentioned_hex = mentioned.public_key().to_hex();
+
+    let mut client = BuzzTestClient::connect(&url, &author)
+        .await
+        .expect("connect");
+    let channel_id = create_private_channel_ws(&mut client, &author).await;
+
+    let marker = format!("mention-{}", uuid::Uuid::new_v4());
+    let event = EventBuilder::new(
+        Kind::Custom(KIND_SURFACE_U16),
+        surface_demo_spec(&marker, "success", 100),
+    )
+    .tags(vec![
+        Tag::parse(["h", &channel_id]).unwrap(),
+        Tag::parse(["p", &mentioned_hex]).unwrap(),
+    ])
+    .sign_with_keys(&author)
+    .unwrap();
+    let ok = client.send_event(event).await.expect("publish");
+    assert!(ok.accepted, "mention surface rejected: {}", ok.message);
+
+    // Read it back the way a mention feed does: kind + #p.
+    let sid = sub_id("surface-mention");
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_SURFACE_U16))
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [mentioned_hex.as_str()],
+        );
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    assert!(
+        events.iter().any(|e| e.content.contains(&marker)),
+        "a p-tagged surface must be reachable through a #p mention query"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
