@@ -83,7 +83,10 @@ fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError
     let has_matching_tag = event.tags.iter().any(|tag| {
         let parts = tag.as_slice();
         parts.first().map(String::as_str) == Some("emoji")
-            && parts.get(1).is_some_and(|value| value == &normalized)
+            && parts.get(1).is_some_and(|value| {
+                buzz_sdk::normalize_custom_emoji_shortcode(value)
+                    .is_ok_and(|tag_shortcode| tag_shortcode == normalized)
+            })
     });
     if !has_matching_tag || emoji_char_count > buzz_sdk::MAX_CUSTOM_EMOJI_REACTION_LEN {
         return Err(IngestError::Rejected(format!(
@@ -2957,6 +2960,20 @@ mod tests {
     #[test]
     fn reaction_validation_accepts_wrapped_max_shortcode() {
         let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(validate_reaction_emoji(&event, &event.content).is_ok());
+    }
+
+    #[test]
+    fn reaction_validation_accepts_wrapped_mixed_case_max_shortcode() {
+        let shortcode = "Ab".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN / 2);
         let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
             .tags([
                 nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
