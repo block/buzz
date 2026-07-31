@@ -397,8 +397,15 @@ pub async fn get_channel_members(
     channel_id: String,
     state: State<'_, AppState>,
 ) -> Result<ChannelMembersResponse, String> {
+    load_channel_members(&channel_id, &state).await
+}
+
+pub(crate) async fn load_channel_members(
+    channel_id: &str,
+    state: &AppState,
+) -> Result<ChannelMembersResponse, String> {
     let events = query_relay(
-        &state,
+        state,
         &[serde_json::json!({
             "kinds": [39002],
             "#d": [channel_id],
@@ -417,7 +424,7 @@ pub async fn get_channel_members(
     let pubkeys: Vec<String> = response.members.iter().map(|m| m.pubkey.clone()).collect();
     if !pubkeys.is_empty() {
         let profile_events = query_relay(
-            &state,
+            state,
             &[serde_json::json!({
                 "kinds": [0],
                 "authors": pubkeys,

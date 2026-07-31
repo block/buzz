@@ -3,6 +3,7 @@ use tauri::{AppHandle, State};
 
 mod forum;
 
+use super::channels::load_channel_members;
 use forum::{forum_message_from_event, forum_reply_from_event};
 
 use crate::{
@@ -541,7 +542,25 @@ pub async fn send_channel_message(
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
-    let mentions = mention_pubkeys.unwrap_or_default();
+    let mut mentions = mention_pubkeys.unwrap_or_default();
+    let members = if content.contains('@') {
+        load_channel_members(&channel_id, &state).await.ok()
+    } else {
+        None
+    };
+    if let Some(members) = members {
+        let named_members: Vec<(String, String)> = members
+            .members
+            .into_iter()
+            .filter_map(|member| {
+                member
+                    .display_name
+                    .map(|display_name| (display_name, member.pubkey))
+            })
+            .collect();
+        let resolved = buzz_core_pkg::mentions::resolve_mention_pubkeys(&content, &named_members);
+        merge_resolved_mentions(&mut mentions, resolved);
+    }
     let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
@@ -610,6 +629,21 @@ pub async fn send_channel_message(
         depth,
         created_at: chrono::Utc::now().timestamp(),
     })
+}
+
+fn merge_resolved_mentions(
+    explicit_mentions: &mut Vec<String>,
+    resolved_mentions: impl IntoIterator<Item = String>,
+) {
+    let mut seen: std::collections::HashSet<String> = explicit_mentions
+        .iter()
+        .map(|pubkey| pubkey.to_ascii_lowercase())
+        .collect();
+    for pubkey in resolved_mentions {
+        if seen.insert(pubkey.to_ascii_lowercase()) {
+            explicit_mentions.push(pubkey);
+        }
+    }
 }
 
 fn event_has_client_marker(event: &Event, marker: &str) -> bool {
