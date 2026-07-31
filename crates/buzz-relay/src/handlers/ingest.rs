@@ -1200,6 +1200,42 @@ const PROJECT_SINGLETON_METADATA_TAGS: [&str; 4] =
 const PROJECT_MEMBER_KIND_SEGMENT: &str = "30617";
 const _: () = assert!(KIND_GIT_REPO_ANNOUNCEMENT == 30617);
 
+/// A validation failure from [`validate_project_envelope`] or
+/// [`parse_project_member_coordinate`].
+///
+/// Carries the stable NIP-MP rule identifier alongside the human-readable
+/// rejection message. The rule ID allows the fixture oracle and any future
+/// cross-implementation conformance test to assert *which* rule fired, not just
+/// that rejection occurred — an implementation cannot pass a reject fixture by
+/// refusing for an unrelated reason.
+///
+/// The eight IDs match the `reject_rules` strings in `NIP-MP.fixtures.json`
+/// exactly: `d-cardinality`, `d-empty`, `member-cap`, `member-tag-arity`,
+/// `member-coordinate-malformed`, `member-duplicate`, `metadata-cardinality`,
+/// `metadata-length`.
+#[derive(Debug)]
+struct ProjectRejection {
+    /// Stable rule identifier matching the fixture file's `reject_rules` set.
+    rule: &'static str,
+    /// Human-readable explanation forwarded to the client's NOTICE/OK message.
+    message: String,
+}
+
+impl std::fmt::Display for ProjectRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.rule, self.message)
+    }
+}
+
+impl ProjectRejection {
+    fn new(rule: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            rule,
+            message: message.into(),
+        }
+    }
+}
+
 /// Validate the envelope of a kind:30621 NIP-MP project event.
 ///
 /// Enforces the structural contract in `docs/nips/NIP-MP.md` — exactly one
@@ -1216,7 +1252,7 @@ const _: () = assert!(KIND_GIT_REPO_ANNOUNCEMENT == 30617);
 /// Duplicates are rejected rather than deduped: a relay cannot rewrite tags
 /// inside a signed event without invalidating its id and signature, so the
 /// choice is reject or force every consumer to apply a first-wins rule.
-fn validate_project_envelope(event: &Event) -> Result<(), String> {
+fn validate_project_envelope(event: &Event) -> Result<(), ProjectRejection> {
     let mut d_tags: Vec<&str> = Vec::new();
     let mut members: Vec<&str> = Vec::new();
     let mut name: Option<&str> = None;
@@ -1258,21 +1294,30 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
     // tags make the address reader-dependent. Length is bounded by the generic
     // `D_TAG_MAX_LEN` check the ingest pipeline already applies.
     if d_tags.len() != 1 {
-        return Err(format!(
-            "project event must have exactly one `d` tag (got {})",
-            d_tags.len()
+        return Err(ProjectRejection::new(
+            "d-cardinality",
+            format!(
+                "project event must have exactly one `d` tag (got {})",
+                d_tags.len()
+            ),
         ));
     }
     if d_tags[0].is_empty() {
-        return Err("project event `d` tag must not be empty".to_string());
+        return Err(ProjectRejection::new(
+            "d-empty",
+            "project event `d` tag must not be empty",
+        ));
     }
 
     // `member-cap` before `member-coordinate-malformed` and `member-duplicate`:
     // refuse on count before doing per-tag work.
     if members.len() > PROJECT_MEMBER_CAP {
-        return Err(format!(
-            "project event must have at most {PROJECT_MEMBER_CAP} member `a` tags (got {})",
-            members.len()
+        return Err(ProjectRejection::new(
+            "member-cap",
+            format!(
+                "project event must have at most {PROJECT_MEMBER_CAP} member `a` tags (got {})",
+                members.len()
+            ),
         ));
     }
     // `member-tag-arity`: every member `a` tag has exactly 2 or 3 elements per
@@ -1282,9 +1327,12 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
         if parts.first().map(|s| s.as_str()) == Some("a") && !(2..=3).contains(&parts.len()) {
-            return Err(format!(
-                "project event member `a` tag must have exactly 2 or 3 elements (got {})",
-                parts.len()
+            return Err(ProjectRejection::new(
+                "member-tag-arity",
+                format!(
+                    "project event member `a` tag must have exactly 2 or 3 elements (got {})",
+                    parts.len()
+                ),
             ));
         }
     }
@@ -1292,49 +1340,65 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
     for member in &members {
         parse_project_member_coordinate(member)?;
         if !seen.insert(*member) {
-            return Err(format!(
-                "project event has duplicate member coordinate {member:?}"
+            return Err(ProjectRejection::new(
+                "member-duplicate",
+                format!("project event has duplicate member coordinate {member:?}"),
             ));
         }
     }
 
     for (i, count) in singleton_counts.iter().enumerate() {
         if *count > 1 {
-            return Err(format!(
-                "project event must have at most one `{}` tag (got {count})",
-                PROJECT_SINGLETON_METADATA_TAGS[i]
+            return Err(ProjectRejection::new(
+                "metadata-cardinality",
+                format!(
+                    "project event must have at most one `{}` tag (got {count})",
+                    PROJECT_SINGLETON_METADATA_TAGS[i]
+                ),
             ));
         }
     }
     if let Some(name) = name {
         if name.len() > PROJECT_NAME_MAX_LEN {
-            return Err(format!(
-                "project event `name` tag too long ({} bytes, max {PROJECT_NAME_MAX_LEN})",
-                name.len()
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `name` tag too long ({} bytes, max {PROJECT_NAME_MAX_LEN})",
+                    name.len()
+                ),
             ));
         }
     }
     if let Some(description) = description {
         if description.len() > PROJECT_DESCRIPTION_MAX_LEN {
-            return Err(format!(
-                "project event `description` tag too long ({} bytes, max {PROJECT_DESCRIPTION_MAX_LEN})",
-                description.len()
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `description` tag too long ({} bytes, max {PROJECT_DESCRIPTION_MAX_LEN})",
+                    description.len()
+                ),
             ));
         }
     }
     if let Some(buzz_channel) = buzz_channel {
         if buzz_channel.len() > PROJECT_METADATA_TAG_MAX_LEN {
-            return Err(format!(
-                "project event `buzz-channel` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
-                buzz_channel.len()
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `buzz-channel` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
+                    buzz_channel.len()
+                ),
             ));
         }
     }
     if let Some(buzz_visibility) = buzz_visibility {
         if buzz_visibility.len() > PROJECT_METADATA_TAG_MAX_LEN {
-            return Err(format!(
-                "project event `buzz-visibility` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
-                buzz_visibility.len()
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `buzz-visibility` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
+                    buzz_visibility.len()
+                ),
             ));
         }
     }
@@ -1347,11 +1411,14 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
 /// parses coordinates (`side_effects.rs`), so a repository whose `d` tag
 /// contains a colon stays addressable and a project can never disagree with a
 /// deletion about where the `d` value begins.
-fn parse_project_member_coordinate(coordinate: &str) -> Result<(), String> {
+fn parse_project_member_coordinate(coordinate: &str) -> Result<(), ProjectRejection> {
     let malformed = || {
-        format!(
-            "project event member `a` tag must be \
-             `{PROJECT_MEMBER_KIND_SEGMENT}:<lowercase-64-hex-owner>:<repo-d>` (got {coordinate:?})"
+        ProjectRejection::new(
+            "member-coordinate-malformed",
+            format!(
+                "project event member `a` tag must be \
+                 `{PROJECT_MEMBER_KIND_SEGMENT}:<lowercase-64-hex-owner>:<repo-d>` (got {coordinate:?})"
+            ),
         )
     };
     let mut segments = coordinate.splitn(3, ':');
@@ -4259,14 +4326,20 @@ mod tests {
     fn project_envelope_rejects_missing_d_tag() {
         let ev = make_project(&[&["name", "No Identity"]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("exactly one `d` tag"), "got: {err}");
+        assert!(
+            err.to_string().contains("exactly one `d` tag"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn project_envelope_rejects_multiple_d_tags() {
         let ev = make_project(&[&["d", "one"], &["d", "two"]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("exactly one `d` tag"), "got: {err}");
+        assert!(
+            err.to_string().contains("exactly one `d` tag"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4275,7 +4348,7 @@ mod tests {
         // slot, where unrelated projects silently overwrite each other.
         let ev = make_project(&[&["d", ""]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("must not be empty"), "got: {err}");
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
     }
 
     #[test]
@@ -4283,7 +4356,7 @@ mod tests {
         // `["d"]` with no value is treated as empty, not as absent.
         let ev = make_project(&[&["d"]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("must not be empty"), "got: {err}");
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
     }
 
     #[test]
@@ -4291,7 +4364,10 @@ mod tests {
         let coord = member_coord(OWNER_A, "buzz");
         let ev = make_project(&[&["d", "platform"], &["a", &coord], &["a", &coord]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("duplicate member coordinate"), "got: {err}");
+        assert!(
+            err.to_string().contains("duplicate member coordinate"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4304,7 +4380,7 @@ mod tests {
         let tag_refs: Vec<&[&str]> = tags.iter().map(|t| t.as_slice()).collect();
         let ev = make_project(&tag_refs);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("at most 64 member"), "got: {err}");
+        assert!(err.to_string().contains("at most 64 member"), "got: {err}");
     }
 
     #[test]
@@ -4320,7 +4396,7 @@ mod tests {
         let ev = make_project(&tag_refs);
         let err = validate_project_envelope(&ev).unwrap_err();
         assert!(
-            err.contains("at most 64 member"),
+            err.to_string().contains("at most 64 member"),
             "cap must be evaluated before the duplicate set is built, got: {err}"
         );
     }
@@ -4331,7 +4407,10 @@ mod tests {
         let coord = format!("30618:{OWNER_A}:buzz");
         let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("member `a` tag must be"), "got: {err}");
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4339,7 +4418,10 @@ mod tests {
         let coord = member_coord(&"z".repeat(64), "buzz");
         let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("member `a` tag must be"), "got: {err}");
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4349,7 +4431,10 @@ mod tests {
         let coord = member_coord(&"A".repeat(64), "buzz");
         let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("member `a` tag must be"), "got: {err}");
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4357,7 +4442,10 @@ mod tests {
         let coord = member_coord(&"a".repeat(63), "buzz");
         let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("member `a` tag must be"), "got: {err}");
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4365,7 +4453,10 @@ mod tests {
         let coord = member_coord(OWNER_A, "");
         let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("member `a` tag must be"), "got: {err}");
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4373,7 +4464,10 @@ mod tests {
         let coord = format!("30617:{OWNER_A}");
         let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("member `a` tag must be"), "got: {err}");
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4382,7 +4476,10 @@ mod tests {
         // (rule 4) before the coordinate parse (rule 5) even runs.
         let ev = make_project(&[&["d", "platform"], &["a"]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("exactly 2 or 3 elements"), "got: {err}");
+        assert!(
+            err.to_string().contains("exactly 2 or 3 elements"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4393,7 +4490,8 @@ mod tests {
             let ev = make_project(&[&["d", "platform"], &[tag_name, "x"], &[tag_name, "y"]]);
             let err = validate_project_envelope(&ev).unwrap_err();
             assert!(
-                err.contains(&format!("at most one `{tag_name}` tag")),
+                err.to_string()
+                    .contains(&format!("at most one `{tag_name}` tag")),
                 "duplicate `{tag_name}` must be rejected, got: {err}"
             );
         }
@@ -4404,7 +4502,10 @@ mod tests {
         let name = "x".repeat(PROJECT_NAME_MAX_LEN + 1);
         let ev = make_project(&[&["d", "platform"], &["name", &name]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("`name` tag too long"), "got: {err}");
+        assert!(
+            err.to_string().contains("`name` tag too long"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4419,7 +4520,10 @@ mod tests {
         let description = "x".repeat(PROJECT_DESCRIPTION_MAX_LEN + 1);
         let ev = make_project(&[&["d", "platform"], &["description", &description]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("`description` tag too long"), "got: {err}");
+        assert!(
+            err.to_string().contains("`description` tag too long"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4467,8 +4571,9 @@ mod tests {
 
     /// Drive every case in the shared NIP-MP fixture file against
     /// `validate_project_envelope`. All 11 accept cases must pass; all 20
-    /// reject cases must return an error. This is the machine-readable oracle
-    /// the spec promises ("the shared fixtures are wired as its test oracle").
+    /// reject cases must return an error whose rule is in the case's allowed
+    /// `reject_rules` set — an implementation cannot pass by rejecting for an
+    /// unrelated reason. This is the machine-readable oracle the spec promises.
     #[test]
     fn project_envelope_validates_all_shared_fixtures() {
         #[derive(serde::Deserialize)]
@@ -4479,6 +4584,8 @@ mod tests {
         struct Case {
             name: String,
             expect: String,
+            #[serde(default)]
+            reject_rules: Vec<String>,
             template: Template,
         }
         #[derive(serde::Deserialize)]
@@ -4507,11 +4614,21 @@ mod tests {
                     case.name,
                     result.unwrap_err()
                 ),
-                "reject" => assert!(
-                    result.is_err(),
-                    "fixture {:?} expected reject, but was accepted",
-                    case.name
-                ),
+                "reject" => {
+                    let rejection = match result {
+                        Err(r) => r,
+                        Ok(()) => {
+                            panic!("fixture {:?} expected reject, but was accepted", case.name)
+                        }
+                    };
+                    assert!(
+                        case.reject_rules.iter().any(|r| r == rejection.rule),
+                        "fixture {:?} fired rule {:?}, which is not in allowed set {:?}",
+                        case.name,
+                        rejection.rule,
+                        case.reject_rules,
+                    );
+                }
                 other => panic!(
                     "unknown expect value {:?} in fixture {:?}",
                     other, case.name

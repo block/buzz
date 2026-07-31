@@ -705,9 +705,9 @@ jobs:
         env:
           RELAY_URL: ws://localhost:3000
       - name: NIP-MP coordinate deletion guard
-        # Verifies that a tombstone with created_at between two project versions
-        # deletes the older head and spares the newer one — directly testing the
-        # never-delete-newer invariant of soft_delete_by_coordinate.
+        # Verifies the never-delete-newer invariant of soft_delete_by_coordinate:
+        # a stale tombstone (created_at earlier than the live head) spares that
+        # head, and an equal-timestamp tombstone deletes it.
         run: |
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \

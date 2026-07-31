@@ -297,7 +297,7 @@ Legacy `<owner>:<dtag>` repository routes remain valid and resolve to that repos
 
 ## Conformance Fixtures
 
-Two fixture files carry the machine-checkable contract. Neither has consumers yet; each states what its consumers are required to do.
+Two fixture files carry the machine-checkable contract. `NIP-MP.fixtures.json` is already wired as the relay ingest consumer; the remaining consumers listed below are Phase 2 work.
 
 ### Ingest
 
