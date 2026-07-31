@@ -75,6 +75,19 @@ test("mac: Alt+arrows do not match (that is the win/linux chord)", () => {
   );
 });
 
+test("mac: ⌘←/⌘→ never match — they are line start/end in text editing", () => {
+  // Deliberately unbound: editable targets must keep receiving ⌘←/⌘→ so
+  // line-start/line-end editing still works. Only ⌘[ / ⌘] navigate.
+  assert.equal(
+    matchBackForwardChord(chord({ key: "ArrowLeft", metaKey: true }), true),
+    null,
+  );
+  assert.equal(
+    matchBackForwardChord(chord({ key: "ArrowRight", metaKey: true }), true),
+    null,
+  );
+});
+
 // ── Windows/Linux: Alt+← / Alt+→ ─────────────────────────────────────────────
 
 test("win/linux: Alt+ArrowLeft matches back", () => {
