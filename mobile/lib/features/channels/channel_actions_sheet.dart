@@ -305,7 +305,7 @@ class _ChannelQuickActionsRow extends StatelessWidget {
         ),
       _ChannelQuickAction(
         icon: isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
-        label: isUnread ? 'Read' : 'Unread',
+        label: isUnread ? 'Mark Read' : 'Mark Unread',
         onTap: onToggleRead,
       ),
     ],

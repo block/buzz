@@ -25,6 +25,7 @@ Channel _channel({String type = 'stream'}) => Channel(
 Widget _app({
   required Channel channel,
   required Future<List<ChannelMember>> Function() loadMembers,
+  bool isUnread = false,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
@@ -33,7 +34,7 @@ Widget _app({
   child: MaterialApp(
     theme: AppTheme.light(),
     home: Scaffold(
-      body: ChannelActionsSheet(channel: channel, isUnread: false),
+      body: ChannelActionsSheet(channel: channel, isUnread: isUnread),
     ),
   ),
 );
@@ -58,7 +59,7 @@ void main() {
 
     for (final label in [
       'Star',
-      'Unread',
+      'Mark Unread',
       'Move to section…',
       'Mute channel',
       'Manage channel',
@@ -80,6 +81,20 @@ void main() {
     expect(muteTop, lessThan(manageTop));
     expect(manageTop, lessThan(copyNameTop));
     expect(copyNameTop, lessThan(copyIdTop));
+  });
+
+  testWidgets('unread channel uses the Mark Read label', (tester) async {
+    await tester.pumpWidget(
+      _app(
+        channel: _channel(),
+        isUnread: true,
+        loadMembers: () async => const [],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Mark Read'), findsOneWidget);
+    expect(find.text('Mark Unread'), findsNothing);
   });
 
   testWidgets('admin can archive but cannot delete', (tester) async {
@@ -146,7 +161,7 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final label in [
-      'Unread',
+      'Mark Unread',
       'Mute channel',
       'Copy channel name',
       'Copy channel ID',
