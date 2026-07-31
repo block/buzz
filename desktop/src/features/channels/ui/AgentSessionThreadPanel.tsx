@@ -15,6 +15,7 @@ import {
   observerEventScrollId,
   scopeByChannel,
   deriveLatestSessionId,
+  deriveLatestTurnId,
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
@@ -129,14 +130,10 @@ export function AgentSessionThreadPanel({
     () => mergeObserverEventWindows(scopedEvents, archivedChannelEvents),
     [scopedEvents, archivedChannelEvents],
   );
-  const activeTurnId = React.useMemo(() => {
-    if (!isWorking) return null;
-    for (let index = combinedHeaderEvents.length - 1; index >= 0; index -= 1) {
-      const turnId = combinedHeaderEvents[index]?.turnId;
-      if (turnId) return turnId;
-    }
-    return null;
-  }, [combinedHeaderEvents, isWorking]);
+  const latestTurnId = React.useMemo(
+    () => deriveLatestTurnId(combinedHeaderEvents),
+    [combinedHeaderEvents],
+  );
   const activeSessionId = React.useMemo(
     () => deriveLatestSessionId(combinedHeaderEvents),
     [combinedHeaderEvents],
@@ -145,7 +142,7 @@ export function AgentSessionThreadPanel({
     agent.pubkey,
     sessionChannelId,
     activeSessionId,
-    activeTurnId,
+    latestTurnId,
   );
   const latestActivityAt = React.useMemo(
     () => getLatestActivityTimestamp(combinedHeaderEvents),
