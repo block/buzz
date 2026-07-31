@@ -1092,7 +1092,10 @@ fn parse_relay_agents(agents: serde_json::Value) -> Vec<RelayAgentInfo> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("<missing pubkey>")
                 .to_owned();
-            match serde_json::from_value::<RelayAgentInfo>(item) {
+            // serde_path_to_error names the offending field (e.g.
+            // `channel_add_policy: invalid type: integer`) so operators can
+            // spot schema drift from the warn alone.
+            match serde_path_to_error::deserialize::<_, RelayAgentInfo>(item) {
                 Ok(agent) => Some(agent),
                 Err(e) => {
                     tracing::warn!(
