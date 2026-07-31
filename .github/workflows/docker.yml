@@ -448,7 +448,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
         with:
-          images: ghcr.io/block/buzz-push-gateway
+          images: ${{ env.GATEWAY_IMAGE_NAME }}
           tags: |
             type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
@@ -462,7 +462,7 @@ jobs:
         run: |
           set -euo pipefail
           tags=(); while IFS= read -r tag; do [ -n "$tag" ] && tags+=("-t" "$tag"); done <<< "$META_TAGS"
-          digests=(); for digest in *; do digests+=("ghcr.io/block/buzz-push-gateway@sha256:${digest}"); done
+          digests=(); for digest in *; do digests+=("${{ env.GATEWAY_IMAGE_NAME }}@sha256:${digest}"); done
           docker buildx imagetools create "${tags[@]}" "${digests[@]}"
           first_tag=$(echo "$META_TAGS" | head -n1)
           digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r '.digest')
@@ -470,7 +470,7 @@ jobs:
       - name: Attest gateway image provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
-          subject-name: ghcr.io/block/buzz-push-gateway
+          subject-name: ${{ env.GATEWAY_IMAGE_NAME }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
       - name: Gateway publication summary
@@ -480,7 +480,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### Published \`ghcr.io/block/buzz-push-gateway\`"
+            echo "### Published \`${{ env.GATEWAY_IMAGE_NAME }}\`"
             echo
             printf "**Digest:** \`%s\`\n" "$GATEWAY_DIGEST"
             echo
@@ -491,6 +491,6 @@ jobs:
             echo
             echo 'Verify provenance before deployment:'
             echo "\`\`\`"
-            printf 'gh attestation verify oci://ghcr.io/block/buzz-push-gateway@%s --owner block\n' "$GATEWAY_DIGEST"
+            printf 'gh attestation verify oci://${{ env.GATEWAY_IMAGE_NAME }}@%s --owner ${{ github.repository_owner }}\n' "$GATEWAY_DIGEST"
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
