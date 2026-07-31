@@ -1792,6 +1792,7 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        desired_mcp: None,
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
@@ -2937,6 +2938,13 @@ fn dispatch_pending(
         };
         tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
 
+        // Turn-boundary MCP application: stamp the channel's desired set onto
+        // the agent before it is moved into the task. The task compares this
+        // against `SessionState.applied_mcp` and resumes in place on a
+        // mismatch. Stamping here — not in the control handler — is what makes
+        // a live toggle land without cancelling an in-flight turn.
+        agent.desired_mcp = pool.desired_mcp_for(&channel_id).cloned();
+
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
@@ -3837,6 +3845,7 @@ async fn initialize_agent_pool(
                             model_capabilities: None,
                             desired_model: startup.model.clone(),
                             model_overridden: false,
+                            desired_mcp: None,
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
@@ -5366,6 +5375,7 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_mcp: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy

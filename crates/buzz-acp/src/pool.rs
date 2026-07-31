@@ -103,6 +103,11 @@ pub struct SessionState {
     /// fetch fails — all fail open. Cleared on session invalidation alongside
     /// `core_sections` so the next session picks up any canvas change.
     pub canvas_sections: HashMap<Uuid, String>,
+    /// channel_id → the MCP server set the live session for that channel was
+    /// actually created or resumed with. Compared against the desired set at
+    /// each turn boundary; a mismatch triggers an in-place `session/resume`.
+    /// Cleared with the session so a rotated session re-applies from scratch.
+    pub applied_mcp: HashMap<Uuid, Vec<McpServer>>,
 }
 
 impl SessionState {
@@ -125,6 +130,7 @@ impl SessionState {
         self.turn_counts.remove(channel_id);
         self.core_sections.remove(channel_id);
         self.canvas_sections.remove(channel_id);
+        self.applied_mcp.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
@@ -136,6 +142,7 @@ impl SessionState {
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
         self.canvas_sections.clear();
+        self.applied_mcp.clear();
     }
 
     #[cfg(test)]
@@ -144,6 +151,7 @@ impl SessionState {
             || self.turn_counts.contains_key(channel_id)
             || self.core_sections.contains_key(channel_id)
             || self.canvas_sections.contains_key(channel_id)
+            || self.applied_mcp.contains_key(channel_id)
     }
 }
 
@@ -161,6 +169,11 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
+    /// MCP server set desired for the channel this agent is about to serve,
+    /// stamped by `dispatch_pending` at claim time. `None` means "no managed
+    /// set for this channel" — the agent uses `PromptContext.mcp_servers`.
+    /// Runtime-only, re-stamped on every dispatch.
+    pub desired_mcp: Option<Vec<McpServer>>,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
     /// Whether Goose accepted its custom system-prompt method. `None` probes on
@@ -216,6 +229,10 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// channel_id → desired MCP server set, the authority for what a channel's
+    /// sessions should run with. Runtime-only (the desktop re-sends on
+    /// reconnect), matching `desired_model` semantics.
+    desired_mcp: HashMap<Uuid, Vec<McpServer>>,
 }
 
 /// Result returned by a completed prompt task.
@@ -568,7 +585,24 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            desired_mcp: HashMap::new(),
         }
+    }
+
+    /// Record the desired MCP server set for a channel.
+    ///
+    /// Takes effect at the channel's next turn boundary: `dispatch_pending`
+    /// stamps it onto the claimed agent, and the session lookup resumes the
+    /// live session in place if it differs from what was applied. Never
+    /// disturbs an in-flight turn.
+    #[allow(dead_code)] // Driven by the MCP control frame (Task 5).
+    pub fn set_desired_mcp(&mut self, channel_id: Uuid, servers: Vec<McpServer>) {
+        self.desired_mcp.insert(channel_id, servers);
+    }
+
+    /// The desired MCP server set for a channel, if one has been recorded.
+    pub fn desired_mcp_for(&self, channel_id: &Uuid) -> Option<&Vec<McpServer>> {
+        self.desired_mcp.get(channel_id)
     }
 
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
@@ -3965,6 +3999,48 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
+    /// An empty pool — enough to exercise the channel-keyed maps that need no
+    /// agent slots. `from_slots` avoids spawning subprocesses.
+    fn test_pool() -> AgentPool {
+        AgentPool::from_slots(Vec::new())
+    }
+
+    fn test_mcp_servers() -> Vec<McpServer> {
+        vec![McpServer {
+            name: "razorpay".into(),
+            command: "/usr/bin/rzp".into(),
+            args: vec![],
+            env: vec![],
+        }]
+    }
+
+    #[test]
+    fn invalidate_channel_clears_applied_mcp() {
+        let cid = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.sessions.insert(cid, "ses_1".to_string());
+        state.applied_mcp.insert(cid, test_mcp_servers());
+
+        assert!(state.invalidate_channel(&cid));
+
+        assert!(
+            !state.applied_mcp.contains_key(&cid),
+            "a dropped session must not leave a stale applied-MCP record behind"
+        );
+    }
+
+    #[test]
+    fn set_desired_mcp_is_readable_per_channel() {
+        let mut pool = test_pool();
+        let cid = Uuid::new_v4();
+        let servers = test_mcp_servers();
+
+        pool.set_desired_mcp(cid, servers.clone());
+
+        assert_eq!(pool.desired_mcp_for(&cid), Some(&servers));
+        assert_eq!(pool.desired_mcp_for(&Uuid::new_v4()), None);
+    }
+
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
@@ -5876,6 +5952,7 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_mcp: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -5934,6 +6011,7 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_mcp: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
