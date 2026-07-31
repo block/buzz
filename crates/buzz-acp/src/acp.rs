@@ -202,6 +202,10 @@ pub struct AcpClient {
     /// in its initialize response. Gates the in-place MCP reconfiguration path;
     /// call sites fall back to session invalidation when false.
     resume_supported: bool,
+    /// Tool names seen in `tool_call` session updates. Drained by the pool
+    /// after each turn to opportunistically verify an MCP grant landed — the
+    /// ACP wire carries no MCP status, so a tool call is the only evidence.
+    observed_tool_names: Vec<String>,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -553,6 +557,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             resume_supported: false,
+            observed_tool_names: Vec::new(),
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -923,6 +928,11 @@ impl AcpClient {
     /// Whether the connected agent supports `session/resume`.
     pub fn resume_supported(&self) -> bool {
         self.resume_supported
+    }
+
+    /// Take the tool names observed since the last call, clearing the buffer.
+    pub fn take_observed_tool_names(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.observed_tool_names)
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -1803,6 +1813,10 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                // Recorded for opportunistic MCP-grant verification; the pool
+                // drains this after the turn. Only the raw name matters, and
+                // only an `mcp__<server>__` prefix ever matches.
+                self.observed_tool_names.push(title.to_string());
                 true
             }
             "tool_call_update" => {

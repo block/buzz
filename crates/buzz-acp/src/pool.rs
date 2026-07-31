@@ -108,6 +108,35 @@ pub struct SessionState {
     /// each turn boundary; a mismatch triggers an in-place `session/resume`.
     /// Cleared with the session so a rotated session re-applies from scratch.
     pub applied_mcp: HashMap<Uuid, Vec<McpServer>>,
+    /// Channels whose applied MCP grant has been *proven* to have landed by a
+    /// tool call from one of its servers. A channel in `applied_mcp` but not
+    /// here is `applied_unverified` — the ACP wire carries no MCP status, so
+    /// absence of evidence is never reported as success. Reset whenever the
+    /// applied set changes: a new grant is unverified again.
+    pub mcp_verified: HashSet<Uuid>,
+}
+
+/// Promote a channel's MCP grant to *verified* when a tool call proves a
+/// granted server is actually mounted.
+///
+/// The ACP wire carries no MCP status today (the Claude adapter consumes the
+/// SDK's `system`/`init` message, which holds `mcp_servers[{name,status}]`,
+/// without forwarding it). A tool call named `mcp__<server>__<tool>` is
+/// therefore the only first-hand evidence available that the grant landed.
+/// Absence of evidence is reported as `applied_unverified`, never as success.
+fn note_tool_call_for_verification(state: &mut SessionState, channel_id: &Uuid, tool_name: &str) {
+    let Some(servers) = state.applied_mcp.get(channel_id) else {
+        return;
+    };
+    // Match the full `mcp__<server>__` prefix rather than splitting on `__`:
+    // a server name may itself contain a double underscore, and splitting would
+    // silently attribute its tool calls to the wrong server (or to none).
+    let landed = servers
+        .iter()
+        .any(|s| tool_name.starts_with(&format!("mcp__{}__", s.name)));
+    if landed {
+        state.mcp_verified.insert(*channel_id);
+    }
 }
 
 impl SessionState {
@@ -131,6 +160,7 @@ impl SessionState {
         self.core_sections.remove(channel_id);
         self.canvas_sections.remove(channel_id);
         self.applied_mcp.remove(channel_id);
+        self.mcp_verified.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
@@ -143,6 +173,7 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.applied_mcp.clear();
+        self.mcp_verified.clear();
     }
 
     #[cfg(test)]
@@ -944,6 +975,8 @@ async fn reconcile_channel_mcp(agent: &mut OwnedAgent, ctx: &PromptContext, cid:
     {
         Ok(_) => {
             agent.state.applied_mcp.insert(*cid, desired);
+            // A new grant is unverified until a tool call proves it landed.
+            agent.state.mcp_verified.remove(cid);
             tracing::info!(
                 target: "pool::session",
                 "resumed session {sid} for channel {cid} with a new MCP set"
@@ -1680,6 +1713,7 @@ pub async fn run_prompt_task(
                         let applied = effective_mcp_servers(&agent, &ctx).clone();
                         agent.state.sessions.insert(*cid, sid.clone());
                         agent.state.applied_mcp.insert(*cid, applied);
+                        agent.state.mcp_verified.remove(cid);
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
@@ -2197,6 +2231,15 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            // Opportunistic MCP-grant verification: a tool call named
+            // `mcp__<server>__<tool>` is the only first-hand evidence on the ACP
+            // wire that a granted server actually mounted.
+            if let PromptSource::Channel(cid) = &source {
+                for tool_name in agent.acp.take_observed_tool_names() {
+                    note_tool_call_for_verification(&mut agent.state, cid, &tool_name);
+                }
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -4119,6 +4162,37 @@ mod tests {
 
         assert_eq!(pool.desired_mcp_for(&cid), Some(&servers));
         assert_eq!(pool.desired_mcp_for(&Uuid::new_v4()), None);
+    }
+
+    #[test]
+    fn a_tool_call_from_a_granted_server_marks_the_grant_verified() {
+        let cid = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.applied_mcp.insert(cid, test_mcp_servers());
+
+        assert!(!state.mcp_verified.contains(&cid));
+
+        // MCP tools surface as `mcp__<server>__<tool>`.
+        note_tool_call_for_verification(&mut state, &cid, "mcp__razorpay__create_order");
+
+        assert!(
+            state.mcp_verified.contains(&cid),
+            "a tool call from a granted server is proof the grant landed"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_tool_call_does_not_verify_the_grant() {
+        let cid = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.applied_mcp.insert(cid, test_mcp_servers());
+
+        note_tool_call_for_verification(&mut state, &cid, "Read");
+
+        assert!(
+            !state.mcp_verified.contains(&cid),
+            "a built-in tool call proves nothing about the MCP grant"
+        );
     }
 
     /// A minimal agent over a sleeping subprocess — enough to read the plain
