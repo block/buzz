@@ -187,6 +187,31 @@ pub async fn pick_and_upload_sticker_image(
     Ok(Some(descriptor))
 }
 
+/// Map an import failure onto a message that points at the actual cause.
+///
+/// The link is validated against the official `signal.art` shape before any
+/// request is made, so once we are here the link's *form* is already known
+/// good. Reporting every downstream failure as "check the link" therefore
+/// sends the user to re-examine the one thing that cannot be wrong. A
+/// transport failure in particular is worth calling out on its own:
+/// `cdn.signal.org` is served under Signal's own private root CA, so a client
+/// trusting only the public roots cannot complete the handshake — the link is
+/// fine and re-entering it will never help.
+fn signal_import_error_message(error: &sonar_stickers::StickerError) -> String {
+    match error {
+        sonar_stickers::StickerError::Http(_) => {
+            "Could not reach Signal to download that pack. This is a network or \
+             TLS failure, not a problem with the link."
+                .to_string()
+        }
+        sonar_stickers::StickerError::Crypto(_) => {
+            "Could not decrypt that Signal pack — the pack key in the link may be wrong."
+                .to_string()
+        }
+        _ => "Could not import that Signal sticker pack.".to_string(),
+    }
+}
+
 /// Import and decrypt a Signal sticker pack entirely in trusted Rust, then
 /// upload the authenticated plaintext assets through Buzz's existing Blossom
 /// path. The Signal link (including its pack key) is consumed by this command
@@ -210,8 +235,13 @@ pub async fn import_signal_sticker_pack(
     )
     .await;
     signal_link.zeroize();
-    let imported = imported_result.map_err(|_| {
-        "Could not import that Signal sticker pack. Check the link and try again.".to_string()
+    // Safe to log: Signal's URLs carry the pack *id*, never the pack key —
+    // the key is only used locally to decrypt what comes back. Discarding the
+    // error entirely left every failure indistinguishable, which is how a TLS
+    // handshake failure came to be reported as a bad link.
+    let imported = imported_result.map_err(|error| {
+        eprintln!("buzz-desktop: signal sticker import failed: {error}");
+        signal_import_error_message(&error)
     })?;
 
     let mut stickers = Vec::with_capacity(imported.stickers.len());
@@ -657,5 +687,42 @@ mod tests {
         assert!(!validate_official_signal_sticker_link(
             &valid.replace("https://", "http://")
         ));
+    }
+
+    /// A transport failure must not be reported as a bad link. `cdn.signal.org`
+    /// is served under Signal's own private root CA, so a client trusting only
+    /// the public roots fails the handshake on a perfectly valid link — the
+    /// old blanket "check the link and try again" sent users to re-examine the
+    /// one thing already validated before the request was made.
+    #[test]
+    fn transport_failure_is_not_reported_as_a_bad_link() {
+        let message = signal_import_error_message(&sonar_stickers::StickerError::Http(
+            "GET https://cdn.signal.org/stickers/abc/manifest.proto: invalid peer certificate"
+                .to_string(),
+        ));
+        assert!(message.contains("network or TLS"), "{message}");
+        assert!(
+            !message.to_ascii_lowercase().contains("check the link"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn decrypt_failure_points_at_the_pack_key() {
+        let message = signal_import_error_message(&sonar_stickers::StickerError::Crypto(
+            "AES-CBC decrypt failed".to_string(),
+        ));
+        assert!(message.contains("pack key"), "{message}");
+    }
+
+    /// The underlying detail is logged, never surfaced — it can carry the pack
+    /// id and upstream URLs, which is diagnostic noise for a user-facing toast.
+    #[test]
+    fn user_facing_message_never_leaks_the_underlying_detail() {
+        let secret = "GET https://cdn.signal.org/stickers/deadbeef/manifest.proto";
+        let message =
+            signal_import_error_message(&sonar_stickers::StickerError::Http(secret.to_string()));
+        assert!(!message.contains(secret), "{message}");
+        assert!(!message.contains("cdn.signal.org"), "{message}");
     }
 }
