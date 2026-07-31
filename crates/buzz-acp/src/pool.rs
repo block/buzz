@@ -3646,9 +3646,11 @@ pub(crate) fn build_turn_metric_counts(
         // one. Never derived from input+output (NIP-AM MUST NOT).
         total_tokens: usage.cumulative_total_tokens,
         cost_usd: usage.cumulative_cost_usd,
-        // Session-cumulative cache-read tokens; zero when no cache hits have
-        // been reported across this session.
-        cache_read_tokens: Some(usage.cumulative_cache_read_tokens),
+        // Session-cumulative cache-read tokens; None when the harness never
+        // reported this field (e.g. goose or older buzz-agent sessions).
+        // Passes through directly — do not wrap in Some() as the field already
+        // carries provenance (None vs Some(0) are distinct meanings).
+        cache_read_tokens: usage.cumulative_cache_read_tokens,
         // buzz-agent does not emit a cache-write count on the wire today;
         // leave None rather than deriving it from other fields.
         cache_write_tokens: None,
@@ -6035,7 +6037,7 @@ mod tests {
             cumulative_output_tokens: 50,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
-            cumulative_cache_read_tokens: 0,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // owner_pubkey = None → early return, no panic.
@@ -6071,7 +6073,7 @@ mod tests {
             cumulative_output_tokens: 80,
             cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
-            cumulative_cache_read_tokens: 0,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
@@ -6108,7 +6110,7 @@ mod tests {
             cumulative_output_tokens: 70,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
-            cumulative_cache_read_tokens: 0,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
@@ -6145,7 +6147,7 @@ mod tests {
             cumulative_output_tokens: 100,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
-            cumulative_cache_read_tokens: 0,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
@@ -6179,7 +6181,7 @@ mod tests {
             cumulative_output_tokens: 120,
             cumulative_total_tokens: Some(620), // genuine cumulative total
             cumulative_cost_usd: None,
-            cumulative_cache_read_tokens: 0,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
 
@@ -6228,7 +6230,7 @@ mod tests {
             cumulative_output_tokens: 60,
             cumulative_total_tokens: None, // session has no total
             cumulative_cost_usd: None,
-            cumulative_cache_read_tokens: 0,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
 
