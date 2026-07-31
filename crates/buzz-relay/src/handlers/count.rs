@@ -7,8 +7,8 @@ use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
-    event_visible_to_reader, filter_can_match_persona_shared_kinds,
-    filter_can_match_result_gated_kinds, result_gated_count_safe_for_pushdown,
+    event_visible_to_reader, filter_can_match_result_gated_kinds,
+    filter_can_match_shared_gated_kinds, result_gated_count_safe_for_pushdown,
 };
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
@@ -103,11 +103,11 @@ pub async fn handle_count(
         // fast-path count_events() cannot be used because it doesn't do
         // per-event author filtering.
         let needs_author_only_filtering = super::req::filter_can_match_author_only_kinds(filter);
-        // Determine if this filter can match kind 30175 (persona) — if so, the
-        // fast-path must be bypassed because it has no per-event shared-tag check.
-        // A fast count over 30175 would include foreign unshared persona events,
-        // leaking the existence of private agent activity.
-        let needs_persona_filtering = filter_can_match_persona_shared_kinds(filter);
+        // Determine if this filter can match a shared-gated kind (30175, 30178)
+        // — if so, the fast path must be bypassed because it has no per-event
+        // shared-tag check. A fast count over those kinds would include foreign
+        // unshared events, leaking the existence of private agent activity.
+        let needs_shared_gate_filtering = filter_can_match_shared_gated_kinds(filter);
         // Determine if this filter can match result-gated kinds (44200, 30622)
         // that require a per-event owner check. When the fast SQL path would
         // count matching rows without calling reader_authorized_for_event, a
@@ -157,10 +157,10 @@ pub async fn handle_count(
                 conn.tenant.community(),
             )
             .await;
-            // Persona visibility pushdown: pre-filter the fallback query_events
-            // candidate page before ORDER/LIMIT.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown: pre-filter the fallback
+            // query_events candidate page before ORDER/LIMIT.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
@@ -171,9 +171,9 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
@@ -184,7 +184,11 @@ pub async fn handle_count(
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
                 super::req::apply_count_fallback_limit(&mut q);
-                match state.db.query_events(&q).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("count_req_fallback", &q)
+                    .await
+                {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -226,9 +230,9 @@ pub async fn handle_count(
             )
             .await;
             query.channel_ids = Some(accessible_channels.to_vec());
-            // Persona visibility pushdown for the fallback query_events path.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown for the fallback query_events path.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
 
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
@@ -240,10 +244,10 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
                 query.limit = None; // COUNT doesn't need a row limit
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
@@ -253,7 +257,11 @@ pub async fn handle_count(
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
                 super::req::apply_count_fallback_limit(&mut query);
-                match state.db.query_events(&query).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("count_req_fallback", &query)
+                    .await
+                {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);

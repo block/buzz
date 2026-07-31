@@ -6,6 +6,7 @@ import 'package:camera/camera.dart' as camera;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -14,10 +15,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -34,6 +37,7 @@ import 'mentions/mention_ranking.dart';
 import 'photo_library.dart';
 
 part 'compose_bar/helpers.dart';
+part 'compose_bar/agent_mention_labels.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
@@ -229,6 +233,16 @@ class ComposeBar extends HookConsumerWidget {
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
+    final agentMentionLabels = _agentMentionLabels(
+      candidates: mentionMap.value.values,
+    );
+    final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
+      '\u0000',
+    );
+    useEffect(() {
+      controller.setAgentMentionNames(agentMentionLabels);
+      return null;
+    }, [controller, agentMentionLabelsKey]);
     useEffect(
       () {
         final memberList = membersAsync.asData?.value ?? <ChannelMember>[];

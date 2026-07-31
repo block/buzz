@@ -82,11 +82,11 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
-    #[arg(long, env = "BUZZ_AUTH_TAG")]
+    #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
@@ -369,6 +369,9 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
+        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -808,6 +811,9 @@ pub enum UsersCmd {
         /// Search by display name (case-insensitive substring match)
         #[arg(long = "name")]
         name: Option<String>,
+        /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)
+        #[arg(long = "owner", requires = "name")]
+        owner: Option<String>,
     },
     /// Update the current identity's profile
     #[command(name = "set-profile")]
@@ -1126,6 +1132,11 @@ pub enum ReposCmd {
         /// Preferred Nostr relay(s) for repo discovery — can be specified multiple times
         #[arg(long = "nostr-relay")]
         relays: Vec<String>,
+        /// Channel UUID to bind the repo to. The `buzz-channel` tag is the
+        /// git ACL: without it the relay 404s every clone/fetch/push until
+        /// the author runs `buzz repos bind` (issue #3527).
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1144,6 +1155,20 @@ pub enum ReposCmd {
         /// Maximum number of results
         #[arg(long)]
         limit: Option<u32>,
+    },
+    /// Bind (or rebind) one of your repositories to a channel.
+    ///
+    /// The `buzz-channel` tag on the announcement is the git ACL: the relay
+    /// authorizes clone/fetch/push by membership in the bound channel. A
+    /// repo announced without it (e.g. by a vanilla NIP-34 client) returns
+    /// 404 for everyone until its author binds it here.
+    Bind {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Channel UUID to bind. Replaces any existing binding.
+        #[arg(long)]
+        channel: String,
     },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
@@ -1988,7 +2013,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["create", "get", "list", "protect"]
+            vec!["bind", "create", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2051,7 +2076,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 4),
+            ("repos", 5),
             ("social", 7),
             ("upload", 1),
             ("users", 5),
@@ -2074,5 +2099,47 @@ mod tests {
                 group_name, expected_count, actual_count
             );
         }
+    }
+
+    /// Collect all args (recursing into subcommands) whose env var name looks
+    /// like a credential but does NOT have `hide_env_values` set.
+    fn collect_unhidden_secret_args(cmd: &clap::Command) -> Vec<(String, String)> {
+        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+
+        let mut violations: Vec<(String, String)> = Vec::new();
+
+        for arg in cmd.get_arguments() {
+            if let Some(env_key) = arg.get_env() {
+                let env_name = env_key.to_string_lossy().to_uppercase();
+                let is_secret = SECRET_PATTERNS.iter().any(|pat| env_name.contains(pat));
+                if is_secret && !arg.is_hide_env_values_set() {
+                    violations.push((cmd.get_name().to_string(), env_name));
+                }
+            }
+        }
+
+        for sub in cmd.get_subcommands() {
+            violations.extend(collect_unhidden_secret_args(sub));
+        }
+
+        violations
+    }
+
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// must set `hide_env_values = true` to prevent credential leakage in --help.
+    #[test]
+    fn secret_env_args_hide_their_values_in_help() {
+        let cmd = Cli::command();
+        let violations = collect_unhidden_secret_args(&cmd);
+        assert!(
+            violations.is_empty(),
+            "Found secret-bearing env args without hide_env_values=true. \
+             Add `hide_env_values = true` to each:\n{}",
+            violations
+                .iter()
+                .map(|(cmd, env)| format!("  command={cmd:?} env={env:?}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

@@ -15,7 +15,7 @@ type E2eWindow = Window & {
   }) => void;
 };
 
-test("Share compute has a clear empty state and starts and stops sharing", async ({
+test("Share compute selects the curated default and starts and stops sharing", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -30,22 +30,32 @@ test("Share compute has a clear empty state and starts and stops sharing", async
   await expect(card).toContainText(
     "Choose a suggested model below, or enter a model reference or local file",
   );
-  await expect(toggle).toBeDisabled();
-
-  await model.fill("hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M");
+  await expect(model).toHaveValue("Gemma-4-E4B-it-Q4_K_M");
+  await expect(toggle).toBeEnabled();
   await expect(card).toContainText(
     "Buzz downloads remote models when sharing starts",
   );
-  await expect(toggle).toBeEnabled();
 
   await toggle.click();
   await expect(toggle).toBeChecked();
-  await expect(card).toContainText("Sharing SmolLM2 135M with relay members");
+  await expect(card).toContainText("Sharing Gemma 4 E4B with relay members");
   await expect
     .poll(() =>
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
     )
     .toContain("mesh_start_node");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as E2eWindow).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [],
+      ),
+    )
+    .toContainEqual({
+      command: "mesh_start_node",
+      payload: {
+        request: { mode: "serve", modelId: "Gemma-4-E4B-it-Q4_K_M" },
+      },
+    });
 
   await toggle.click();
   await expect(toggle).not.toBeChecked();

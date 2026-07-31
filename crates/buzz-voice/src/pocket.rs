@@ -24,8 +24,9 @@ mod pocket_april;
 mod pocket_models;
 
 use pocket_april::{prepare_april_prompt, AprilPocketTts, AprilSynthesisOutcome};
-pub(crate) use pocket_models::{
-    april_model_info, PocketModelArtifact, APRIL_BUNDLE_ID, APRIL_MODEL_ID, APRIL_MODEL_REVISION,
+pub use pocket_models::{
+    april_model_info, PocketModelArtifact, PocketModelInfo, APRIL_BUNDLE_ID, APRIL_MODEL_ID,
+    APRIL_MODEL_REVISION,
 };
 
 /// Pocket TTS emits 24 kHz mono PCM.

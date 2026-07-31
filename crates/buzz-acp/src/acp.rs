@@ -20,10 +20,6 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
-/// Env var that tells a goose ACP child not to start its cron scheduler.
-/// Injected unconditionally by [`AcpClient::spawn`]; see the call site for why.
-pub(crate) const GOOSE_SCHEDULER_DISABLED_ENV: &str = "GOOSE_ACP_SCHEDULER_DISABLED";
-
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -516,16 +512,6 @@ impl AcpClient {
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
         }
-
-        // Buzz-managed agents must never execute the operator's personal cron
-        // schedule. A goose ACP child starts a scheduler over the shared
-        // `schedule.json`, so a pool of N children fires every scheduled job N
-        // times — under the wrong identity and racing standalone goose.
-        //
-        // Set last, and with no operator-wins escape hatch, so it beats both a
-        // conflicting persona `extra_env` entry and any inherited parent value.
-        // Agent builds that don't recognize the variable ignore it.
-        cmd.env(GOOSE_SCHEDULER_DISABLED_ENV, "true");
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
@@ -2866,46 +2852,6 @@ mod tests {
             .expect("failed to spawn test script")
     }
 
-    /// Spawn a script that echoes the named env vars as the child observes
-    /// them, one per line. `<unset>` means the child did not receive the var.
-    async fn spawn_and_read_child_env(
-        vars: &[&str],
-        extra_env: &[(String, String)],
-    ) -> Vec<String> {
-        let script = vars
-            .iter()
-            .map(|var| format!("printf '%s\\n' \"${{{var}:-<unset>}}\""))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut client = AcpClient::spawn("bash", &["-c".into(), script], extra_env, false)
-            .await
-            .expect("failed to spawn env probe script");
-        let mut observed = Vec::with_capacity(vars.len());
-        for var in vars {
-            observed.push(
-                client
-                    .reader
-                    .next()
-                    .await
-                    .unwrap_or_else(|| panic!("child produced no output for {var}"))
-                    .expect("child stdout was not readable"),
-            );
-        }
-        observed
-    }
-
-    /// Every spawned agent must be told not to run the operator's cron
-    /// schedule, without the caller having to opt in.
-    #[tokio::test]
-    async fn spawn_injects_scheduler_disabled_env_by_default() {
-        let observed = spawn_and_read_child_env(&[GOOSE_SCHEDULER_DISABLED_ENV], &[]).await;
-        assert_eq!(
-            observed,
-            vec!["true"],
-            "{GOOSE_SCHEDULER_DISABLED_ENV} must be injected into every spawn"
-        );
-    }
-
     /// Spawn a probe script whose file name carries a runtime identity (e.g.
     /// `hermes-acp`) and return the value of `var` as the child observed it.
     /// `<unset>` means the child did not receive the var.
@@ -2975,37 +2921,6 @@ mod tests {
             spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
-        );
-    }
-
-    /// Persona config must not be able to re-enable the scheduler: this is a
-    /// correctness invariant, not an operator-tunable default, so the
-    /// injection is set after (and therefore wins over) the `extra_env` loop.
-    ///
-    /// The control var pins that `extra_env` really did reach the child, so a
-    /// pass here means the conflicting entry lost the fight rather than
-    /// `extra_env` being dropped wholesale.
-    #[tokio::test]
-    async fn spawn_scheduler_disabled_env_overrides_conflicting_extra_env() {
-        let extra_env = vec![
-            (
-                GOOSE_SCHEDULER_DISABLED_ENV.to_string(),
-                "false".to_string(),
-            ),
-            (
-                "BUZZ_ENV_PROBE_CONTROL".to_string(),
-                "delivered".to_string(),
-            ),
-        ];
-        let observed = spawn_and_read_child_env(
-            &[GOOSE_SCHEDULER_DISABLED_ENV, "BUZZ_ENV_PROBE_CONTROL"],
-            &extra_env,
-        )
-        .await;
-        assert_eq!(
-            observed,
-            vec!["true", "delivered"],
-            "a persona extra_env entry must not override {GOOSE_SCHEDULER_DISABLED_ENV}"
         );
     }
 

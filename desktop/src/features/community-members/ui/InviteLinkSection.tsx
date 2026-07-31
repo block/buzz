@@ -84,8 +84,8 @@ export function InviteLinkSection({
   }
 
   return (
-    <section className="pt-2" data-testid="community-invite-link-section">
-      <div className="space-y-5">
+    <section data-testid="community-invite-link-section">
+      <div className="space-y-3">
         <div className="flex items-center justify-between gap-4">
           <span className="text-sm font-medium">Expires after</span>
           <DropdownMenu>
