@@ -116,9 +116,9 @@ export function useTtsSubscription(
     };
     const initialReadinessGate = createInitialTtsReadinessGate(
       deliver,
-      ({ routeId }) => {
+      ({ routeId }, reason) => {
         console.debug(
-          `[huddle] tts stage=eligibility status=rejected reason=membership_unavailable route_id=${routeId}`,
+          `[huddle] tts stage=eligibility status=rejected reason=${reason} route_id=${routeId}`,
         );
       },
     );
@@ -140,7 +140,7 @@ export function useTtsSubscription(
         agentPubkeys.clear();
         agentsLoaded = false;
         if (initial) {
-          initialReadinessGate.fail();
+          initialReadinessGate.fail("membership_unavailable");
         }
         console.error("[huddle] Failed to load agent pubkeys:", e);
       }
@@ -178,13 +178,14 @@ export function useTtsSubscription(
             if (!disposed) applyBootstrap(state);
           })
           .catch((err) => {
-            if (!ttsStateKnown) initialReadinessGate.fail();
+            if (!ttsStateKnown)
+              initialReadinessGate.fail("tts_state_unavailable");
             console.warn("[huddle] Failed to load TTS state:", err);
           });
       })
       .catch((err) => {
         speakInOrder.setEnabled(false);
-        initialReadinessGate.fail();
+        initialReadinessGate.fail("tts_state_unavailable");
         console.warn("[huddle] Failed to listen for TTS state:", err);
       });
 
@@ -208,7 +209,7 @@ export function useTtsSubscription(
         }
 
         // Preserve arrival order until initial membership and TTS state are
-        // both known. A failed lookup clears this buffer fail-closed.
+        // both known. A failed readiness check clears this buffer fail-closed.
         const routeId = allocateTtsRouteId();
         if (!agentsLoaded) {
           console.debug(

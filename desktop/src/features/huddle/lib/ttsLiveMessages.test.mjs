@@ -254,16 +254,18 @@ test("preserves the first agent reply when membership resolves before TTS state"
   assert.deepEqual(spoken, ["first agent reply"]);
 });
 
-test("drops the initial buffer fail-closed when membership lookup fails", () => {
+test("drops the initial buffer fail-closed with the readiness failure", () => {
   const delivered = [];
   const dropped = [];
   const gate = createInitialTtsReadinessGate(
     (event) => delivered.push(event),
-    (event) => dropped.push(event),
+    (event, reason) => dropped.push({ event, reason }),
   );
   gate.push("unverified");
-  gate.fail();
+  gate.fail("tts_state_unavailable");
   gate.push("after-failure");
   assert.deepEqual(delivered, ["after-failure"]);
-  assert.deepEqual(dropped, ["unverified"]);
+  assert.deepEqual(dropped, [
+    { event: "unverified", reason: "tts_state_unavailable" },
+  ]);
 });
