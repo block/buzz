@@ -350,6 +350,91 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+/// Overlay the latest `kind:40003` edit content onto the events it targets.
+///
+/// Agents poll with `messages get` / `messages thread`, so those must report
+/// the message's CURRENT content — a surface card's whole update model is a
+/// full-spec replacement, and an agent reading the original spec forever would
+/// act on stale state.
+///
+/// Edits are looked up **by target id**: an edit tags the event it replaces,
+/// so a reply's edit does not carry the thread root's id, and a window scan
+/// could miss it entirely. Ties on `created_at` (second precision) break on
+/// event id, matching every other client so all readers converge.
+///
+/// Best-effort: a failed lookup leaves original content rather than failing
+/// the read. Edit events already present in `events` are left in place — this
+/// only rewrites the content of their targets.
+async fn overlay_latest_edits(client: &BuzzClient, events: &mut [serde_json::Value]) {
+    const EDIT_KIND: u64 = 40003;
+
+    let target_ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.get("kind").and_then(|v| v.as_u64()) != Some(EDIT_KIND))
+        .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    if target_ids.is_empty() {
+        return;
+    }
+
+    let filter = serde_json::json!({ "kinds": [EDIT_KIND], "#e": target_ids });
+    let Ok(raw) = client.query(&filter).await else {
+        return;
+    };
+    let edits: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+
+    // target id -> (created_at, edit id, content)
+    let mut latest: std::collections::HashMap<String, (u64, String, String)> =
+        std::collections::HashMap::new();
+    for edit in &edits {
+        let Some(target) = edit
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .and_then(|tags| {
+                tags.iter().find_map(|tag| {
+                    let parts = tag.as_array()?;
+                    (parts.first()?.as_str()? == "e")
+                        .then(|| parts.get(1)?.as_str().map(str::to_string))
+                        .flatten()
+                })
+            })
+        else {
+            continue;
+        };
+        let created_at = edit.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = edit
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let content = edit
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let wins = latest.get(&target).is_none_or(|(at, existing_id, _)| {
+            created_at > *at || (created_at == *at && id > *existing_id)
+        });
+        if wins {
+            latest.insert(target, (created_at, id, content));
+        }
+    }
+
+    for event in events.iter_mut() {
+        if event.get("kind").and_then(|v| v.as_u64()) == Some(EDIT_KIND) {
+            continue;
+        }
+        let Some(id) = event.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+            continue;
+        };
+        if let Some((_, _, content)) = latest.get(&id) {
+            if let Some(obj) = event.as_object_mut() {
+                obj.insert("content".into(), serde_json::json!(content));
+            }
+        }
+    }
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -386,6 +471,7 @@ pub async fn cmd_get_messages(
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    overlay_latest_edits(client, &mut events).await;
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -422,6 +508,9 @@ pub async fn cmd_get_thread(
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    // The reply filter only catches edits tagged to the ROOT; an edited reply
+    // carries its own id, so resolve current content by target id.
+    overlay_latest_edits(client, &mut events).await;
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())

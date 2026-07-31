@@ -1,3 +1,4 @@
+import { messagePreviewText } from "@/features/surfaces/spec";
 import {
   AlertCircle,
   ArrowLeft,
@@ -392,7 +393,7 @@ function InboxMessageDetailPane({
     replyTarget && replyTarget.id !== item.id
       ? {
           author: replyTarget.authorLabel,
-          body: replyTarget.content,
+          body: messagePreviewText(replyTarget.content, replyTarget.kind),
           id: replyTarget.id,
         }
       : null;

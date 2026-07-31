@@ -2848,14 +2848,6 @@ where
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit.saturating_add(1) as usize);
     let agent_reply_filter = replies_filter.clone().author(agent_pubkey).limit(1);
-    // Edits (kind:40003) for anything in this thread — without them a surface
-    // card in the thread reads as its original spec forever.
-    let edits_filter = nostr::Filter::new()
-        .kind(nostr::Kind::Custom(
-            buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16,
-        ))
-        .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit.saturating_add(1) as usize);
 
     let context = fetch_with_retry(|| async {
         match timeout(
@@ -2864,13 +2856,37 @@ where
                 root_filter.clone(),
                 replies_filter.clone(),
                 agent_reply_filter.clone(),
-                edits_filter.clone(),
             ]),
         )
         .await
         {
             Ok(Ok(json)) => {
-                parse_nostr_thread_response_with_meta(json, root_event_id, limit, &agent_pubkey)
+                // Second phase: fetch the edits that target exactly the events
+                // this page returned. An updated card must read as its current
+                // spec, and a reply's edit is addressed to the reply, not the
+                // thread root. Failure here degrades to original content.
+                let ids = collect_event_ids(&json);
+                let merged = if ids.is_empty() {
+                    json
+                } else {
+                    match timeout(
+                        CONTEXT_FETCH_TIMEOUT,
+                        query(vec![edits_for_ids_filter(&ids)]),
+                    )
+                    .await
+                    {
+                        Ok(Ok(edits)) => merge_event_arrays(json, edits),
+                        _ => {
+                            tracing::warn!(
+                                channel_id = %channel_id,
+                                root = root_event_id,
+                                "thread edit overlay fetch failed — rendering original content"
+                            );
+                            json
+                        }
+                    }
+                };
+                parse_nostr_thread_response_with_meta(merged, root_event_id, limit, &agent_pubkey)
             }
             Ok(Err(e)) => {
                 tracing::warn!(
@@ -2972,15 +2988,14 @@ async fn fetch_dm_context(
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
     let ch_str = channel_id.to_string();
     let filter = nostr::Filter::new()
-        // Conversational kinds — surfaces are context an agent must read, not
-        // just publish — plus edits, which carry the current content of any
-        // message that has been updated (a surface card's whole update model).
+        // Conversational kinds only — surfaces are context an agent must read,
+        // not just publish. Edits are fetched separately, by target id: mixing
+        // them into this limited filter would let edit events consume message
+        // slots and split an original from its update.
         .kinds(
             buzz_core::kind::CONVERSATIONAL_KINDS
                 .iter()
-                .copied()
-                .chain(std::iter::once(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT))
-                .map(|k| nostr::Kind::Custom(k as u16)),
+                .map(|k| nostr::Kind::Custom(*k as u16)),
         )
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit as usize);
@@ -2992,7 +3007,30 @@ async fn fetch_dm_context(
         )
         .await
         {
-            Ok(Ok(json)) => parse_nostr_dm_response(json, limit),
+            Ok(Ok(json)) => {
+                // Second phase, by target id — see `edits_for_ids_filter`.
+                let ids = collect_event_ids(&json);
+                let merged = if ids.is_empty() {
+                    json
+                } else {
+                    match timeout(
+                        CONTEXT_FETCH_TIMEOUT,
+                        rest.query(std::slice::from_ref(&edits_for_ids_filter(&ids))),
+                    )
+                    .await
+                    {
+                        Ok(Ok(edits)) => merge_event_arrays(json, edits),
+                        _ => {
+                            tracing::warn!(
+                                channel_id = %channel_id,
+                                "DM edit overlay fetch failed — rendering original content"
+                            );
+                            json
+                        }
+                    }
+                };
+                parse_nostr_dm_response(merged, limit)
+            }
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
@@ -3083,6 +3121,42 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
         total,
         truncated,
     })
+}
+
+/// Event ids present in a relay JSON response array.
+fn collect_event_ids(json: &serde_json::Value) -> Vec<String> {
+    json.as_array()
+        .map(|events| {
+            events
+                .iter()
+                .filter(|ev| !is_edit_event(ev))
+                .filter_map(|ev| ev.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Filter for the edits that target exactly `ids`.
+///
+/// Edits MUST be looked up by target id. Scanning a channel window instead
+/// would miss a reply's edit (its `e` tag holds the reply's id, not the
+/// thread root's) and could drop the relevant edit on a busy channel; mixing
+/// edits into the content filter would let them consume message slots.
+fn edits_for_ids_filter(ids: &[String]) -> nostr::Filter {
+    let e_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
+    nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16,
+        ))
+        .custom_tags(e_tag, ids.iter().map(String::as_str))
+}
+
+/// Append `extra` events onto a relay response array.
+fn merge_event_arrays(mut json: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    if let (Some(base), Some(extra)) = (json.as_array_mut(), extra.as_array()) {
+        base.extend(extra.iter().cloned());
+    }
+    json
 }
 
 /// Map of `target event id -> replacement content` from `kind:40003` edits.
@@ -4675,6 +4749,9 @@ mod tests {
             2,
             agent_pubkey,
             move |filters| {
+                if is_edits_query(&filters) {
+                    return std::future::ready(Ok(json!([])));
+                }
                 assert_thread_query_filters(&filters, channel_id, root_id, agent_pubkey, 3);
                 std::future::ready(Ok(json.clone()))
             },
@@ -5004,6 +5081,16 @@ mod tests {
         }
     }
 
+    /// True when a query is the second-phase edit lookup rather than the
+    /// content page (see `edits_for_ids_filter`).
+    fn is_edits_query(filters: &[nostr::Filter]) -> bool {
+        filters.len() == 1
+            && serde_json::to_value(&filters[0])
+                .ok()
+                .and_then(|v| v.get("kinds").cloned())
+                == Some(json!([buzz_core::kind::KIND_STREAM_MESSAGE_EDIT]))
+    }
+
     fn assert_thread_query_filters(
         filters: &[nostr::Filter],
         channel_id: Uuid,
@@ -5013,8 +5100,8 @@ mod tests {
     ) {
         assert_eq!(
             filters.len(),
-            4,
-            "root, recent replies, agent reply, and edit-overlay filters"
+            3,
+            "content phase: root, recent replies, and agent reply filters"
         );
 
         let root = serde_json::to_value(&filters[0]).expect("serialize root filter");
@@ -5031,14 +5118,6 @@ mod tests {
         assert_eq!(replies.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(replies.get("limit"), Some(&json!(reply_limit)));
         assert!(replies.get("authors").is_none());
-
-        let edits = serde_json::to_value(&filters[3]).expect("serialize edits filter");
-        assert_eq!(
-            edits.get("kinds"),
-            Some(&json!([buzz_core::kind::KIND_STREAM_MESSAGE_EDIT])),
-            "thread context must fetch edits, or an updated card reads as its original spec"
-        );
-        assert_eq!(edits.get("#h"), Some(&json!([channel_id.to_string()])));
 
         let agent = serde_json::to_value(&filters[2]).expect("serialize agent filter");
         assert_eq!(
@@ -5064,6 +5143,131 @@ mod tests {
         assert_eq!(count.get("limit"), Some(&json!(0)));
         assert!(count.get("ids").is_none());
         assert!(count.get("authors").is_none());
+    }
+
+    fn edit_event(id: &str, target: &str, content: &str, created_at: u64) -> serde_json::Value {
+        json!({
+            "id": id,
+            "pubkey": "editorpub",
+            "kind": buzz_core::kind::KIND_STREAM_MESSAGE_EDIT,
+            "content": content,
+            "created_at": created_at,
+            "tags": [["e", target]]
+        })
+    }
+
+    /// A surface card posted as a thread *reply* and later edited must read as
+    /// its current spec. The edit targets the REPLY id, so a channel-window
+    /// scan (or a `#e = root` filter) would never find it, and unrelated newer
+    /// edits must not displace it.
+    #[tokio::test]
+    async fn test_thread_context_applies_edit_targeting_a_reply() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let card_reply_id = "2222222222222222222222222222222222222222222222222222222222222222";
+        let other_reply_id = "3333333333333333333333333333333333333333333333333333333333333333";
+        let channel_id = Uuid::new_v4();
+        let agent_pubkey = agent.public_key();
+
+        let content_page = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(card_reply_id, "humanpub", "{\"original\":true}", 2000),
+            thread_event(other_reply_id, "humanpub", "unrelated reply", 2500),
+        ]);
+        // Newer edits for an unrelated event must not crowd out the card's own
+        // edit — the lookup is by target id, not by recency window.
+        let edits_page = json!([
+            edit_event("e1", other_reply_id, "unrelated newer edit", 9000),
+            edit_event("e2", card_reply_id, "{\"updated\":true}", 3000),
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            50,
+            agent_pubkey,
+            move |filters| {
+                let payload = if is_edits_query(&filters) {
+                    // The second phase must ask for the ids the page returned,
+                    // including the reply that carries the card.
+                    let filter = serde_json::to_value(&filters[0]).expect("serialize");
+                    let targets = filter.get("#e").cloned().unwrap_or(json!([]));
+                    let targets = targets.as_array().expect("targets");
+                    assert!(
+                        targets.iter().any(|t| t == card_reply_id),
+                        "edit lookup must target the reply carrying the card"
+                    );
+                    edits_page.clone()
+                } else {
+                    content_page.clone()
+                };
+                std::future::ready(Ok(payload))
+            },
+            move |_filters| std::future::ready(Ok(json!({ "count": 2 }))),
+        )
+        .await
+        .expect("thread context");
+
+        match ctx {
+            ConversationContext::Thread { messages, .. } => {
+                let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+                assert!(
+                    contents.contains(&"{\"updated\":true}"),
+                    "the card reply must read as its edited spec; got {contents:?}"
+                );
+                assert!(
+                    !contents.contains(&"{\"original\":true}"),
+                    "the original spec must not survive the overlay; got {contents:?}"
+                );
+                // Three stored events in, three messages out: the two edit
+                // events overlay their targets instead of becoming rows.
+                assert_eq!(
+                    messages.len(),
+                    3,
+                    "edit events must overlay, never add rows; got {contents:?}"
+                );
+                // Per-target overlay: the unrelated reply gets its own edit,
+                // not the card's.
+                assert!(
+                    contents.contains(&"unrelated newer edit"),
+                    "each edit must apply to the event it targets; got {contents:?}"
+                );
+            }
+            other => panic!("expected Thread context, got {other:?}"),
+        }
+    }
+
+    /// Edits are fetched separately from the content page, so they must never
+    /// consume message slots nor appear as messages of their own.
+    #[test]
+    fn test_dm_context_edits_do_not_consume_message_slots() {
+        let target = "4444444444444444444444444444444444444444444444444444444444444444";
+        let merged = json!([
+            thread_event(target, "humanpub", "{\"original\":true}", 1000),
+            thread_event(
+                "5555555555555555555555555555555555555555555555555555555555555555",
+                "humanpub",
+                "second message",
+                1100
+            ),
+            edit_event("e9", target, "{\"updated\":true}", 1200),
+        ]);
+
+        let ctx = parse_nostr_dm_response(merged, 2).expect("dm context");
+        match ctx {
+            ConversationContext::Dm { messages, .. } => {
+                assert_eq!(
+                    messages.len(),
+                    2,
+                    "the edit must not occupy a message slot: {messages:?}"
+                );
+                assert!(
+                    messages.iter().any(|m| m.content == "{\"updated\":true}"),
+                    "the edited message must read as its current content: {messages:?}"
+                );
+            }
+            other => panic!("expected Dm context, got {other:?}"),
+        }
     }
 
     fn thread_event(id: &str, pubkey: &str, content: &str, created_at: u64) -> serde_json::Value {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatScalar, parseSurfaceSpec } from "./spec.ts";
+import { formatScalar, messagePreviewText, parseSurfaceSpec } from "./spec.ts";
 
 const validSpec = JSON.stringify({
   version: 1,
@@ -209,4 +209,21 @@ test("parseSurfaceSpec_astralPlaneLengths_countCodePoints", () => {
   );
   assert.equal(result.outcome, "card");
   assert.equal(result.spec.nodes.length, 1);
+});
+
+test("messagePreviewText_surfaceKind_returnsFallbackNotJson", () => {
+  // Reply banners, reminder previews and notifications show a message body
+  // outside its own renderer — spec JSON must never reach a human there.
+  const spec = JSON.stringify({
+    version: 1,
+    fallbackText: "Deploy healthy",
+    nodes: [{ type: "badge", text: "HEALTHY", tone: "success" }],
+  });
+  assert.equal(messagePreviewText(spec, 40110), "Deploy healthy");
+  assert.ok(!messagePreviewText(spec, 40110).includes("{"));
+});
+
+test("messagePreviewText_otherKinds_passThroughUnchanged", () => {
+  assert.equal(messagePreviewText("hello **world**", 9), "hello **world**");
+  assert.equal(messagePreviewText("plain", undefined), "plain");
 });

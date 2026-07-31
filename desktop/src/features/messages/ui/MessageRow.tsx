@@ -1,3 +1,4 @@
+import { messagePreviewText } from "@/features/surfaces/spec";
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
 
@@ -181,7 +182,7 @@ export const MessageRow = React.memo(
         openReminder({
           eventId: msg.id,
           channelId: channelId ?? "",
-          preview: msg.body.slice(0, 100),
+          preview: messagePreviewText(msg.body, msg.kind).slice(0, 100),
           authorPubkey: msg.pubkey ?? "",
         });
       },

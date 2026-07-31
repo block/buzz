@@ -90,10 +90,12 @@ pub async fn get_feed(
         Vec::new()
     };
 
-    let mentions: Vec<FeedItemInfo> = mention_events
+    let mut mentions: Vec<FeedItemInfo> = mention_events
         .iter()
         .map(|ev| feed_item_from_event(ev, "mentions"))
         .collect();
+    crate::commands::edit_overlay::apply_to_feed_items(&state, &mention_events, &mut mentions)
+        .await;
     let needs_action: Vec<FeedItemInfo> = approval_events
         .iter()
         .map(|ev| feed_item_from_event(ev, "needs_action"))
@@ -232,19 +234,18 @@ pub async fn get_forum_thread(
                 "#e": [event_id.clone()],
                 "#h": [channel_id.clone()],
             }),
-            // Edits targeting the root. Without these a surface posted to a
-            // forum thread renders its original spec forever — its whole
-            // update model is a full-spec replacement via kind:40003.
-            serde_json::json!({
-                "kinds": [buzz_core_pkg::kind::KIND_STREAM_MESSAGE_EDIT],
-                "#e": [event_id.clone()],
-                "#h": [channel_id.clone()],
-            }),
         ],
     )
     .await?;
 
-    let latest_edit = crate::commands::edit_overlay::latest_edit_by_target(&events);
+    // Second phase: edits are addressed to the event they replace, so a reply's
+    // edit carries the REPLY's id, not the root's. Look them up by the exact
+    // ids this page returned — a channel-window scan would miss reply edits
+    // entirely and could drop the relevant one on a busy channel.
+    let target_ids: Vec<String> = events.iter().map(|ev| ev.id.to_hex()).collect();
+    let latest_edit =
+        crate::commands::edit_overlay::fetch_latest_edits(&state, &target_ids, Some(&channel_id))
+            .await;
 
     let mut root: Option<ForumMessageInfo> = None;
     let mut replies: Vec<ForumThreadReplyInfo> = Vec::new();

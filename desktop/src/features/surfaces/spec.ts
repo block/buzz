@@ -231,3 +231,15 @@ export function surfacePreviewText(content: string): string {
       return "Surface card";
   }
 }
+
+/**
+ * Plain-text preview for any message body, given its kind. Surfaces render
+ * their `fallbackText`; every other kind is returned unchanged.
+ *
+ * Use this anywhere a message body is shown outside its own renderer — reply
+ * banners, reminder previews, notifications — so spec JSON never leaks into a
+ * human-facing string.
+ */
+export function messagePreviewText(body: string, kind?: number): string {
+  return kind === 40110 ? surfacePreviewText(body) : body;
+}

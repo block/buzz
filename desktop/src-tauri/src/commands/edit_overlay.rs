@@ -9,11 +9,79 @@
 //! `created_at` is second-precision, so two edits can tie; ties break on event
 //! id lexicographically. That is the same rule the channel timeline uses
 //! (`formatTimelineMessages`), so every client converges on one state.
+//!
+//! Edits must be fetched **by target id**, never by scanning a channel window:
+//! an edit tags the event it replaces (`e` = that event's id), so a reply's
+//! edit does not carry the thread root's id, and a busy channel can push the
+//! relevant edit outside any window. Hence the two-phase read — fetch the
+//! content page, then [`fetch_latest_edits`] for exactly the ids it returned.
 
 use std::collections::HashMap;
 
 use buzz_core_pkg::kind::KIND_STREAM_MESSAGE_EDIT;
 use nostr::Event;
+
+use crate::app_state::AppState;
+use crate::models::FeedItemInfo;
+use crate::relay::query_relay;
+
+/// Relay filters cap how many values a tag filter may carry; chunk the id list
+/// so a large page still resolves in a bounded number of queries.
+const EDIT_LOOKUP_CHUNK: usize = 100;
+
+/// Fetch the latest edit content for exactly `target_ids`.
+///
+/// Returns `target event id -> replacement content`. Failures are non-fatal:
+/// a read that cannot reach the relay renders original content rather than
+/// failing outright, which is the same degradation the callers already have.
+pub(crate) async fn fetch_latest_edits(
+    state: &AppState,
+    target_ids: &[String],
+    channel_id: Option<&str>,
+) -> HashMap<String, String> {
+    let mut overlay: HashMap<String, String> = HashMap::new();
+    for chunk in target_ids.chunks(EDIT_LOOKUP_CHUNK) {
+        let mut filter = serde_json::json!({
+            "kinds": [KIND_STREAM_MESSAGE_EDIT],
+            "#e": chunk,
+        });
+        if let Some(channel_id) = channel_id {
+            filter["#h"] = serde_json::json!([channel_id]);
+        }
+        match query_relay(state, &[filter]).await {
+            Ok(events) => overlay.extend(latest_edit_by_target(&events)),
+            Err(error) => {
+                tracing::warn!(
+                    "edit overlay fetch failed ({} targets): {error}",
+                    chunk.len()
+                );
+            }
+        }
+    }
+    overlay
+}
+
+/// Overlay current content onto feed items, looked up by their exact ids.
+///
+/// Feed rows render the event's content — a surface card's `fallbackText` —
+/// so without this an updated card keeps its original summary in the Inbox
+/// while the detail view shows the new one.
+pub(crate) async fn apply_to_feed_items(
+    state: &AppState,
+    events: &[Event],
+    items: &mut [FeedItemInfo],
+) {
+    let ids: Vec<String> = events.iter().map(|ev| ev.id.to_hex()).collect();
+    let overlay = fetch_latest_edits(state, &ids, None).await;
+    if overlay.is_empty() {
+        return;
+    }
+    for item in items.iter_mut() {
+        if let Some(content) = overlay.get(&item.id) {
+            item.content = content.clone();
+        }
+    }
+}
 
 /// Map of `target event id -> replacement content`, keeping the latest edit
 /// per target under `(created_at, id)` ordering.
@@ -89,6 +157,27 @@ mod tests {
             let overlay = latest_edit_by_target(&events);
             assert_eq!(overlay.get(&target).map(String::as_str), Some(expected));
         }
+    }
+
+    #[test]
+    fn overlay_is_addressed_per_target_not_per_thread() {
+        // A reply's edit tags the REPLY, never the thread root. A reader that
+        // looked edits up by root id (or by scanning a channel window) would
+        // leave an edited reply — a surface card posted as a reply — stale.
+        let keys = Keys::generate();
+        let root = "1".repeat(64);
+        let reply = "2".repeat(64);
+        let events = vec![
+            edit(&keys, &root, "root updated", 1_700_000_000),
+            edit(&keys, &reply, "reply updated", 1_700_000_000),
+        ];
+        let overlay = latest_edit_by_target(&events);
+        assert_eq!(overlay.get(&root).map(String::as_str), Some("root updated"));
+        assert_eq!(
+            overlay.get(&reply).map(String::as_str),
+            Some("reply updated"),
+            "an edit addressed to a reply must resolve to that reply"
+        );
     }
 
     #[test]
