@@ -10,10 +10,13 @@
 //! - `otherMouseUp` with button 3/4 — mice whose X1/X2 buttons reach the app
 //!   as plain mouse buttons.
 //! - `swipe` with a horizontal delta — AppKit's page-swipe gesture
-//!   (`swipeWithEvent:`): `deltaX > 0` is back, `deltaX < 0` is forward,
-//!   the convention Safari follows. Trackpad two-finger swipes arrive this
-//!   way, and many mouse drivers synthesize the same gesture for the
-//!   back/forward buttons instead of button-3/4 events.
+//!   (`swipeWithEvent:`): `deltaX > 0` is back, `deltaX < 0` is forward.
+//!   Sent by mouse drivers that synthesize a page-swipe gesture for the
+//!   back/forward buttons instead of button-3/4 events (the hardware this
+//!   was verified on). Stock Apple trackpad and Magic Mouse swipes arrive
+//!   as phased scroll-wheel events instead, which this module does not
+//!   handle — that path (`ScrollWheel` + `trackSwipeEventWithOptions:`,
+//!   which also needs scroll-edge detection) is a follow-up.
 //!
 //! Windows/Linux are unaffected: WebView2 and WebKitGTK deliver X1/X2 as
 //! ordinary DOM mouse events, which the frontend `mouseup` listener handles.
@@ -58,14 +61,22 @@ pub fn init(app_handle: &tauri::AppHandle) {
         match ev.r#type() {
             NSEventType::OtherMouseUp => {
                 if let Some(direction) = direction_for_button(ev.buttonNumber()) {
-                    let _ = app.emit("mouse-nav", direction);
-                    // Swallow the event: nothing downstream should also act on it.
+                    // Emit to the main window explicitly instead of
+                    // broadcasting (`emit`) so navigation stays scoped if
+                    // multi-window ever lands. "main" is the default label
+                    // for the single configured window (see deep_link.rs).
+                    let _ = app.emit_to("main", "mouse-nav", direction);
+                    // Swallow the release: nothing downstream should also act
+                    // on it. The matching press deliberately passes through:
+                    // WKWebView never delivers X1/X2 to the page, so the
+                    // unmatched down is inert, and swallowing presses risks
+                    // interfering with AppKit behaviors keyed off mouse-down.
                     return std::ptr::null_mut();
                 }
             }
             NSEventType::Swipe => {
                 if let Some(direction) = direction_for_swipe(ev.deltaX()) {
-                    let _ = app.emit("mouse-nav", direction);
+                    let _ = app.emit_to("main", "mouse-nav", direction);
                 }
                 // Pass swipes through: nothing else navigates on them, and
                 // swallowing mid-gesture events could confuse AppKit's

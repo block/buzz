@@ -126,7 +126,12 @@ export function useBackForwardControls() {
 
   React.useEffect(() => {
     window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("mouseup", handleMouseUp);
+    // Only listen for mouse buttons inside Tauri: in a plain browser
+    // context (dev server, e2e) the browser itself navigates on X1/X2, so
+    // this listener would double-fire the navigation.
+    if (isTauri()) {
+      window.addEventListener("mouseup", handleMouseUp);
+    }
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("mouseup", handleMouseUp);
