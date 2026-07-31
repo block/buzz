@@ -2596,6 +2596,23 @@ test("canvas shows signed revision history and opens earlier revisions read-only
   await expect(canvasSection.getByTestId("channel-canvas-edit")).toBeVisible();
 });
 
+test("canvas shows an empty revision history before the first save", async ({
+  page,
+}) => {
+  await installMockBridge(page, { canvasHistory: [] });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+
+  const canvasSection = page.getByTestId("channel-canvas-section");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-history-empty"),
+  ).toHaveText("No revision history yet — save the canvas to start tracking changes.");
+  await expect(canvasSection.getByTestId("channel-canvas-edit")).toContainText(
+    "Create canvas",
+  );
+});
+
 async function seedHomeInboxMention(
   page: import("@playwright/test").Page,
   itemId: string,

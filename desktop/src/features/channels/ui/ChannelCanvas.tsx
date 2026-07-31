@@ -201,8 +201,11 @@ export function ChannelCanvas({
           />
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">
-          No canvas set for this channel.
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="channel-canvas-history-empty"
+        >
+          No revision history yet — save the canvas to start tracking changes.
         </p>
       )}
       {selectedRevision && currentRevision ? (
