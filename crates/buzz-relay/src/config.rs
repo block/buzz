@@ -227,11 +227,6 @@ pub struct Config {
     /// Maximum media upload starts accepted from one pubkey per minute.
     pub media_uploads_per_minute: u32,
 
-    /// Require Blossom kind:24242 `t=get` auth plus relay membership before
-    /// serving media GET/HEAD. Defaults on so private attachment URLs are not
-    /// bearer capabilities after membership is revoked.
-    pub require_media_get_auth: bool,
-
     /// Whether tamper-evident event/media audit logging is enabled. Defaults to true.
     /// This does not control the separate `moderation_actions` audit trail.
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
@@ -777,15 +772,6 @@ impl Config {
             .filter(|&v| v > 0)
             .unwrap_or(30);
 
-        let require_media_get_auth = std::env::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
-            .map(|v| {
-                v == "true"
-                    || v == "1"
-                    || v.eq_ignore_ascii_case("yes")
-                    || v.eq_ignore_ascii_case("on")
-            })
-            .unwrap_or(true);
-
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
@@ -1004,7 +990,6 @@ impl Config {
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
-            require_media_get_auth,
             audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
@@ -1072,10 +1057,6 @@ mod tests {
         assert!(
             !config.serve_git_web_gui,
             "serve_git_web_gui should default to false"
-        );
-        assert!(
-            config.require_media_get_auth,
-            "require_media_get_auth should default to true"
         );
         assert_eq!(
             config.media.s3_addressing_style,

@@ -350,11 +350,9 @@ pub(crate) fn sign_blossom_get_auth_header(
 /// Mint a `t=get` Authorization header value for a relay media fetch, or
 /// `None` when signing is unavailable (identity in recovery mode).
 ///
-/// Fail-open by design: while the relay's `BUZZ_REQUIRE_MEDIA_GET_AUTH` flag
-/// is off, an unauthenticated request still succeeds, so degrading to no
-/// header (instead of erroring) keeps media rendering during key recovery.
-/// Once the flag is on, these requests will 403 — the correct outcome for an
-/// identity that can't prove membership.
+/// When signing is unavailable, callers send no header and the relay rejects
+/// the read. This keeps recovery mode from accidentally treating a media URL
+/// as a bearer capability.
 ///
 /// Safety contract: callers must only attach the returned header to URLs
 /// constructed from (or validated against) the app's own relay base URL —
