@@ -425,6 +425,45 @@ void main() {
       );
     });
 
+    test('transcodes profile images to JPEG before upload', () async {
+      final transcodedBytes = Uint8List.fromList([0xff, 0xd8, 0xff, 0xd9]);
+      Uint8List? transcodeInput;
+      http.Request? capturedRequest;
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          capturedRequest = request;
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/avatar.jpg',
+              'sha256': request.headers['X-SHA-256'],
+              'size': request.bodyBytes.length,
+              'type': 'image/jpeg',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        transcodeImageToJpeg: (bytes) async {
+          transcodeInput = bytes;
+          return transcodedBytes;
+        },
+      );
+      final sourceBytes = Uint8List.fromList([1, 2, 3, 4]);
+
+      final descriptor = await service.uploadProfileImage(
+        XFile.fromData(sourceBytes, name: 'avatar.png'),
+      );
+
+      expect(transcodeInput, sourceBytes);
+      expect(capturedRequest!.headers['Content-Type'], 'image/jpeg');
+      expect(capturedRequest!.bodyBytes, transcodedBytes);
+      expect(descriptor.type, 'image/jpeg');
+    });
+
     test(
       'retries the legacy upload route when the standard route is absent',
       () async {

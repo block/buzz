@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/relay/relay.dart';
@@ -11,12 +12,42 @@ import '../../shared/widgets/avatar_image.dart';
 import 'profile_provider.dart';
 import 'user_profile.dart';
 
+const _profileAvatarMaxDimension = 512.0;
+const _profileAvatarImageQuality = 85;
+
+typedef PickProfileAvatarImage =
+    Future<XFile?> Function({
+      required double maxWidth,
+      required double maxHeight,
+      required int imageQuality,
+    });
+
+final profileAvatarImagePickerProvider = Provider<PickProfileAvatarImage>((
+  ref,
+) {
+  final picker = ImagePicker();
+  return ({required maxWidth, required maxHeight, required imageQuality}) =>
+      picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+        imageQuality: imageQuality,
+        requestFullMetadata: false,
+      );
+});
+
 final profileAvatarPickerProvider = Provider<Future<String?> Function()>((ref) {
   return () async {
+    final image = await ref.read(profileAvatarImagePickerProvider)(
+      maxWidth: _profileAvatarMaxDimension,
+      maxHeight: _profileAvatarMaxDimension,
+      imageQuality: _profileAvatarImageQuality,
+    );
+    if (image == null) return null;
     final descriptor = await ref
         .read(mediaUploadServiceProvider)
-        .pickAndUploadImage();
-    return descriptor?.url;
+        .uploadProfileImage(image);
+    return descriptor.url;
   };
 });
 

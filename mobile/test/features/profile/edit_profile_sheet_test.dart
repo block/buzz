@@ -1,15 +1,54 @@
+import 'dart:typed_data';
+
 import 'package:buzz/features/profile/edit_profile_sheet.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/settings_profile_header.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_status.dart';
 import 'package:buzz/features/profile/user_status_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  test('profile avatar selection is bounded before JPEG upload', () async {
+    double? capturedMaxWidth;
+    double? capturedMaxHeight;
+    int? capturedImageQuality;
+    final uploadService = _RecordingMediaUploadService();
+    final container = ProviderContainer(
+      overrides: [
+        profileAvatarImagePickerProvider.overrideWithValue(({
+          required maxWidth,
+          required maxHeight,
+          required imageQuality,
+        }) async {
+          capturedMaxWidth = maxWidth;
+          capturedMaxHeight = maxHeight;
+          capturedImageQuality = imageQuality;
+          return XFile.fromData(
+            Uint8List.fromList([1, 2, 3]),
+            name: 'avatar.png',
+          );
+        }),
+        mediaUploadServiceProvider.overrideWithValue(uploadService),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final url = await container.read(profileAvatarPickerProvider)();
+
+    expect(capturedMaxWidth, 512);
+    expect(capturedMaxHeight, 512);
+    expect(capturedImageQuality, 85);
+    expect(await uploadService.uploadedImage?.readAsBytes(), [1, 2, 3]);
+    expect(url, 'https://example.com/avatar.jpg');
+  });
+
   testWidgets('profile-less identity saves name, uploaded avatar, and bio', (
     tester,
   ) async {
@@ -82,6 +121,30 @@ void main() {
     expect(find.text('Couldn\u2019t save your profile. Try again.'), findsOne);
     expect(find.text('Profile saved'), findsNothing);
   });
+}
+
+class _RecordingMediaUploadService extends MediaUploadService {
+  _RecordingMediaUploadService()
+    : super(
+        baseUrl: 'https://relay.example',
+        nsec: null,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+
+  XFile? uploadedImage;
+
+  @override
+  Future<BlobDescriptor> uploadProfileImage(XFile image) async {
+    uploadedImage = image;
+    return const BlobDescriptor(
+      url: 'https://example.com/avatar.jpg',
+      sha256: 'sha256',
+      size: 3,
+      type: 'image/jpeg',
+      uploaded: 1,
+    );
+  }
 }
 
 class _RecordingProfileNotifier extends ProfileNotifier {
