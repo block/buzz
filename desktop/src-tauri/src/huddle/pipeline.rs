@@ -9,6 +9,7 @@ use std::sync::{
 };
 
 use nostr::JsonUtil;
+use tauri::State;
 use uuid::Uuid;
 
 use crate::app_state::AppState;
@@ -20,55 +21,224 @@ use super::state::{HuddlePhase, VoiceInputMode};
 use super::stt;
 use super::tts;
 
+pub(crate) enum PostConnectOutcome {
+    Ready,
+    Stale,
+}
+
+/// Hot-start: check if voice models just finished downloading during an active
+/// huddle and start the corresponding pipelines.
+///
+/// Called by the frontend on a timer or after model status changes. No-op if
+/// the huddle is not active or pipelines are already running.
+#[tauri::command]
+pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), String> {
+    let (is_active, ephemeral_channel_id, huddle_generation) = {
+        let hs = state.huddle()?;
+        (
+            matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active),
+            hs.ephemeral_channel_id.clone(),
+            hs.huddle_generation,
+        )
+    };
+
+    if !is_active {
+        return Ok(());
+    }
+
+    // Detect dead pipelines: if the worker thread has exited (init failure or crash),
+    // clear the pipeline handle so hot-start can retry on the next cycle.
+    {
+        let mut hs = state.huddle()?;
+        if let Some(ref p) = hs.stt_pipeline {
+            if p.is_finished() {
+                hs.stt_pipeline = None;
+            }
+        }
+        if let Some(ref p) = hs.tts_pipeline {
+            if p.is_finished() {
+                hs.tts_pipeline = None;
+            }
+        }
+    }
+    // Re-read after potential cleanup.
+    let (has_stt, has_tts, transcription_enabled) = {
+        let hs = state.huddle()?;
+        (
+            hs.stt_pipeline.is_some(),
+            hs.tts_pipeline.is_some(),
+            hs.transcription_enabled,
+        )
+    };
+
+    // Check if models just became ready (one-shot flags).
+    let stt_ready = models::global_model_manager()
+        .map(|m| m.take_stt_ready())
+        .unwrap_or(false);
+    let tts_ready = models::global_model_manager()
+        .map(|m| m.take_tts_ready())
+        .unwrap_or(false);
+
+    // Start TTS first (so STT can capture tts_cancel).
+    if !has_tts && (tts_ready || models::is_tts_ready()) {
+        if let Err(e) = maybe_start_tts_pipeline(&state).await {
+            eprintln!("buzz-desktop: TTS hotstart failed: {e}");
+        }
+    }
+    if transcription_enabled && !has_stt && (stt_ready || models::is_stt_ready()) {
+        if let Some(eph_id) = &ephemeral_channel_id {
+            if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
+                eprintln!("buzz-desktop: STT hotstart failed: {e}");
+            }
+        }
+    }
+
+    // Periodically refresh agent membership from the relay.
+    // This catches mid-huddle additions/removals by other participants, keeps
+    // STT p-tags authoritative, and auto-enables transcription when the first
+    // agent appears unless the user has already chosen a transcription state.
+    // Throttled independently from the more frequent hotstart poll.
+    //
+    // NOTE: The frontend ALSO polls agent membership independently via
+    // get_huddle_agent_pubkeys. This is intentional — the two polls have
+    // different failure semantics:
+    //   - Rust (here): preserves stale list on failure (STT p-tags should not
+    //     disappear on a transient network blip).
+    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
+    //     must fail-closed — never speak from a stale agent list).
+    //
+    // On Ok: always replace (even with empty — agents may have been removed).
+    // On Err: preserve the existing list (transient failure shouldn't zero it).
+    if let Some(eph_id) = &ephemeral_channel_id {
+        let should_refresh = {
+            let hs = state.huddle()?;
+            match hs.last_agent_refresh {
+                None => true,
+                Some(t) => t.elapsed() >= std::time::Duration::from_secs(15),
+            }
+        };
+        if should_refresh {
+            // Fetch agents (for STT p-tags) before all members (for participant
+            // list) so relay membership queries remain ordered.
+            // Only update the throttle timestamp when at least one fetch succeeds,
+            // so transient failures retry immediately on the next poll cycle.
+            // Fetch both lists before acquiring the lock — no lock held across await.
+            let fresh_agents = fetch_channel_members(eph_id, Some("bot"), &state)
+                .await
+                .ok();
+            let fresh_members = fetch_channel_members(eph_id, None, &state).await.ok();
+            let transcription_auto_enabled = if fresh_agents.is_some() || fresh_members.is_some() {
+                let mut hs = state.huddle()?;
+                if !hs.is_current_huddle(eph_id, huddle_generation) {
+                    return Ok(());
+                }
+                if let Some(agents) = fresh_agents {
+                    *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
+                }
+                if let Some(members) = fresh_members {
+                    hs.participants = members;
+                }
+                hs.last_agent_refresh = Some(std::time::Instant::now());
+                hs.maybe_auto_enable_transcription_for_agents()
+            } else {
+                false
+            };
+            if transcription_auto_enabled {
+                start_auto_enabled_transcription(&state, eph_id).await;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn post_connect_setup(
     state: &AppState,
     ephemeral_channel_id: &str,
-) -> Result<(), String> {
+    huddle_generation: u64,
+) -> Result<PostConnectOutcome, String> {
+    {
+        let hs = state.huddle()?;
+        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
+            return Ok(PostConnectOutcome::Stale);
+        }
+    }
+
     // Hydrate agent pubkeys and participants from relay in parallel
     // (authoritative — overrides local guesses).
     let (agents_result, all_members_result) = tokio::join!(
         fetch_channel_members(ephemeral_channel_id, Some("bot"), state),
         fetch_channel_members(ephemeral_channel_id, None, state),
     );
-    if let Ok(agents) = agents_result {
-        let hs = state.huddle()?;
-        *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
-    }
-
-    if let Ok(all_members) = all_members_result {
-        if !all_members.is_empty() {
-            let mut hs = state.huddle()?;
-            hs.participants = all_members;
+    let transcription_auto_enabled = {
+        let mut hs = state.huddle()?;
+        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
+            return Ok(PostConnectOutcome::Stale);
         }
+        if let Ok(agents) = agents_result {
+            *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
+        }
+        if let Ok(all_members) = all_members_result {
+            if !all_members.is_empty() {
+                hs.participants = all_members;
+            }
+        }
+        hs.maybe_auto_enable_transcription_for_agents()
+    };
+
+    if transcription_auto_enabled {
+        state.emit_huddle_state_changed();
     }
 
-    // Prepare TTS for agent voice. STT is transcript-specific and starts only
-    // when transcription is explicitly enabled.
+    // Prepare voice models. Agent presence may have auto-enabled transcription;
+    // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {
         mgr.start_tts_download(state.http_client.clone());
+        if state.huddle()?.transcription_enabled {
+            mgr.start_stt_download(state.http_client.clone());
+        }
     }
 
     // Connect audio relay WebSocket (Opus encode/decode pipeline).
     // This is the core audio path — failure is fatal for the huddle.
     let parent_id = {
         let hs = state.huddle()?;
+        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
+            return Ok(PostConnectOutcome::Stale);
+        }
         hs.parent_channel_id.clone()
     };
-    let (cancel, pcm_tx) =
-        relay_api::connect_audio_relay(ephemeral_channel_id, parent_id.as_deref(), state).await?;
+    let audio_result =
+        relay_api::connect_audio_relay(ephemeral_channel_id, parent_id.as_deref(), state).await;
     {
         let mut hs = state.huddle()?;
+        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
+            if let Ok((cancel, _)) = audio_result {
+                cancel.cancel();
+            }
+            return Ok(PostConnectOutcome::Stale);
+        }
+        let (cancel, pcm_tx) = audio_result?;
         hs.audio_ws_cancel = Some(cancel);
         hs.audio_relay_pcm_tx = Some(pcm_tx);
     }
 
-    // Start TTS immediately. STT/transcript posting is opt-in and starts only
-    // after the user explicitly enables transcription.
+    // Start TTS immediately, then STT when transcription is enabled either by
+    // the user or by authoritative agent membership.
+    if !state
+        .huddle()?
+        .is_current_huddle(ephemeral_channel_id, huddle_generation)
+    {
+        return Ok(PostConnectOutcome::Stale);
+    }
     if let Err(e) = maybe_start_tts_pipeline(state).await {
         eprintln!("buzz-desktop: TTS pipeline failed to start: {e}");
     }
+    if let Err(e) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
+        eprintln!("buzz-desktop: STT pipeline failed to start: {e}");
+    }
 
-    Ok(())
+    Ok(PostConnectOutcome::Ready)
 }
 
 /// Attempt to start the STT pipeline if models are present.
@@ -83,12 +253,16 @@ pub(crate) async fn maybe_start_stt_pipeline(
     state: &AppState,
     ephemeral_channel_id: &str,
 ) -> Result<bool, String> {
-    {
+    let huddle_generation = {
         let hs = state.huddle()?;
-        if !hs.transcription_enabled {
+        if !hs.transcription_enabled
+            || !matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
+            || hs.ephemeral_channel_id.as_deref() != Some(ephemeral_channel_id)
+        {
             return Ok(false);
         }
-    }
+        hs.huddle_generation
+    };
 
     if !models::is_stt_ready() {
         return Ok(false); // Models not downloaded yet — voice-only mode.
@@ -97,21 +271,29 @@ pub(crate) async fn maybe_start_stt_pipeline(
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
-    // Atomically claim the construction slot (mirrors tts_starting pattern).
-    {
-        let hs = state.huddle()?;
-        if hs.stt_starting.swap(true, Ordering::AcqRel) {
-            return Ok(false); // Another caller is already constructing.
-        }
-    }
-
-    // Grab shared flags, agent pubkeys, and session generation from HuddleState.
+    // Atomically claim construction and grab shared state under one lock.
     // If replacing an existing pipeline, bump generation first so the old
     // transcription task's next POST sees a stale generation and exits.
     // Take the old pipeline OUT of the lock before dropping — Drop joins
     // the worker thread (~200ms) and must not block under the mutex.
-    let (tts_active, tts_cancel, agent_pubkeys_arc, session_gen, ptt_active_for_stt, old_stt) = {
+    let (
+        tts_active,
+        tts_cancel,
+        agent_pubkeys_arc,
+        session_gen,
+        expected_generation,
+        stt_starting,
+        ptt_active_for_stt,
+        old_stt,
+    ) = {
         let mut hs = state.huddle()?;
+        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
+            return Ok(false);
+        }
+        if hs.stt_starting.swap(true, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        let stt_starting = Arc::clone(&hs.stt_starting);
         // Invalidate any existing transcription task before replacing the pipeline.
         if hs.stt_pipeline.is_some() {
             hs.session_generation.fetch_add(1, Ordering::Release);
@@ -130,6 +312,8 @@ pub(crate) async fn maybe_start_stt_pipeline(
             Some(Arc::clone(&hs.tts_cancel)),
             Arc::clone(&hs.agent_pubkeys),
             Arc::clone(&hs.session_generation),
+            hs.session_generation.load(Ordering::Acquire),
+            stt_starting,
             ptt,
             old,
         )
@@ -144,13 +328,11 @@ pub(crate) async fn maybe_start_stt_pipeline(
     let (pipeline, text_rx) = match constructed {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            let hs = state.huddle()?;
-            hs.stt_starting.store(false, Ordering::Release);
+            stt_starting.store(false, Ordering::Release);
             return Err(e);
         }
         Err(e) => {
-            let hs = state.huddle()?;
-            hs.stt_starting.store(false, Ordering::Release);
+            stt_starting.store(false, Ordering::Release);
             return Err(format!("spawn_blocking failed: {e}"));
         }
     };
@@ -158,10 +340,14 @@ pub(crate) async fn maybe_start_stt_pipeline(
 
     {
         let mut hs = state.huddle()?;
-        hs.stt_starting.store(false, Ordering::Release);
+        stt_starting.store(false, Ordering::Release);
         // Phase check: huddle may have been torn down during construction.
         if !hs.transcription_enabled
-            || !matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
+            || !hs.is_current_transcription_generation(
+                ephemeral_channel_id,
+                huddle_generation,
+                expected_generation,
+            )
         {
             return Ok(false);
         }
@@ -170,6 +356,17 @@ pub(crate) async fn maybe_start_stt_pipeline(
 
     spawn_transcription_task(text_rx, channel_uuid, agent_pubkeys_arc, session_gen, state);
     Ok(true)
+}
+
+/// Start STT after agent presence automatically enables transcription.
+pub(crate) async fn start_auto_enabled_transcription(state: &AppState, ephemeral_channel_id: &str) {
+    if let Some(manager) = models::global_model_manager() {
+        manager.start_stt_download(state.http_client.clone());
+    }
+    if let Err(error) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
+        eprintln!("buzz-desktop: auto-enabled STT failed to start: {error}");
+    }
+    state.emit_huddle_state_changed();
 }
 
 /// Attempt to start the TTS pipeline if TTS models are present and TTS is enabled.

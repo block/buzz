@@ -83,6 +83,17 @@ type MockRelayAgentSeed = {
   status?: "online" | "away" | "offline";
 };
 
+type MockHuddleSeed = {
+  parentChannelId: string;
+  ephemeralChannelId: string;
+  members: Array<{
+    pubkey: string;
+    role: "owner" | "admin" | "member" | "guest" | "bot";
+  }>;
+  transcriptionEnabled?: boolean;
+  isCreator?: boolean;
+};
+
 type MockPersonaSeed = {
   id?: string;
   displayName: string;
@@ -152,6 +163,8 @@ type MockBridgeOptions = {
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
   relaySelf?: string | null;
+  /** Native-like huddle state seeded from authoritative role-bearing membership. */
+  huddle?: MockHuddleSeed;
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
   builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
   /** Optional policy returned by the native join-policy discovery command. */
@@ -209,6 +222,14 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  /** Result returned by the mocked `add_agent_to_huddle` command. */
+  addAgentToHuddleResult?: {
+    ephemeral_added: boolean;
+    parent_added: boolean;
+    parent_error: string | null;
+  };
+  /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
+  huddleStateReadDelayMs?: number;
   /** Per agent+relay runtime rows for pair-scoped lifecycle commands. */
   managedAgentRuntimes?: Array<{
     pubkey: string;

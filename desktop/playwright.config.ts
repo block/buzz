@@ -131,6 +131,7 @@ export default defineConfig({
         "**/harness-management.spec.ts",
         "**/harness-catalog-screenshots.spec.ts",
         "**/inline-custom-harness.spec.ts",
+        "**/huddle-transcription.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
