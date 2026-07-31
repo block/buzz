@@ -131,7 +131,11 @@ pub(crate) fn resolve_effective_harness_descriptor(
     let runtime_meta = known_acp_runtime(&effective_command);
 
     // Look up the harness definition once — used for both args and env.
-    // Resolution order: record.runtime → persona.runtime → "".
+    // Resolution order: record.runtime → persona.runtime → command match → "".
+    // The command-match fallback covers agents whose `agent_command_override`
+    // was set directly to a preset's command (e.g. `"opencode"`) without also
+    // recording a `runtime` id — otherwise such agents silently lose the
+    // preset's default args (e.g. OpenCode's required `acp` subcommand).
     let harness_def = {
         let runtime_id = record
             .runtime
@@ -145,7 +149,13 @@ pub(crate) fn resolve_effective_harness_descriptor(
                 })
             })
             .unwrap_or("");
-        crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id)
+        crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id).or_else(
+            || {
+                crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_command(
+                    &effective_command,
+                )
+            },
+        )
     };
 
     // Args: explicit non-empty instance args win; otherwise use definition args.
@@ -191,7 +201,7 @@ pub(crate) fn resolve_effective_agent_env(
 ) -> EffectiveAgentEnv {
     // Look up the harness definition for definition-level env (preset/custom).
     // Same resolution logic as spawn_agent_child: record runtime id first, then
-    // persona runtime id, then nothing.
+    // persona runtime id, then a command match, then nothing.
     let harness_def = {
         let runtime_id = record
             .runtime
@@ -205,7 +215,15 @@ pub(crate) fn resolve_effective_agent_env(
                 })
             })
             .unwrap_or("");
-        crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id)
+        crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id).or_else(
+            || {
+                let effective_command =
+                    crate::managed_agents::record_agent_command(record, personas);
+                crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_command(
+                    &effective_command,
+                )
+            },
+        )
     };
 
     resolve_effective_agent_env_with_def(record, personas, runtime, global, harness_def)

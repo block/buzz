@@ -1650,6 +1650,41 @@ fn deleted_harness_summary_display_and_spawn_sentence_agree() {
     assert!(!sentence.contains(super::DANGLING_HARNESS_PREFIX));
 }
 
+/// An agent whose command was set directly to a preset's command string (e.g.
+/// `agent_command_override: "opencode"`) — the shape produced when a user
+/// pins a runtime via a raw command override rather than picking it from the
+/// detected-harness list — must still pick up that preset's default args.
+///
+/// Without a command-match fallback, `resolve_effective_harness_descriptor`
+/// only finds a harness definition via `record.runtime` / `persona.runtime`,
+/// which is unset here. That silently drops OpenCode's required `acp`
+/// subcommand: Buzz then spawns bare `opencode` (the interactive TUI) instead
+/// of `opencode acp` (the ACP server), and the agent hangs until the 60s
+/// initialize timeout on every pooled worker.
+#[test]
+fn command_override_without_runtime_id_still_gets_preset_args() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
+
+    let _lock = registry_test_lock();
+    warm_harness_registry_from_dir(None);
+
+    let record = record_with(None, None, Some("opencode"));
+    let global = GlobalAgentConfig::default();
+
+    let descriptor = resolve_effective_harness_descriptor(&record, &[], &global)
+        .expect("opencode preset should resolve via command match");
+
+    assert_eq!(descriptor.command, "opencode");
+    assert_eq!(
+        descriptor.args,
+        vec!["acp".to_string()],
+        "opencode's preset default args (acp) must apply even without an explicit runtime id"
+    );
+}
+
 // ── I2: custom catalog entry carries definition_env for the edit round-trip ───
 
 /// A custom harness definition that includes env vars must surface those vars
