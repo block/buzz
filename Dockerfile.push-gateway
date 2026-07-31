@@ -15,6 +15,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /build/recipe.json recipe.json
+# Keep the patched sherpa sys crate at its published version; cargo-chef masks
+# workspace package versions, so the patch remains outside the workspace recipe.
+COPY --from=planner /build/crates/sherpa-onnx-sys crates/sherpa-onnx-sys
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --locked -p buzz-push-gateway --bin buzz-push-gateway \

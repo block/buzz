@@ -304,11 +304,17 @@ impl AprilPocketTts {
             .collect()
     }
 
-    pub(crate) fn synth_chunk(
+    pub(crate) fn synth_chunk_with_callback<F>(
         &mut self,
         prepared: &AprilPreparedPrompt,
         style: &VoiceStyle,
-    ) -> Result<Vec<f32>, String> {
+        callback: &mut Option<F>,
+        progress_offset: f32,
+        progress_scale: f32,
+    ) -> Result<(Vec<f32>, bool), String>
+    where
+        F: FnMut(&[f32], f32) -> bool,
+    {
         let voice_embeddings = self.voice_embeddings(style)?;
         let mut flow_state = self.condition_voice(&voice_embeddings)?;
         let token_ids = self
@@ -321,7 +327,7 @@ impl AprilPocketTts {
             .map(i64::from)
             .collect::<Vec<_>>();
         if token_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         if token_ids.len() > self.bundle.max_token_per_chunk {
             return Err(format!(
@@ -335,9 +341,15 @@ impl AprilPocketTts {
         let text_embeddings = self.text_embeddings(token_ids)?;
         self.run_flow_main_prefix(&text_embeddings, &mut flow_state)?;
         let max_frames = estimate_max_frames(token_count, self.bundle.frame_rate);
-        let latents =
-            self.generate_latents(max_frames, prepared.frames_after_eos, &mut flow_state)?;
-        self.decode_latents(&latents)
+        let (latents, cancelled) = self.generate_latents(
+            max_frames,
+            prepared.frames_after_eos,
+            &mut flow_state,
+            callback,
+            progress_offset,
+            progress_scale,
+        )?;
+        Ok((self.decode_latents(&latents)?, cancelled))
     }
 
     fn prepared_token_count(&self, text: &str) -> Result<usize, String> {
@@ -497,18 +509,29 @@ impl AprilPocketTts {
         replace_state_from_outputs(state, &mut outputs)
     }
 
-    fn generate_latents(
+    fn generate_latents<F>(
         &mut self,
         max_frames: usize,
         frames_after_eos: usize,
         state: &mut [StateValue],
-    ) -> Result<Vec<f32>, String> {
+        callback: &mut Option<F>,
+        progress_offset: f32,
+        progress_scale: f32,
+    ) -> Result<(Vec<f32>, bool), String>
+    where
+        F: FnMut(&[f32], f32) -> bool,
+    {
         let mut current = vec![f32::NAN; self.bundle.latent_dim];
         let mut latents = Vec::with_capacity(max_frames * self.bundle.latent_dim);
         let mut eos_step = None;
         let mut rng = rand::rng();
 
         for step in 0..max_frames {
+            let local_progress = step as f32 / max_frames as f32;
+            let progress = progress_offset + local_progress * progress_scale;
+            if !super::callback_allows_progress(callback, &[], progress)? {
+                return Ok((latents, true));
+            }
             let sequence = Tensor::from_array((
                 vec![1_i64, 1, self.bundle.latent_dim as i64],
                 current.clone().into_boxed_slice(),
@@ -594,7 +617,7 @@ impl AprilPocketTts {
             current.clone_from(&noise);
             latents.extend_from_slice(&noise);
         }
-        Ok(latents)
+        Ok((latents, false))
     }
 
     fn decode_latents(&mut self, latents: &[f32]) -> Result<Vec<f32>, String> {

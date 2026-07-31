@@ -63,6 +63,10 @@ RUN apt-get update \
 # locations. The normal runtime strips it below; runtime-debug retains it.
 ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 COPY --from=planner /build/recipe.json recipe.json
+# The sherpa sys patch keeps its published 1.13.4 version so Cargo can replace
+# the registry crate. It is excluded from the workspace recipe because
+# cargo-chef masks workspace package versions to 0.0.1.
+COPY --from=planner /build/crates/sherpa-onnx-sys crates/sherpa-onnx-sys
 # Cook the full workspace recipe — relay deps include workspace siblings, so
 # scoping to -p buzz-relay misses transitive deps and re-builds them later.
 RUN cargo chef cook --release --recipe-path recipe.json

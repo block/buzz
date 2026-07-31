@@ -1,0 +1,34 @@
+[package]
+name = "sherpa-onnx-sys"
+version = "1.13.4"
+edition = "2021"
+description = "Raw FFI bindings to the sherpa-onnx C API"
+license = "Apache-2.0"
+repository = "https://github.com/k2-fsa/sherpa-onnx"
+readme = "README.md"
+links = "sherpa-onnx"
+
+keywords = ["ffi", "speech", "sherpa-onnx", "bindings"]
+categories = ["external-ffi-bindings"]
+
+include = [
+    "src/**",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE*",
+]
+
+[features]
+default = ["static"]
+static = []
+shared = []
+
+[build-dependencies]
+bzip2 = "0.4"
+tar = "0.4"
+ureq = { version = "2.12", features = ["proxy-from-env"] }
+
+[package.metadata.docs.rs]
+default-features = false
+features = []

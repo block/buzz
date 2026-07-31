@@ -13,6 +13,7 @@
 //!
 //! `huddle::models` writes the complete attribution beside the cached bytes.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -39,6 +40,42 @@ pub const DEFAULT_VOICE: &str = "reference_sample";
 pub const VOICE_FILE_EXT: &str = "wav";
 
 const TTS_NUM_THREADS: usize = 1;
+
+thread_local! {
+    static ACTIVE_SYNTHESIS_ENGINES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct SynthesisCallGuard {
+    engine_id: usize,
+}
+
+impl SynthesisCallGuard {
+    fn enter(engine_id: usize) -> Result<Self, String> {
+        ACTIVE_SYNTHESIS_ENGINES.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.contains(&engine_id) {
+                return Err("Pocket TTS callback re-entered the active engine".to_string());
+            }
+            active.push(engine_id);
+            Ok(Self { engine_id })
+        })
+    }
+
+    fn is_active(engine_id: usize) -> bool {
+        ACTIVE_SYNTHESIS_ENGINES.with(|active| active.borrow().contains(&engine_id))
+    }
+}
+
+impl Drop for SynthesisCallGuard {
+    fn drop(&mut self) {
+        ACTIVE_SYNTHESIS_ENGINES.with(|active| {
+            let mut active = active.borrow_mut();
+            if let Some(index) = active.iter().rposition(|engine| *engine == self.engine_id) {
+                active.remove(index);
+            }
+        });
+    }
+}
 
 /// Loaded reference voice samples and their original sample rate.
 #[derive(Debug, Clone)]
@@ -91,6 +128,9 @@ impl PocketTts {
     /// Split text into synthesis units that satisfy the bundle's exact
     /// 50-token input limit.
     pub fn split_text_into_chunks(&self, text: &str) -> Result<Vec<String>, String> {
+        if SynthesisCallGuard::is_active(self as *const Self as usize) {
+            return Err("Pocket TTS callback re-entered the active engine".to_string());
+        }
         let Some(prepared) = prepare_april_prompt(text) else {
             return Ok(Vec::new());
         };
@@ -107,10 +147,34 @@ impl PocketTts {
     pub fn synth_chunk(
         &self,
         text: &str,
+        lang: &str,
+        style: &VoiceStyle,
+        steps: usize,
+    ) -> Result<Vec<f32>, String> {
+        self.synth_chunk_with_callback(text, lang, style, steps, None::<fn(&[f32], f32) -> bool>)
+    }
+
+    /// Synthesize text, allowing the caller to stop generation early.
+    ///
+    /// The callback receives PCM accumulated after each decoded text chunk
+    /// and progress in `[0, 1]`. During latent generation the callback is
+    /// invoked with an empty sample slice so cancellation can remain
+    /// responsive before PCM is available. Return `true` to continue or
+    /// `false` to stop and return the audio generated so far. Progress is
+    /// monotonic across split text chunks. Calls back into the same
+    /// [`PocketTts`] return an error instead of blocking on its engine lock.
+    pub fn synth_chunk_with_callback<F>(
+        &self,
+        text: &str,
         _lang: &str,
         style: &VoiceStyle,
         _steps: usize,
-    ) -> Result<Vec<f32>, String> {
+        mut callback: Option<F>,
+    ) -> Result<Vec<f32>, String>
+    where
+        F: FnMut(&[f32], f32) -> bool + 'static,
+    {
+        let _call_guard = SynthesisCallGuard::enter(self as *const Self as usize)?;
         let Some(prepared) = prepare_april_prompt(text) else {
             return Ok(Vec::new());
         };
@@ -120,13 +184,45 @@ impl PocketTts {
             .map_err(|_| "Pocket TTS engine lock poisoned".to_string())?;
         let chunks = engine.split_prompt(&prepared)?;
         let mut samples = Vec::new();
-        for chunk in chunks {
+        let chunk_count = chunks.len();
+        for (index, chunk) in chunks.into_iter().enumerate() {
             let prepared = prepare_april_prompt(&chunk)
                 .ok_or_else(|| "Pocket TTS prompt chunk became empty".to_string())?;
-            samples.extend(engine.synth_chunk(&prepared, style)?);
+            let progress_offset = index as f32 / chunk_count as f32;
+            let progress_scale = 1.0 / chunk_count as f32;
+            let (chunk_samples, cancelled) = engine.synth_chunk_with_callback(
+                &prepared,
+                style,
+                &mut callback,
+                progress_offset,
+                progress_scale,
+            )?;
+            samples.extend(chunk_samples);
+            if cancelled {
+                break;
+            }
+            let progress = (index + 1) as f32 / chunk_count as f32;
+            if !callback_allows_progress(&mut callback, &samples, progress)? {
+                break;
+            }
         }
         Ok(samples)
     }
+}
+
+fn callback_allows_progress<F>(
+    callback: &mut Option<F>,
+    samples: &[f32],
+    progress: f32,
+) -> Result<bool, String>
+where
+    F: FnMut(&[f32], f32) -> bool,
+{
+    let Some(callback) = callback.as_mut() else {
+        return Ok(true);
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(samples, progress)))
+        .map_err(|_| "Pocket TTS synthesis callback panicked".to_string())
 }
 
 #[cfg(test)]
@@ -146,6 +242,34 @@ mod tests {
             .artifacts
             .iter()
             .any(|artifact| artifact.filename == "flow_lm_main.onnx"));
+    }
+
+    #[test]
+    fn callback_can_cancel_before_pcm_is_available() {
+        let mut callback = Some(|samples: &[f32], progress: f32| {
+            assert!(samples.is_empty());
+            assert_eq!(progress, 0.25);
+            false
+        });
+        assert!(!callback_allows_progress(&mut callback, &[], 0.25).expect("callback"));
+    }
+
+    #[test]
+    fn callback_panic_is_reported_without_unwinding() {
+        let mut callback = Some(|_: &[f32], _: f32| -> bool {
+            panic!("callback failure");
+        });
+        assert_eq!(
+            callback_allows_progress(&mut callback, &[], 0.0).unwrap_err(),
+            "Pocket TTS synthesis callback panicked"
+        );
+    }
+
+    #[test]
+    fn active_engine_reentry_is_rejected() {
+        let _guard = SynthesisCallGuard::enter(42).expect("first call");
+        assert!(SynthesisCallGuard::enter(42).is_err());
+        assert!(SynthesisCallGuard::is_active(42));
     }
 
     #[test]
