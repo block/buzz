@@ -12,6 +12,7 @@ import 'channel.dart';
 import 'channel_management_provider.dart' show channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'read_state/read_state_provider.dart';
+import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
 import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
@@ -545,6 +546,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           event,
           myPk,
           participatedRootIds: _participatedRootIds,
+          followedRootIds: _followedRootIds(),
           authoredRootIds: _authoredRootIds,
           mutedChannelIds: mutedChannelIds,
           channelId: channel.id,
@@ -585,6 +587,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             event,
             myPk,
             participatedRootIds: _participatedRootIds,
+            followedRootIds: _followedRootIds(),
             authoredRootIds: _authoredRootIds,
             mutedChannelIds: mutedChannelIds,
             channelId: channel.id,
@@ -608,6 +611,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     for (final entry in ref.read(channelMutesProvider).store.channels.entries)
       if (entry.value.muted) entry.key,
   };
+
+  Set<String> _followedRootIds() =>
+      ref.read(threadFollowsProvider).followedRootIds;
 
   void _loadThreadInterestStores(String pubkey) {
     final normalizedPubkey = pubkey.toLowerCase();

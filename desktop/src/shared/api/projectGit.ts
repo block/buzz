@@ -116,6 +116,7 @@ type RawProjectRepoDiff = {
   files: RawProjectRepoDiffFile[];
   additions: number;
   deletions: number;
+  commit_body: string | null;
 };
 
 function fromRawProjectRepoSnapshot(
@@ -192,6 +193,7 @@ export async function getProjectRepoDiff(input: {
   return {
     additions: diff.additions,
     deletions: diff.deletions,
+    commitBody: diff.commit_body,
     files: diff.files.map((file) => ({
       path: file.path,
       additions: file.additions,
@@ -227,6 +229,7 @@ export async function getProjectLocalRepoDiff(input: {
   return {
     additions: diff.additions,
     deletions: diff.deletions,
+    commitBody: diff.commit_body,
     files: diff.files.map((file) => ({
       path: file.path,
       additions: file.additions,

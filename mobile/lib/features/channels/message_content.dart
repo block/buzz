@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -18,8 +19,12 @@ import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
+import '../../shared/emoji/emoji_only.dart';
 import 'media_viewer_page.dart';
 import 'message_media.dart';
+
+part 'message_content/media_carousel.dart';
 
 const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
@@ -92,9 +97,30 @@ class MessageContent extends HookConsumerWidget {
   /// mentioned user's pubkey.
   final void Function(String pubkey)? onMentionTap;
 
+  /// Opens the message's thread from the full-screen image viewer.
+  final VoidCallback? onMediaReply;
+
+  /// Opens message-specific actions for an image in the full-screen viewer.
+  final MediaViewerMoreAction? onMediaMore;
+
   final TextStyle? baseStyle;
 
   final int? maxLines;
+
+  /// Render a body that is nothing but emoji at [kEmojiOnlyFontSize], the way
+  /// desktop's `MessageRow` does. Off by default: previews, search hits, and
+  /// notification rows want a message to occupy its usual line height whatever
+  /// it contains.
+  final bool scaleEmojiOnly;
+
+  /// Allows a multi-image carousel to reclaim leading space reserved by the
+  /// surrounding message layout, while keeping its image count aligned with
+  /// the message body.
+  final double mediaCarouselLeadingOverflow;
+
+  /// Allows a multi-image carousel to continue through the trailing page
+  /// gutter while keeping its first image and count aligned with the body.
+  final double mediaCarouselTrailingOverflow;
 
   const MessageContent({
     super.key,
@@ -105,26 +131,66 @@ class MessageContent extends HookConsumerWidget {
     this.tags = const [],
     this.onChannelTap,
     this.onMentionTap,
+    this.onMediaReply,
+    this.onMediaMore,
     this.baseStyle,
     this.maxLines,
+    this.scaleEmojiOnly = false,
+    this.mediaCarouselLeadingOverflow = 0,
+    this.mediaCarouselTrailingOverflow = 0,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final style =
+    final baseTextStyle =
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
+    final resolvedMentionNames = mentionNames;
+    final resolvedAgentMentionPubkeys = {
+      ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
+    };
     final imetaByUrl = parseImetaTags(tags);
+    final trailingGallery = maxLines == null
+        ? _extractTrailingImageGallery(content, imetaByUrl)
+        : null;
+    final markdownContent = trailingGallery?.content ?? content;
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
     );
+    final mentionPresentationKey = [
+      for (final entry
+          in (resolvedMentionNames.entries.toList()
+            ..sort((a, b) => a.key.compareTo(b.key))))
+        '${entry.key}\u0000${entry.value}',
+      ...(resolvedAgentMentionPubkeys.toList()..sort()),
+    ].join('\u0001');
+
+    // Decided here rather than by the caller: this is where the event's own
+    // emoji tags and the community palette have already been merged, and a
+    // `:shortcode:` only counts as emoji if it resolves against that palette.
+    final emojiOnly =
+        scaleEmojiOnly &&
+        isEmojiOnlyMessage(
+          markdownContent,
+          nativeEmoji: ref.watch(nativeEmojiGlyphsProvider),
+          customEmoji: customEmoji,
+        );
+    final style = emojiOnly
+        ? baseTextStyle?.copyWith(
+            fontSize: kEmojiOnlyFontSize,
+            height: kEmojiOnlyHeight,
+          )
+        : baseTextStyle;
+    final inlineCustomEmojiSize = emojiOnly
+        ? kEmojiOnlyCustomEmojiSize
+        : kCustomEmojiInlineSize;
 
     final finalContent = useMemoized(() {
       // Convert autolinks and bare URLs to standard markdown links,
       // but skip content inside backticks (inline code / fenced blocks).
       final buffer = StringBuffer();
-      final parts = content.split('`');
+      final parts = markdownContent.split('`');
       for (var i = 0; i < parts.length; i++) {
         if (i.isOdd) {
           // Inside backticks — preserve as-is.
@@ -165,7 +231,7 @@ class MessageContent extends HookConsumerWidget {
           mentionBuf.write('`${mentionParts[i]}`');
         } else {
           var segment = mentionParts[i];
-          for (final name in mentionNames.values) {
+          for (final name in resolvedMentionNames.values) {
             if (name.contains(' ')) {
               final normalizedName = _markdownMentionName(name);
               segment = segment.replaceAllMapped(
@@ -186,28 +252,53 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [content, mentionNames]);
+    }, [markdownContent, resolvedMentionNames]);
 
-    return GptMarkdown(
-      finalContent,
-      style: style,
-      followLinkColor: false,
-      codeBuilder: (context, name, code, closed) =>
-          _MessageCodeBlock(name: name, code: code),
-      linkBuilder: (context, linkText, url, linkStyle) =>
-          _buildLink(context, ref, linkText, url, linkStyle, style),
-      imageBuilder: (context, imageUrl) =>
-          _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
-      maxLines: maxLines,
-      inlineComponents: [
-        _MentionMd(
-          mentionNames: mentionNames,
-          agentMentionPubkeys: agentMentionPubkeys,
-          onMentionTap: onMentionTap,
+    final markdown = KeyedSubtree(
+      key: ValueKey('$finalContent\u0000$mentionPresentationKey'),
+      child: GptMarkdown(
+        finalContent,
+        style: style,
+        followLinkColor: false,
+        codeBuilder: (context, name, code, closed) =>
+            _MessageCodeBlock(name: name, code: code),
+        linkBuilder: (context, linkText, url, linkStyle) =>
+            _buildLink(context, ref, linkText, url, linkStyle, style),
+        imageBuilder: (context, imageUrl) =>
+            _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+        maxLines: maxLines,
+        inlineComponents: [
+          _MentionMd(
+            mentionNames: resolvedMentionNames,
+            agentMentionPubkeys: resolvedAgentMentionPubkeys,
+            onMentionTap: onMentionTap,
+          ),
+          CustomEmojiMd(customEmoji, size: inlineCustomEmojiSize),
+          _ChannelLinkMd(
+            channelNames: channelNames,
+            onChannelTap: onChannelTap,
+          ),
+          ...MarkdownComponent.inlineComponents,
+        ],
+      ),
+    );
+    if (trailingGallery == null) return markdown;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (trailingGallery.content.trim().isNotEmpty) markdown,
+        _MessageImageCarousel(
+          key: ValueKey(
+            trailingGallery.items.map((item) => item.url).join('\u0000'),
+          ),
+          items: trailingGallery.items,
+          leadingOverflow: mediaCarouselLeadingOverflow,
+          trailingOverflow: mediaCarouselTrailingOverflow,
+          onReply: onMediaReply,
+          onMore: onMediaMore,
         ),
-        CustomEmojiMd(customEmoji),
-        _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
-        ...MarkdownComponent.inlineComponents,
       ],
     );
   }
@@ -221,6 +312,8 @@ class MessageContent extends HookConsumerWidget {
       url: imageUrl,
       imeta: imeta,
       semanticLabel: imeta?.alt ?? 'Message image',
+      onReply: onMediaReply,
+      onMore: onMediaMore,
     );
   }
 
@@ -298,17 +391,22 @@ class _MessageImagePreview extends HookConsumerWidget {
   final String url;
   final ImetaEntry? imeta;
   final String semanticLabel;
+  final VoidCallback? onReply;
+  final MediaViewerMoreAction? onMore;
 
   const _MessageImagePreview({
     required this.url,
     required this.imeta,
     required this.semanticLabel,
+    required this.onReply,
+    required this.onMore,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final heroTag = useMemoized(() => Object());
     final layout = _resolveImagePreviewLayout(context, imeta?.aspectRatio);
+    final previewDecodeWidth = layout.width ?? _messageMediaMaxWidth(context);
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
@@ -318,6 +416,10 @@ class _MessageImagePreview extends HookConsumerWidget {
           imageUrl: url,
           heroTag: heroTag,
           semanticLabel: semanticLabel,
+          previewDecodeWidth: previewDecodeWidth,
+          aspectRatio: imeta?.aspectRatio,
+          onReply: onReply,
+          onMore: onMore,
         ),
         child: _MessageMediaPreviewFrame(
           previewKey: ValueKey('message-media-image-preview:$url'),
@@ -325,15 +427,19 @@ class _MessageImagePreview extends HookConsumerWidget {
           width: layout.width,
           height: layout.height,
           constraints: layout.constraints,
-          child: Hero(
+          child: MediaViewerHero(
             tag: heroTag,
-            child: MediaImage(
-              url: url,
-              fit: layout.fit,
-              semanticLabel: semanticLabel,
-              errorBuilder: (_, _, _) => _MediaPreviewFallback(
-                icon: LucideIcons.imageOff,
-                label: 'Image unavailable',
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(Radii.md),
+              child: MediaImage(
+                url: url,
+                decodeWidth: previewDecodeWidth,
+                fit: layout.fit,
+                semanticLabel: semanticLabel,
+                errorBuilder: (_, _, _) => _MediaPreviewFallback(
+                  icon: LucideIcons.imageOff,
+                  label: 'Image unavailable',
+                ),
               ),
             ),
           ),

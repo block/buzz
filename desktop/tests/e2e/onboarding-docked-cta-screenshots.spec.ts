@@ -10,6 +10,8 @@ const BLANK_TYLER_IDENTITY = {
 };
 
 const SHOT_DIR = "test-results/onboarding-docked-cta";
+const NCRYPTSEC =
+  "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
@@ -46,7 +48,21 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/01b-enter-key.png` });
 
-  await page.getByRole("button", { name: "Back" }).click();
+  await page.getByTestId("nostr-import-nsec-input").fill(NCRYPTSEC);
+  await expect(
+    page.getByRole("heading", { name: "Unlock your account" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("backup-password-timeline")).toBeVisible();
+  await expect(page.getByTestId("restore-ncryptsec-affordance")).toBeVisible();
+  await expect(page.getByTestId("restore-unlock-icon")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-passphrase")).toBeFocused();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/01c-restore-backup.png` });
+
+  // The first Back returns to key selection; the second leaves import.
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(importCard).toBeVisible();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Create a new identity key" }),
   ).toBeVisible();
@@ -59,12 +75,56 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02-backup.png` });
 
+  // The key stays masked behind an explicit reveal toggle.
+  await expect(page.getByTestId("backup-key-value")).toBeVisible();
+
   // Reveal the key: box must not reflow (same-length monospace mask).
-  await page.getByTestId("nsec-reveal-toggle").click();
-  await expect(page.getByTestId("nsec-value")).toHaveClass(/select-text/);
+  await page.getByTestId("backup-key-reveal-toggle").click();
+  await expect(page.getByTestId("backup-key-value")).toHaveClass(/select-text/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02b-backup-revealed.png` });
 
+  // Backup options leave the yellow flow for the dark security view without
+  // adding a progress step or a generic Next action.
+  await page.getByTestId("backup-options-link").click();
+  await expect(
+    page.getByTestId("onboarding-page-backup-options"),
+  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-next")).toHaveCount(0);
+  const optionPanels = page.getByTestId("backup-option-panel");
+  await expect(optionPanels).toHaveCount(3);
+  await expect(
+    page.getByTestId("backup-options").locator(".buzz-card-textured"),
+  ).toHaveCount(0);
+  await expect(optionPanels.first()).toHaveCSS("padding-left", "24px");
+  const titleTops = await optionPanels
+    .locator("span.text-lg")
+    .evaluateAll((titles) =>
+      titles.map((title) => title.getBoundingClientRect().top),
+    );
+  expect(Math.max(...titleTops) - Math.min(...titleTops)).toBeLessThan(1);
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/02c-backup-options.png` });
+
+  await page.getByTestId("backup-option-password").click();
+  await expect(page.getByTestId("onboarding-page-download")).toBeVisible();
+  const passwordPanel = page.getByTestId("backup-password-panel");
+  await expect(passwordPanel).toBeVisible();
+  await expect(passwordPanel).not.toHaveClass(/buzz-card-textured/);
+  await expect(passwordPanel).toHaveCSS("padding-left", "24px");
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/02d-backup-password.png` });
+
+  await page.getByTestId("backup-passphrase-generate").click();
+  const generatorPopover = page.getByRole("dialog");
+  await expect(generatorPopover).toBeVisible();
+  await expect(generatorPopover).not.toHaveClass(/buzz-card-textured/);
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOT_DIR}/02e-backup-generator.png` });
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("backup-return-to-onboarding").click();
+  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await page.getByTestId("onboarding-next").click();
   await expect(
     page.getByRole("heading", { name: "Set up your agent harnesses" }),
@@ -113,6 +173,39 @@ test("machine key import remains usable in a short viewport", async ({
   expect(layout.footerTop).toBeGreaterThan(layout.inputBottom);
   expect(layout.scrollHeight).toBeGreaterThanOrEqual(620);
   expect(layout.scrollWidth).toBe(layout.clientWidth);
+});
+
+test("backup options keep one-column geometry on narrow windows", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 600, height: 700 });
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Your unique identity key has been created",
+    }),
+  ).toBeVisible();
+  await page.getByTestId("backup-options-link").click();
+
+  const panels = page.getByTestId("backup-option-panel");
+  await expect(panels).toHaveCount(3);
+  const geometry = await panels.evaluateAll((elements) => ({
+    clientWidth: document.documentElement.clientWidth,
+    lefts: elements.map((element) => element.getBoundingClientRect().left),
+    rights: elements.map((element) => element.getBoundingClientRect().right),
+    scrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(new Set(geometry.lefts.map(Math.round)).size).toBe(1);
+  expect(geometry.lefts.every((left) => left >= 0)).toBe(true);
+  expect(geometry.rights.every((right) => right <= geometry.clientWidth)).toBe(
+    true,
+  );
+  expect(geometry.scrollWidth).toBe(geometry.clientWidth);
 });
 
 test("relay onboarding: profile and avatar docked CTAs", async ({ page }) => {

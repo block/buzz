@@ -10,11 +10,16 @@ import 'text_theme.dart';
 /// Desktop uses --radius: 0.625rem (10px) as base:
 ///   lg = 10px, md = 8px, sm = 6px
 class Radii {
+  /// Small radius for compact UI elements.
+  static const double xs = 4.0;
   static const double lg = 10.0;
   static const double md = 8.0;
   static const double sm = 6.0;
   static const double card = 12.0; // grouped settings cards
   static const double dialog = 24.0; // desktop uses rounded-3xl for dialogs
+
+  /// Fully rounds pills, circles, and other capsule shapes.
+  static const double full = 999.0;
 }
 
 class AppTheme {

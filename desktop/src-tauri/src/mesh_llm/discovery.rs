@@ -5,9 +5,10 @@ use sha2::{Digest, Sha256};
 
 use super::{dedupe_models, MeshAvailability, MeshModelOption, MeshServeTarget, MESH_STATUS_KIND};
 
-/// Running-node status notes are refreshed every 45 seconds. Ignore notes older
-/// than two minutes so crashed/offline devices stop contributing compute or
-/// admission identities without requiring a relay-side cleanup job.
+/// Running-node status notes are refreshed every 45 seconds. Routing ignores
+/// notes older than two minutes so crashed/offline devices stop contributing
+/// compute without a relay-side cleanup job. Admission intentionally does not:
+/// Buzz membership, rather than device liveness, is the trust boundary.
 pub(super) const STATUS_FRESHNESS_SECS: u64 = 120;
 pub(crate) const MESH_STATUS_PAGE_SIZE: usize = 100;
 
@@ -199,13 +200,14 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
         let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) else {
             continue;
         };
-        if owner_id_from_status_event(&event).is_none() {
+        let Some(owner_id) = owner_id_from_status_event(&event) else {
             continue;
-        }
+        };
         if !endpoint_binding_is_valid(&event, &content) {
             continue;
         }
         saw_valid_status = true;
+        let reporter_pubkey = event.pubkey.to_hex().to_ascii_lowercase();
         let mut serve_targets = content
             .get("serveTargets")
             .or_else(|| content.get("serve_targets"))
@@ -218,6 +220,8 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
                     super::transport_policy::validate_advertised_endpoint(&target.endpoint_addr)
                         .ok()?;
                 target.endpoint_addr = validated.join_token;
+                target.reporter_pubkey = Some(reporter_pubkey.clone());
+                target.owner_id = Some(owner_id.clone());
                 if target.endpoint_id.is_none() {
                     target.endpoint_id = Some(validated.endpoint_id);
                 }

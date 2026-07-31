@@ -17,7 +17,14 @@ export type RawPersona = {
   name_pool?: string[];
   is_builtin: boolean;
   is_active?: boolean;
+  shared?: boolean;
   source_team?: string | null;
+  /**
+   * Provenance of a local copy of another owner's catalog entry. Serialized by
+   * the backend `CatalogSource` in snake_case; the create payload sends the
+   * camelCase aliases it accepts.
+   */
+  catalog_source?: { owner_pubkey: string; persona_id: string } | null;
   env_vars?: Record<string, string>;
   respond_to?: string | null;
   respond_to_allowlist?: string[];
@@ -40,7 +47,14 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     namePool: persona.name_pool ?? [],
     isBuiltIn: persona.is_builtin,
     isActive: persona.is_active ?? true,
+    shared: persona.shared ?? false,
     sourceTeam: persona.source_team ?? null,
+    catalogSource: persona.catalog_source
+      ? {
+          ownerPubkey: persona.catalog_source.owner_pubkey,
+          personaId: persona.catalog_source.persona_id,
+        }
+      : null,
     envVars: persona.env_vars ?? {},
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
@@ -69,31 +83,37 @@ export async function createPersona(
         namePool: input.namePool ?? [],
         envVars: input.envVars ?? {},
         behavior: input.behavior,
+        catalogSource: input.catalogSource,
       },
     }),
   );
+}
+
+/** The `UpdatePersonaRequest` payload shared by both edit commands. */
+function updatePersonaPayload(input: UpdatePersonaInput) {
+  return {
+    id: input.id,
+    displayName: input.displayName,
+    avatarUrl: input.avatarUrl,
+    systemPrompt: input.systemPrompt,
+    runtime: input.runtime,
+    model: input.model,
+    provider: input.provider,
+    namePool: input.namePool ?? [],
+    // Send envVars only when caller explicitly provided it; omitting
+    // tells the backend "don't touch the stored env vars" so editing
+    // unrelated fields can't silently wipe saved credentials.
+    envVars: input.envVars,
+    // Same absent-vs-present contract as envVars for the behavioral quad.
+    behavior: input.behavior,
+  };
 }
 
 export async function updatePersona(
   input: UpdatePersonaInput,
 ): Promise<AgentPersona> {
   const raw = await invokeTauri<RawPersona>("update_persona", {
-    input: {
-      id: input.id,
-      displayName: input.displayName,
-      avatarUrl: input.avatarUrl,
-      systemPrompt: input.systemPrompt,
-      runtime: input.runtime,
-      model: input.model,
-      provider: input.provider,
-      namePool: input.namePool ?? [],
-      // Send envVars only when caller explicitly provided it; omitting
-      // tells the backend "don't touch the stored env vars" so editing
-      // unrelated fields can't silently wipe saved credentials.
-      envVars: input.envVars,
-      // Same absent-vs-present contract as envVars for the behavioral quad.
-      behavior: input.behavior,
-    },
+    input: updatePersonaPayload(input),
   });
   if (raw.writeback_warning) {
     console.warn(
@@ -101,6 +121,41 @@ export async function updatePersona(
     );
   }
   return fromRawPersona(raw);
+}
+
+/**
+ * Save an edit AND publish the persona's catalog head, reporting whether the
+ * relay accepted it.
+ *
+ * `updatePersona` only enqueues the head best-effort, so it cannot tell the UI
+ * whether the community catalog actually received the change. Use this for the
+ * "Save and publish" affordance, which promises exactly that.
+ */
+export async function updatePersonaAndPublish(
+  input: UpdatePersonaInput,
+): Promise<PersonaSharePublicationResult> {
+  return fromRawPublicationResult(
+    await invokeTauri<RawPersonaSharePublicationResult>(
+      "update_persona_and_publish",
+      { input: updatePersonaPayload(input) },
+    ),
+  );
+}
+
+type RawPersonaSharePublicationResult = {
+  persona: RawPersona;
+  publicationStatus: "published" | "queued";
+  relayMessage?: string;
+};
+
+function fromRawPublicationResult(
+  raw: RawPersonaSharePublicationResult,
+): PersonaSharePublicationResult {
+  return {
+    persona: fromRawPersona(raw.persona),
+    publicationStatus: raw.publicationStatus,
+    relayMessage: raw.relayMessage ?? null,
+  };
 }
 
 export async function deletePersona(id: string): Promise<void> {
@@ -115,6 +170,24 @@ export async function setPersonaActive(
     await invokeTauri<RawPersona>("set_persona_active", { id, active }),
   );
 }
+
+export async function setPersonaShared(
+  id: string,
+  shared: boolean,
+): Promise<PersonaSharePublicationResult> {
+  return fromRawPublicationResult(
+    await invokeTauri<RawPersonaSharePublicationResult>("set_persona_shared", {
+      id,
+      shared,
+    }),
+  );
+}
+
+export type PersonaSharePublicationResult = {
+  persona: AgentPersona;
+  publicationStatus: "published" | "queued";
+  relayMessage: string | null;
+};
 
 export type SnapshotMemoryLevel = "none" | "core" | "everything";
 export type SnapshotFormat = "json" | "png";
@@ -172,6 +245,10 @@ export async function encodeAgentSnapshotForSend(
 /** Preview returned by `preview_agent_snapshot_import` before any write. */
 export type AgentSnapshotImportPreview = {
   displayName: string;
+  /** Source classification shown in the preview; imports remain custom. */
+  isBuiltIn: boolean;
+  model: string | null;
+  runtime: string | null;
   systemPrompt: string | null;
   /** Effective avatar: data URL if present, source URL fallback otherwise. */
   avatarUrl: string | null;
@@ -235,9 +312,15 @@ export async function confirmAgentSnapshotImport(
 
 // Patches a single inbound persona/team/agent projection event into the local
 // store (personas.json). The backend resolves the match key and the
-// pending-edit race; the frontend only forwards the raw Nostr event JSON.
+// pending-edit race; the frontend forwards the raw Nostr event JSON plus the
+// relay it arrived on, so a workspace switch mid-flight cannot retain the event
+// into the newly active community's scoped store.
 export async function reconcileInboundPersonaEvent(
   eventJson: string,
+  arrivalRelayUrl: string,
 ): Promise<void> {
-  await invokeTauri("reconcile_inbound_persona_event", { eventJson });
+  await invokeTauri("reconcile_inbound_persona_event", {
+    eventJson,
+    arrivalRelayUrl,
+  });
 }

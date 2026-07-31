@@ -89,31 +89,45 @@ class NoteCard extends HookConsumerWidget {
                         onTap: () => showUserProfileSheet(context, note.pubkey),
                         child: Row(
                           children: [
-                            Flexible(
-                              child: Text(
-                                displayName,
-                                style: context.textTheme.labelMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                overflow: TextOverflow.ellipsis,
+                            Expanded(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      displayName,
+                                      maxLines: 1,
+                                      style: messageUsernameTextStyle,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  if (isAgent) ...[
+                                    const SizedBox(width: Grid.half),
+                                    Icon(
+                                      LucideIcons.bot,
+                                      size: 13,
+                                      color: context.colors.primary,
+                                    ),
+                                  ],
+                                ],
                               ),
                             ),
-                            if (isAgent) ...[
-                              const SizedBox(width: Grid.half),
-                              Icon(
-                                LucideIcons.bot,
-                                size: 13,
-                                color: context.colors.primary,
+                            const SizedBox(width: Grid.xxs),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                maxWidth: Grid.xl,
                               ),
-                            ],
+                              child: Text(
+                                formatPulseRelativeTime(note.createdAt),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: messageTimestampTextStyle.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
                           ],
                         ),
-                      ),
-                    ),
-                    Text(
-                      formatPulseRelativeTime(note.createdAt),
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: context.colors.onSurfaceVariant,
                       ),
                     ),
                     if (canFollow) ...[
@@ -142,7 +156,13 @@ class NoteCard extends HookConsumerWidget {
                   ),
                 ],
                 const SizedBox(height: Grid.half),
-                MessageContent(content: note.content, tags: note.tags),
+                MessageContent(
+                  content: note.content,
+                  tags: note.tags,
+                  baseStyle: messageBodyTextStyle.copyWith(
+                    color: context.colors.onSurface,
+                  ),
+                ),
                 const SizedBox(height: Grid.xxs),
                 Row(
                   children: [

@@ -157,7 +157,9 @@ describe("activeAgentTurnsStore", () => {
     // Mirrors the store's private cap: the harness's hard upper bound on
     // parallel agent subprocesses (`--agents` accepts 1..=32).
     const CAP = 32;
-    /** Desktop's default harness parallelism (DEFAULT_AGENT_PARALLELISM). */
+    /** Desktop's former default harness parallelism; still a legitimate
+     * per-agent turn count (any value up to the harness cap of 32 is valid,
+     * regardless of DEFAULT_AGENT_PARALLELISM). */
     const DEFAULT_PARALLELISM = 24;
     const EPOCH = Date.parse("2024-01-01T00:00:00Z");
     const at = (ms) => new Date(EPOCH + ms).toISOString();
@@ -188,9 +190,10 @@ describe("activeAgentTurnsStore", () => {
       assert.ok(channels.has(`c${CAP + 1}`));
     });
 
-    it("tracks every turn of a default-parallelism agent working in 24 channels", () => {
-      // DEFAULT_AGENT_PARALLELISM is 24, so a single agent legitimately runs 24
-      // concurrent turns. Every one must keep its working badge.
+    it("tracks every turn of a high-parallelism agent working in 24 channels", () => {
+      // Parallelism up to the harness cap (32) is user-configurable, so a
+      // single agent can legitimately run 24 concurrent turns. Every one
+      // must keep its working badge.
       syncAgentTurnsFromEvents(AGENT, startTurns(DEFAULT_PARALLELISM));
       const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
       assert.equal(

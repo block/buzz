@@ -31,7 +31,7 @@ use super::{
     effective_config::{resolve_effective_config, EffectiveConfigResult},
     known_acp_runtime, normalize_agent_args,
     persona_events::preview_prospective_persona_snapshot,
-    resolve_effective_agent_env,
+    runtime::{resolve_session_title, SESSION_TITLE_ENV_VAR},
     types::{AgentDefinition, ManagedAgentRecord, TeamRecord},
     GlobalAgentConfig,
 };
@@ -66,29 +66,42 @@ pub(crate) fn spawn_config_hash(
     // restart would actually run. Idempotent, so the spawn-time stamp
     // (post-snapshot record) and later recomputes (persisted record) agree
     // when nothing changed. The persona env itself reaches the hash through
-    // `resolve_effective_agent_env` below; `persona_source_version` is set on
+    // the descriptor's layered env below; `persona_source_version` is set on
     // the clone but is not a hash input.
     let record = preview_prospective_persona_snapshot(record, personas);
     let record = &record;
 
-    let effective_command = crate::managed_agents::record_agent_command(record, personas);
-    let runtime_meta = known_acp_runtime(&effective_command);
-    let effective = resolve_effective_agent_env(record, personas, runtime_meta, global);
+    // Resolve command, args, and env via the single typed descriptor — same path
+    // as spawn_agent_child.  Dangling harness id falls back to the infallible
+    // record_agent_command (no-op: a dangling harness can't be spawned, so the
+    // hash never matters for that agent).
+    let descriptor =
+        crate::managed_agents::resolve_effective_harness_descriptor(record, personas, global)
+            .unwrap_or_else(|_| {
+                let cmd = crate::managed_agents::record_agent_command(record, personas);
+                let args = normalize_agent_args(&cmd, record.agent_args.clone());
+                crate::managed_agents::readiness::EffectiveHarnessDescriptor {
+                    command: cmd,
+                    args,
+                    env: Default::default(),
+                }
+            });
+    let runtime_meta = known_acp_runtime(&descriptor.command);
 
     let mut hasher = DefaultHasher::new();
 
     // Harness identity and derivations (live-persona-resolved, like spawn).
     record.acp_command.hash(&mut hasher);
-    effective_command.hash(&mut hasher);
-    normalize_agent_args(&effective_command, record.agent_args.clone()).hash(&mut hasher);
+    descriptor.command.hash(&mut hasher);
+    descriptor.args.hash(&mut hasher);
     runtime_meta
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
         .hash(&mut hasher);
 
-    // Effective env layering (baked floor → runtime metadata → user env).
-    // BTreeMap iteration is ordered, so this is deterministic.
-    effective.env.hash(&mut hasher);
+    // Effective env layering (baked floor → runtime metadata → definition env
+    // → global → persona → agent). BTreeMap iteration is ordered, deterministic.
+    descriptor.env.hash(&mut hasher);
 
     // Record fields the spawn env writes read directly. The relay is hashed
     // resolved: every record spawns on the workspace relay (legacy pins
@@ -112,6 +125,16 @@ pub(crate) fn spawn_config_hash(
     resolved_prompt.hash(&mut hasher);
     resolved_model.hash(&mut hasher);
     resolved_provider.hash(&mut hasher);
+    // Session title: the same resolve `spawn_agent_child` performs for its env
+    // write, so a rename raises the restart badge. Skipped when a user env
+    // override shadows it — spawn writes the title BEFORE the user env layer,
+    // so the override is what actually runs, and it already reaches this hash
+    // through `descriptor.env` above. Hashing the record-derived value under an
+    // override would badge a rename that changes nothing.
+    let effective_session_title = (!descriptor.env.contains_key(SESSION_TITLE_ENV_VAR))
+        .then(|| resolve_session_title(record.display_name.as_deref(), &record.name))
+        .flatten();
+    effective_session_title.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);
     record.respond_to.as_str().hash(&mut hasher);
     // The allowlist is hashed as the env receives it: spawn sets

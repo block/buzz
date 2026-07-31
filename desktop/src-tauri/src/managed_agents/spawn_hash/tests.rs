@@ -49,8 +49,10 @@ fn record() -> ManagedAgentRecord {
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -70,8 +72,10 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
         name_pool: vec![],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -544,6 +548,72 @@ fn linked_instance_stale_prompt_bytes_are_inert_at_hash_time() {
 }
 
 #[test]
+fn display_name_edit_changes_hash() {
+    // The spawn writes BUZZ_ACP_SESSION_TITLE from display_name-or-name, so a
+    // rename must trip the badge: the running process keeps the old title
+    // until it restarts, and the operator has to be told that.
+    let rec = record();
+    let mut renamed = record();
+    renamed.display_name = Some("Fizz".into());
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        "a display-name rename changes the spawned session title and must badge"
+    );
+}
+
+#[test]
+fn name_edit_changes_hash_when_display_name_is_absent() {
+    // With no display_name the title falls back to the unique handle, so the
+    // handle is what the env write carries and what must be hashed.
+    let rec = record();
+    let mut renamed = record();
+    renamed.name = "agent-2".into();
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        "the fallback title source must reach the hash too"
+    );
+}
+
+#[test]
+fn display_name_edit_does_not_change_hash_under_an_explicit_title_override() {
+    // User env is written AFTER the Buzz-set title (last-wins), so an explicit
+    // BUZZ_ACP_SESSION_TITLE is what the child actually runs with. Renaming the
+    // record changes nothing about the spawned process, so badging it would be
+    // a false restart prompt. The override itself still reaches the hash
+    // through the effective env.
+    let mut rec = record();
+    rec.env_vars
+        .insert("BUZZ_ACP_SESSION_TITLE".into(), "Pinned Title".into());
+    let mut renamed = rec.clone();
+    renamed.display_name = Some("Fizz".into());
+    assert_eq!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&renamed, &[], &[], "wss://ws.example", &Default::default()),
+        "a rename shadowed by an explicit title override must not badge"
+    );
+}
+
+#[test]
+fn title_override_edit_changes_hash() {
+    // Counterpart to the test above: the override is not inert — editing it
+    // changes what the child runs with and must badge.
+    let mut rec = record();
+    rec.env_vars
+        .insert("BUZZ_ACP_SESSION_TITLE".into(), "Pinned Title".into());
+    let mut edited = record();
+    edited
+        .env_vars
+        .insert("BUZZ_ACP_SESSION_TITLE".into(), "Other Title".into());
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default()),
+        "editing an explicit title override must badge"
+    );
+}
+
+#[test]
 fn linked_instance_prompt_model_provider_resolve_from_one_call() {
     // The prompt for a linked instance must track the definition, exactly
     // like model/provider — a definition prompt edit trips the hash even
@@ -559,5 +629,139 @@ fn linked_instance_prompt_model_provider_resolve_from_one_call() {
         spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
         spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
         "linked instance prompt must resolve from the live definition, not stale record bytes"
+    );
+}
+
+// ── I2: definition args and env reach spawn_config_hash ──────────────────────
+//
+// These tests prove that editing a custom harness definition's args or env
+// changes spawn_config_hash, which trips the "restart required" badge.
+// They would fail if spawn_config_hash used only record.agent_args without
+// falling back to definition args, or if resolve_effective_agent_env did not
+// include definition env.
+
+/// When a record has no instance args but the definition has default args,
+/// changing the definition args changes the spawn hash. This would fail if
+/// spawn_config_hash used only record.agent_args.
+#[test]
+fn spawn_hash_changes_when_definition_default_args_change() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // The loaded-harness registry is process-global: a parallel test re-warming
+    // it between the two hash computations makes both resolve to no-definition
+    // and h1 == h2 (observed on Windows CI).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+
+    // Write v1 definition (args: ["--mode", "v1"]).
+    fs::write(
+        dir.path().join("my-def.json"),
+        r#"{"id":"my-def","label":"My Def","command":"my-def-bin","args":["--mode","v1"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r = record();
+    r.runtime = Some("my-def".into());
+    r.agent_args = vec![]; // no instance args → definition args are used
+
+    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    // Update to v2 args and re-warm (simulating save + transactional refresh).
+    fs::write(
+        dir.path().join("my-def.json"),
+        r#"{"id":"my-def","label":"My Def","command":"my-def-bin","args":["--mode","v2"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(
+        h1, h2,
+        "changing definition default args must change the spawn hash"
+    );
+}
+
+/// When a definition has env vars, adding them changes the spawn hash. This
+/// proves resolve_effective_agent_env includes definition env in the layering.
+#[test]
+fn spawn_hash_changes_when_definition_env_changes() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+
+    // Write definition without env.
+    fs::write(
+        dir.path().join("env-def.json"),
+        r#"{"id":"env-def","label":"Env Def","command":"env-def-bin"}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r = record();
+    r.runtime = Some("env-def".into());
+
+    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    // Update to include env and re-warm.
+    fs::write(
+        dir.path().join("env-def.json"),
+        r#"{"id":"env-def","label":"Env Def","command":"env-def-bin","env":{"MY_FLAG":"1"}}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(h1, h2, "adding definition env must change the spawn hash");
+}
+
+/// Instance-level args win over definition default args (non-empty instance
+/// args must NOT be overridden by the definition). The hash must match a record
+/// that has the same effective args from either source.
+#[test]
+fn spawn_hash_instance_args_win_over_definition_args() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("arg-def.json"),
+        r#"{"id":"arg-def","label":"Arg Def","command":"arg-def-bin","args":["--def-arg"]}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r_instance = record();
+    r_instance.runtime = Some("arg-def".into());
+    r_instance.agent_args = vec!["--instance-arg".to_string()];
+
+    let mut r_no_instance = record();
+    r_no_instance.runtime = Some("arg-def".into());
+    r_no_instance.agent_args = vec![];
+
+    let h_instance = spawn_config_hash(&r_instance, &[], &[], "ws://relay", &Default::default());
+    let h_no_instance =
+        spawn_config_hash(&r_no_instance, &[], &[], "ws://relay", &Default::default());
+
+    assert_ne!(
+        h_instance, h_no_instance,
+        "instance args and definition args must produce different hashes"
     );
 }

@@ -3,6 +3,7 @@ import { Hash, LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
+import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
@@ -20,12 +21,8 @@ import {
   getDmHuddleMemberPubkeys,
   hasOtherDmParticipant,
 } from "@/features/channels/lib/dmHuddleMembers";
-import {
-  buildVideoReviewCommentsByRootId,
-  buildVideoReviewContextForMessage,
-} from "@/features/messages/lib/videoReviewContext";
+import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
-import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
@@ -40,6 +37,7 @@ import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewMod
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
+import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
   WelcomeComposerBanner,
@@ -149,6 +147,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   profilePanelTab,
   profilePanelView,
   targetMessageId,
+  threadAllMessages,
   threadHeadMessage,
   threadMessages,
   threadMessagesPending = false,
@@ -218,6 +217,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     composerWrapperRef,
     `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
     "css-variable",
+    () => messageTimelineRef.current?.settleAtBottom() ?? false,
   );
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
     if (welcomeComposerDismissTimerRef.current !== null) {
@@ -408,26 +408,18 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel?.id ?? null,
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
+  const hasComposerBottomActivity = hasComposerBotActivity || hasTypingActivity;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
-    if (!openThreadHeadId) {
-      return [];
-    }
-
-    const pubkeys: string[] = [];
-    for (const entry of botTypingEntries) {
-      if (entry.threadHeadId !== openThreadHeadId) {
-        continue;
-      }
-
-      if (
-        !pubkeys.some(
-          (pubkey) => pubkey.toLowerCase() === entry.pubkey.toLowerCase(),
-        )
-      ) {
-        pubkeys.push(entry.pubkey);
-      }
-    }
-    return pubkeys;
+    if (!openThreadHeadId) return [];
+    return botTypingEntries
+      .filter((entry) => entry.threadHeadId === openThreadHeadId)
+      .map((entry) => entry.pubkey)
+      .filter(
+        (pubkey, index, all) =>
+          all.findIndex(
+            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
+          ) === index,
+      );
   }, [botTypingEntries, openThreadHeadId]);
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
@@ -478,25 +470,26 @@ export const ChannelPane = React.memo(function ChannelPane({
     threadHeadMessage,
     threadMessages,
   });
-  const videoReviewCommentsByRootId = React.useMemo(
-    () => buildVideoReviewCommentsByRootId(messages),
-    [messages],
-  );
   const activeVideoReviewCommentSender = activeChannel?.archivedAt
     ? undefined
     : onSendVideoReviewComment;
-  const threadHeadVideoReviewContext = React.useMemo(() => {
-    if (!threadHeadMessage) {
-      return undefined;
+  const threadVideoReviewContextsByMessageId = React.useMemo(() => {
+    const messagesById = new Map(
+      messages.map((message) => [message.id, message]),
+    );
+    if (threadHeadMessage) {
+      messagesById.set(threadHeadMessage.id, threadHeadMessage);
+    }
+    for (const message of threadAllMessages) {
+      messagesById.set(message.id, message);
     }
 
-    return buildVideoReviewContextForMessage({
+    return buildVideoReviewContextsByMessageId({
       channelId: activeChannel?.id ?? null,
       channelName: activeChannel?.name,
       channelType: activeChannel?.channelType ?? null,
-      comments: videoReviewCommentsByRootId.get(threadHeadMessage.id) ?? [],
       isSendingVideoReviewComment: isSending,
-      message: threadHeadMessage,
+      messages: [...messagesById.values()],
       onSendVideoReviewComment: activeVideoReviewCommentSender,
       onToggleReaction,
       profiles,
@@ -505,17 +498,16 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel,
     activeVideoReviewCommentSender,
     isSending,
+    messages,
     onToggleReaction,
     profiles,
+    threadAllMessages,
     threadHeadMessage,
-    videoReviewCommentsByRootId,
   ]);
 
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
-  // Focus mode only replaces the wide split thread pane; narrow threads and
-  // other auxiliary panels keep their existing presentation.
   const useFocusThreadDrawer =
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
@@ -526,6 +518,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
     useThreadViewModeSwitch({
+      activeThreadHeadId: threadHeadMessage?.id ?? null,
       externalScrollTargetId: threadScrollTargetId,
       onExternalTargetResolved: onThreadScrollTargetResolved,
       onModeChange: markExitComplete,
@@ -734,7 +727,12 @@ export const ChannelPane = React.memo(function ChannelPane({
               data-testid="channel-composer-overlay"
               ref={composerWrapperRef}
             >
-              <div className="composer-overlay-corner-masks pointer-events-auto">
+              <div
+                className={cn(
+                  "composer-dock composer-overlay-corner-masks relative pointer-events-auto",
+                  hasComposerBottomActivity && "composer-dock--with-activity",
+                )}
+              >
                 {timeoutState.active ? (
                   <ComposerTimeoutBanner
                     expiresAtMs={timeoutState.expiresAtMs}
@@ -748,11 +746,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                     />
                   </div>
                 ) : null}
+                <ComposerDockBackdrop gutterClassName="inset-x-5" />
                 <MessageComposer
                   channelId={activeChannel?.id ?? null}
                   channelName={activeChannel?.name ?? "channel"}
                   channelType={activeChannel?.channelType ?? null}
-                  containerClassName="px-5"
+                  containerClassName="px-5 pb-0"
+                  layoutMode="dock"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
                   autoSubmitDraftKey={autoSendDraftKey}
@@ -787,40 +787,26 @@ export const ChannelPane = React.memo(function ChannelPane({
                   }
                   showTopBorder={false}
                 />
-                <div
-                  className="min-h-8 overflow-visible bg-background px-5 pb-1.5 pt-0"
-                  data-testid="channel-composer-activity-row"
-                >
-                  <div className="flex h-full w-full items-center gap-2 overflow-visible">
-                    {hasComposerBotActivity ? (
-                      <div className="flex min-w-0 flex-1 overflow-visible">
-                        <BotActivityComposerAction
-                          agents={activityAgents}
-                          channelId={activeChannel?.id ?? null}
-                          onOpenAgentSession={onOpenAgentSession}
-                          openAgentSessionPubkey={openAgentSessionPubkey}
-                          profiles={profiles}
-                          workingBotPubkeys={composerWorkingBotPubkeys}
-                          variant="inline"
-                        />
-                      </div>
-                    ) : null}
-                    {hasTypingActivity ? (
-                      <TypingIndicatorRow
-                        channel={activeChannel}
-                        className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
-                        currentPubkey={currentPubkey}
-                        profiles={profiles}
-                        typingPubkeys={typingPubkeys}
-                      />
-                    ) : null}
-                  </div>
-                </div>
+                {/* The activity accessory is anchored in the dock's reserved
+                    bottom rail, so fading it cannot change the observed
+                    overlay height or move the conversation. Its natural
+                    content height remains responsive. */}
+                <ChannelComposerActivityAccessory
+                  agents={activityAgents}
+                  channel={activeChannel}
+                  currentPubkey={currentPubkey}
+                  onOpenAgentSession={onOpenAgentSession}
+                  openAgentSessionPubkey={openAgentSessionPubkey}
+                  profiles={profiles}
+                  typingPubkeys={typingPubkeys}
+                  visible={hasComposerBottomActivity}
+                  workingBotPubkeys={composerWorkingBotPubkeys}
+                />
               </div>
             </div>
           )}
           {canDropInMainColumn && mainComposerMedia.isDragOver ? (
-            <DropZoneOverlay className="z-30 rounded-none" />
+            <DropZoneOverlay className="z-50 rounded-2xl bg-primary/20 backdrop-blur-sm" />
           ) : null}
         </section>
       ) : null}
@@ -881,7 +867,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onExpandReplies={onExpandThreadReplies}
                 onSelectReplyTarget={onSelectThreadReplyTarget}
                 onSend={onSendThreadReply}
-                onScrollTargetResolved={resolveScrollTarget}
+                onScrollTargetResolved={() => resolveScrollTarget()}
+                onScrollTargetSettled={resolveScrollTarget}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={onUnfollowThread}
                 profiles={profiles}
@@ -889,7 +876,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
                 threadHead={threadHeadMessage}
-                threadHeadVideoReviewContext={threadHeadVideoReviewContext}
+                videoReviewContextsByMessageId={
+                  threadVideoReviewContextsByMessageId
+                }
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}
                 threadRepliesPending={threadMessagesPending}
@@ -898,7 +887,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
                 threadTypingPubkeys={threadTypingPubkeys}
-                toolbarExtraActions={
+                activityAccessoryVisible={hasThreadComposerBotActivity}
+                activityAccessoryContent={
                   hasThreadComposerBotActivity ? (
                     <BotActivityComposerAction
                       agents={activityAgents}

@@ -8,6 +8,23 @@ pub fn kill_stale_tracked_processes(
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     instance_id: &str,
 ) -> bool {
+    kill_stale_tracked_processes_with(
+        records,
+        runtimes,
+        |pid| process_has_buzz_marker(pid, instance_id),
+        terminate_process,
+    )
+}
+
+/// Injectable version of `kill_stale_tracked_processes` for testing.
+/// `has_marker(pid)` returns true when the process carries this instance's
+/// `BUZZ_MANAGED_AGENT` marker; `kill(pid)` performs the termination.
+pub(crate) fn kill_stale_tracked_processes_with(
+    records: &mut [ManagedAgentRecord],
+    runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    has_marker: impl Fn(u32) -> bool,
+    mut kill: impl FnMut(u32) -> Result<(), String>,
+) -> bool {
     use crate::managed_agents::BackendKind;
 
     let mut changed = false;
@@ -19,8 +36,11 @@ pub fn kill_stale_tracked_processes(
             continue;
         };
         if !runtimes.keys().any(|key| key.pubkey == record.pubkey) {
-            if process_belongs_to_us(pid) && process_has_buzz_marker(pid, instance_id) {
-                let _ = terminate_process(pid);
+            // Name-gate is omitted intentionally: custom harnesses use arbitrary
+            // binary names not in KNOWN_AGENT_BINARIES. BUZZ_MANAGED_AGENT is the
+            // authoritative ownership proof; terminate only if it matches.
+            if has_marker(pid) {
+                let _ = kill(pid);
             }
             record.runtime_pid = None;
             record.last_stopped_at = Some(crate::util::now_iso());

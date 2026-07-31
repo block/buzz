@@ -14,8 +14,10 @@ import 'features/profile/settings_profile_header.dart';
 import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
+import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
 import 'shared/theme/theme.dart';
+import 'shared/widgets/buzz_loading_indicator.dart';
 
 class App extends HookConsumerWidget {
   const App({super.key});
@@ -88,6 +90,11 @@ class App extends HookConsumerWidget {
         topSectionGradient: buzzDarkGradient,
       ),
       themeMode: effectiveMode,
+      // Above the navigator, so a burst keeps playing over a pushed thread page
+      // or a modal sheet — the same reason desktop pins its canvas to the
+      // viewport rather than to the message row.
+      builder: (context, child) =>
+          EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
       home: authState.when(
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),
@@ -113,6 +120,10 @@ class _SplashScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    return const Scaffold(
+      body: Center(
+        child: BuzzLoadingIndicator(size: 56, semanticLabel: 'Starting Buzz'),
+      ),
+    );
   }
 }

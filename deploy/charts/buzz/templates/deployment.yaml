@@ -55,13 +55,14 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if or .Values.minio.enabled .Values.extraInitContainers }}
+      initContainers:
       {{- if .Values.minio.enabled }}
       # Quickstart only: the bundled MinIO bucket is created by a concurrent
       # init Job (templates/quickstart-minio-init.yaml). The relay's A3 S3
       # conformance probe is startup-fatal, so without this gate the relay Pods
       # CrashLoopBackOff (with growing backoff) until the bucket appears. Block
       # relay start until the bucket exists — deterministic, no crash-loops.
-      initContainers:
         - name: wait-for-bucket
           image: {{ .Values.minio.mcImage | quote }}
           securityContext:
@@ -90,12 +91,24 @@ spec:
               done
               echo "bucket {{ .Values.s3.bucket }} present"
       {{- end }}
+      {{- with .Values.extraInitContainers }}
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: relay
           image: {{ include "buzz.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.relay.containerSecurityContext | nindent 12 }}
+          {{- with .Values.relay.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.relay.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - { name: app,     containerPort: 3000, protocol: TCP }
             - { name: health,  containerPort: {{ .Values.service.healthPort }}, protocol: TCP }
@@ -157,6 +170,10 @@ spec:
             - { name: BUZZ_S3_ENDPOINT, value: {{ $s3Endpoint | quote }} }
             {{- end }}
             - { name: BUZZ_S3_BUCKET, value: {{ .Values.s3.bucket | quote }} }
+            {{- if .Values.s3.region }}
+            - { name: BUZZ_S3_REGION, value: {{ .Values.s3.region | quote }} }
+            {{- end }}
+            - { name: BUZZ_S3_ADDRESSING_STYLE, value: {{ .Values.s3.addressingStyle | quote }} }
 
             # ── Secrets (from chart-managed or existing) ─────────────
             - name: BUZZ_RELAY_PRIVATE_KEY
@@ -225,6 +242,9 @@ spec:
           volumeMounts:
             - { name: git-repos, mountPath: {{ .Values.persistence.git.mountPath | quote }} }
             - { name: git-pack-cache, mountPath: {{ .Values.git.packCachePath | quote }} }
+            {{- with .Values.relay.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
 
       volumes:
         - name: git-repos
@@ -238,3 +258,6 @@ spec:
         - name: git-pack-cache
           emptyDir:
             sizeLimit: {{ .Values.git.packCacheVolumeSize | quote }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

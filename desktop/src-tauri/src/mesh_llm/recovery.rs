@@ -153,6 +153,13 @@ fn should_evict_after_probe(
         || consecutive >= DEAD_PROBE_EVICT_THRESHOLD
 }
 
+fn requires_process_restart(
+    mode: crate::mesh_llm::MeshNodeMode,
+    startup_in_progress: bool,
+) -> bool {
+    startup_in_progress || mode == crate::mesh_llm::MeshNodeMode::Serve
+}
+
 /// Probe and, when justified, remove one stale runtime. A closed port is
 /// decisive for a foreground agent start; watchdog and ambiguous/unhealthy
 /// ports require consecutive failures to avoid restarting on a transient load
@@ -161,22 +168,23 @@ pub(crate) async fn recover_stale_mesh_runtime(
     state: &AppState,
     urgency: MeshRecoveryUrgency,
 ) -> MeshRuntimeRecovery {
-    let (candidate_id, startup_in_progress) = match state.mesh_llm_runtime.lock().await.as_ref() {
-        Some(runtime) => (runtime.id(), runtime.is_starting().await),
-        None => {
-            state.mesh_recovery.reset_probe_streak();
-            // A cancelled SDK startup can outlive its Buzz-side task briefly
-            // because the embedded runtime runs on its own thread. Never start
-            // a replacement merely because the tracked handle is gone: first
-            // prove the old ingress is either still useful or has released the
-            // port. This closes the port-conflict loop in #2304.
-            return match probe_mesh_ingress().await {
-                MeshIngressProbe::Live => MeshRuntimeRecovery::Live,
-                MeshIngressProbe::PortClosed => MeshRuntimeRecovery::Absent,
-                MeshIngressProbe::Unhealthy => MeshRuntimeRecovery::ReleasePending,
-            };
-        }
-    };
+    let (candidate_id, startup_in_progress, candidate_mode) =
+        match state.mesh_llm_runtime.lock().await.as_ref() {
+            Some(runtime) => (runtime.id(), runtime.is_starting().await, runtime.mode()),
+            None => {
+                state.mesh_recovery.reset_probe_streak();
+                // A cancelled SDK startup can outlive its Buzz-side task briefly
+                // because the embedded runtime runs on its own thread. Never start
+                // a replacement merely because the tracked handle is gone: first
+                // prove the old ingress is either still useful or has released the
+                // port. This closes the port-conflict loop in #2304.
+                return match probe_mesh_ingress().await {
+                    MeshIngressProbe::Live => MeshRuntimeRecovery::Live,
+                    MeshIngressProbe::PortClosed => MeshRuntimeRecovery::Absent,
+                    MeshIngressProbe::Unhealthy => MeshRuntimeRecovery::ReleasePending,
+                };
+            }
+        };
     let probe = probe_mesh_ingress().await;
     if probe == MeshIngressProbe::Live {
         state.mesh_recovery.reset_probe_streak();
@@ -196,12 +204,13 @@ pub(crate) async fn recover_stale_mesh_runtime(
         return MeshRuntimeRecovery::Debouncing;
     }
 
-    // The pinned SDK does not yield its control handle until the management
-    // API is ready. Dropping its still-pending start future would detach the
-    // embedded runtime thread without sending a shutdown request, so Buzz must
-    // not evict it and race a replacement onto the same ports. A controlled
-    // app relaunch is the only process-owned cleanup boundary in this state.
-    if startup_in_progress {
+    // Never replace a serving runtime in-process. Its native listeners and
+    // model host are process-owned; stopping it here and then cold-starting a
+    // client silently disables Share Compute and can race ports 9337/3131.
+    // Pending client startups have the same ownership problem because the SDK
+    // has not yielded a shutdown handle yet. In both cases, process restart is
+    // the only boundary that preserves the configured role safely.
+    if requires_process_restart(candidate_mode, startup_in_progress) {
         state.mesh_recovery.reset_probe_streak();
         return MeshRuntimeRecovery::RestartRequired;
     }
@@ -241,19 +250,36 @@ pub(crate) async fn recover_stale_mesh_runtime(
 pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _rearm_guard = state.mesh_recovery.rearm_lock.lock().await;
+    let runtime_mode = state
+        .mesh_llm_runtime
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| runtime.mode());
     let recovery = recover_stale_mesh_runtime(&state, MeshRecoveryUrgency::Watchdog).await;
     let active_pubkeys = active_managed_agent_pubkeys(&state);
+    // Mesh participation is resolved through the same definition-authoritative
+    // path as spawn/restore (#1968): definition → global fallback. A linked
+    // instance's own bytes never contribute.
+    let personas = crate::managed_agents::load_personas(app).unwrap_or_default();
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
 
     match recovery {
         MeshRuntimeRecovery::Live
         | MeshRuntimeRecovery::Debouncing
         | MeshRuntimeRecovery::Replaced => return Ok(()),
         MeshRuntimeRecovery::RestartRequired => {
+            if runtime_mode == Some(crate::mesh_llm::MeshNodeMode::Serve) {
+                eprintln!(
+                    "buzz-mesh: serving ingress failed; restarting Buzz to restore Share Compute without changing roles"
+                );
+                app.request_restart();
+                return Ok(());
+            }
             let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
-            if !records
-                .iter()
-                .any(|record| is_running_relay_mesh_agent(record, &active_pubkeys))
-            {
+            if !records.iter().any(|record| {
+                running_relay_mesh_model_id(record, &active_pubkeys, &personas, &global).is_some()
+            }) {
                 // A foreground save may still be bringing up its first ingress.
                 // Only an already-running consumer justifies an automatic app
                 // relaunch from the background watchdog.
@@ -272,10 +298,9 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
         }
         MeshRuntimeRecovery::Absent => {
             let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
-            if !records
-                .iter()
-                .any(|record| is_running_relay_mesh_agent(record, &active_pubkeys))
-            {
+            if !records.iter().any(|record| {
+                running_relay_mesh_model_id(record, &active_pubkeys, &personas, &global).is_some()
+            }) {
                 return Ok(());
             }
         }
@@ -285,11 +310,20 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
     let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
     let mesh_records: Vec<_> = records
         .into_iter()
-        .filter(|record| is_running_relay_mesh_agent(record, &active_pubkeys))
+        .filter_map(|record| {
+            running_relay_mesh_model_id(&record, &active_pubkeys, &personas, &global)
+                .map(|mesh_model_id| (record, mesh_model_id))
+        })
         .collect();
     let mut first_error = None;
-    for record in &mesh_records {
-        match crate::commands::mesh_llm::ensure_relay_mesh_for_record(app, record, false).await {
+    for (record, mesh_model_id) in &mesh_records {
+        match crate::commands::mesh_llm::ensure_relay_mesh_for_record(
+            app,
+            Some(mesh_model_id.as_str()),
+            false,
+        )
+        .await
+        {
             Ok(()) => {
                 if let Err(error) = clear_mesh_last_error_if_set(app, &record.pubkey) {
                     eprintln!("buzz-mesh: failed to clear recovery error: {error}");
@@ -322,16 +356,28 @@ fn active_managed_agent_pubkeys(state: &AppState) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn is_running_relay_mesh_agent(
+/// Effective mesh model for a record that is actively running, or `None`
+/// when the record is not a running relay-mesh consumer. Resolution goes
+/// through `resolve_effective_relay_mesh_model_id` (definition → global
+/// fallback, #1968) so the watchdog agrees with spawn/restore about which
+/// agents are mesh-backed.
+fn running_relay_mesh_model_id(
     record: &crate::managed_agents::ManagedAgentRecord,
     active_pubkeys: &HashSet<String>,
-) -> bool {
-    record.backend == crate::managed_agents::BackendKind::Local
-        && crate::managed_agents::relay_mesh_model_id(record).is_some()
+    personas: &[crate::managed_agents::AgentDefinition],
+    global: &crate::managed_agents::GlobalAgentConfig,
+) -> Option<String> {
+    let running = record.backend == crate::managed_agents::BackendKind::Local
         && active_pubkeys.contains(&record.pubkey.to_ascii_lowercase())
         && record
             .runtime_pid
-            .is_none_or(crate::managed_agents::process_is_running)
+            .is_none_or(crate::managed_agents::process_is_running);
+    if !running {
+        return None;
+    }
+    crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
+        record, personas, global,
+    )
 }
 
 fn persist_mesh_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), String> {
@@ -386,8 +432,10 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: std::collections::BTreeMap::from([
                 ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
                 (
@@ -457,30 +505,62 @@ mod tests {
     }
 
     #[test]
-    fn only_running_relay_mesh_agents_trigger_rearm() {
-        let empty = active_set(&[]);
-        assert!(!is_running_relay_mesh_agent(
-            &mesh_record("stopped", Some(std::process::id())),
-            &empty
+    fn failed_serving_runtime_requires_process_restart_instead_of_client_fallback() {
+        assert!(requires_process_restart(
+            crate::mesh_llm::MeshNodeMode::Serve,
+            false
         ));
+        assert!(requires_process_restart(
+            crate::mesh_llm::MeshNodeMode::Client,
+            true
+        ));
+        assert!(!requires_process_restart(
+            crate::mesh_llm::MeshNodeMode::Client,
+            false
+        ));
+    }
+
+    #[test]
+    fn only_running_relay_mesh_agents_trigger_rearm() {
+        let personas: Vec<crate::managed_agents::AgentDefinition> = Vec::new();
+        let global = crate::managed_agents::GlobalAgentConfig::default();
+
+        let empty = active_set(&[]);
+        assert!(running_relay_mesh_model_id(
+            &mesh_record("stopped", Some(std::process::id())),
+            &empty,
+            &personas,
+            &global,
+        )
+        .is_none());
 
         let active = active_set(&["live"]);
-        assert!(is_running_relay_mesh_agent(
-            &mesh_record("live", Some(std::process::id())),
-            &active
-        ));
-        assert!(is_running_relay_mesh_agent(
-            &mesh_record("live", None),
-            &active
-        ));
+        assert_eq!(
+            running_relay_mesh_model_id(
+                &mesh_record("live", Some(std::process::id())),
+                &active,
+                &personas,
+                &global,
+            )
+            .as_deref(),
+            Some("Qwen3")
+        );
+        assert_eq!(
+            running_relay_mesh_model_id(&mesh_record("live", None), &active, &personas, &global)
+                .as_deref(),
+            Some("Qwen3")
+        );
 
         let mut non_mesh = mesh_record("plain", Some(std::process::id()));
         non_mesh.env_vars.clear();
         non_mesh.relay_mesh = None;
-        assert!(!is_running_relay_mesh_agent(
+        assert!(running_relay_mesh_model_id(
             &non_mesh,
-            &active_set(&["plain"])
-        ));
+            &active_set(&["plain"]),
+            &personas,
+            &global,
+        )
+        .is_none());
     }
 
     #[test]

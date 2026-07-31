@@ -21,8 +21,7 @@ use crate::{
 
 /// Subset of the goose file config exposed to the frontend for gate evaluation.
 ///
-/// Only the fields the dialog gate needs — not the full `RuntimeConfigSurface`.
-/// The gate uses this to know which requirements are already satisfied in the
+/// Only the fields the dialog gate needs. This tracks which requirements are already satisfied in the
 /// harness config file, so it can show "Set in goose config" rather than
 /// surfacing a false missing-key marker.
 #[derive(Debug, Serialize)]
@@ -685,8 +684,10 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
@@ -709,8 +710,10 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
