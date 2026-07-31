@@ -260,6 +260,87 @@ void main() {
     expect(session.state.status, SessionStatus.disconnected);
   });
 
+  test(
+    'reconnects on resume even when the status still claims connected',
+    () async {
+      // A suspended app never runs its background grace timer and never receives
+      // the socket's onDisconnected callback, so it resumes still believing it is
+      // connected while sitting on a socket the platform already tore down.
+      // Resuming must rebuild the connection rather than trust that status.
+      final sockets = <_ControlledRelaySocket>[];
+      final session = _sessionWithControlledSockets(sockets);
+      final keychain = nostr.Keys.generate();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: keychain.nsec,
+            ),
+          ),
+          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(sockets, hasLength(1));
+      sockets.first.connectSuccessfully();
+      expect(session.state.status, SessionStatus.connected);
+
+      // Background, then resume before the 5s grace timer fires — exactly what a
+      // screen lock does, since a suspended process cannot run timers.
+      session.onAppPaused();
+      session.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        sockets,
+        hasLength(2),
+        reason: 'resume after backgrounding must rebuild the socket',
+      );
+    },
+  );
+
+  test('does not rebuild the socket when the app never backgrounded', () async {
+    // Returning from `inactive` (a Control Centre swipe, say) also calls
+    // onAppResumed, but the socket is genuinely alive — reconnecting there
+    // would churn the connection for no reason.
+    final sockets = <_ControlledRelaySocket>[];
+    final session = _sessionWithControlledSockets(sockets);
+    final keychain = nostr.Keys.generate();
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(
+            baseUrl: 'https://relay.example',
+            nsec: keychain.nsec,
+          ),
+        ),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+
+    sockets.first.connectSuccessfully();
+    expect(session.state.status, SessionStatus.connected);
+
+    session.onAppResumed();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(sockets, hasLength(1));
+    expect(session.state.status, SessionStatus.connected);
+  });
+
   test('delivers the same live event to each matching subscription', () async {
     final session = RelaySessionNotifier();
     final firstEvents = <NostrEvent>[];
@@ -397,6 +478,33 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.authenticated);
+}
+
+/// A session whose sockets are all [_ControlledRelaySocket]s, appended to
+/// [sockets] in creation order so tests can assert how many were built.
+RelaySessionNotifier _sessionWithControlledSockets(
+  List<_ControlledRelaySocket> sockets,
+) {
+  return RelaySessionNotifier(
+    socketFactory:
+        ({
+          required wsUrl,
+          required nsec,
+          required onMessage,
+          required onConnected,
+          required onDisconnected,
+        }) {
+          final socket = _ControlledRelaySocket(
+            wsUrl: wsUrl,
+            nsec: nsec,
+            onMessage: onMessage,
+            onConnected: onConnected,
+            onDisconnected: onDisconnected,
+          );
+          sockets.add(socket);
+          return socket;
+        },
+  );
 }
 
 class _ControlledRelaySocket extends RelaySocket {

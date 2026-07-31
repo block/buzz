@@ -103,6 +103,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _subIdCounter = 0;
   bool _disposed = false;
   bool _paused = false;
+  bool _wasBackgrounded = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
 
@@ -315,6 +316,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
+    _wasBackgrounded = true;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = Timer(const Duration(seconds: 5), _pauseNow);
   }
@@ -334,14 +336,33 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
 
-    // If still connected, nothing to do — the socket survived the background
-    // grace window.
-    if (state.status == SessionStatus.connected) return;
+    final wasBackgrounded = _wasBackgrounded;
+    _wasBackgrounded = false;
+
+    // Only trust a `connected` status when the app never actually left the
+    // foreground — e.g. resuming from `inactive` after a Control Centre swipe.
+    //
+    // After a real background stint the status cannot be trusted: the OS
+    // suspends the process, so the grace timer never fires and a socket torn
+    // down by the platform or carrier NAT never delivers its onDisconnected
+    // callback. The session then resumes believing it is connected, sits on a
+    // dead socket, and no events arrive until some later write happens to
+    // surface the error. Reconnecting is idempotent and replays missed events,
+    // so an occasional redundant reconnect is far cheaper than a silent stall.
+    if (!wasBackgrounded && state.status == SessionStatus.connected) return;
 
     // Cancel any in-flight reconnect backoff timer so we reconnect immediately
     // instead of waiting for the (possibly large) exponential delay.
     _reconnectTimer?.cancel();
     _reconnectDelayMs = _baseReconnectDelayMs;
+
+    if (state.status == SessionStatus.connected) {
+      // Believed-connected but unverifiable: tear the old socket down first so
+      // the replacement is not racing a half-open one.
+      unawaited(reconnect());
+      return;
+    }
+
     final config = ref.read(relayConfigProvider);
     _connect(config);
   }
