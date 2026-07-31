@@ -1,44 +1,95 @@
 part of '../compose_bar.dart';
 
-class _SuggestionPanelMotion extends StatelessWidget {
+class _SuggestionPanelMotion extends HookWidget {
   final Duration duration;
+  final Alignment alignment;
   final Widget child;
 
-  const _SuggestionPanelMotion({required this.duration, required this.child});
+  const _SuggestionPanelMotion({
+    required this.duration,
+    required this.alignment,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: duration,
-      reverseDuration: duration,
-      layoutBuilder: (currentChild, previousChildren) => Stack(
-        alignment: Alignment.bottomLeft,
-        clipBehavior: Clip.none,
-        children: [...previousChildren, ?currentChild],
-      ),
-      transitionBuilder: (child, animation) {
-        final curvedAnimation = CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutCubic,
-          reverseCurve: Curves.easeInCubic,
-        );
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final springController = useAnimationController(
+      initialValue: 1,
+      upperBound: 1.08,
+    );
+    final springValue = useAnimation(springController);
+    final previousChildKey = useRef<Key?>(child.key);
 
-        return AnimatedBuilder(
-          animation: curvedAnimation,
-          child: child,
-          builder: (context, child) => IgnorePointer(
-            ignoring: animation.status == AnimationStatus.reverse,
-            child: Opacity(
-              opacity: curvedAnimation.value,
-              child: Transform.translate(
-                offset: Offset(0, Grid.xs * (1 - curvedAnimation.value)),
-                child: child,
+    useEffect(() {
+      if (previousChildKey.value == child.key) return null;
+      previousChildKey.value = child.key;
+      if (reducedMotion) {
+        springController.value = 1;
+      } else {
+        springController
+          ..stop()
+          ..value = 0.9
+          ..animateWith(
+            SpringSimulation(
+              SpringDescription.withDurationAndBounce(
+                duration: const Duration(milliseconds: 320),
+                bounce: 0.18,
               ),
+              0.9,
+              1,
+              0,
+              snapToEnd: true,
             ),
+          );
+      }
+      return null;
+    }, [child.key, reducedMotion]);
+
+    return Transform.scale(
+      scale: springValue,
+      alignment: alignment,
+      child: AnimatedSize(
+        duration: duration,
+        curve: Curves.easeInOutCubic,
+        alignment: alignment,
+        child: AnimatedSwitcher(
+          duration: duration,
+          reverseDuration: duration,
+          layoutBuilder: (currentChild, previousChildren) => Stack(
+            alignment: alignment,
+            clipBehavior: Clip.none,
+            children: [...previousChildren, ?currentChild],
           ),
-        );
-      },
-      child: child,
+          transitionBuilder: (child, animation) {
+            final curvedAnimation = CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOutBack,
+              reverseCurve: Curves.easeInOutCubic,
+            );
+
+            return AnimatedBuilder(
+              animation: curvedAnimation,
+              child: child,
+              builder: (context, child) => IgnorePointer(
+                ignoring: animation.status == AnimationStatus.reverse,
+                child: Opacity(
+                  opacity: animation.value.clamp(0.0, 1.0),
+                  child: Transform.translate(
+                    offset: Offset(0, Grid.xs * (1 - animation.value)),
+                    child: Transform.scale(
+                      scale: 0.92 + (0.08 * curvedAnimation.value),
+                      alignment: alignment,
+                      child: child,
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+          child: child,
+        ),
+      ),
     );
   }
 }

@@ -869,12 +869,7 @@ pub fn spawn_agent_child(
     // uses the same trim semantics as the preflight callers.
     #[cfg(feature = "mesh-llm")]
     if let Some(ref mesh_model_id) = mesh_model_id {
-        let mut mesh_env = std::collections::BTreeMap::new();
-        super::apply_relay_mesh_env(
-            &mut mesh_env,
-            Some(super::RELAY_MESH_PROVIDER_ID),
-            Some(mesh_model_id.as_str()),
-        );
+        let mesh_env = super::relay_mesh_process_env(&descriptor.env, mesh_model_id);
         command.env_remove("OPENAI_API_KEY");
         for (key, value) in mesh_env {
             command.env(key, value);

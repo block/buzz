@@ -25,6 +25,8 @@ export type MintedInvite = {
   code: string;
   expiresAt: number;
   url: string;
+  maxUses: number | null;
+  usesRemaining: number | null;
 };
 
 export type JoinPolicy = {
@@ -189,15 +191,29 @@ export async function acceptJoinPolicy(
 }
 
 /** Mint an invite code on the active community's relay (owner/admin only). */
-export async function mintInvite(ttlSecs?: number): Promise<MintedInvite> {
+export async function mintInvite(options?: {
+  ttlSecs?: number;
+  maxUses?: number | null;
+}): Promise<MintedInvite> {
   const base = await getRelayHttpUrl();
-  const body = JSON.stringify(ttlSecs ? { ttl_secs: ttlSecs } : {});
+  const payload: Record<string, unknown> = {};
+  if (options?.ttlSecs != null) payload.ttl_secs = options.ttlSecs;
+  if (options?.maxUses != null) payload.max_uses = options.maxUses;
+  const body = JSON.stringify(payload);
   const raw = await invitePost<{
     code: string;
     expires_at: number;
     url: string;
+    max_uses: number | null;
+    uses_remaining: number | null;
   }>(base, "/api/invites", body);
-  return { code: raw.code, expiresAt: raw.expires_at, url: raw.url };
+  return {
+    code: raw.code,
+    expiresAt: raw.expires_at,
+    url: raw.url,
+    maxUses: raw.max_uses,
+    usesRemaining: raw.uses_remaining,
+  };
 }
 
 /**

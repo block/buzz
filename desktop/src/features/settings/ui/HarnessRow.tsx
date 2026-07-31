@@ -10,6 +10,7 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
 } from "@/features/agents/hooks";
+import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -324,6 +325,7 @@ export function HarnessRow({
   }, [resetEpoch]);
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
+  const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
 
   const del = useDeleteCustomHarnessMutation();
   // Blast-radius data for the delete confirmation — only fetched while the
@@ -348,7 +350,7 @@ export function HarnessRow({
         } else {
           setInstallResult({
             success: false,
-            error: getInstallErrorMessage(result.steps),
+            error: getInstallErrorMessage(result),
           });
         }
       },
@@ -479,6 +481,15 @@ export function HarnessRow({
           </p>
         ) : null}
 
+        {isInstalling && installOutputLine ? (
+          <p
+            aria-live="polite"
+            className="mt-2 truncate rounded-lg border border-border/60 bg-background/60 px-3 py-1.5 font-mono text-xs text-muted-foreground"
+            data-testid={`doctor-runtime-install-output-${runtime.id}`}
+          >
+            {installOutputLine}
+          </p>
+        ) : null}
         {installError ? (
           <p
             className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"

@@ -36,6 +36,12 @@ export function mergePresenceUpdate(
   return { ...old, [pubkey]: status };
 }
 
+// Keep the local optimistic cache and relay expiry at three heartbeat windows.
+// The relay owns the authoritative TTL; deploy its TTL increase before shipping
+// a desktop build with a slower heartbeat.
+export const PRESENCE_HEARTBEAT_INTERVAL_MS = 60_000;
+export const PRESENCE_TTL_SECONDS = 3 * (PRESENCE_HEARTBEAT_INTERVAL_MS / 1000);
+
 // Away means "human not at the machine" (Slack/Discord semantics), never
 // "Buzz is not the focused window". OS-wide idle is authoritative when the
 // platform exposes it; otherwise fall back to in-app activity.

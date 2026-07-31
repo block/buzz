@@ -2,10 +2,14 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
-import 'channel_management_provider.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
+
+const _channelLiveEventKinds = [
+  ...EventKind.channelEventKinds,
+  EventKind.channelThreadSummary,
+];
 
 /// Provides the message list for a specific channel. Registers a live
 /// subscription first, then syncs history via the server-assembled channel
@@ -17,8 +21,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _reachedOldest = false;
   bool _initInFlight = false;
   bool _usingChannelWindow = false;
+  bool _initialWindowQueryInFlight = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
+  final Set<String> _liveSummaryRootsDuringInitialWindowQuery = {};
   final Map<String, NostrEvent> _deepLinkEvents = {};
   final Set<String> _retainedDeepLinkEventIds = {};
 
@@ -48,12 +54,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (sessionState.status != SessionStatus.connected) {
       _initVersion++;
       _initInFlight = false;
+      _initialWindowQueryInFlight = false;
+      _liveSummaryRootsDuringInitialWindowQuery.clear();
       return AsyncData(_lastKnownMessages ?? const []);
     }
 
     _reachedOldest = false;
     _windowStore = const ChannelWindowStore.empty();
     _usingChannelWindow = false;
+    _initialWindowQueryInFlight = false;
+    _liveSummaryRootsDuringInitialWindowQuery.clear();
     _init();
     if (_lastKnownMessages case final cached? when cached.isNotEmpty) {
       return AsyncData(cached);
@@ -71,7 +81,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       try {
         final unsubscribe = await session.subscribe(
           NostrFilter(
-            kinds: EventKind.channelEventKinds,
+            kinds: _channelLiveEventKinds,
             tags: {
               '#h': [channelId],
             },
@@ -126,12 +136,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     RelaySessionNotifier session,
   ) async {
     try {
+      _initialWindowQueryInFlight = true;
       final page = await _fetchWindowPage(session, null);
-      _windowStore = replaceNewestChannelWindow(_windowStore, page);
+      _initialWindowQueryInFlight = false;
+      _windowStore = replaceNewestChannelWindow(
+        _windowStore,
+        page,
+        retainLiveSummaryRootIds: _liveSummaryRootsDuringInitialWindowQuery,
+      );
+      _liveSummaryRootsDuringInitialWindowQuery.clear();
       _usingChannelWindow = true;
       _reachedOldest = !channelWindowHasMore(_windowStore);
       return flattenChannelWindowEvents(_windowStore);
     } catch (error) {
+      _initialWindowQueryInFlight = false;
+      _liveSummaryRootsDuringInitialWindowQuery.clear();
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );
@@ -168,6 +187,26 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   );
 
   void _handleLiveEvent(NostrEvent event, {bool authoritative = true}) {
+    // A live summary can race the initial channel-window query. Buffer it in
+    // the window store even before that query installs its first page, rather
+    // than treating metadata as an ordinary websocket timeline event.
+    if (event.kind == EventKind.channelThreadSummary && !_usingChannelWindow) {
+      final rootId = _initialWindowQueryInFlight
+          ? event.getTagValue('e')
+          : null;
+      if (_mergeWindowEventIntoStore(event)) {
+        if (rootId != null) {
+          _liveSummaryRootsDuringInitialWindowQuery.add(rootId);
+        }
+        if (_initInFlight) return;
+        final current =
+            state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+        _lastKnownMessages = current;
+        state = AsyncData(current);
+      }
+      return;
+    }
+
     // Reply ownership and its thread-local overlay must transition together.
     // The authoritative thread query performs both confirmations after it
     // contains the reply; a live echo only triggers that query below.
@@ -181,11 +220,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final merged = _mergeEvent(current, event);
       _lastKnownMessages = merged;
       state = AsyncData(merged);
-    }
-
-    if (event.kind == EventKind.systemMessage &&
-        _isMembershipEvent(event.content)) {
-      ref.invalidate(channelMembersProvider(channelId));
     }
   }
 
@@ -222,7 +256,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
       if (!_isBroadcastReply(event)) return false;
     }
+    // Thread summaries are neither a timeline row nor an aux event, but they are
+    // how the root's "N replies" row learns a reply landed — a reply itself
+    // never reaches the main timeline. Dropping them here meant the count only
+    // appeared after leaving the channel and coming back, which refetched.
     if (!isTimelineRow &&
+        event.kind != EventKind.channelThreadSummary &&
         !EventKind.channelAuxEventKinds.contains(event.kind)) {
       return false;
     }
@@ -241,12 +280,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ref
         .read(pendingLocalMessagesProvider(channelId).notifier)
         .confirm(eventIds);
-  }
-
-  static bool _isMembershipEvent(String content) {
-    return content.contains('member_joined') ||
-        content.contains('member_left') ||
-        content.contains('member_removed');
   }
 
   /// Adds a just-signed outgoing message before the relay acknowledges it.
@@ -320,6 +353,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         pages: _windowStore.pages,
         liveOverlay: nextOverlay,
         liveAux: _windowStore.liveAux,
+        liveThreadSummaries: _windowStore.liveThreadSummaries,
       );
     }
 

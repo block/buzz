@@ -2,16 +2,21 @@ import 'dart:async';
 import 'dart:math' show min;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../profile/presence_cache_provider.dart';
 import '../profile/profile_provider.dart';
@@ -24,6 +29,7 @@ import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
+import 'channel_typing_indicator.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
 import 'date_formatters.dart';
@@ -34,7 +40,6 @@ import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
-import 'mentions/mention_candidates_provider.dart';
 import 'read_state/deferred_read_state_update.dart';
 import 'read_state/read_state_provider.dart';
 import 'read_state/read_state_time.dart';
@@ -216,6 +221,7 @@ class ChannelDetailPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
+        titleStyle: channelTitleTextStyle,
         title: resolvedChannel.isDm
             ? _DmAppBarTitle(
                 channel: resolvedChannel,
@@ -364,8 +370,17 @@ class ChannelDetailPage extends HookConsumerWidget {
                     ),
                   ),
           ),
-          if (!resolvedChannel.isForum && typingEntries.isNotEmpty)
-            _TypingIndicator(entries: typingEntries),
+          if (!resolvedChannel.isForum)
+            AnimatedSize(
+              duration: MediaQuery.disableAnimationsOf(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.bottomCenter,
+              child: typingEntries.isEmpty
+                  ? const SizedBox.shrink()
+                  : ChannelTypingIndicator(entries: typingEntries),
+            ),
           if (!resolvedChannel.isForum &&
               resolvedChannel.isMember &&
               !resolvedChannel.isArchived)

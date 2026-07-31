@@ -24,6 +24,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::pocket::{
+    april_model_info, PocketModelArtifact, APRIL_BUNDLE_ID, APRIL_MODEL_ID, APRIL_MODEL_REVISION,
+};
+
 // ── Integrity verification ────────────────────────────────────────────────────
 //
 // All model artifacts are verified against pinned SHA-256 hashes before
@@ -38,19 +42,15 @@ use sha2::{Digest, Sha256};
 /// Computed from a known-good download. Update when upgrading model versions.
 const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
 
-/// HuggingFace base URL for the sherpa-onnx Pocket TTS fp32 repackage.
-///
-/// Pinned to commit 96d1e53ce3311ca6c2c6a35e2062d36b4cec6fa3
-/// (2026-02-10) for reproducible downloads.
-///
-/// fp32 (not int8): a direct same-runtime A/B (k2-fsa/sherpa-onnx#3172)
-/// found the ONNX int8 quantization audibly degraded Pocket TTS output and
-/// that fp32 "significantly improved quality even at 1 step". The runtime
-/// bundle grows from ~189 MB to ~473 MB; encoder, text conditioner, both
-/// JSON tables, and LICENSE are byte-identical between the two repos — only
-/// the three quantized sessions (lm_main, lm_flow, decoder) change.
-const POCKET_HF_BASE: &str =
-    "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-2026-01-26/resolve/96d1e53ce3311ca6c2c6a35e2062d36b4cec6fa3";
+fn pocket_artifact_url(filename: &str) -> String {
+    format!(
+        "https://huggingface.co/{APRIL_MODEL_ID}/resolve/{APRIL_MODEL_REVISION}/onnx/{APRIL_BUNDLE_ID}/{filename}"
+    )
+}
+
+fn pocket_license_url() -> String {
+    format!("https://huggingface.co/{APRIL_MODEL_ID}/resolve/{APRIL_MODEL_REVISION}/onnx/LICENSE")
+}
 
 /// Reference voice WAV: "Mary (f, conversation)" from the Kyutai TTS demo
 /// voice set — VCTK speaker p333, ai-coustics-enhanced. Pinned to
@@ -64,20 +64,19 @@ const POCKET_HF_BASE: &str =
 const POCKET_REFERENCE_WAV_URL: &str =
     "https://huggingface.co/kyutai/tts-voices/resolve/323332d33f997de8394f24a193e1a76df720e01a/vctk/p333_023_enhanced.wav";
 
-/// SHA-256 hashes for individual Pocket TTS model files.
-/// Computed from known-good pinned downloads. Update when upgrading model versions.
-#[rustfmt::skip]
-const TTS_FILE_HASHES: &[(&str, &str)] = &[
-    ("decoder.onnx",          "f267880fde6c58b17b0a8f3647eaf8dcfad321f833f32d583ebc2fb2d1a15f10"),
-    ("encoder.onnx",          "e8f2f6d301ffb96e398b138a7dc6d3038622d236044636b73d920bab85890260"),
-    ("lm_flow.onnx",          "79c013a554a54e63319c33c0cc8830cbbedc9b7e448ae7e26f7923ae11f9873e"),
-    ("lm_main.onnx",          "255d1a9263c5abdf36034abfc19c11d21cc5f40f0f87d8361288e972cbd5c578"),
-    ("text_conditioner.onnx", "0b84e837d7bfaf2c896627b03e3f080320309f37f4fc7df7698c644f7ba5e6b1"),
-    ("vocab.json",            "6fb646346cf931016f70c4921aab0900ce7a304b893cb02135c74e294abfea01"),
-    ("token_scores.json",     "5be2f278caf9b9800741f0fd82bff677f4943ec764c356f907213434b622d958"),
-    ("LICENSE",               "fe7b4ce83b8381cc5b216bbb4af73c570688d1b819c73bbaed8ca401f4677cd6"),
-    ("reference_sample.wav",  "a35b0468382218e9f37a9a7494d1e4b74deaf18d7ced22265b4e325bb55c183f"),
-];
+const TTS_LICENSE_ARTIFACT: PocketModelArtifact = PocketModelArtifact {
+    filename: "LICENSE",
+    sha256: "fe7b4ce83b8381cc5b216bbb4af73c570688d1b819c73bbaed8ca401f4677cd6",
+    size_bytes: 18_655,
+    quantized: false,
+};
+
+const TTS_REFERENCE_ARTIFACT: PocketModelArtifact = PocketModelArtifact {
+    filename: "reference_sample.wav",
+    sha256: "a35b0468382218e9f37a9a7494d1e4b74deaf18d7ced22265b4e325bb55c183f",
+    size_bytes: 639_084,
+    quantized: false,
+};
 
 // ── Model versioning ──────────────────────────────────────────────────────────
 //
@@ -92,15 +91,8 @@ const TTS_FILE_HASHES: &[(&str, &str)] = &[
 /// honest (each version tag identifies one specific set of model bytes).
 const STT_MODEL_VERSION: &str = "2";
 
-/// Model manifest version for Pocket TTS. Increment when upgrading model files.
-/// Bumped "1" → "2" when the bundled reference voice changed from KevinAHM's
-/// anonymous 16 kHz sample to Mary (VCTK p333, 32 kHz, ai-coustics-enhanced)
-/// from kyutai/tts-voices. The hash mismatch on `reference_sample.wav` would
-/// fail readiness on its own, but the manifest bump makes the re-download
-/// reason explicit and skips the failing-then-re-fetching transient state.
-/// Bumped "2" → "3" for the int8 → fp32 model swap (see `POCKET_HF_BASE`):
-/// existing int8 installs must re-download the suffixless fp32 sessions.
-const TTS_MODEL_VERSION: &str = "3";
+/// Identifies the exact April INT8 asset set expected by readiness checks.
+const TTS_MODEL_VERSION: &str = "4";
 
 /// Filename for the version manifest written alongside model files.
 const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
@@ -110,9 +102,9 @@ const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
 /// Maximum expected STT archive size (200 MB — actual is ~100 MB).
 const MAX_STT_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
-/// Maximum expected Pocket TTS file size (400 MB per file — largest is
-/// `lm_main.onnx` at ~303 MB fp32).
-const MAX_TTS_FILE_BYTES: u64 = 400 * 1024 * 1024;
+/// Maximum expected Pocket TTS file size. The largest pinned INT8 artifact is
+/// `flow_lm_main_int8.onnx` at 76,341,079 bytes.
+const MAX_TTS_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx by
 /// k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
@@ -181,9 +173,9 @@ Original model by Kyutai: https://huggingface.co/kyutai/pocket-tts
 Paper: Charles, Roebel, et al., Pocket TTS (arXiv:2509.06926).
 Mimi neural codec by Kyutai is bundled as part of the model.
 
-ONNX export by KevinAHM: https://huggingface.co/KevinAHM/pocket-tts-onnx
-Sherpa-onnx repackage by csukuangfj / k2-fsa:
-https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-2026-01-26
+April 2026 ONNX export by KevinAHM:
+https://huggingface.co/KevinAHM/pocket-tts-onnx
+Pinned revision: 58a6d00cf13d239b6748cb0769f35c580a8f606c
 
 Bundled reference voice (reference_sample.wav):
 \"Mary (f, conversation)\" preset from the Kyutai TTS demo voice catalogue
@@ -203,13 +195,14 @@ license text for full warranty disclaimer.
 
 /// All files that must be present for Pocket TTS to be considered ready.
 const TTS_EXPECTED_FILES: &[&str] = &[
-    "decoder.onnx",
-    "encoder.onnx",
-    "lm_flow.onnx",
-    "lm_main.onnx",
+    "bundle.json",
+    "bos_before_voice.npy",
+    "flow_lm_main_int8.onnx",
+    "flow_lm_flow_int8.onnx",
+    "mimi_decoder_int8.onnx",
+    "mimi_encoder.onnx",
     "text_conditioner.onnx",
-    "vocab.json",
-    "token_scores.json",
+    "tokenizer.model",
     "LICENSE",
     "reference_sample.wav",
     TTS_LICENSE_FILE_NAME,
@@ -404,6 +397,7 @@ struct ModelSlot {
     dir_name: &'static str,                  // subdir under ~/.buzz/models/
     expected_files: &'static [&'static str], // files required for "ready"
     version: &'static str,                   // manifest version; increment to force re-download
+    expected_size: fn(&str) -> Option<u64>,
     status: Arc<Mutex<ModelStatus>>,
     just_ready: Arc<AtomicBool>, // fires once when download completes
 }
@@ -418,9 +412,15 @@ impl ModelSlot {
             dir_name,
             expected_files,
             version,
+            expected_size: |_| None,
             status: Arc::new(Mutex::new(ModelStatus::NotDownloaded)),
             just_ready: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn with_expected_sizes(mut self, expected_size: fn(&str) -> Option<u64>) -> Self {
+        self.expected_size = expected_size;
+        self
     }
 
     fn model_dir(&self, models_dir: &Path) -> PathBuf {
@@ -432,7 +432,17 @@ impl ModelSlot {
         std::fs::read_to_string(dir.join(MANIFEST_FILENAME))
             .map(|v| v.trim() == self.version)
             .unwrap_or(false)
-            && self.expected_files.iter().all(|f| dir.join(f).is_file())
+            && self.expected_files.iter().all(|filename| {
+                let path = dir.join(filename);
+                path.is_file()
+                    && (self.expected_size)(filename)
+                        .map(|expected| {
+                            path.metadata()
+                                .map(|metadata| metadata.len() == expected)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(true)
+            })
     }
 
     fn dir_if_ready(&self, models_dir: &Path) -> Option<PathBuf> {
@@ -451,6 +461,39 @@ impl ModelSlot {
     }
     fn take_ready(&self) -> bool {
         self.just_ready.swap(false, Ordering::AcqRel)
+    }
+
+    /// Recover or clean up the backup left by an interrupted atomic install.
+    fn recover_interrupted_install(&self, models_dir: &Path) {
+        let final_dir = self.model_dir(models_dir);
+        let backup_dir = final_dir.with_extension("old");
+        if !backup_dir.exists() {
+            return;
+        }
+        if self.is_ready(models_dir) {
+            if let Err(error) = std::fs::remove_dir_all(&backup_dir) {
+                eprintln!(
+                    "buzz-desktop: could not remove stale {} backup: {error}",
+                    self.dir_name
+                );
+            }
+            return;
+        }
+        if final_dir.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&final_dir) {
+                eprintln!(
+                    "buzz-desktop: could not remove incomplete {} install: {error}",
+                    self.dir_name
+                );
+                return;
+            }
+        }
+        if let Err(error) = std::fs::rename(&backup_dir, &final_dir) {
+            eprintln!(
+                "buzz-desktop: could not restore interrupted {} install: {error}",
+                self.dir_name
+            );
+        }
     }
 
     /// Spawn a background download task if not already ready or downloading.
@@ -511,6 +554,9 @@ impl ModelSlot {
             ));
         }
 
+        std::fs::write(source_dir.join(MANIFEST_FILENAME), self.version)
+            .map_err(|e| format!("write model manifest: {e}"))?;
+
         let final_dir = self.model_dir(models_dir);
         let backup_dir = final_dir.with_extension("old");
 
@@ -529,8 +575,6 @@ impl ModelSlot {
             return Err(format!("install new model: {e}"));
         }
 
-        std::fs::write(final_dir.join(MANIFEST_FILENAME), self.version)
-            .map_err(|e| format!("write model manifest: {e}"))?;
         let _ = tokio::fs::remove_dir_all(&backup_dir).await;
         if let Some(extra) = temp_cleanup {
             let _ = tokio::fs::remove_dir_all(extra).await;
@@ -540,6 +584,25 @@ impl ModelSlot {
         self.just_ready.store(true, Ordering::Release);
         Ok(())
     }
+}
+
+fn tts_expected_size(filename: &str) -> Option<u64> {
+    april_model_info()
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.filename == filename)
+        .map(|artifact| artifact.size_bytes)
+        .or_else(|| {
+            [TTS_LICENSE_ARTIFACT, TTS_REFERENCE_ARTIFACT]
+                .iter()
+                .find(|artifact| artifact.filename == filename)
+                .map(|artifact| artifact.size_bytes)
+        })
+}
+
+fn tts_model_slot() -> ModelSlot {
+    ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION)
+        .with_expected_sizes(tts_expected_size)
 }
 
 // ── ModelManager ──────────────────────────────────────────────────────────────
@@ -561,11 +624,13 @@ impl ModelManager {
     /// Returns `None` if the home directory cannot be resolved.
     pub fn new() -> Option<Self> {
         let models_dir = dirs::home_dir()?.join(".buzz").join("models");
-        Some(Self {
+        let manager = Self {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
-            tts: ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION),
-        })
+            tts: tts_model_slot(),
+        };
+        manager.tts.recover_interrupted_install(&manager.models_dir);
+        Some(manager)
     }
 
     // ── STT accessors ────────────────────────────────────────────────────────
@@ -638,7 +703,7 @@ impl ModelManager {
         }
     }
 
-    /// Start a background Pocket TTS download (~189 MB). No-op if already ready or downloading.
+    /// Start a background Pocket TTS download. No-op if already ready or downloading.
     pub fn start_tts_download(&self, http_client: reqwest::Client) {
         let manager = self.clone();
         self.tts.start_download(
@@ -754,8 +819,8 @@ impl ModelManager {
     /// Download and verify the Pocket TTS model files from HuggingFace.
     ///
     /// Downloads files into `~/.buzz/models/pocket-tts/`:
-    ///   - five ONNX sessions (Pocket TTS + Mimi codec)
-    ///   - `vocab.json` / `token_scores.json` for sherpa-onnx text conditioning
+    ///   - five ONNX sessions selected by the April INT8 bundle
+    ///   - bundle metadata, SentencePiece tokenizer, and learned voice BOS
     ///   - upstream `LICENSE` plus Buzz's `MODEL_LICENSE.txt` attribution sidecar
     ///   - `reference_sample.wav` as the bundled default voice
     ///
@@ -768,24 +833,18 @@ impl ModelManager {
         let temp_dir = self.models_dir.join("pocket-tts.tmp");
         fresh_temp_dir(&temp_dir).await?;
 
-        let model_files = [
-            "decoder.onnx",
-            "encoder.onnx",
-            "lm_flow.onnx",
-            "lm_main.onnx",
-            "text_conditioner.onnx",
-            "vocab.json",
-            "token_scores.json",
-            "LICENSE",
-        ];
-        let mut downloads: Vec<(String, &'static str)> = model_files
+        let mut downloads: Vec<(String, PocketModelArtifact)> = april_model_info()
+            .artifacts
             .iter()
-            .map(|filename| (format!("{POCKET_HF_BASE}/{filename}"), *filename))
+            .copied()
+            .map(|artifact| (pocket_artifact_url(artifact.filename), artifact))
             .collect();
-        downloads.push((POCKET_REFERENCE_WAV_URL.to_string(), "reference_sample.wav"));
+        downloads.push((pocket_license_url(), TTS_LICENSE_ARTIFACT));
+        downloads.push((POCKET_REFERENCE_WAV_URL.to_string(), TTS_REFERENCE_ARTIFACT));
         let total_files = downloads.len() as u32;
 
-        for (i, (url, filename)) in downloads.iter().enumerate() {
+        for (i, (url, artifact)) in downloads.iter().enumerate() {
+            let filename = artifact.filename;
             eprintln!("buzz-desktop: downloading Pocket TTS {filename} from {url}");
 
             let response = fetch_url(&http_client, url, filename)
@@ -822,16 +881,19 @@ impl ModelManager {
             })?;
             eprintln!("buzz-desktop: downloaded {bytes} bytes ({filename}), wrote to disk");
 
-            let expected = TTS_FILE_HASHES
-                .iter()
-                .find(|(n, _)| *n == *filename)
-                .map(|(_, hash)| *hash)
-                .ok_or_else(|| format!("missing expected hash for Pocket TTS file: {filename}"))?;
-            let actual = sha256_file(&dest).await?;
-            if actual != expected {
+            if bytes != artifact.size_bytes {
                 let _ = tokio::fs::remove_dir_all(&temp_dir).await;
                 return Err(format!(
-                    "Pocket TTS {filename} integrity check failed: expected {expected}, got {actual}"
+                    "Pocket TTS {filename} size check failed: expected {} bytes, got {bytes}",
+                    artifact.size_bytes
+                ));
+            }
+            let actual = sha256_file(&dest).await?;
+            if actual != artifact.sha256 {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                return Err(format!(
+                    "Pocket TTS {filename} integrity check failed: expected {}, got {actual}",
+                    artifact.sha256
                 ));
             }
 
@@ -931,24 +993,5 @@ pub fn is_tts_ready() -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tts_readiness_requires_license_sidecar() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let slot = ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION);
-        let model_dir = temp.path().join(TTS_MODEL_DIR_NAME);
-        std::fs::create_dir_all(&model_dir).expect("create model dir");
-
-        for file in TTS_EXPECTED_FILES {
-            std::fs::write(model_dir.join(file), b"test").expect("write expected file");
-        }
-        std::fs::write(model_dir.join(MANIFEST_FILENAME), TTS_MODEL_VERSION).expect("manifest");
-
-        assert!(slot.is_ready(temp.path()));
-
-        std::fs::remove_file(model_dir.join(TTS_LICENSE_FILE_NAME)).expect("remove sidecar");
-        assert!(!slot.is_ready(temp.path()));
-    }
-}
+#[path = "models_tests.rs"]
+mod tests;

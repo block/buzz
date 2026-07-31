@@ -61,6 +61,28 @@ class _InboxRow extends ConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final profile = userCache[item.item.pubkey.toLowerCase()];
     final senderLabel = profile?.displayName ?? shortPubkey(item.item.pubkey);
+    final profileMentionNames = {
+      for (final pubkey in mentionedPubkeysFromTags(item.item.tags))
+        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
+          pubkey: userCache[pubkey]!.displayName!.trim(),
+    };
+    final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
+    final knownAgentPubkeys = channel == null
+        ? ref.watch(knownAgentPubkeysProvider)
+        : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: knownAgentPubkeys,
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: mentionPubkeys,
+      profileMentionNames: profileMentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     final isDm = channel?.isDm ?? false;
     final channelName = channel != null && !isDm
@@ -91,7 +113,7 @@ class _InboxRow extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _RowAvatar(pubkey: item.item.pubkey, profile: profile),
-            const SizedBox(width: Grid.twelve),
+            const SizedBox(width: messageAvatarContentGap),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -100,19 +122,25 @@ class _InboxRow extends ConsumerWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          senderLabel,
-                          // Compact label scale — matches the old
-                          // "@ Mention" headline treatment while staying
-                          // the row's primary label.
-                          style: context.textTheme.labelMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
+                        child: MessageAuthorMeta(
+                          displayName: senderLabel,
+                          username: messageUsernameLabel(profile),
+                          timestamp: _inboxTimestamp(item.latestActivityAt),
+                          nameColor: context.colors.onSurface,
+                          metadataColor: mutedColor,
+                          nameStyle: activityUsernameTextStyle,
+                          metadataStyle: activityTimestampTextStyle,
+                          displayNameKey: ValueKey(
+                            'activity-author-${item.id}',
                           ),
-                          overflow: TextOverflow.ellipsis,
+                          usernameKey: ValueKey('activity-username-${item.id}'),
+                          timestampKey: ValueKey(
+                            'activity-timestamp-${item.id}',
+                          ),
                         ),
                       ),
-                      const SizedBox(width: Grid.xxs),
                       if (!isDone) ...[
+                        const SizedBox(width: Grid.xxs),
                         Container(
                           key: ValueKey('inbox-unread-dot-${item.id}'),
                           width: 6,
@@ -122,17 +150,7 @@ class _InboxRow extends ConsumerWidget {
                             color: context.colors.primary,
                           ),
                         ),
-                        const SizedBox(width: Grid.half),
                       ],
-                      Text(
-                        _inboxTimestamp(item.latestActivityAt),
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: mutedColor,
-                          fontWeight: isDone
-                              ? FontWeight.w400
-                              : FontWeight.w500,
-                        ),
-                      ),
                     ],
                   ),
                   const SizedBox(height: Grid.quarter),
@@ -142,9 +160,8 @@ class _InboxRow extends ConsumerWidget {
                       Flexible(
                         child: Text(
                           label.text,
-                          style: context.textTheme.labelSmall?.copyWith(
+                          style: activityContextTextStyle.copyWith(
                             color: labelColor,
-                            fontWeight: FontWeight.w500,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -163,7 +180,7 @@ class _InboxRow extends ConsumerWidget {
                             ),
                             child: Text(
                               '#${label.channelLabel}',
-                              style: context.textTheme.labelSmall?.copyWith(
+                              style: activityContextTextStyle.copyWith(
                                 color: mutedColor,
                               ),
                               overflow: TextOverflow.ellipsis,
@@ -174,14 +191,15 @@ class _InboxRow extends ConsumerWidget {
                     ],
                   ),
                   const SizedBox(height: Grid.half),
-                  // Preview (bold while unread — desktop parity).
+                  // Message preview.
                   MessageContent(
                     content: item.item.displayContent,
+                    mentionNames: mentionNames,
+                    agentMentionPubkeys: agentMentionPubkeys,
                     tags: item.item.tags,
                     maxLines: 2,
-                    baseStyle: context.textTheme.bodySmall?.copyWith(
-                      color: isDone ? mutedColor : context.colors.onSurface,
-                      fontWeight: isDone ? FontWeight.w400 : FontWeight.w600,
+                    baseStyle: activityPreviewTextStyle.copyWith(
+                      color: context.colors.onSurface,
                     ),
                   ),
                 ],
@@ -238,7 +256,7 @@ class _RowAvatar extends StatelessWidget {
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     return AvatarImage(
       imageUrl: profile?.avatarUrl,
-      radius: 18,
+      radius: activityAvatarSize / 2,
       backgroundColor: context.colors.primaryContainer,
       fallback: Text(
         initial,

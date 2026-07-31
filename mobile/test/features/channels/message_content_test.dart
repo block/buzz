@@ -6,15 +6,27 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/shared/emoji/emoji_only.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
-Widget _testable(Widget child, {List<Override> overrides = const []}) {
+Widget _testable(
+  Widget child, {
+  List<Override> overrides = const [],
+  bool disableAnimations = false,
+}) {
   return ProviderScope(
     overrides: overrides,
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: Scaffold(body: child),
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(disableAnimations: disableAnimations),
+          child: Scaffold(body: child),
+        ),
+      ),
     ),
   );
 }
@@ -182,11 +194,22 @@ void main() {
       );
 
       expect(route, isA<PageRouteBuilder<void>>());
-      expect(route.transitionDuration, const Duration(milliseconds: 280));
+      expect(route.transitionDuration, const Duration(milliseconds: 260));
       expect(
         route.reverseTransitionDuration,
-        const Duration(milliseconds: 220),
+        const Duration(milliseconds: 170),
       );
+    });
+
+    test('buildImageViewerRoute disables motion when requested', () {
+      final route = buildImageViewerRoute(
+        imageUrl: 'https://example.com/media/image.png',
+        heroTag: Object(),
+        disableAnimations: true,
+      );
+
+      expect(route.transitionDuration, Duration.zero);
+      expect(route.reverseTransitionDuration, Duration.zero);
     });
 
     group('plain text', () {
@@ -237,6 +260,93 @@ void main() {
 
         expect(find.byType(Image), findsNothing);
         expect(_allRichText(tester), contains(':shipit:'));
+      });
+    });
+
+    group('emoji-only bodies', () {
+      /// Font size the body text actually rendered at.
+      ///
+      /// gpt_markdown resolves the style onto the spans rather than the root
+      /// RichText, which keeps the ambient 14px — so read the span carrying the
+      /// text, not the root.
+      double bodyFontSize(WidgetTester tester, String text) {
+        final richText = tester.widget<RichText>(_findRich(text).first);
+        double? size;
+        richText.text.visitChildren((span) {
+          if (span is TextSpan && (span.text ?? '').contains(text)) {
+            size ??= span.style?.fontSize;
+          }
+          return size == null;
+        });
+        return size ?? richText.text.style!.fontSize!;
+      }
+
+      testWidgets('an all-emoji body renders larger, like desktop', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: '\u{1F389}', scaleEmojiOnly: true),
+          ),
+        );
+
+        expect(bodyFontSize(tester, '\u{1F389}'), kEmojiOnlyFontSize);
+      });
+
+      testWidgets('one word alongside the emoji keeps body size', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'ship it \u{1F389}',
+              scaleEmojiOnly: true,
+            ),
+          ),
+        );
+
+        expect(bodyFontSize(tester, 'ship it'), lessThan(kEmojiOnlyFontSize));
+      });
+
+      testWidgets('the scale is opt-in, so previews are unaffected', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '\u{1F389}')),
+        );
+
+        expect(bodyFontSize(tester, '\u{1F389}'), lessThan(kEmojiOnlyFontSize));
+      });
+
+      testWidgets('a tagged custom emoji alone scales its image too', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: ':shipit:',
+              scaleEmojiOnly: true,
+              tags: [
+                ['emoji', 'shipit', 'https://relay.example/shipit.png'],
+              ],
+            ),
+          ),
+        );
+
+        final image = tester.widget<Image>(find.byType(Image));
+        expect(image.height, kEmojiOnlyCustomEmojiSize);
+      });
+
+      testWidgets('an unresolvable shortcode stays body size', (tester) async {
+        // Without a matching emoji tag it renders as literal text, so scaling it
+        // would blow up a `:word:` that was never emoji at all.
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: ':shipit:', scaleEmojiOnly: true),
+          ),
+        );
+
+        expect(bodyFontSize(tester, ':shipit:'), lessThan(kEmojiOnlyFontSize));
       });
     });
 
@@ -431,6 +541,242 @@ void main() {
       });
 
       testWidgets(
+        'groups uploaded photos into a carousel and opens the full gallery',
+        (tester) async {
+          const first = 'https://example.com/media/one.png';
+          const second = 'https://example.com/media/two.png';
+          const third = 'https://example.com/media/three.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+Photos
+![image]($first)
+![image]($second)
+![image]($third)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png', 'alt First photo'],
+                  ['imeta', 'url $second', 'm image/png', 'alt Second photo'],
+                  ['imeta', 'url $third', 'm image/png', 'alt Third photo'],
+                ],
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final carousel = find.byKey(const ValueKey('message-media-carousel'));
+          expect(carousel, findsOneWidget);
+          expect(find.text('3 images'), findsOneWidget);
+
+          await tester.drag(carousel, const Offset(-600, 0));
+          await tester.pumpAndSettle();
+
+          await tester.tap(
+            find.byKey(const ValueKey('message-media-carousel-item:$second')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('message-media-image-viewer')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('message-media-image-viewer-filmstrip')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail:1'),
+            ),
+            findsOneWidget,
+          );
+          final displayedImage = tester.widget<MediaImage>(
+            find.byKey(const ValueKey('message-media-image-viewer-image:1')),
+          );
+          expect(displayedImage.decodeWidth, isNotNull);
+          final selectedThumbnailClip = tester.widget<ClipRRect>(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail-clip:1'),
+            ),
+          );
+          final selectedThumbnailRadius =
+              selectedThumbnailClip.borderRadius as BorderRadius;
+          expect(
+            selectedThumbnailRadius.topLeft.x,
+            closeTo(Radii.sm - 2.5, 0.01),
+          );
+
+          await tester.fling(
+            find.byKey(const ValueKey('message-media-image-viewer-pages')),
+            const Offset(-700, 0),
+            1200,
+          );
+          await tester.pumpAndSettle();
+
+          final thirdThumbnail = find.byKey(
+            const ValueKey('message-media-image-viewer-thumbnail:2'),
+          );
+          final thirdSemantics = tester.widget<Semantics>(
+            find
+                .ancestor(of: thirdThumbnail, matching: find.byType(Semantics))
+                .first,
+          );
+          expect(thirdSemantics.properties.selected, isTrue);
+        },
+      );
+
+      testWidgets(
+        'keeps adjacent carousel images active and ends with a gutter',
+        (tester) async {
+          const first = 'https://example.com/media/gutter-one.png';
+          const second = 'https://example.com/media/gutter-two.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+![image]($first)
+![image]($second)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png'],
+                  ['imeta', 'url $second', 'm image/png'],
+                ],
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final carousel = find.byKey(const ValueKey('message-media-carousel'));
+          final pageViewFinder = find.descendant(
+            of: carousel,
+            matching: find.byType(PageView),
+          );
+          final pageView = tester.widget<PageView>(pageViewFinder);
+
+          expect(pageView.allowImplicitScrolling, isTrue);
+          expect(pageView.clipBehavior, Clip.none);
+
+          pageView.controller!.jumpToPage(1);
+          await tester.pumpAndSettle();
+
+          final lastCard = find.byKey(
+            const ValueKey('message-media-carousel-item:$second'),
+          );
+          expect(
+            tester.getRect(carousel).right - tester.getRect(lastCard).right,
+            Grid.gutter,
+          );
+        },
+      );
+
+      testWidgets(
+        'jumps to a selected gallery thumbnail when motion is disabled',
+        (tester) async {
+          const first = 'https://example.com/media/reduced-motion-one.png';
+          const second = 'https://example.com/media/reduced-motion-two.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+![image]($first)
+![image]($second)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png'],
+                  ['imeta', 'url $second', 'm image/png'],
+                ],
+              ),
+              disableAnimations: true,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(
+            find.byKey(const ValueKey('message-media-carousel-item:$first')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail:1'),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final selectedThumbnail = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.byKey(
+                    const ValueKey('message-media-image-viewer-thumbnail:1'),
+                  ),
+                  matching: find.byType(Semantics),
+                )
+                .first,
+          );
+          expect(selectedThumbnail.properties.selected, isTrue);
+          expect(tester.takeException(), isNull);
+        },
+      );
+
+      testWidgets('resets carousel paging when gallery images change', (
+        tester,
+      ) async {
+        const firstGallery = [
+          'https://example.com/media/first-a.png',
+          'https://example.com/media/first-b.png',
+          'https://example.com/media/first-c.png',
+        ];
+        const secondGallery = [
+          'https://example.com/media/second-a.png',
+          'https://example.com/media/second-b.png',
+        ];
+
+        Widget gallery(List<String> urls) => _testable(
+          MessageContent(
+            content: urls.map((url) => '![image]($url)').join('\n'),
+            tags: [
+              for (final url in urls) ['imeta', 'url $url', 'm image/png'],
+            ],
+          ),
+        );
+
+        await tester.pumpWidget(gallery(firstGallery));
+        await tester.pumpAndSettle();
+        final firstCarousel = tester.widget<PageView>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-media-carousel')),
+            matching: find.byType(PageView),
+          ),
+        );
+
+        await tester.fling(
+          find.byKey(const ValueKey('message-media-carousel')),
+          const Offset(-700, 0),
+          1200,
+        );
+        await tester.pumpAndSettle();
+        expect(firstCarousel.controller!.page, greaterThan(0));
+
+        await tester.pumpWidget(gallery(secondGallery));
+        await tester.pumpAndSettle();
+        final secondCarousel = tester.widget<PageView>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-media-carousel')),
+            matching: find.byType(PageView),
+          ),
+        );
+
+        expect(
+          secondCarousel.controller,
+          isNot(same(firstCarousel.controller)),
+        );
+        expect(secondCarousel.controller!.page, 0);
+      });
+
+      testWidgets(
         'disables hero on close after the fullscreen image is transformed',
         (tester) async {
           const imageUrl = 'https://example.com/media/transformed.png';
@@ -483,6 +829,90 @@ void main() {
           );
         },
       );
+
+      testWidgets('double tap resets the fullscreen image transform', (
+        tester,
+      ) async {
+        const imageUrl = 'https://example.com/media/double-tap-reset.png';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'Look\n![image](https://example.com/media/double-tap-reset.png)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/double-tap-reset.png',
+                  'm image/png',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final transformationController = await _openImageViewer(
+          tester,
+          imageUrl,
+        );
+        _applyImageViewerTransform(
+          transformationController,
+          dx: 32,
+          dy: 24,
+          scale: 2,
+        );
+        await tester.pump();
+
+        final gestureSurface = find.byKey(
+          const ValueKey('message-media-image-viewer-gesture:0'),
+        );
+        await tester.tap(gestureSurface);
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.tap(gestureSurface);
+        await tester.pumpAndSettle();
+
+        expect(
+          transformationController.value.storage,
+          orderedEquals(Matrix4.identity().storage),
+        );
+        expect(_isImageViewerHeroEnabled(tester), isTrue);
+      });
+
+      testWidgets('swiping down dismisses the fullscreen gallery', (
+        tester,
+      ) async {
+        const imageUrl = 'https://example.com/media/swipe-dismiss.png';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'Look\n![image](https://example.com/media/swipe-dismiss.png)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/swipe-dismiss.png',
+                  'm image/png',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await _openImageViewer(tester, imageUrl);
+
+        await tester.drag(
+          find.byKey(const ValueKey('message-media-image-viewer-gesture:0')),
+          const Offset(0, 180),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('message-media-image-viewer')),
+          findsNothing,
+        );
+      });
 
       testWidgets(
         'disables hero on back navigation after the fullscreen image is transformed',
@@ -772,6 +1202,43 @@ void main() {
         // separately so they can be aligned independently.
         expect(find.text('@'), findsOneWidget);
         expect(find.text('Alice'), findsOneWidget);
+      });
+
+      testWidgets('renders a known agent mention with the bot chip', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+              maxLines: 2,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('@'), findsNothing);
+        expect(find.text('Helper Bot'), findsOneWidget);
+      });
+
+      testWidgets('normalizes passed multi-word agent mentions', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('Helper Bot'), findsOneWidget);
+        expect(_allRichText(tester), isNot(contains('Bot Bot')));
       });
 
       testWidgets('highlights an entire multi-word display name', (

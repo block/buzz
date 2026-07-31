@@ -488,6 +488,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (liveSub != null &&
         liveSub.readyCompleter != null &&
         !liveSub.readyCompleter!.isCompleted) {
+      // EOSE is the boundary between replay and live delivery. Flush any
+      // replay events before resolving subscribe(), so callers that begin a
+      // one-shot query immediately afterwards cannot classify a delayed batch
+      // callback as having arrived during that query.
+      _flushBufferedEventsNow();
       liveSub.readyCompleter!.complete();
       liveSub.readyCompleter = null;
     }
@@ -565,6 +570,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       const Duration(milliseconds: _eventBatchMs),
       _flushEventBuffer,
     );
+  }
+
+  void _flushBufferedEventsNow() {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _flushEventBuffer();
   }
 
   void _flushEventBuffer() {

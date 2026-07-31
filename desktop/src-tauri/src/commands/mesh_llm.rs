@@ -8,12 +8,35 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::{app_state::AppState, mesh_llm, relay};
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MeshSharingConfig {
     enabled: bool,
+    /// A fresh Share Compute request that must cross a process boundary before
+    /// it can start. Consumed before startup so an interrupted download is not
+    /// resumed on a later launch.
+    #[serde(default)]
+    start_on_next_launch: bool,
     model_id: String,
     max_vram_gb: Option<u64>,
+    /// Community relay where Share Compute was explicitly enabled. Older
+    /// configs predate community binding and restore against the active relay.
+    #[serde(default)]
+    relay_url: Option<String>,
+}
+
+fn pending_new_start_checkpoint(config: &MeshSharingConfig) -> MeshSharingConfig {
+    let mut checkpoint = config.clone();
+    checkpoint.enabled = false;
+    checkpoint.start_on_next_launch = false;
+    checkpoint
+}
+
+fn one_shot_restart_checkpoint(config: &MeshSharingConfig) -> MeshSharingConfig {
+    let mut checkpoint = config.clone();
+    checkpoint.enabled = false;
+    checkpoint.start_on_next_launch = true;
+    checkpoint
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -325,8 +348,10 @@ fn sharing_config_from_request(
         .ok_or_else(|| "modelId is required for serve mode".to_string())?;
     Ok(MeshSharingConfig {
         enabled: true,
+        start_on_next_launch: false,
         model_id: model_id.to_string(),
         max_vram_gb: request.max_vram_gb,
+        relay_url: request.relay_url.clone(),
     })
 }
 
@@ -353,7 +378,7 @@ fn restart_to_share(
     app: &AppHandle,
     config: &MeshSharingConfig,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    save_mesh_sharing_config(app, config)?;
+    save_mesh_sharing_config(app, &one_shot_restart_checkpoint(config))?;
     let status = restarting_share_status(config);
     app.request_restart();
     Ok(status)
@@ -369,7 +394,7 @@ fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
     format!("buzz-community-{}", &digest[..32])
 }
 
-fn buzz_mesh_name(state: &AppState) -> String {
+pub(super) fn buzz_mesh_name(state: &AppState) -> String {
     buzz_mesh_name_for_relay(&relay::relay_ws_url_with_override(state))
 }
 
@@ -386,8 +411,13 @@ fn advance_mesh_status_cursor(
     Ok(cursor)
 }
 
-async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
-    let mut events = relay::query_relay(state, &[mesh_llm::relay_membership_filter()]).await?;
+async fn query_mesh_discovery_events_at(
+    state: &AppState,
+    relay_url: &str,
+) -> Result<Vec<nostr::Event>, String> {
+    let api_base_url = relay::relay_http_base_url(relay_url);
+    let mut events =
+        relay::query_relay_at(state, &api_base_url, &[mesh_llm::relay_membership_filter()]).await?;
     let member_pubkeys = mesh_llm::current_member_pubkeys(&events);
     if member_pubkeys.is_empty() {
         // Distinguish "relay returned a membership snapshot listing zero
@@ -408,7 +438,7 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
     let mut previous_cursor: Option<(u64, String)> = None;
 
     loop {
-        let page = relay::query_relay(state, &[status_filter.clone()]).await?;
+        let page = relay::query_relay_at(state, &api_base_url, &[status_filter.clone()]).await?;
         let done = page.len() < mesh_llm::MESH_STATUS_PAGE_SIZE;
         if !done {
             let cursor = advance_mesh_status_cursor(&mut status_filter, &page)?;
@@ -424,6 +454,10 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
     }
 }
 
+async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
+    query_mesh_discovery_events_at(state, &relay::relay_ws_url_with_override(state)).await
+}
+
 /// Resolve the admission roster by intersecting member-signed mesh status
 /// reporters with the current NIP-43 direct-member list.
 ///
@@ -434,6 +468,14 @@ async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Even
 /// allowlist on error instead of restarting the node down to self-only.
 pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Result<Vec<String>, String> {
     let events = query_mesh_discovery_events(state).await?;
+    Ok(mesh_llm::owner_ids_from_events(&events))
+}
+
+pub(crate) async fn resolve_trusted_owner_ids_at(
+    state: &AppState,
+    relay_url: &str,
+) -> Result<Vec<String>, String> {
+    let events = query_mesh_discovery_events_at(state, relay_url).await?;
     Ok(mesh_llm::owner_ids_from_events(&events))
 }
 
@@ -480,10 +522,11 @@ fn buzz_mesh_join_targets(
 /// Resolve the validated member endpoint this runtime should join to enter the
 /// existing Buzz community mesh. `Ok(None)` means this machine is the first
 /// live serving member (or is itself the shared bootstrap contact).
-pub(crate) async fn resolve_buzz_mesh_join_targets(
+pub(crate) async fn resolve_buzz_mesh_join_targets_at(
     state: &AppState,
+    relay_url: &str,
 ) -> Result<Vec<mesh_llm::MeshServeTarget>, String> {
-    let events = query_mesh_discovery_events(state).await?;
+    let events = query_mesh_discovery_events_at(state, relay_url).await?;
     let self_owner_id = mesh_llm::ensure_owner_identity()
         .map_err(|error| format!("failed to load mesh owner identity: {error}"))?
         .owner_id;
@@ -497,8 +540,11 @@ pub(crate) async fn resolve_buzz_mesh_join_targets(
 /// snapshot. A node start used to repeat the full membership + status query
 /// for each value, making Share Compute startup both slower and more exposed
 /// to inconsistent snapshots.
-async fn resolve_buzz_mesh_startup(state: &AppState) -> (Vec<String>, Option<String>) {
-    match query_mesh_discovery_events(state).await {
+async fn resolve_buzz_mesh_startup_at(
+    state: &AppState,
+    relay_url: &str,
+) -> (Vec<String>, Option<String>) {
+    match query_mesh_discovery_events_at(state, relay_url).await {
         Ok(events) => {
             let trusted_owner_ids = mesh_llm::owner_ids_from_events(&events);
             let join_token = mesh_llm::ensure_owner_identity()
@@ -527,33 +573,61 @@ async fn resolve_buzz_mesh_startup(state: &AppState) -> (Vec<String>, Option<Str
 }
 
 pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> CmdResult<()> {
-    let Some(config) = load_mesh_sharing_config(app)? else {
+    let Some(mut config) = load_mesh_sharing_config(app)? else {
         return Ok(());
     };
-    if !config.enabled || config.model_id.trim().is_empty() {
+    if (!config.enabled && !config.start_on_next_launch) || config.model_id.trim().is_empty() {
         return Ok(());
     }
+    config.model_id = mesh_llm::canonical_curated_model_id(&config.model_id).to_string();
     if state.mesh_llm_runtime.lock().await.is_some() {
         return Ok(());
     }
-    let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(state).await;
+    let relay_url = config
+        .relay_url
+        .clone()
+        .unwrap_or_else(|| relay::relay_ws_url_with_override(state));
+    let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup_at(state, &relay_url).await;
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
         return Ok(());
     }
     prepare_windows_mesh_runtime_dependencies(app);
+    if config.start_on_next_launch {
+        // Consume a role-switch request before doing any potentially long model
+        // work. If Buzz exits during that work, the next launch stays stopped.
+        config = pending_new_start_checkpoint(&config);
+        save_mesh_sharing_config(app, &config)?;
+    }
+    // This is restoration of a previously inference-ready serving node. Keep
+    // the enabled checkpoint armed while restoring so a transient startup
+    // failure does not silently turn Share Compute off. New starts remain
+    // disarmed in `mesh_start_node` until their first inference probe passes.
     let request = mesh_llm::StartMeshNodeRequest {
         mode: mesh_llm::MeshNodeMode::Serve,
-        model_id: Some(config.model_id),
+        model_id: Some(config.model_id.clone()),
         max_vram_gb: config.max_vram_gb,
         join_token,
-        mesh_name: Some(buzz_mesh_name(state)),
+        mesh_name: Some(buzz_mesh_name_for_relay(&relay_url)),
+        relay_url: Some(relay_url),
         trusted_owner_ids: Some(trusted_owner_ids),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
         .map_err(|error| format!("failed to restore Share Compute: {error:#}"))?;
+    if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
+        let cleanup = started.stop().await;
+        if let Err(cleanup_error) = cleanup {
+            eprintln!(
+                "buzz-mesh: restored node failed inference readiness and cleanup was incomplete: {cleanup_error:#}"
+            );
+        }
+        return Err(format!("failed to restore Share Compute: {error}"));
+    }
     *runtime = Some(started);
+    config.enabled = true;
+    config.start_on_next_launch = false;
+    save_mesh_sharing_config(app, &config)?;
     drop(runtime);
     mesh_llm::publish_current_status_once(app, "restore").await;
     Ok(())
@@ -613,6 +687,11 @@ async fn mesh_start_node_inner(
         ),
     );
 
+    let relay_url = relay::relay_ws_url_with_override(&state);
+    request.relay_url = Some(relay_url.clone());
+    if let Some(model_id) = request.model_id.as_mut() {
+        *model_id = mesh_llm::canonical_curated_model_id(model_id).to_string();
+    }
     let sharing_config = if request.mode == mesh_llm::MeshNodeMode::Serve {
         Some(sharing_config_from_request(&request)?)
     } else {
@@ -652,7 +731,8 @@ async fn mesh_start_node_inner(
     // endpoint from one snapshot so UI startup does not repeat relay probes.
     if request.trusted_owner_ids.is_none() || request.join_token.is_none() {
         append_mesh_debug_log(&app, "resolving Buzz mesh startup metadata");
-        let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(&state).await;
+        let (trusted_owner_ids, join_token) =
+            resolve_buzz_mesh_startup_at(&state, &relay_url).await;
         request.trusted_owner_ids.get_or_insert(trusted_owner_ids);
         if request.join_token.is_none() {
             request.join_token = join_token;
@@ -668,7 +748,7 @@ async fn mesh_start_node_inner(
                 .map_or(0, std::vec::Vec::len)
         ),
     );
-    request.mesh_name = Some(buzz_mesh_name(&state));
+    request.mesh_name = Some(buzz_mesh_name_for_relay(&relay_url));
     let mut runtime = state.mesh_llm_runtime.lock().await;
 
     let plan = match runtime.as_ref() {
@@ -690,6 +770,13 @@ async fn mesh_start_node_inner(
             );
             return existing.status().await.map_err(|error| error.to_string());
         }
+    }
+
+    if let Some(config) = sharing_config.as_ref() {
+        // Do not arm launch restoration until the exact inference path used by
+        // agents succeeds. Mesh may bind its ports after primary weights load
+        // while package layers are still downloading.
+        save_mesh_sharing_config(&app, &pending_new_start_checkpoint(config))?;
     }
 
     append_mesh_debug_log(&app, "starting DesktopMeshRuntime");
@@ -731,6 +818,21 @@ async fn mesh_start_node_inner(
             ));
         }
     };
+    if let Some(config) = sharing_config.as_ref() {
+        if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
+            let cleanup = started.stop().await;
+            if let Err(cleanup_error) = &cleanup {
+                eprintln!(
+                    "buzz-mesh: started node failed inference readiness and cleanup was incomplete: {cleanup_error:#}"
+                );
+            }
+            drop(runtime);
+            app.request_restart();
+            return Err(format!(
+                "mesh node started but inference never became ready: {error}; Buzz is restarting to guarantee cleanup"
+            ));
+        }
+    }
     *runtime = Some(started);
     drop(runtime);
     if let Some(config) = sharing_config.as_ref() {
@@ -934,6 +1036,7 @@ pub(crate) async fn ensure_client_node_for_model(
         max_vram_gb: None,
         join_token: Some(join_token.clone()),
         mesh_name: Some(buzz_mesh_name(state)),
+        relay_url: Some(relay::relay_ws_url_with_override(state)),
         trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
@@ -1075,6 +1178,18 @@ pub(crate) async fn ensure_relay_mesh_for_record(
             }
         }
     }
+
+    // A persisted Share Compute configuration is authoritative about this
+    // machine's role. If no runtime is currently tracked (for example after a
+    // clean process restart), restore the serving node instead of treating an
+    // agent request as permission to replace it with a client node.
+    if load_mesh_sharing_config(app)?
+        .is_some_and(|config| config.enabled && !config.model_id.trim().is_empty())
+    {
+        restore_mesh_sharing(app, &state).await?;
+        return wait_for_mesh_inference(model_id).await;
+    }
+
     let target = match resolve_mesh_bootstrap_target(&state, model_id).await {
         Ok(Some(target)) => target,
         Ok(None) => {
@@ -1091,6 +1206,9 @@ pub(crate) async fn ensure_relay_mesh_for_record(
     };
 
     prepare_windows_mesh_runtime_dependencies(app);
+    // No serving configuration exists, so this is a genuine consumer-only
+    // start. A configured serving machine is restored above and never reaches
+    // this client fallback.
     // Serve→Client re-arm transition (micspiral review #3, intentional-by-design):
     // if the dead ingress belonged to a *serve* node with running consumer
     // agents, this re-arms it as a Client (`MeshNodeMode::Client`). That is the
@@ -1115,14 +1233,17 @@ pub async fn mesh_stop_node(
     // role under the lock and, when it's a consume session, leave it running
     // and return its live status unchanged. The frontend also guards this, but
     // status can be stale between polls, so the backend is authoritative.
-    let taken = {
+    let (taken, bound_relay_url) = {
         let mut guard = state.mesh_llm_runtime.lock().await;
         if let Some(runtime) = guard.as_ref() {
             if !share_stop_should_teardown(runtime.mode()) {
                 return runtime.status().await.map_err(|error| error.to_string());
             }
         }
-        guard.take()
+        let bound_relay_url = guard
+            .as_ref()
+            .and_then(|runtime| runtime.start_request().relay_url.clone());
+        (guard.take(), bound_relay_url)
     };
     if let Some(runtime) = taken {
         runtime.stop().await.map_err(|error| error.to_string())?;
@@ -1131,11 +1252,13 @@ pub async fn mesh_stop_node(
         &app,
         &MeshSharingConfig {
             enabled: false,
+            start_on_next_launch: false,
             model_id: String::new(),
             max_vram_gb: None,
+            relay_url: None,
         },
     )?;
-    mesh_llm::publish_stopped_status_once(&app, "stop").await;
+    mesh_llm::publish_stopped_status_once_at(&app, bound_relay_url.as_deref(), "stop").await;
     Ok(mesh_llm::stopped_status())
 }
 
