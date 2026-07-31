@@ -26,7 +26,7 @@ import type { Channel, RelayEvent } from "@/shared/api/types";
  * deferred decision stale.
  *
  * Returns the routed open. Explicit destinations (tab clicks, palette,
- * ⌘[/⌘], ⌥↑↓) keep using the plain open and land exactly where asked.
+ * ⇧⌘[/⇧⌘], ⌥↑↓) keep using the plain open and land exactly where asked.
  */
 export function useUnreadRouting({
   subIndex,

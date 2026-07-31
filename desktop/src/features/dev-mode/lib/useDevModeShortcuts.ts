@@ -9,7 +9,7 @@ import type { Channel } from "@/shared/api/types";
  * - ⌘N jumps to the fresh composer (new channel)
  * - ⌘T drafts a side chat in the open channel
  * - ⌘⇧T drafts a new tab (sub-channel) of the open main
- * - ⌘[/⌘] cycle through the open channel's tabs, wrapping at the ends
+ * - ⇧⌘[/⇧⌘] cycle through the open channel's tabs, wrapping at the ends
  */
 export function useDevModeShortcuts({
   view,
@@ -57,6 +57,20 @@ export function useDevModeShortcuts({
         if (key === "t" && onDraftTab) {
           event.preventDefault();
           onDraftTab();
+        } else if (
+          (event.code === "BracketLeft" || event.code === "BracketRight") &&
+          view === "channel" &&
+          activeChannel &&
+          activeMainChannel
+        ) {
+          event.preventDefault();
+          const tabs = [activeMainChannel, ...activeSubChannels];
+          if (tabs.length < 2) return;
+          const index = tabs.findIndex((tab) => tab.id === activeChannel.id);
+          const direction = event.code === "BracketRight" ? 1 : -1;
+          onOpenChannel(
+            tabs[(index + direction + tabs.length) % tabs.length].id,
+          );
         }
         return;
       }
@@ -66,18 +80,6 @@ export function useDevModeShortcuts({
       } else if (key === "t" && onDraftSideChat) {
         event.preventDefault();
         onDraftSideChat();
-      } else if (
-        (event.key === "[" || event.key === "]") &&
-        view === "channel" &&
-        activeChannel &&
-        activeMainChannel
-      ) {
-        event.preventDefault();
-        const tabs = [activeMainChannel, ...activeSubChannels];
-        if (tabs.length < 2) return;
-        const index = tabs.findIndex((tab) => tab.id === activeChannel.id);
-        const direction = event.key === "]" ? 1 : -1;
-        onOpenChannel(tabs[(index + direction + tabs.length) % tabs.length].id);
       }
     };
     window.addEventListener("keydown", handlePaletteKeyDown, true);

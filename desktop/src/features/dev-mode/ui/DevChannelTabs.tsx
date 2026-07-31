@@ -8,7 +8,7 @@ import { cn } from "@/shared/lib/cn";
  * Tab strip across the top of an open channel: `main` plus one tab per
  * sub-channel the user can see (surfaced to users as "tabs"). Parents can
  * carry hundreds, so the strip scrolls horizontally instead of wrapping;
- * the active tab scrolls itself into view. ⌘[/⌘] cycle through tabs.
+ * the active tab scrolls itself into view. ⇧⌘[/⇧⌘] cycle through tabs.
  */
 export function DevChannelTabs({
   main,
