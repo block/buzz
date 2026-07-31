@@ -96,6 +96,8 @@ import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
+
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
@@ -105,7 +107,6 @@ export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
-
   const communitiesHook = useCommunities();
   const hasCommunityRail = communitiesHook.communities.length > 1;
   const addCommunityDialog = useAddCommunityDialogState();
@@ -167,7 +168,10 @@ export function AppShell() {
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
   );
-  usePersonaSync(identityQuery.data?.pubkey);
+  usePersonaSync(
+    identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
+  );
   useAgentsDataRefresh();
   // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
   useAutoRestartPolicy();
@@ -228,6 +232,7 @@ export function AppShell() {
   const relayConnectionCard = useSidebarRelayConnectionCard(
     channelsErrorMessage,
     communitiesHook.activeCommunity?.relayUrl,
+    `${communitiesHook.activeCommunity?.id ?? "none"}-${communitiesHook.reinitKey}`,
   );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
@@ -610,16 +615,12 @@ export function AppShell() {
     },
     [openSearchHit],
   );
-
   useAppShellLifecycleEffects({
     homeBadgeCountExcludingHighPriority,
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-
-  // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
-
   const handleOpenNewDm = React.useCallback(
     () => void goNewMessage(),
     [goNewMessage],
@@ -703,9 +704,13 @@ export function AppShell() {
     markChannelRead,
     selectedView,
   });
-
   return (
     <PreventSleepProvider>
+      <AppShellTrayMenu
+        channels={channels}
+        goChannel={goChannel}
+        openCreateChannel={handleOpenCreateChannel}
+      />
       <ChannelNavigationProvider channels={channels}>
         <AppShellProvider
           value={{

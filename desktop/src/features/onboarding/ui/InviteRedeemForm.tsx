@@ -118,7 +118,7 @@ export function InviteRedeemForm({
     const code = parsedInvite?.code;
     let cancelled = false;
     const timeoutId = window.setTimeout(() => {
-      void getJoinPolicy(relayWsUrl)
+      void getJoinPolicy(relayWsUrl, code ? "webview" : "native")
         .then((policy) => {
           if (cancelled || !policy) return;
           setJoinPolicy(policy);
@@ -156,7 +156,7 @@ export function InviteRedeemForm({
         setPolicyError(null);
         setIsLoadingPolicy(true);
         try {
-          const policy = await getJoinPolicy(normalizedRelayUrl);
+          const policy = await getJoinPolicy(normalizedRelayUrl, "native");
           if (!policy) {
             onConnect?.(normalizedRelayUrl, apiToken.trim() || undefined);
             return;
@@ -205,7 +205,7 @@ export function InviteRedeemForm({
       setPolicyError(null);
       setIsLoadingPolicy(true);
       try {
-        const policy = await getJoinPolicy(relayWsUrl);
+        const policy = await getJoinPolicy(relayWsUrl, "webview");
         if (!policy) {
           onRedeem(relayWsUrl, parsedInvite.code);
           return;

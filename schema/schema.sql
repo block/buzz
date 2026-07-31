@@ -572,6 +572,43 @@ CREATE TABLE relay_members (
 
 CREATE INDEX idx_relay_members_role ON relay_members (community_id, role);
 
+-- ── Join policy acceptances ──────────────────────────────────────────────────
+-- Durable evidence of the policy version accepted when an invite claim grants
+-- relay membership. The composite foreign key keeps evidence bound to a live
+-- member in the same community and removes it with that membership.
+
+CREATE TABLE join_policy_acceptances (
+    community_id UUID NOT NULL,
+    pubkey TEXT NOT NULL,
+    policy_version TEXT NOT NULL CHECK (length(policy_version) = 64),
+    accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, pubkey, policy_version),
+    FOREIGN KEY (community_id, pubkey)
+        REFERENCES relay_members (community_id, pubkey) ON DELETE CASCADE
+);
+
+-- ── Relay invites (use-limited invite links) ──────────────────────────────────
+-- Conformance: durable invite records for atomic redemption, community-scoped.
+-- Stores only SHA-256(code) as 32-byte BYTEA; never the reusable bearer code.
+-- PK and UNIQUE both lead with community_id. max_uses NULL = unlimited.
+
+CREATE TABLE relay_invites (
+    community_id  UUID        NOT NULL REFERENCES communities(id),
+    id           UUID        NOT NULL DEFAULT gen_random_uuid(),
+    token_hash   BYTEA       NOT NULL CHECK (length(token_hash) = 32),
+    role         TEXT        NOT NULL DEFAULT 'member' CHECK (role = 'member'),
+    max_uses     INTEGER     CHECK (max_uses BETWEEN 1 AND 10000),
+    use_count    INTEGER     NOT NULL DEFAULT 0 CHECK (use_count >= 0),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    created_by   TEXT        NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, id),
+    UNIQUE (community_id, token_hash),
+    CHECK (max_uses IS NULL OR use_count <= max_uses)
+);
+
+CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at);
+
 -- ── Archived identities (NIP-IA) ──────────────────────────────────────────────
 -- Conformance: archive cannot hide a key in another community. PK scoped.
 
@@ -1014,3 +1051,23 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('push_gateway_endpoint_quotas', 'public gateway endpoint abuse ceilings span relay communities'),
     ('push_gateway_delivery_auth_replays', 'public gateway signed-event replay admission spans relay communities'),
     ('push_gateway_delivery_request_replays', 'public gateway stable request-id admission spans relay communities');
+
+-- ── Replica heartbeat (read-replica freshness fence) ─────────────────────────
+-- Portable read-side freshness observation for the replica fence (see
+-- crates/buzz-db/src/replica_fence.rs and migrations/0026). Exactly one row;
+-- the single-row token UPDATE is the serialization point that makes tokens
+-- globally commit-ordered across relay pods. `epoch` detects token resets
+-- (restore/re-seed) so a stale retained token can never masquerade as fresh
+-- coverage. Deployment-global by design: describes replication topology,
+-- never tenant data.
+
+CREATE TABLE replica_heartbeat (
+    id    smallint PRIMARY KEY CHECK (id = 1),
+    epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
+    token bigint   NOT NULL DEFAULT 0
+);
+
+INSERT INTO replica_heartbeat (id) VALUES (1);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data');

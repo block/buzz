@@ -11,8 +11,8 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_USER_STATUS,
+        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1578,6 +1578,22 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
     }
     let tags = vec![tag(&["status", status])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status).tags(tags))
+}
+
+/// Build a NIP-38 user status event (kind 30315) on the `d:general` coordinate.
+///
+/// `text` becomes the event content and `emoji`, when non-blank, an
+/// `["emoji", ...]` tag; both are trimmed. Blank text with no emoji clears the
+/// status — kind 30315 is parameterized-replaceable, so an event carrying
+/// neither is what clients read as "no status".
+pub fn build_user_status(text: &str, emoji: Option<&str>) -> Result<EventBuilder, SdkError> {
+    let text = text.trim();
+    check_content(text, 64 * 1024)?;
+    let mut tags = vec![tag(&["d", "general"])?];
+    if let Some(emoji) = emoji.map(str::trim).filter(|e| !e.is_empty()) {
+        tags.push(tag(&["emoji", emoji])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_USER_STATUS as u16), text).tags(tags))
 }
 
 // ---------------------------------------------------------------------------
@@ -3389,6 +3405,53 @@ mod tests {
     fn presence_update_rejects_invalid_status() {
         let err = build_presence_update("dnd").unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── build_user_status ─────────────────────────────────────────────────────
+
+    #[test]
+    fn user_status_carries_text_and_emoji_on_d_general() {
+        let ev = sign(build_user_status("shipping the CLI", Some("🚀")).unwrap());
+        assert_eq!(ev.kind.as_u16(), 30315);
+        assert_eq!(ev.content, "shipping the CLI");
+        assert_eq!(tag_values(&ev, "d"), vec!["general"]);
+        assert_eq!(tag_values(&ev, "emoji"), vec!["🚀"]);
+    }
+
+    #[test]
+    fn user_status_trims_text_and_emoji() {
+        let ev = sign(build_user_status("  heads down  ", Some("  🎧 ")).unwrap());
+        assert_eq!(ev.content, "heads down");
+        assert_eq!(tag_values(&ev, "emoji"), vec!["🎧"]);
+    }
+
+    #[test]
+    fn user_status_omits_blank_emoji_tag() {
+        let ev = sign(build_user_status("on call", Some("   ")).unwrap());
+        assert_eq!(ev.content, "on call");
+        assert!(tag_values(&ev, "emoji").is_empty());
+    }
+
+    #[test]
+    fn user_status_keeps_emoji_when_text_is_blank() {
+        let ev = sign(build_user_status("", Some("🎶")).unwrap());
+        assert_eq!(ev.content, "");
+        assert_eq!(tag_values(&ev, "emoji"), vec!["🎶"]);
+    }
+
+    #[test]
+    fn user_status_clear_shape_is_empty_content_and_d_tag_only() {
+        let ev = sign(build_user_status("", None).unwrap());
+        assert_eq!(ev.kind.as_u16(), 30315);
+        assert_eq!(ev.content, "");
+        assert_eq!(tag_values(&ev, "d"), vec!["general"]);
+        assert_eq!(ev.tags.len(), 1);
+    }
+
+    #[test]
+    fn user_status_rejects_oversize_text() {
+        let err = build_user_status(&"x".repeat(64 * 1024 + 1), None).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 
     // ── build_git_pull_request / build_git_pr_update ──────────────────────────

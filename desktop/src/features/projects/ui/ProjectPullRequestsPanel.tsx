@@ -35,8 +35,8 @@ import { canReviewProjectPullRequest } from "@/features/projects/pullRequestRevi
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
@@ -49,6 +49,7 @@ import {
   ProfileAuthorName,
   ProfileIdentityButton,
 } from "./ProjectProfileIdentity";
+import { ProjectRichContent } from "./ProjectRichContent";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
 import { PullRequestReviewCard } from "./PullRequestReviewCard";
 
@@ -252,6 +253,7 @@ function PullRequestRow({
 
   return (
     <ProjectFeedRow
+      eventId={pullRequest.id}
       meta={
         <>
           <ProfileIdentityButton
@@ -393,10 +395,12 @@ export function PullRequestMetaRail({
   profiles,
   project,
   pullRequest,
+  stacked = false,
 }: {
   profiles?: UserProfileLookup;
   project: Project;
   pullRequest: ProjectPullRequest;
+  stacked?: boolean;
 }) {
   const identityQuery = useIdentityQuery();
   const authorProfile = profileForPubkey(pullRequest.author, profiles);
@@ -414,7 +418,12 @@ export function PullRequestMetaRail({
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
 
   return (
-    <aside className="min-w-0 space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+    <aside
+      className={cn(
+        "min-w-0 space-y-6 border-border/60 p-4",
+        stacked ? "border-t" : "border-t xl:border-l xl:border-t-0",
+      )}
+    >
       <OverviewRailSection title="Status">
         <span
           className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
@@ -488,7 +497,8 @@ export function PullRequestMetaRail({
   );
 }
 
-function PullRequestDetail({
+/** Full pull-request conversation, review actions, and comment composer. */
+export function ProjectPullRequestDetail({
   mode,
   onOpenInlineComment,
   onOpenCommit,
@@ -639,10 +649,9 @@ function PullRequestDetail({
     <div>
       {pullRequest.content ? (
         <header className="p-4">
-          <Markdown
-            className="text-sm"
+          <ProjectRichContent
             content={pullRequest.content}
-            interactive={false}
+            tags={pullRequest.tags}
           />
         </header>
       ) : null}
@@ -670,9 +679,11 @@ function PullRequestDetail({
                 ) : null}
               </div>
               {update.content ? (
-                <p className="text-sm text-muted-foreground">
-                  {update.content}
-                </p>
+                <ProjectRichContent
+                  className="text-sm text-muted-foreground"
+                  content={update.content}
+                  tags={update.tags}
+                />
               ) : null}
             </article>
           ))}
@@ -829,10 +840,10 @@ function PullRequestDetail({
                     </span>
                   </div>
                   {activityContent ? (
-                    <Markdown
+                    <ProjectRichContent
                       className="mt-1 text-sm text-foreground/90"
                       content={activityContent}
-                      interactive={false}
+                      tags={item.tags}
                     />
                   ) : null}
                   {item.anchor ? (
@@ -950,7 +961,7 @@ export function PullRequestsPanel({
 
   if (selectedPullRequest) {
     return (
-      <PullRequestDetail
+      <ProjectPullRequestDetail
         mode={mode}
         onOpenInlineComment={onOpenInlineComment}
         onOpenCommit={onOpenCommit}

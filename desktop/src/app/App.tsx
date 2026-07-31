@@ -33,6 +33,7 @@ import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboa
 import {
   MachineOnboardingFlow,
   type MachineOnboardingPage,
+  type PostOnboardingNavigation,
 } from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
@@ -55,6 +56,7 @@ import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
+import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
@@ -269,9 +271,18 @@ function AppReady({
   }
 
   return (
-    <KnownAgentPubkeysProvider>
-      <RouterProvider router={router} />
-    </KnownAgentPubkeysProvider>
+    <EncryptedBackupProvider
+      onOpenSettings={() =>
+        void router.navigate({
+          to: "/settings",
+          search: { section: "profile" },
+        })
+      }
+    >
+      <KnownAgentPubkeysProvider>
+        <RouterProvider router={router} />
+      </KnownAgentPubkeysProvider>
+    </EncryptedBackupProvider>
   );
 }
 
@@ -592,6 +603,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   });
   const [machineInitialPage, setMachineInitialPage] =
     useState<MachineOnboardingPage>();
+  const [postOnboardingNav, setPostOnboardingNav] =
+    useState<PostOnboardingNavigation | null>(null);
 
   const reopenMachineConfig = useCallback(() => {
     setMachineInitialPage("config");
@@ -605,6 +618,27 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     },
     [machine.complete],
   );
+
+  const navigateAfterOnboarding = useCallback(
+    (nav: PostOnboardingNavigation) => {
+      setPostOnboardingNav(nav);
+    },
+    [],
+  );
+
+  // Execute the pending navigation once the RouterProvider is mounted (i.e.
+  // machine.stage transitions to "ready").  We wait for the ready stage rather
+  // than using setTimeout(0) so the router is guaranteed to exist before we call
+  // router.navigate().
+  useEffect(() => {
+    if (machine.stage === "ready" && postOnboardingNav) {
+      void router.navigate({
+        to: postOnboardingNav.to,
+        search: postOnboardingNav.search ?? {},
+      });
+      setPostOnboardingNav(null);
+    }
+  }, [machine.stage, postOnboardingNav]);
 
   const openAddCommunity = useCallback(
     (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
@@ -664,6 +698,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         continueWithIdentity={machine.continueWithIdentity}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
+        navigateAfterComplete={navigateAfterOnboarding}
         queryClient={machine.queryClient}
       />
       {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}

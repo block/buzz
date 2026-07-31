@@ -15,8 +15,8 @@ import {
 } from "@/features/profile/lib/identity";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ChannelMember } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
@@ -24,6 +24,7 @@ import {
 } from "./ProjectFeedRow";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
+import { ProjectRichContent } from "./ProjectRichContent";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
@@ -158,14 +159,17 @@ function IssueRow({
   );
 }
 
-function IssueDetail({
+/** Full issue conversation and comment composer. */
+export function ProjectIssueDetail({
   issue,
   profiles,
   project,
+  stackMetaRail = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
+  stackMetaRail?: boolean;
 }) {
   const commentMutation = useCreateProjectIssueCommentMutation(project);
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
@@ -198,7 +202,12 @@ function IssueDetail({
   );
 
   return (
-    <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <div
+      className={cn(
+        "grid",
+        !stackMetaRail && "xl:grid-cols-[minmax(0,1fr)_18rem]",
+      )}
+    >
       <div className="min-w-0 divide-y divide-border/50">
         <header className="space-y-3 p-4">
           <div className="min-w-0">
@@ -214,11 +223,7 @@ function IssueDetail({
             </h3>
           </div>
           {issue.content ? (
-            <Markdown
-              className="text-sm"
-              content={issue.content}
-              interactive={false}
-            />
+            <ProjectRichContent content={issue.content} tags={issue.tags} />
           ) : null}
         </header>
 
@@ -238,11 +243,7 @@ function IssueDetail({
                       role={relativeTime(item.createdAt)}
                     />
                   </div>
-                  <Markdown
-                    className="text-sm"
-                    content={item.content}
-                    interactive={false}
-                  />
+                  <ProjectRichContent content={item.content} tags={item.tags} />
                 </article>
               ))}
             </div>
@@ -261,7 +262,11 @@ function IssueDetail({
         </section>
       </div>
 
-      <IssueMetaRail issue={issue} profiles={profiles} />
+      <IssueMetaRail
+        issue={issue}
+        profiles={profiles}
+        stacked={stackMetaRail}
+      />
     </div>
   );
 }
@@ -271,16 +276,23 @@ function IssueDetail({
 function IssueMetaRail({
   issue,
   profiles,
+  stacked = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
+  stacked?: boolean;
 }) {
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const status = issueStatusVisual(issue.status);
 
   return (
-    <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+    <aside
+      className={cn(
+        "space-y-6 border-border/60 p-4",
+        stacked ? "border-t" : "border-t xl:border-l xl:border-t-0",
+      )}
+    >
       <OverviewRailSection title="Status">
         <span
           className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}
@@ -365,7 +377,7 @@ export function ProjectIssuesPanel({
 
   if (selectedIssue) {
     return (
-      <IssueDetail
+      <ProjectIssueDetail
         issue={selectedIssue}
         profiles={profiles}
         project={project}

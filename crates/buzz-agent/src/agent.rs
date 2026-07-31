@@ -14,7 +14,7 @@ use crate::mcp::ResultBudget;
 
 use crate::types::{
     AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent,
+    ToolResultContent, TurnTotalState,
 };
 use crate::wire::{self, WireSender};
 
@@ -60,6 +60,22 @@ pub struct RunCtx<'a> {
     /// Accumulated output tokens across all LLM rounds in this turn, for
     /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
     pub turn_output_tokens: &'a mut Option<u64>,
+    /// The cache-served subset of `turn_input_tokens`, accumulated across all
+    /// LLM rounds in this turn. Reset to `None` at turn start in `run()`.
+    /// Consumers price this slice at the provider's cached rate; without it
+    /// every round of a growing conversation is billed at full price.
+    pub turn_cached_input_tokens: &'a mut Option<u64>,
+    /// Tri-state total-token accumulator for this turn.
+    ///
+    /// - `Unseen`: no usage-bearing response observed yet this turn (initial state).
+    /// - `Exact(n)`: every usage-bearing response so far reported a genuine
+    ///   provider total; `n` is their sum.
+    /// - `Unknown`: at least one usage-bearing response lacked a provider total;
+    ///   this turn can never produce a reliable total.
+    ///
+    /// Reset to `Unseen` at turn start in `run()`. Callers must not derive a
+    /// total by summing input+output — that is the UI display approximation only.
+    pub turn_total_state: &'a mut TurnTotalState,
 }
 
 impl RunCtx<'_> {
@@ -78,6 +94,8 @@ impl RunCtx<'_> {
         // Reset per-turn token accumulators for this prompt.
         *self.turn_input_tokens = None;
         *self.turn_output_tokens = None;
+        *self.turn_cached_input_tokens = None;
+        *self.turn_total_state = TurnTotalState::Unseen;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -175,6 +193,31 @@ impl RunCtx<'_> {
                 *self.turn_output_tokens =
                     Some(self.turn_output_tokens.unwrap_or(0).saturating_add(out));
             }
+            // Accumulate the cache-served subset of this turn's input. Tracked
+            // separately from `turn_input_tokens` rather than subtracted from
+            // it: the input total must stay inclusive for the handoff gate,
+            // which cares how much context was sent, not what it cost.
+            if let Some(cached) = response.cached_input_tokens {
+                *self.turn_cached_input_tokens = Some(
+                    self.turn_cached_input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(cached),
+                );
+            }
+            // Fold the provider-reported total into the turn tri-state, but only
+            // when this response was usage-bearing (had input or output tokens).
+            // A response with no usage at all is not evidence of a missing total
+            // and must not poison the accumulator.
+            //
+            // Shape assumption: documented OpenAI-compatible responses that carry
+            // `total_tokens` always co-report at least one of `prompt_tokens` /
+            // `completion_tokens`. A response that supplies only `total_tokens`
+            // with neither category is therefore not a supported shape and would
+            // be silently ignored here. If that shape is ever encountered, extend
+            // this gate rather than representing absent categories as zero.
+            if response.input_tokens.is_some() || response.output_tokens.is_some() {
+                *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
+            }
 
             if !response.reasoning.is_empty() {
                 wire::send(
@@ -213,6 +256,7 @@ impl RunCtx<'_> {
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
@@ -249,6 +293,7 @@ impl RunCtx<'_> {
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
                 tool_calls: calls.clone(),
+                reasoning_details: response.reasoning_details,
             });
 
             if let Some(stop) = self.execute_calls(&calls).await {
@@ -679,7 +724,11 @@ pub(crate) fn push_hook_outputs_as_tool_results(
                 provider_id: provider_id.clone(),
                 name: tool_name,
                 arguments: serde_json::json!({}),
+                // Synthesised locally, so there is no provider wire form to
+                // preserve.
+                provider_extra: Default::default(),
             }],
+            reasoning_details: None,
         });
         history.push(HistoryItem::ToolResult(ToolResult {
             provider_id,
@@ -742,5 +791,78 @@ fn map_stop(p: ProviderStop) -> StopReason {
         ProviderStop::EndTurn | ProviderStop::ToolUse | ProviderStop::Other => StopReason::EndTurn,
         ProviderStop::MaxTokens => StopReason::MaxTokens,
         ProviderStop::Refusal => StopReason::Refusal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A9 regression: `reasoning_details` contributes real bytes to
+    /// `estimated_bytes` (see `types.rs::HistoryItem::size_with`), so a
+    /// history item carrying a large opaque reasoning array must actually
+    /// drive `truncate_history` eviction — not be silently invisible to the
+    /// sizing gate that decides what survives a turn.
+    #[test]
+    fn truncate_history_evicts_oldest_turn_with_reasoning_details() {
+        let big_reasoning = json!([{ "type": "reasoning.text", "text": "x".repeat(400) }]);
+        let mut history = vec![
+            HistoryItem::User("first question".into()),
+            HistoryItem::Assistant {
+                text: "first answer".into(),
+                tool_calls: vec![],
+                reasoning_details: Some(big_reasoning),
+            },
+            HistoryItem::User("second question".into()),
+            HistoryItem::Assistant {
+                text: "second answer".into(),
+                tool_calls: vec![],
+                reasoning_details: None,
+            },
+        ];
+
+        let total_before: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        // Budget below the total but above the second (smaller) turn alone,
+        // so only the oldest user+assistant pair — the one carrying
+        // reasoning_details — must be dropped.
+        let max_bytes = total_before - 100;
+        assert!(
+            max_bytes > 0,
+            "test fixture must leave room to evict only one turn"
+        );
+
+        truncate_history(&mut history, max_bytes);
+
+        assert_eq!(
+            history.len(),
+            2,
+            "the oldest user+assistant turn (with reasoning_details) must be evicted"
+        );
+        assert!(matches!(&history[0], HistoryItem::User(s) if s == "second question"));
+        assert!(
+            matches!(&history[1], HistoryItem::Assistant { text, .. } if text == "second answer")
+        );
+        let total_after: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        assert!(total_after <= max_bytes);
+    }
+
+    #[test]
+    fn truncate_history_noop_when_under_budget() {
+        let mut history = vec![
+            HistoryItem::User("hi".into()),
+            HistoryItem::Assistant {
+                text: "hello".into(),
+                tool_calls: vec![],
+                reasoning_details: None,
+            },
+        ];
+        let original_len = history.len();
+        truncate_history(&mut history, 1_000_000);
+        assert_eq!(
+            history.len(),
+            original_len,
+            "under budget must not evict anything"
+        );
     }
 }

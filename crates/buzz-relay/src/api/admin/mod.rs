@@ -126,7 +126,7 @@ async fn report_detail(
     State(state): State<Arc<crate::state::AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<buzz_db::admin_moderation::AdminReport>, ApiError> {
+) -> Result<Json<buzz_db::admin_moderation::AdminReportDetail>, ApiError> {
     authorize(&state, &headers)?;
     state
         .db
@@ -373,6 +373,36 @@ mod tests {
     }
 
     const HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[tokio::test]
+    async fn report_detail_requires_admin_host_before_database_access() {
+        let response = router(test_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/reports/{}", Uuid::nil()))
+                    .header(header::HOST, "community.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn report_detail_rejects_unknown_report() {
+        let response = router(test_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/reports/{}", Uuid::nil()))
+                    .header(header::HOST, "admin.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
 
     #[tokio::test]
     async fn feedback_attachment_requires_admin_host_before_database_access() {

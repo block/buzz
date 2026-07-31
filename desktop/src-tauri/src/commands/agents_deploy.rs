@@ -4,42 +4,36 @@
 
 use tauri::AppHandle;
 
+#[cfg(test)]
+use crate::managed_agents::AgentDefinition;
 use crate::{
     app_state::AppState,
-    managed_agents::{load_personas, AgentDefinition, ManagedAgentRecord},
+    managed_agents::{load_personas, ManagedAgentRecord},
     relay::relay_ws_url_with_override,
 };
 
 /// Resolve the deploy-specific structured model/provider for a managed agent.
 ///
-/// Deploy uses **live-persona-first** precedence so remote agents receive
-/// current config after a persona update, without requiring delete+recreate.
-/// Unlike local spawn (which re-snapshots the persona onto `record` at the
-/// start of every spawn), provider start does not re-snapshot — so the
-/// record may hold a stale snapshot while the linked persona has moved on.
+/// Delegates to the single effective-config resolver which enforces
+/// definition-authoritative semantics for linked instances:
+///   - **Linked:** definition → global. Stale record bytes are never consulted.
+///   - **Definition-less:** instance → global.
+///   - **Orphaned:** returns `(None, None)` — spawn is blocked elsewhere.
 ///
-/// Precedence: live-persona → record (snapshot fallback) → global.
-/// Symmetric for both model and provider.
+/// Both local spawn and deploy now use the same resolver, so they can never
+/// disagree on what model/provider an agent runs with.
 ///
 /// Exported `pub(crate)` for unit testing.
-pub(crate) fn resolve_deploy_model_provider<'a>(
-    record: &'a ManagedAgentRecord,
-    personas: &'a [AgentDefinition],
-    global: &'a crate::managed_agents::GlobalAgentConfig,
-) -> (Option<&'a str>, Option<&'a str>) {
-    let live_persona = record
-        .persona_id
-        .as_deref()
-        .and_then(|pid| personas.iter().find(|p| p.id == pid));
-    let model = live_persona
-        .and_then(|p| p.model.as_deref())
-        .or(record.model.as_deref())
-        .or(global.model.as_deref());
-    let provider = live_persona
-        .and_then(|p| p.provider.as_deref())
-        .or(record.provider.as_deref())
-        .or(global.provider.as_deref());
-    (model, provider)
+#[cfg(test)]
+pub(crate) fn resolve_deploy_model_provider(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    global: &crate::managed_agents::GlobalAgentConfig,
+) -> (Option<String>, Option<String>) {
+    crate::managed_agents::effective_config::resolve_effective_model_provider_pair(
+        record, personas, global,
+    )
+    .unwrap_or((None, None))
 }
 
 /// Build the standard agent JSON payload for provider deploy calls.
@@ -84,15 +78,16 @@ pub(super) fn build_deploy_payload(
     let merged_env =
         crate::managed_agents::merged_user_env(&global_persona_merged, &record.env_vars);
 
-    // Resolve the deploy-specific structured provider/model. Uses the deploy
-    // resolver with live-persona → record → global precedence.
     let personas = load_personas(app).unwrap_or_default();
-    let (effective_model, effective_provider) =
-        resolve_deploy_model_provider(record, &personas, &global_config);
-    let (effective_model, effective_provider) = (
-        effective_model.map(str::to_string),
-        effective_provider.map(str::to_string),
-    );
+    let cfg = crate::managed_agents::effective_config::resolve_effective_config(
+        record,
+        &personas,
+        &global_config,
+    )
+    .require_resolved()?;
+    let effective_model = cfg.model.value;
+    let effective_provider = cfg.provider.value;
+    let effective_prompt = cfg.system_prompt.value;
 
     Ok(deploy_payload_json(
         record,
@@ -102,6 +97,7 @@ pub(super) fn build_deploy_payload(
         ),
         effective_model,
         effective_provider,
+        effective_prompt,
         merged_env,
     ))
 }
@@ -114,36 +110,25 @@ pub(super) fn deploy_payload_json(
     relay_url: String,
     effective_model: Option<String>,
     effective_provider: Option<String>,
+    effective_prompt: Option<String>,
     merged_env: std::collections::BTreeMap<String, String>,
 ) -> serde_json::Value {
     serde_json::json!({
         "name": &record.name,
-        // Resolve the per-agent pin against the active workspace relay here:
-        // this payload crosses the host boundary to a remote provider harness
-        // that has no notion of the desktop's workspace, so the blank→workspace
-        // fallback (otherwise applied at read-time in `effective_agent_relay_url`)
-        // must be materialized into a concrete URL before serializing.
         "relay_url": relay_url,
         "private_key_nsec": &record.private_key_nsec,
         "auth_tag": &record.auth_tag,
         "agent_command": &record.agent_command,
         "agent_args": &record.agent_args,
-        "system_prompt": &record.system_prompt,
+        "system_prompt": effective_prompt,
         "model": effective_model,
-        // Structured provider from the persona record. Providers that don't
-        // yet read this field will fall back to env_vars or their own default
-        // — no protocol break.
         "provider": effective_provider,
         "turn_timeout_seconds": record.turn_timeout_seconds,
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
         "parallelism": record.parallelism,
-        // Inbound author gate. Providers that don't yet read these fall back
-        // to the harness default (`owner-only`) — no protocol break.
         "respond_to": record.respond_to,
         "respond_to_allowlist": &record.respond_to_allowlist,
-        // Merged persona + agent env vars. Providers that don't read this
-        // field will simply ignore it — no protocol break.
         "env_vars": merged_env,
     })
 }

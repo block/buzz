@@ -41,6 +41,8 @@ spec:
         s3:
           endpoint: "https://s3.us-east-1.amazonaws.com"
           bucket: "buzz-media"
+          region: "us-east-1"
+          addressingStyle: virtual
           # accessKey / secretKey live in buzz-secrets
 
         persistence:

@@ -1140,9 +1140,7 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
-    /// Tuple: (initialized client, protocol version, supports_goose_steer).
-    /// The third element is always `true` — the supervisor uses
-    /// try-and-tolerate for the steer extension.
+    /// Tuple: (initialized client, protocol version, agent name).
     result: Result<(AcpClient, u32, String)>,
 }
 
@@ -1535,6 +1533,7 @@ async fn tokio_main() -> Result<()> {
         turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
+        session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
@@ -2227,18 +2226,18 @@ async fn tokio_main() -> Result<()> {
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
-                                    // Try-and-tolerate fork: when the mode
-                                    // wants a Steer, attempt the non-cancelling
-                                    // path first for any agent. On accept,
+                                    // Non-cancelling fork: when the mode
+                                    // wants a Steer, attempt the
+                                    // non-cancelling path first. On accept,
                                     // withhold the queued event and spawn an
                                     // ack watcher; the main loop's
                                     // `PoolEvent::SteerAck` arm decides
                                     // success/release/fallback. On reject
-                                    // (including `-32601 method_not_found`
-                                    // from agents that don't implement the
-                                    // extension), fall through to the universal
-                                    // cancel+merge `Steer` signal so the event
-                                    // still reaches the agent.
+                                    // (including agents that advertise no
+                                    // steer transport at all), fall through
+                                    // to the universal cancel+merge `Steer`
+                                    // signal so the event still reaches the
+                                    // agent.
                                     let native_attempted = matches!(signal, ControlSignal::Steer)
                                         && try_native_steer(
                                             &mut pool,
@@ -2418,13 +2417,25 @@ async fn tokio_main() -> Result<()> {
                 event_id,
                 ack,
             })) => {
-                // Goose-native steer attempt resolved. Locked semantics
-                // (Eva + Max + Perci, unanimous on Option X):
+                // Mid-turn steer attempt resolved (either transport:
+                // `_goose/unstable/session/steer` or `_session/steering`).
+                // Locked semantics (Eva + Max + Perci, unanimous on Option X):
                 //
                 //   Success
                 //     The agent received the steer via the non-cancelling
                 //     path. Drop the withheld event so normal dispatch
                 //     never redelivers it.
+                //
+                //     Also covers `_session/steering`'s `startedNewTurn`
+                //     outcome: the message was delivered, but into a fresh
+                //     turn because the one being steered had already
+                //     finished. Delivery is what this arm keys on, so the
+                //     event is still dropped. The read loop deliberately
+                //     does NOT renew its hard deadline in that case (the
+                //     awaited turn is settled), while
+                //     `extend_in_flight_deadline` below still applies —
+                //     the agent really is running more work, so the
+                //     channel's in-flight budget should reflect it.
                 //
                 //   Err(_) where the write never landed (Transport /
                 //   ExpectedRunIdMissing):
@@ -2432,6 +2443,16 @@ async fn tokio_main() -> Result<()> {
                 //     attempted on the wire". Release withheld back to the
                 //     queue front AND issue the cancel+merge fallback so
                 //     the message still reaches the agent.
+                //
+                //   Err(OutcomeRejected { .. })
+                //     A `_session/steering` request returned a JSON-RPC
+                //     success whose `outcome` was not `injected` or
+                //     `startedNewTurn` (codex's `failed`, an unknown value,
+                //     or a bare `{}` with no `outcome` at all). The steer
+                //     did not land, so this is treated exactly like a write
+                //     that never happened: release withheld AND fire the
+                //     cancel+merge fallback. Handled by the catch-all
+                //     `Err(_)` arm below.
                 //
                 //   Err(AgentError { code: -32601, .. })
                 //     The agent returned method_not_found — it does not
@@ -2489,9 +2510,9 @@ async fn tokio_main() -> Result<()> {
                     Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
                         (true, false, false)
                     }
-                    // Transport / ExpectedRunIdMissing: write never landed.
-                    // Release and fire the cancel+merge fallback so the
-                    // message still reaches the agent.
+                    // Transport / ExpectedRunIdMissing / OutcomeRejected: the
+                    // steer did not land. Release and fire the cancel+merge
+                    // fallback so the message still reaches the agent.
                     Ok(pool::SteerAck::Err(_)) => (true, false, true),
                     Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
                     Err(_recv_err) => (true, false, false),
@@ -2925,15 +2946,15 @@ fn dispatch_pending(
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
 
-        // Goose-native non-cancelling steer seam: snapshot capability before
-        // the agent moves into `run_prompt_task`, and install the per-turn
-        // steer receiver on the read loop so the main loop's mode-gate fork
+        // Mid-turn non-cancelling steer seam: install the per-turn steer
+        // receiver on the read loop so the main loop's mode-gate fork
         // (see the `if accepted && queue.is_channel_in_flight(...)` block
         // in the relay event branch of the main `select!` loop) can drive
         // it via the matching sender stored in `TaskMeta.steer_tx`.
-        // Install the steer channel for every prompt task — the supervisor
-        // uses try-and-tolerate: it attempts the steer for any agent and
-        // treats `-32601 method_not_found` as "fall back to cancel+merge".
+        // Installed for every prompt task: the read loop picks the steer
+        // transport at write time from `active_run_id` and the agent's
+        // advertised `_session/steering` capability, and acks
+        // `ExpectedRunIdMissing` (→ cancel+merge) when it has neither.
         let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
         agent.acp.install_steer_rx(rx);
         let steer_tx = Some(tx);
@@ -3604,6 +3625,22 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
         assert!(prompt.contains("buzz messages send ... --content -"));
     }
+
+    #[test]
+    fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("--mention <hex-or-npub>"));
+        assert!(prompt.contains("every presentation-only name that should notify"));
+        assert!(
+            prompt.contains("permits unresolved or ambiguous `@Name` text as presentation-only")
+        );
+        assert!(prompt.contains("success JSON's `mention_pubkeys`"));
+        assert!(prompt.contains("no follow-up verification command is needed"));
+        assert!(prompt.contains("stops before sending"));
+        assert!(prompt
+            .contains("add them explicitly with `buzz channels add-member` only when authorized"));
+        assert!(prompt.contains("never changes membership automatically"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
@@ -3782,7 +3819,8 @@ async fn initialize_agent_pool(
                                 .and_then(|info| info.get("name"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown"),
-                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
+                            steering_supported = acp.steering_supported(),
+                            "agent initialized"
                         );
                         acp.observe(
                             "agent_initialized",
@@ -4026,7 +4064,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![], None).await?;
+        let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, acp::AcpError>((init, session))
     })
     .await;
@@ -4175,6 +4213,18 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     env.push(EnvVar {
                         name: "BUZZ_AUTH_TAG".into(),
                         value: auth_tag,
+                    });
+                }
+            }
+            // Forward the agent's display name so dev-mcp can use it as the git
+            // author name instead of the raw npub. Read from the process env
+            // rather than Config: this is a pass-through of a contract owned
+            // upstream, and absent simply means dev-mcp falls back to the npub.
+            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                if !display_name.is_empty() {
+                    env.push(EnvVar {
+                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                        value: display_name,
                     });
                 }
             }
@@ -4973,6 +5023,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
@@ -5034,6 +5085,60 @@ mod build_mcp_servers_tests {
         let server = &servers[0];
         let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
+    }
+
+    #[test]
+    fn test_display_name_set_is_forwarded_to_mcp_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        let entry = servers[0]
+            .env
+            .iter()
+            .find(|e| e.name == "BUZZ_ACP_DISPLAY_NAME");
+        assert_eq!(
+            entry.map(|e| e.value.as_str()),
+            Some("Duncan"),
+            "a set display name should reach the MCP server verbatim"
+        );
+    }
+
+    #[test]
+    fn test_display_name_unset_omits_the_key_entirely() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+
+        // Absent, not empty-valued: dev-mcp distinguishes the two and only
+        // falls back to the npub when the key is missing or blank.
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
+            "unset display name should not add the key"
+        );
+    }
+
+    #[test]
+    fn test_display_name_empty_omits_the_key_entirely() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+
+        assert!(
+            !servers[0]
+                .env
+                .iter()
+                .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
+            "empty display name should not be forwarded"
+        );
     }
 
     #[test]
@@ -5139,6 +5244,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),

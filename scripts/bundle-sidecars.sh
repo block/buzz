@@ -35,6 +35,14 @@ fi
 
 mkdir -p "$BINARIES_DIR"
 for bin in "${SIDECARS[@]}"; do
-    cp "$SRC_DIR/${bin}${EXE}" "$BINARIES_DIR/${bin}-${TARGET}${EXE}"
+    destination="$BINARIES_DIR/${bin}-${TARGET}${EXE}"
+    cp "$SRC_DIR/${bin}${EXE}" "$destination"
+
+    # cp preserves the mode of an existing destination on macOS. Generated
+    # sidecar placeholders may not be executable, so make the bundled Unix
+    # binaries executable explicitly.
+    if [[ -z "$EXE" ]]; then
+        chmod 755 "$destination"
+    fi
 done
 echo "Sidecars bundled for $TARGET"

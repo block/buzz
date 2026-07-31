@@ -104,12 +104,10 @@ export function relayMembershipLookupFromEvent(
 }
 
 async function fetchMembershipListEvent(): Promise<RelayEvent | null> {
-  const events = await relayClient.fetchEvents({
+  return relayClient.fetchFirstEvent({
     kinds: [KIND_NIP43_MEMBERSHIP_LIST],
     limit: 1,
   });
-
-  return events[events.length - 1] ?? null;
 }
 
 /** Loads the NIP-43 snapshot only when the relay advertises membership support. */

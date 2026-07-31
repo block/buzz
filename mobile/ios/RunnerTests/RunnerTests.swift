@@ -6,6 +6,179 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  @MainActor
+  func testExpandedAttachmentSurfaceDismissesKeyboard() {
+    let window = KeyboardDismissalSpyWindow()
+
+    NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(in: window)
+
+    XCTAssertTrue(window.didForceEndEditing)
+  }
+
+  func testExpandedAttachmentSurfaceMeasuresKeyboardOverlap() {
+    XCTAssertEqual(
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 544,
+          width: 390,
+          height: 300
+        )
+      ),
+      300
+    )
+    XCTAssertEqual(
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        keyboardLayoutFrame: CGRect(x: 0, y: 844, width: 390, height: 0)
+      ),
+      0
+    )
+  }
+
+  func testAttachmentMenuReturnsToKeyboardDismissedAnchor() {
+    let anchorBounds = CGRect(x: 0, y: 0, width: 44, height: 44)
+
+    XCTAssertEqual(
+      NativeAttachmentPopoverAnchorLayout.sourceRect(
+        anchorBounds: anchorBounds,
+        keyboardDismissalOffset: 300,
+        isExpanded: true
+      ),
+      anchorBounds.offsetBy(dx: 0, dy: 340)
+    )
+    XCTAssertEqual(
+      NativeAttachmentPopoverAnchorLayout.sourceRect(
+        anchorBounds: anchorBounds,
+        keyboardDismissalOffset: 300,
+        isExpanded: false
+      ),
+      anchorBounds.offsetBy(dx: 0, dy: 300)
+    )
+  }
+
+  func testAttachmentMenuKeepsKeyboardWhenMenuFitsAboveTrigger() {
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: CGRect(x: 320, y: 480, width: 44, height: 44),
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        safeAreaInsets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 544,
+          width: 390,
+          height: 300
+        ),
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
+      ),
+      0
+    )
+  }
+
+  func testAttachmentMenuDismissesKeyboardAndRepositionsInCompactHeight() {
+    let sourceRect = CGRect(x: 760, y: 168, width: 44, height: 44)
+    let keyboardDismissalOffset =
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: sourceRect,
+        containerBounds: CGRect(x: 0, y: 0, width: 844, height: 390),
+        safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 228,
+          width: 844,
+          height: 162
+        ),
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
+      )
+
+    XCTAssertEqual(keyboardDismissalOffset, 162)
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.sourceRect(
+        sourceRect,
+        keyboardDismissalOffset: keyboardDismissalOffset
+      ),
+      sourceRect.offsetBy(dx: 0, dy: 162)
+    )
+  }
+
+  func testAttachmentMenuDoesNotMoveWithoutSoftwareKeyboard() {
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: CGRect(x: 760, y: 168, width: 44, height: 44),
+        containerBounds: CGRect(x: 0, y: 0, width: 844, height: 390),
+        safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
+        keyboardLayoutFrame: CGRect(x: 0, y: 390, width: 844, height: 0),
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
+      ),
+      0
+    )
+  }
+
+  func testEmbeddedPhotoPickerAppliesOneZoomInStepWithoutAnimation() {
+    var zoomInCalls = 0
+    var animationsWereEnabled = true
+
+    EmbeddedPhotoPickerLayout.applyPreferredScale {
+      zoomInCalls += 1
+      animationsWereEnabled = UIView.areAnimationsEnabled
+    }
+
+    XCTAssertEqual(zoomInCalls, 1)
+    XCTAssertFalse(animationsWereEnabled)
+  }
+
+  func testNativeAttachmentMenuUsesRoomyRowsAndInsets() {
+    let traits = UITraitCollection(preferredContentSizeCategory: .large)
+    let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
+
+    XCTAssertEqual(size.width, 216)
+    XCTAssertEqual(size.height, 264)
+    XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
+    XCTAssertEqual(
+      NativeAttachmentMenuLayout.itemHeight(compatibleWith: traits),
+      52
+    )
+    XCTAssertEqual(NativeAttachmentMenuLayout.itemSpacing, 8)
+    XCTAssertEqual(NativeAttachmentMenuLayout.labelTextStyle, .title3)
+  }
+
+  func testNativeAttachmentMenuGrowsAndScrollsForAccessibilityText() {
+    let traits = UITraitCollection(
+      preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge
+    )
+    let itemHeight = NativeAttachmentMenuLayout.itemHeight(
+      compatibleWith: traits
+    )
+    let contentHeight = NativeAttachmentMenuLayout.contentHeight(
+      compatibleWith: traits
+    )
+    let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
+
+    XCTAssertGreaterThan(itemHeight, 52)
+    XCTAssertGreaterThan(contentHeight, 264)
+    XCTAssertEqual(
+      size.height,
+      min(contentHeight, NativeAttachmentMenuLayout.maximumHeight)
+    )
+    XCTAssertLessThanOrEqual(
+      size.height,
+      NativeAttachmentMenuLayout.maximumHeight
+    )
+  }
+
   func testDynamicIslandQrScannerRecognizesTallSafeAreas() {
     for safeAreaTopInset in [51, 59, 62] {
       XCTAssertTrue(
@@ -225,6 +398,15 @@ class RunnerTests: XCTestCase {
     let url = try XCTUnwrap(
       Bundle(for: RunnerTests.self).url(forResource: name, withExtension: fileExtension))
     return try Data(contentsOf: url)
+  }
+}
+
+private final class KeyboardDismissalSpyWindow: UIWindow {
+  private(set) var didForceEndEditing = false
+
+  override func endEditing(_ force: Bool) -> Bool {
+    didForceEndEditing = force
+    return true
   }
 }
 

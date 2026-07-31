@@ -8,10 +8,8 @@ import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Separator } from "@/shared/ui/separator";
@@ -24,6 +22,15 @@ const TTL_OPTIONS: { label: string; value: number }[] = [
   { label: "30 days", value: 30 * 24 * 60 * 60 },
 ];
 
+const MAX_USE_OPTIONS: { label: string; value: number | null }[] = [
+  { label: "No limit", value: null },
+  { label: "1 use", value: 1 },
+  { label: "3 uses", value: 3 },
+  { label: "5 uses", value: 5 },
+  { label: "10 uses", value: 10 },
+  { label: "25 uses", value: 25 },
+];
+
 export const DEFAULT_INVITE_TTL_SECS = TTL_OPTIONS[1].value;
 
 type CopyStatus = "idle" | "copying" | "copied";
@@ -31,8 +38,9 @@ type CopyStatus = "idle" | "copying" | "copied";
 /**
  * Share-with-link footer for the community invite dialog.
  *
- * Each copy action mints a fresh stateless invite code and places its
- * shareable landing-page URL on the clipboard.
+ * Each copy action mints a fresh database-backed invite code and places its
+ * shareable landing-page URL on the clipboard. Invites may be unlimited or
+ * capped to a caller-selected number of successful joins.
  */
 export function InviteLinkSection({
   onTtlSecsChange,
@@ -42,8 +50,12 @@ export function InviteLinkSection({
   ttlSecs: number;
 }) {
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
+  const [maxUses, setMaxUses] = React.useState<number | null>(null);
   const ttlLabel =
     TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
+  const maxUsesLabel =
+    MAX_USE_OPTIONS.find((option) => option.value === maxUses)?.label ??
+    "No limit";
   const copyLabel =
     copyStatus === "copying"
       ? "Copying…"
@@ -61,7 +73,7 @@ export function InviteLinkSection({
     if (copyStatus === "copying") return;
     setCopyStatus("copying");
     try {
-      const invite = await mintInvite(ttlSecs);
+      const invite = await mintInvite({ ttlSecs, maxUses });
       await writeTextToClipboard(invite.url);
       setCopyStatus("copied");
       toast.success("Invite link copied");
@@ -72,51 +84,80 @@ export function InviteLinkSection({
   }
 
   return (
-    <section className="pt-2" data-testid="community-invite-link-section">
-      <div className="flex items-center gap-3">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-          <Link2 aria-hidden="true" className="h-4 w-4" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-medium">Share with a link</h3>
-          <p className="text-xs text-secondary-foreground/75">
-            Anyone with the link can join this community.
-          </p>
+    <section data-testid="community-invite-link-section">
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-sm font-medium">Expires after</span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label="Choose invite expiry"
+                className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
+                data-testid="invite-link-ttl-trigger"
+                disabled={copyStatus === "copying"}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                {ttlLabel}
+                <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-40">
+              <DropdownMenuRadioGroup
+                onValueChange={(value) => onTtlSecsChange(Number(value))}
+                value={String(ttlSecs)}
+              >
+                {TTL_OPTIONS.map((option) => (
+                  <DropdownMenuRadioItem
+                    data-testid={`invite-link-ttl-${option.value}`}
+                    key={option.value}
+                    value={String(option.value)}
+                  >
+                    {option.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Choose invite expiry"
-              className="h-8 shrink-0 gap-1.5 px-2 text-muted-foreground"
-              data-testid="invite-link-ttl-trigger"
-              disabled={copyStatus === "copying"}
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              {ttlLabel}
-              <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40">
-            <DropdownMenuLabel>Expires after</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuRadioGroup
-              onValueChange={(value) => onTtlSecsChange(Number(value))}
-              value={String(ttlSecs)}
-            >
-              {TTL_OPTIONS.map((option) => (
-                <DropdownMenuRadioItem
-                  data-testid={`invite-link-ttl-${option.value}`}
-                  key={option.value}
-                  value={String(option.value)}
-                >
-                  {option.label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-sm font-medium">Limit number of uses</span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label="Choose maximum invite uses"
+                className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
+                data-testid="invite-link-max-uses-trigger"
+                disabled={copyStatus === "copying"}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                {maxUsesLabel}
+                <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-40">
+              <DropdownMenuRadioGroup
+                onValueChange={(value) =>
+                  setMaxUses(value === "no-limit" ? null : Number(value))
+                }
+                value={String(maxUses ?? "no-limit")}
+              >
+                {MAX_USE_OPTIONS.map((option) => (
+                  <DropdownMenuRadioItem
+                    data-testid={`invite-link-max-uses-${option.value ?? "no-limit"}`}
+                    key={option.value ?? "no-limit"}
+                    value={String(option.value ?? "no-limit")}
+                  >
+                    {option.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
       <Separator className="my-4 bg-input/40" />
       <div className="flex justify-end">

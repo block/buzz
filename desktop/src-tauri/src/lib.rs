@@ -4,9 +4,13 @@ mod archive;
 mod builderlab;
 mod commands;
 mod deep_link;
+mod egress_guard;
 mod event_sync;
 mod events;
 mod huddle;
+mod identity_storage;
+mod key_backup;
+mod linux_media;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -28,7 +32,11 @@ mod reset;
 mod secret_store;
 mod shutdown;
 mod templates;
+#[cfg(target_os = "macos")]
+mod tray_menu;
 mod util;
+#[cfg(target_os = "linux")]
+pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
@@ -61,10 +69,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-#[cfg(target_os = "macos")]
-use tauri::Listener;
 use tauri::{Emitter, Manager, RunEvent};
+#[cfg(target_os = "macos")]
+use tauri::{Listener, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
+#[cfg(target_os = "macos")]
+use tray_menu::show_main_window;
 
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
@@ -192,6 +202,11 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
+
+                    // Linux/WebKitGTK needs media-stream settings and a
+                    // permission-request handler for getUserMedia; no-op
+                    // on macOS/Windows.
+                    linux_media::enable_media_capture(&webview);
 
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
@@ -358,6 +373,8 @@ pub fn run() {
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            #[cfg(target_os = "macos")]
+            tray_menu::init(&app_handle)?;
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
@@ -418,16 +435,6 @@ pub fn run() {
                 .load(std::sync::atomic::Ordering::Acquire);
             let recovery_mode = identity_lost || keyring_locked;
 
-            // Snapshot owner keys after identity resolution; the best-effort
-            // event reconcile itself runs off the synchronous setup path below.
-            let owner_keys = match state.keys.lock() {
-                Ok(k) => k.clone(),
-                Err(e) => {
-                    eprintln!("buzz-desktop: fatal: owner keys lock poisoned: {e}");
-                    std::process::exit(1);
-                }
-            };
-
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
             // set but no source_version). Must run before
@@ -436,6 +443,21 @@ pub fn run() {
             // block launch, but a missing persona is logged loudly inside.
             if let Err(e) = backfill_persona_snapshots(&app_handle) {
                 eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
+            }
+
+            // Warm the loaded-harness registry BEFORE restore so cold-launch
+            // agent spawns can resolve custom/preset runtime ids without
+            // waiting for the frontend's discover_acp_providers call.  This is
+            // a pure directory scan — no PATH probing, no async work.
+            {
+                let custom_dir = app_handle
+                    .path()
+                    .app_data_dir()
+                    .ok()
+                    .map(|d| d.join("custom_harnesses"));
+                managed_agents::custom_harnesses::warm_harness_registry_from_dir(
+                    custom_dir.as_deref(),
+                );
             }
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
@@ -532,15 +554,6 @@ pub fn run() {
 
             try_regenerate_nest(&app_handle);
 
-            // Sync team-dir edits and reconcile persona/team/agent events after
-            // setup can continue. It is best-effort retention backfill, unlike
-            // identity resolution above, so JSON/SQLite/signing work must not
-            // hold the boot path hostage. Skipped in recovery mode — the owner
-            // key is ephemeral.
-            if !recovery_mode {
-                event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
-            }
-
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
@@ -623,17 +636,13 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     use std::time::Duration;
                     use tauri::Manager;
-                    let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
-                        .map(|d| d.join("retention.db"))
-                    else {
-                        eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
-                        return;
-                    };
                     loop {
                         let state = flush_handle.state::<AppState>();
-                        if let Err(e) =
-                            managed_agents::persona_events::flush_pending_events(&db_path, &state)
-                                .await
+                        if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
+                            &flush_handle,
+                            &state,
+                        )
+                        .await
                         {
                             eprintln!("buzz-desktop: event-flush: {e}");
                         }
@@ -663,6 +672,10 @@ pub fn run() {
             title_bar_double_click,
             get_identity,
             get_nsec,
+            generate_backup_passphrase,
+            create_ncryptsec_backup,
+            verify_ncryptsec_backup,
+            save_ncryptsec_copy,
             import_identity,
             persist_current_identity,
             get_profile,
@@ -704,6 +717,8 @@ pub fn run() {
             discover_acp_providers,
             discover_git_bash_prerequisite,
             install_acp_runtime,
+            save_custom_harness,
+            delete_custom_harness,
             connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
@@ -809,8 +824,10 @@ pub fn run() {
             list_personas,
             create_persona,
             update_persona,
+            update_persona_and_publish,
             delete_persona,
             set_persona_active,
+            set_persona_shared,
             reconcile_inbound_persona_event,
             list_channel_templates,
             create_channel_template,
@@ -878,6 +895,7 @@ pub fn run() {
             validate_repos_dir,
             get_active_workspace,
             fetch_workspace_icon,
+            fetch_join_policy,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,
@@ -896,6 +914,14 @@ pub fn run() {
             archive::read_unindexed_observer_rows,
             is_auto_update_supported,
             set_window_vibrancy,
+            #[cfg(target_os = "macos")]
+            tray_menu::clear_tray_agent_activity,
+            #[cfg(target_os = "macos")]
+            tray_menu::requeue_tray_actions,
+            #[cfg(target_os = "macos")]
+            tray_menu::take_tray_actions,
+            #[cfg(target_os = "macos")]
+            tray_menu::update_tray_agent_activity,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -908,6 +934,22 @@ pub fn run() {
     let run_shutdown_done = Arc::clone(&shutdown_done);
     let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_main_window(app_handle),
+        #[cfg(target_os = "macos")]
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "main" => {
+            // Keep the webview alive so Buzz can be reopened from its tray menu.
+            api.prevent_close();
+            if let Some(window) = app_handle.get_webview_window("main") {
+                if let Err(error) = window.hide() {
+                    eprintln!("buzz-desktop: failed to hide main window: {error}");
+                }
+            }
+        }
         RunEvent::ExitRequested { code, .. } => {
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);

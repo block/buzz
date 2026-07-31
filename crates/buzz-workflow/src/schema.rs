@@ -147,6 +147,19 @@ pub enum ActionDef {
 }
 
 impl WorkflowDef {
+    /// True when any step performs an action that can exfiltrate channel data
+    /// to an arbitrary external destination (`call_webhook`).
+    ///
+    /// Definitions with such steps require elevated (owner/admin) channel
+    /// authority both to save and to run — plain membership is not enough,
+    /// because a workflow forwards channel content with the *owner's* standing
+    /// authority long after the save (SEC-006).
+    pub fn requires_elevated_authority(&self) -> bool {
+        self.steps
+            .iter()
+            .any(|s| matches!(s.action, ActionDef::CallWebhook { .. }))
+    }
+
     /// Validate the workflow definition. Returns `Err` with a descriptive message
     /// if any invariant is violated.
     pub fn validate(&self) -> Result<(), WorkflowError> {

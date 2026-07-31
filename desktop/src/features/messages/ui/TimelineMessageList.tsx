@@ -22,11 +22,8 @@ import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/thre
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
-import {
-  buildVideoReviewCommentsByRootId,
-  buildVideoReviewContextForMessage,
-  hasVideoAttachment,
-} from "@/features/messages/lib/videoReviewContext";
+import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
+import type { buildVideoReviewContextForMessage } from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -42,6 +39,7 @@ import { useUpwardPaginationWheel } from "./useUpwardPaginationWheel";
 import { useVirtualizedBottomSettle } from "./useVirtualizedBottomSettle";
 
 export type TimelineVirtualizerApi = {
+  cancelBottomIntent: () => void;
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   settleAtBottom: () => void;
   scrollToMessage: (
@@ -169,40 +167,21 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       buildMainTimelineEntries(messages, undefined, threadSummaries, profiles),
     [mainEntries, messages, profiles, threadSummaries],
   );
-  const reviewCommentsByRootId = React.useMemo(
-    () =>
-      messages.some(hasVideoAttachment)
-        ? buildVideoReviewCommentsByRootId(messages)
-        : new Map<string, TimelineMessage[]>(),
-    [messages],
-  );
   // Contexts are memoized per message id so MessageRow/Markdown memo
   // comparisons hold across unrelated timeline re-renders (typing
   // indicators, presence updates) — a fresh context object per render would
   // defeat the memo and re-render every video message on every pass.
   const videoReviewContextById = React.useMemo(() => {
-    const contexts = new Map<
-      string,
-      NonNullable<ReturnType<typeof buildVideoReviewContextForMessage>>
-    >();
-    for (const message of messages) {
-      const comments = reviewCommentsByRootId.get(message.id) ?? [];
-      const context = buildVideoReviewContextForMessage({
-        channelId,
-        channelName,
-        channelType,
-        comments,
-        isSendingVideoReviewComment,
-        message,
-        onSendVideoReviewComment,
-        onToggleReaction,
-        profiles,
-      });
-      if (context) {
-        contexts.set(message.id, context);
-      }
-    }
-    return contexts;
+    return buildVideoReviewContextsByMessageId({
+      channelId,
+      channelName,
+      channelType,
+      isSendingVideoReviewComment,
+      messages,
+      onSendVideoReviewComment,
+      onToggleReaction,
+      profiles,
+    });
   }, [
     channelId,
     channelName,
@@ -212,7 +191,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     onSendVideoReviewComment,
     onToggleReaction,
     profiles,
-    reviewCommentsByRootId,
   ]);
 
   // The flattened item stream, memoized on the entries and the unread boundary
@@ -454,145 +432,39 @@ function VirtualizedTimelineRows({
   const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
   itemsLengthRef.current = items.length;
   const previousKeysRef = React.useRef<readonly string[]>([]);
-  const prependAnchorRef = React.useRef<{
-    itemKey: string;
-    top: number;
-  } | null>(null);
-  const prependWatcherFrameRef = React.useRef<number | null>(null);
   const [prependShiftEpoch, clearPrependShift] = React.useReducer(
     (version: number) => version + 1,
     0,
   );
-  // Virtua's `shift` is a one-render instruction, not a persistent mode. If it
-  // stays true after a prepend, later measurement changes can keep anchoring
-  // from the end and leave a stale blank range until the next scroll event.
+  const { cancel: cancelBottomSettle, settle: settleAtBottom } =
+    useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
+  const { arm: armUpwardMomentum } = useUpwardPaginationWheel(
+    hostRef,
+    cancelBottomSettle,
+  );
+
+  React.useEffect(
+    () => () => {
+      cancelBottomSettle();
+    },
+    [cancelBottomSettle],
+  );
+
   const isPrepend = React.useMemo(() => {
     void prependShiftEpoch;
     return didPrependVirtualizedTimeline(previousKeysRef.current, keys);
   }, [keys, prependShiftEpoch]);
 
-  const retirePrependAnchor = React.useCallback(() => {
-    if (prependWatcherFrameRef.current !== null) {
-      cancelAnimationFrame(prependWatcherFrameRef.current);
-    }
-    prependWatcherFrameRef.current = null;
-    prependAnchorRef.current = null;
-  }, []);
-  const { cancel: cancelBottomSettle, settle: settleAtBottom } =
-    useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
-  const retireTimelineSettle = React.useCallback(() => {
-    retirePrependAnchor();
-    cancelBottomSettle();
-  }, [cancelBottomSettle, retirePrependAnchor]);
-  const { arm: armUpwardMomentum, clear: clearUpwardMomentum } =
-    useUpwardPaginationWheel(hostRef, retireTimelineSettle);
-
-  const capturePrependAnchor = React.useCallback(() => {
-    // Keep the pending capture current while the fetch is in flight. Once the
-    // prepend commits and the watcher starts, its baseline is frozen.
-    if (prependWatcherFrameRef.current !== null) return;
-    const scroller = hostRef.current?.firstElementChild;
-    if (!(scroller instanceof HTMLDivElement)) return;
-    const scrollerTop = scroller.getBoundingClientRect().top;
-    const row = Array.from(
-      scroller.querySelectorAll<HTMLElement>("[data-timeline-item-key]"),
-    ).find(
-      (candidate) => candidate.getBoundingClientRect().top >= scrollerTop - 1,
-    );
-    const itemKey = row?.dataset.timelineItemKey;
-    if (!row || !itemKey) return;
-    prependAnchorRef.current = {
-      itemKey,
-      top: row.getBoundingClientRect().top - scrollerTop,
-    };
-  }, []);
-
-  React.useLayoutEffect(() => {
-    if (!isPrepend || !prependAnchorRef.current) return;
-    // Virtua's shift mode correctly absorbs prepended measurements, but
-    // estimated offsets can misclassify late row growth deep in history. Keep
-    // the semantic row identity as a short-lived, deviation-gated backstop.
-    // Do not correct in this commit: Virtua has shifted its estimate but has not
-    // applied its ResizeObserver batch yet, so that delta is transient and its
-    // subsequent absolute correction would overwrite our relative write.
-    // This watcher deliberately survives a temporary row unmount and waits for
-    // stable geometry so Virtua remains the primary scroll owner.
-    if (prependWatcherFrameRef.current !== null) {
-      cancelAnimationFrame(prependWatcherFrameRef.current);
-    }
-    const anchor = prependAnchorRef.current;
-    const deadline = performance.now() + 3_000;
-    let previousScrollTop: number | null = null;
-    let settledFrames = 0;
-
-    const watch = () => {
-      const scroller = hostRef.current?.firstElementChild;
-      if (!(scroller instanceof HTMLDivElement)) {
-        prependWatcherFrameRef.current = null;
-        prependAnchorRef.current = null;
-        return;
-      }
-      const atBottom =
-        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
-        32;
-      const row = Array.from(
-        scroller.querySelectorAll<HTMLElement>("[data-timeline-item-key]"),
-      ).find(
-        (candidate) => candidate.dataset.timelineItemKey === anchor.itemKey,
-      );
-      const top = row
-        ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
-        : null;
-      const scrollTop = scroller.scrollTop;
-      settledFrames =
-        previousScrollTop !== null &&
-        Math.abs(scrollTop - previousScrollTop) < 0.5
-          ? settledFrames + 1
-          : 0;
-      previousScrollTop = scrollTop;
-
-      if (row && top !== null && settledFrames >= 2) {
-        const delta = top - anchor.top;
-        if (Math.abs(delta) > 4) {
-          scroller.scrollBy({ top: delta });
-          settledFrames = 0;
-          previousScrollTop = null;
-        }
-      }
-
-      const retired =
-        performance.now() >= deadline ||
-        atBottom ||
-        (top !== null && top > scroller.clientHeight * 2);
-      if (retired) {
-        retirePrependAnchor();
-        return;
-      }
-      prependWatcherFrameRef.current = requestAnimationFrame(watch);
-    };
-    prependWatcherFrameRef.current = requestAnimationFrame(watch);
-    clearUpwardMomentum();
-  }, [clearUpwardMomentum, isPrepend, retirePrependAnchor]);
-
-  React.useEffect(
-    () => () => {
-      retirePrependAnchor();
-      cancelBottomSettle();
-    },
-    [cancelBottomSettle, retirePrependAnchor],
-  );
-
   React.useLayoutEffect(() => {
     previousKeysRef.current = keys;
     if (isPrepend) {
-      cancelBottomSettle();
       clearPrependShift();
     }
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
       settleAtBottom();
     }
-  }, [cancelBottomSettle, isPrepend, items.length, keys, settleAtBottom]);
+  }, [isPrepend, items.length, keys, settleAtBottom]);
 
   const messageItemIndexById = React.useMemo(() => {
     const byId = new Map<string, number>();
@@ -622,16 +494,13 @@ function VirtualizedTimelineRows({
   React.useLayoutEffect(() => {
     if (!onVirtualizerApiChange) return;
     const api: TimelineVirtualizerApi = {
+      cancelBottomIntent: cancelBottomSettle,
       scrollToBottom() {
-        retireTimelineSettle();
-        const lastIndex = itemsLengthRef.current - 1;
-        if (lastIndex >= 0) {
-          listRef.current?.scrollToIndex(lastIndex, { align: "end" });
-        }
+        settleAtBottom();
       },
       settleAtBottom,
       scrollToMessage(messageId) {
-        retireTimelineSettle();
+        cancelBottomSettle();
         const index = messageItemIndexByIdRef.current.get(messageId);
         if (index === undefined) return false;
         listRef.current?.scrollToIndex(index, { align: "center" });
@@ -640,7 +509,7 @@ function VirtualizedTimelineRows({
     };
     onVirtualizerApiChange(api);
     return () => onVirtualizerApiChange(null);
-  }, [onVirtualizerApiChange, retireTimelineSettle, settleAtBottom]);
+  }, [cancelBottomSettle, onVirtualizerApiChange, settleAtBottom]);
 
   React.useLayoutEffect(() => {
     const host = hostRef.current;
@@ -670,15 +539,13 @@ function VirtualizedTimelineRows({
       if (!list || !(scroller instanceof HTMLDivElement)) return;
       onVirtualizerRangeChanged?.();
       const distanceFromBottom = list.scrollSize - list.viewportSize - offset;
-      if (distanceFromBottom > 32) cancelBottomSettle();
+      // Do not infer reader intent from an intermediate virtualizer offset.
+      // Initial channel positioning deliberately chases the floor while rows
+      // are measured; those measurements can briefly report a large gap and
+      // emit `onScroll` without any user input. Cancelling here strands the
+      // channel above its newest message. The settle hook's wheel, pointer,
+      // touch, and key listeners are the authoritative user-interaction gate.
       onAtBottomStateChange?.(distanceFromBottom <= 32);
-      if (
-        prependAnchorRef.current !== null ||
-        offset <= 200 ||
-        prependWatcherFrameRef.current === null
-      ) {
-        capturePrependAnchor();
-      }
       if (offset <= 200) {
         // Layout scrolls near the top must not poison the reader's next input.
         armUpwardMomentum(onStartReached?.() ?? false);
@@ -686,8 +553,6 @@ function VirtualizedTimelineRows({
     },
     [
       armUpwardMomentum,
-      cancelBottomSettle,
-      capturePrependAnchor,
       onAtBottomStateChange,
       onStartReached,
       onVirtualizerRangeChanged,
