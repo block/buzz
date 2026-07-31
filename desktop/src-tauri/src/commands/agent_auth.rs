@@ -709,6 +709,25 @@ mod tests {
     }
 
     #[test]
+    fn opencode_terminal_meta_starts_official_login_command() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let method: AcpAuthMethod = serde_json::from_str(
+            r#"{"_meta":{"terminal-auth":{"command":"opencode","args":["auth","login"]}},"id":"opencode-login","name":"Log in with OpenCode"}"#,
+        )
+        .unwrap();
+
+        assert!(uses_terminal_auth(&method).unwrap());
+        let argv = adapter_terminal_argv("OpenCode", &method, "unused").unwrap();
+        assert_eq!(
+            std::path::Path::new(&argv[0])
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("opencode")
+        );
+        assert_eq!(&argv[1..], ["auth", "login"]);
+    }
+
+    #[test]
     fn terminal_argv_falls_back_to_adapter_command() {
         let _guard = crate::managed_agents::lock_path_mutex();
         let method = AcpAuthMethod {
