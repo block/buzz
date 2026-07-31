@@ -36,6 +36,7 @@ export type TraceEntry = {
 export type WorkflowRun = {
   id: string;
   workflowId: string;
+  triggerEventId: string | null;
   status: WorkflowRunStatus;
   currentStep: number | null;
   executionTrace: TraceEntry[];

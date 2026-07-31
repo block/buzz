@@ -2994,6 +2994,7 @@ type RawWorkflowTraceEntry = {
 type RawWorkflowRun = {
   id: string;
   workflow_id: string;
+  trigger_event_id?: string | null;
   status:
     | "pending"
     | "running"
@@ -3159,6 +3160,7 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
   return {
     id: `mock-run-${Date.now()}`,
     workflow_id: workflow.id,
+    trigger_event_id: null,
     status: "completed",
     current_step: null,
     execution_trace: executionTrace,

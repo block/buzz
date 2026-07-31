@@ -38,6 +38,7 @@ type RawTraceEntry = {
 type RawWorkflowRun = {
   id: string;
   workflow_id: string;
+  trigger_event_id?: string | null;
   status: WorkflowRun["status"];
   current_step: number | null;
   execution_trace: RawTraceEntry[];
@@ -111,6 +112,7 @@ function fromRawWorkflowRun(raw: RawWorkflowRun): WorkflowRun {
   return {
     id: raw.id,
     workflowId: raw.workflow_id,
+    triggerEventId: raw.trigger_event_id ?? null,
     status: raw.status,
     currentStep: raw.current_step,
     executionTrace: raw.execution_trace.map(fromRawTraceEntry),
