@@ -5,10 +5,13 @@ import {
   invalidateChannelState,
   useAddChannelMembersMutation,
   useChannelMembersQuery,
+  useChannelsQuery,
 } from "@/features/channels/hooks";
 import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
+  getMentionableAgentPubkeys,
+  getSharedChannelIds,
   isAgentIdentityInManagedList,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
@@ -253,6 +256,30 @@ export function MembersSidebar({
   });
   const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const channelsQuery = useChannelsQuery();
+  const sharedChannelIds = React.useMemo(
+    () => getSharedChannelIds(channelsQuery.data),
+    [channelsQuery.data],
+  );
+  const mentionableAgentPubkeys = React.useMemo(
+    () =>
+      getMentionableAgentPubkeys({
+        currentPubkey,
+        managedAgentPubkeys: new Set(
+          (managedAgentsQuery.data ?? []).map((agent) =>
+            normalizePubkey(agent.pubkey),
+          ),
+        ),
+        relayAgents: relayAgentsQuery.data,
+        sharedChannelIds,
+      }),
+    [
+      currentPubkey,
+      managedAgentsQuery.data,
+      relayAgentsQuery.data,
+      sharedChannelIds,
+    ],
+  );
   const addSearchResults = React.useMemo(() => {
     if (!canAddMembers || normalizedDeferredSearchQuery.length === 0) {
       return [];
@@ -282,7 +309,8 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys) &&
+          !mentionableAgentPubkeys.has(pubkey))
       ) {
         return;
       }
@@ -369,6 +397,7 @@ export function MembersSidebar({
     relayAgentsQuery.data,
     userSearchResults,
     rawMembers,
+    mentionableAgentPubkeys,
   ]);
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
