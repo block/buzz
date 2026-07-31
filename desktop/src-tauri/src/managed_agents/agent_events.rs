@@ -182,7 +182,11 @@ pub fn build_agent_profile_event(
 
 /// Collect channel ids from the agent's NIP-29 membership events (kind:39002).
 ///
-/// Channels are carried in `h` tags (NIP-29 group tag), not `e` tags.
+/// kind:39002 is addressable: the channel id is the event's `d` tag, and the
+/// members are `p` tags. This mirrors how `get_channels` resolves a user's
+/// channels. (Message events scope channels with `h` tags — a different kind,
+/// a different tag.)
+///
 /// Duplicates are removed while preserving first-seen order.
 pub fn channel_ids_from_membership_events(events: &[nostr::Event]) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
@@ -190,7 +194,7 @@ pub fn channel_ids_from_membership_events(events: &[nostr::Event]) -> Vec<String
     for event in events {
         for tag in event.tags.iter() {
             let slice = tag.as_slice();
-            if slice.first().map(String::as_str) == Some("h") {
+            if slice.first().map(String::as_str) == Some("d") {
                 if let Some(id) = slice.get(1).filter(|value| !value.is_empty()) {
                     if seen.insert(id.clone()) {
                         ids.push(id.clone());
@@ -332,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_ids_from_membership_events_collects_h_tags_once() {
+    fn channel_ids_from_membership_events_collects_d_tags_once() {
         let keys = nostr::Keys::generate();
         let make = |tags: Vec<Vec<&str>>| {
             let parsed: Vec<nostr::Tag> = tags
@@ -346,11 +350,12 @@ mod tests {
         };
 
         let events = vec![
-            make(vec![vec!["h", "chan-a"], vec!["p", "someone"]]),
-            // Duplicate must collapse; `e` tags are not channel references.
-            make(vec![vec!["h", "chan-a"], vec!["e", "chan-ignored"]]),
-            make(vec![vec!["h", "chan-b"]]),
-            make(vec![vec!["h", ""]]),
+            make(vec![vec!["d", "chan-a"], vec!["p", "someone"]]),
+            // Duplicate must collapse; `h`/`e` tags are not the channel id on
+            // kind:39002 — only `d` is.
+            make(vec![vec!["d", "chan-a"], vec!["h", "chan-ignored"]]),
+            make(vec![vec!["d", "chan-b"]]),
+            make(vec![vec!["d", ""]]),
         ];
 
         assert_eq!(
