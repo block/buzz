@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -919,6 +919,29 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
+
+        // Channel-scoped relay guests are represented by an explicit grant
+        // table, separate from channel membership, and guest invites are
+        // structurally bound to one channel.
+        assert_eq!(migrations[26].version, 27);
+        let channel_guests = migrations[26].sql.as_str();
+        assert!(channel_guests.contains("CREATE TABLE relay_guest_channels"));
+        assert!(channel_guests.contains("role IN ('owner', 'admin', 'member', 'guest')"));
+        assert!(channel_guests.contains("role IN ('member', 'guest')"));
+        assert!(channel_guests.contains("role = 'guest'"));
+        assert!(channel_guests.contains("channel_id IS NOT NULL"));
+        assert!(channel_guests.contains("channel_generation IS NOT NULL"));
+        assert!(channel_guests.contains("max_uses = 1"));
+        assert!(
+            channel_guests.contains("ADD COLUMN guest_invite_generation BIGINT NOT NULL DEFAULT 0")
+        );
+        assert!(channel_guests.contains("ADD COLUMN revoked_at TIMESTAMPTZ"));
+        assert!(channel_guests.contains("ADD COLUMN revoked_by TEXT"));
+        assert!(channel_guests.contains("CREATE TABLE relay_member_invite_blocks"));
+        assert!(channel_guests.contains("PRIMARY KEY (community_id, guest_pubkey)"));
+        assert!(channel_guests.contains("REFERENCES channels (community_id, id) ON DELETE CASCADE"));
+        assert!(channel_guests
+            .contains("REFERENCES relay_members (community_id, pubkey) ON DELETE CASCADE"));
     }
 
     #[test]

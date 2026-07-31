@@ -12,6 +12,7 @@ import {
   Pencil,
   Radio,
   Type,
+  UserPlus,
   Users,
   Zap,
 } from "lucide-react";
@@ -42,6 +43,7 @@ import { Button } from "@/shared/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
@@ -86,6 +88,11 @@ import {
   useChannelModerationCapabilities,
 } from "./ChannelManagementModerationActions";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import {
+  DEFAULT_INVITE_TTL_SECS,
+  InviteLinkSection,
+} from "@/features/community-members/ui/InviteLinkSection";
+import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
@@ -154,7 +161,8 @@ export function ChannelManagementSheet({
     hasResolvedMembership &&
     detail?.channelType !== "dm" &&
     !isArchived &&
-    selfMember !== null;
+    selfMember !== null &&
+    selfMember.role !== "guest";
   const memberCount =
     members.length || detail?.memberCount || channel?.memberCount || 0;
 
@@ -639,6 +647,14 @@ function ChannelManagementPanelContent({
   unarchiveChannelMutation,
 }: ChannelManagementPanelContentProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const [guestInviteOpen, setGuestInviteOpen] = React.useState(false);
+  const [guestInviteTtlSecs, setGuestInviteTtlSecs] = React.useState(
+    DEFAULT_INVITE_TTL_SECS,
+  );
+  const relayMembershipQuery = useMyRelayMembershipLookupQuery();
+  const relayRole = relayMembershipQuery.data?.membership?.role;
+  const canInviteGuest =
+    canManageChannel && (relayRole === "owner" || relayRole === "admin");
   useScrollBoundaryLock(scrollRef);
 
   const showModerationActions =
@@ -753,6 +769,17 @@ function ChannelManagementPanelContent({
                   label="Edit"
                   onClick={() => setIsEditDialogOpen(true)}
                   testId="channel-management-edit"
+                />
+              ) : null}
+              {canInviteGuest &&
+              resolvedChannel.visibility === "private" &&
+              resolvedChannel.channelType !== "dm" &&
+              !isArchived ? (
+                <ChannelQuickAction
+                  icon={UserPlus}
+                  label="Invite guest"
+                  onClick={() => setGuestInviteOpen(true)}
+                  testId="channel-management-invite-guest"
                 />
               ) : null}
             </div>
@@ -896,6 +923,25 @@ function ChannelManagementPanelContent({
           unarchiveChannelMutation={unarchiveChannelMutation}
         />
       ) : null}
+
+      <Dialog onOpenChange={setGuestInviteOpen} open={guestInviteOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Invite a guest to #{resolvedChannel.name}</DialogTitle>
+            <DialogDescription>
+              Guests can read and post in this channel. They cannot browse other
+              channels, upload file attachments, direct-message people, or use
+              community tools. Existing file links may remain readable when your
+              relay serves media publicly.
+            </DialogDescription>
+          </DialogHeader>
+          <InviteLinkSection
+            channelId={resolvedChannel.id}
+            onTtlSecsChange={setGuestInviteTtlSecs}
+            ttlSecs={guestInviteTtlSecs}
+          />
+        </DialogContent>
+      </Dialog>
     </AuxiliaryPanelContext.Provider>
   );
 }

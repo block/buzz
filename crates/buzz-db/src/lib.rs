@@ -2351,8 +2351,12 @@ impl Db {
         channel::set_purpose(&self.pool, community_id, channel_id, purpose, set_by).await
     }
 
-    /// Archives a channel.
-    pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
+    /// Archives a channel and returns revoked relay guest pubkeys.
+    pub async fn archive_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Vec<Vec<u8>>> {
         channel::archive_channel(&self.pool, community_id, channel_id).await
     }
 
@@ -2365,12 +2369,12 @@ impl Db {
         channel::unarchive_channel(&self.pool, community_id, channel_id).await
     }
 
-    /// Soft-delete a channel.
+    /// Soft-delete a channel and return its deletion result and revoked guests.
     pub async fn soft_delete_channel(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
-    ) -> Result<bool> {
+    ) -> Result<(bool, Vec<Vec<u8>>)> {
         channel::soft_delete_channel(&self.pool, community_id, channel_id).await
     }
 
@@ -4001,6 +4005,52 @@ impl Db {
         relay_members::get_relay_member(&self.pool, community, pubkey).await
     }
 
+    /// Return private, non-DM channels explicitly granted to a relay guest.
+    pub async fn get_guest_channel_ids(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<Vec<uuid::Uuid>> {
+        relay_members::get_guest_channel_ids(&self.pool, community, pubkey).await
+    }
+
+    /// Return relay-guest pubkeys with a durable grant for one channel.
+    pub async fn get_channel_guest_pubkeys(
+        &self,
+        community: CommunityId,
+        channel_id: uuid::Uuid,
+    ) -> Result<Vec<Vec<u8>>> {
+        relay_members::get_channel_guest_pubkeys(&self.pool, community, channel_id).await
+    }
+
+    /// Make a channel public and atomically revoke its guest-only authority.
+    pub async fn open_channel_and_revoke_guests(
+        &self,
+        community: CommunityId,
+        channel_id: uuid::Uuid,
+    ) -> Result<Vec<Vec<u8>>> {
+        relay_members::open_channel_and_revoke_guests(&self.pool, community, channel_id).await
+    }
+
+    /// Return active member pubkeys visible within a guest's granted channels.
+    pub async fn get_guest_visible_pubkeys(
+        &self,
+        community: CommunityId,
+        channel_ids: &[uuid::Uuid],
+    ) -> Result<Vec<Vec<u8>>> {
+        relay_members::get_guest_visible_pubkeys(&self.pool, community, channel_ids).await
+    }
+
+    /// Revoke one channel grant from a relay guest.
+    pub async fn revoke_guest_channel(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        channel_id: uuid::Uuid,
+    ) -> Result<bool> {
+        relay_members::revoke_guest_channel(&self.pool, community, pubkey, channel_id).await
+    }
+
     /// Returns all relay members of `community` ordered by `created_at` ascending.
     pub async fn list_relay_members(
         &self,
@@ -4054,6 +4104,15 @@ impl Db {
         pubkey: &str,
     ) -> Result<relay_members::RemoveResult> {
         relay_members::remove_relay_member(&self.pool, community, pubkey).await
+    }
+
+    /// Administratively remove a relay member and block bearer-invite re-entry.
+    pub async fn remove_relay_member_and_block_invites(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<relay_members::RemoveResult> {
+        relay_members::remove_relay_member_and_block_invites(&self.pool, community, pubkey).await
     }
 
     /// Removes a relay member from `community` only if their current role matches `expected_role`.
@@ -4123,8 +4182,37 @@ impl Db {
         created_by: &str,
         ttl_secs: u64,
         max_uses: Option<i32>,
+        guest_channel_id: Option<Uuid>,
     ) -> Result<relay_invite::MintedInvite> {
-        relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+        relay_invite::mint_relay_invite(
+            &self.pool,
+            community,
+            created_by,
+            ttl_secs,
+            max_uses,
+            guest_channel_id,
+        )
+        .await
+    }
+
+    /// Revoke an invite under the same row lock used by claims.
+    pub async fn revoke_relay_invite(
+        &self,
+        community: CommunityId,
+        invite_id: Uuid,
+        revoked_by: &str,
+    ) -> Result<Option<String>> {
+        relay_invite::revoke_relay_invite(&self.pool, community, invite_id, revoked_by).await
+    }
+
+    /// List active, unclaimed guest invites for a channel.
+    pub async fn list_active_guest_invites(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        actor: &str,
+    ) -> Result<Vec<relay_invite::ActiveGuestInvite>> {
+        relay_invite::list_active_guest_invites(&self.pool, community, channel_id, actor).await
     }
 
     /// Delete one bounded batch of invites expired before `cutoff`.
@@ -4597,6 +4685,9 @@ impl Db {
             .collect::<Vec<_>>();
         let mut canonical_members = members
             .into_iter()
+            // Channel-scoped guests are intentionally absent from the
+            // community-global NIP-43 directory.
+            .filter(|member| member.role != "guest")
             .map(|member| (member.pubkey.to_ascii_lowercase(), member.role))
             .collect::<Vec<_>>();
         snapshot_members.sort_unstable();
@@ -4641,7 +4732,8 @@ impl Db {
         // Read current members inside the locked transaction.
         let rows = sqlx::query(
             "SELECT pubkey, role FROM relay_members \
-             WHERE community_id = $1 ORDER BY created_at ASC",
+             WHERE community_id = $1 AND role <> 'guest' \
+             ORDER BY created_at ASC",
         )
         .bind(community_id.as_uuid())
         .fetch_all(&mut *tx)
@@ -5079,6 +5171,49 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip43_membership_snapshot_excludes_channel_guests() {
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let relay_keys = nostr::Keys::generate();
+        let member = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let guest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        assert!(db
+            .add_relay_member(community, member, "member", None)
+            .await
+            .expect("add member"));
+        assert!(db
+            .add_relay_member(community, guest, "guest", None)
+            .await
+            .expect("add guest"));
+
+        let (snapshot, _, member_count) = db
+            .publish_nip43_membership_locked(community, &relay_keys)
+            .await
+            .expect("publish membership snapshot");
+        let snapshot_members = snapshot
+            .event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("member") && parts.len() >= 3)
+                    .then(|| (parts[1].as_str(), parts[2].as_str()))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(member_count, 1);
+        assert_eq!(snapshot_members, vec![(member, "member")]);
+        assert!(
+            !db.nip43_membership_snapshot_needs_reconciliation(community, &relay_keys.public_key())
+                .await
+                .expect("snapshot reconciliation check"),
+            "an omitted guest must not make the canonical snapshot look stale"
+        );
     }
 
     #[tokio::test]

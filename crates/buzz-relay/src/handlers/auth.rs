@@ -214,7 +214,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             // Relay membership gate — uses the shared helper with NIP-OA fallback.
-            let nip_oa_owner = match crate::api::relay_members::enforce_relay_membership(
+            let membership_access = match crate::api::relay_members::enforce_relay_membership(
                 &state,
                 conn.tenant.community(),
                 pubkey.as_bytes(),
@@ -222,7 +222,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             )
             .await
             {
-                Ok(owner) => owner,
+                Ok(access) => access,
                 Err(e) => {
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
@@ -236,12 +236,17 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     return;
                 }
             };
+            if let Some(channel_ids) = membership_access.channel_ids.clone() {
+                auth_ctx.scopes = buzz_auth::Scope::channel_guest();
+                auth_ctx.channel_ids = Some(channel_ids);
+                metrics::counter!("buzz_guest_authentications_total").increment(1);
+            }
 
             // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
             // (needed for observer frame auth). Only runs on open relays — on closed
             // relays, enforce_relay_membership already handles NIP-OA delegation.
             // No feature flag needed: NIP-OA is cryptographically self-proving.
-            let nip_oa_owner = nip_oa_owner.or_else(|| {
+            let nip_oa_owner = membership_access.nip_oa_owner.or_else(|| {
                 if !state.config.require_relay_membership && auth_tag_json.is_some() {
                     crate::api::relay_members::extract_nip_oa_owner(
                         pubkey.as_bytes(),
@@ -275,10 +280,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
+            let channel_ids = auth_ctx.channel_ids.clone();
             *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);
             state
                 .conn_manager
                 .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
+            state
+                .conn_manager
+                .set_authenticated_channel_ids(conn_id, channel_ids);
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
         }
         Err(e) => {
