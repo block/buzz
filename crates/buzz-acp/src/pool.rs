@@ -595,7 +595,6 @@ impl AgentPool {
     /// stamps it onto the claimed agent, and the session lookup resumes the
     /// live session in place if it differs from what was applied. Never
     /// disturbs an in-flight turn.
-    #[allow(dead_code)] // Driven by the MCP control frame (Task 5).
     pub fn set_desired_mcp(&mut self, channel_id: Uuid, servers: Vec<McpServer>) {
         self.desired_mcp.insert(channel_id, servers);
     }

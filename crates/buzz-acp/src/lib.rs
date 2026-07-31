@@ -885,6 +885,9 @@ fn handle_relay_observer_control_event(
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
         }
+        Some("update_mcp_servers") => {
+            handle_update_mcp_servers_control(&payload, pool, observer);
+        }
         _ => {
             tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
         }
@@ -1001,6 +1004,137 @@ fn handle_switch_model_control(
                 "modelId": model_id,
             }),
         );
+    }
+}
+
+/// Handle an `update_mcp_servers` control frame.
+///
+/// Records the channel's desired MCP server set. Unlike `switch_model`, this
+/// never cancels an in-flight turn: the set is stamped onto the agent by
+/// `dispatch_pending` at the next turn boundary, and the session is resumed in
+/// place there. The status is therefore always forward-looking.
+///
+/// The payload names a command to execute, so this must only ever be reached
+/// through the owner-signed, encrypted, freshness-checked observer path.
+fn handle_update_mcp_servers_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let Some(channel_id) = payload
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<Uuid>().ok())
+    else {
+        tracing::warn!("observer update_mcp_servers control frame missing valid channelId");
+        return;
+    };
+
+    let Some(raw_servers) = payload.get("mcpServers") else {
+        tracing::warn!("observer update_mcp_servers control frame missing mcpServers");
+        return;
+    };
+
+    // Reject the whole grant on a malformed entry — a partially applied tool
+    // set is worse than none, and the desktop can re-send.
+    let servers: Vec<McpServer> = match serde_json::from_value(raw_servers.clone()) {
+        Ok(servers) => servers,
+        Err(error) => {
+            tracing::warn!(
+                "observer update_mcp_servers control frame has invalid mcpServers: {error}"
+            );
+            if let Some(observer) = observer {
+                emit_mcp_control_result(observer, channel_id, "invalid_servers");
+            }
+            return;
+        }
+    };
+
+    let status = if pool.desired_mcp_for(&channel_id) == Some(&servers) {
+        "unchanged"
+    } else {
+        pool.set_desired_mcp(channel_id, servers);
+        "pending_next_turn"
+    };
+
+    if let Some(observer) = observer {
+        emit_mcp_control_result(observer, channel_id, status);
+    }
+}
+
+fn emit_mcp_control_result(observer: &observer::ObserverHandle, channel_id: Uuid, status: &str) {
+    observer.emit(
+        "control_result",
+        None,
+        &observer::ObserverContext {
+            channel_id: Some(channel_id.to_string()),
+            session_id: None,
+            turn_id: None,
+            started_at: None,
+        },
+        serde_json::json!({
+            "type": "update_mcp_servers",
+            "status": status,
+        }),
+    );
+}
+
+#[cfg(test)]
+mod mcp_control_tests {
+    use super::*;
+
+    fn test_pool() -> AgentPool {
+        AgentPool::from_slots(Vec::new())
+    }
+
+    #[test]
+    fn update_mcp_servers_control_records_the_desired_set() {
+        let mut pool = test_pool();
+        let cid = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "type": "update_mcp_servers",
+            "channelId": cid.to_string(),
+            "mcpServers": [
+                {"name": "razorpay", "command": "/usr/bin/rzp", "args": [], "env": []}
+            ]
+        });
+
+        handle_update_mcp_servers_control(&payload, &mut pool, None);
+
+        let recorded = pool.desired_mcp_for(&cid).expect("desired set recorded");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].name, "razorpay");
+    }
+
+    #[test]
+    fn update_mcp_servers_control_rejects_a_malformed_server_list() {
+        let mut pool = test_pool();
+        let cid = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "type": "update_mcp_servers",
+            "channelId": cid.to_string(),
+            "mcpServers": [{"name": "missing-command"}]
+        });
+
+        handle_update_mcp_servers_control(&payload, &mut pool, None);
+
+        assert!(
+            pool.desired_mcp_for(&cid).is_none(),
+            "a malformed grant must be rejected outright, never partially applied"
+        );
+    }
+
+    #[test]
+    fn update_mcp_servers_control_ignores_a_bad_channel_id() {
+        let mut pool = test_pool();
+        let payload = serde_json::json!({
+            "type": "update_mcp_servers",
+            "channelId": "not-a-uuid",
+            "mcpServers": []
+        });
+
+        handle_update_mcp_servers_control(&payload, &mut pool, None);
+        // No panic, nothing recorded.
     }
 }
 
