@@ -795,7 +795,18 @@ pub async fn soft_delete_event(
 /// scopes an `a`-tag deletion to versions at or before that instant, so a
 /// delayed or replayed tombstone signed between two versions must not erase the
 /// newer replacement. `events.created_at` is immutable per row, so the predicate
-/// alone is sufficient under concurrent replacement — no coordinate lock needed.
+/// guarantees a tombstone can never erase a version newer than itself — the UPDATE
+/// re-evaluates its WHERE clause after any lock wait, so a replacement that races
+/// the deletion and lands with a later `created_at` is always spared.
+///
+/// This does NOT guarantee deletion completeness when a same-coordinate
+/// replacement races the deletion: the deletion may evaluate its predicate before
+/// the replacement arrives, miss the incoming head, and return `Ok(false)`. That
+/// outcome is state-identical to the deletion having arrived first (old head
+/// gone, new head present), which is a valid Nostr ordering — Nostr never fixes
+/// the order of concurrent writes from different signers, and even same-signer
+/// ordering is advisory. The return value feeds only a debug log, not a
+/// correctness gate.
 ///
 /// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
 /// (already deleted, never existed, or strictly newer than the deletion).

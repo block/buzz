@@ -1181,6 +1181,12 @@ const PROJECT_NAME_MAX_LEN: usize = 256;
 /// Maximum byte length of a project `description` tag value.
 const PROJECT_DESCRIPTION_MAX_LEN: usize = 2048;
 
+/// Maximum byte length of `buzz-channel` and `buzz-visibility` tag values.
+///
+/// Both are opaque strings at the relay layer; the bound exists only so an
+/// unbounded value cannot ride into storage on a tag ingest does not interpret.
+const PROJECT_METADATA_TAG_MAX_LEN: usize = 256;
+
 /// Metadata tags a project may carry at most once each.
 ///
 /// Duplicates would make the effective value reader-dependent — one client
@@ -1215,6 +1221,8 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
     let mut members: Vec<&str> = Vec::new();
     let mut name: Option<&str> = None;
     let mut description: Option<&str> = None;
+    let mut buzz_channel: Option<&str> = None;
+    let mut buzz_visibility: Option<&str> = None;
     let mut singleton_counts = [0usize; PROJECT_SINGLETON_METADATA_TAGS.len()];
 
     for tag in event.tags.iter() {
@@ -1235,6 +1243,8 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
                     match tag_name {
                         "name" => name = Some(value),
                         "description" => description = Some(value),
+                        "buzz-channel" => buzz_channel = Some(value),
+                        "buzz-visibility" => buzz_visibility = Some(value),
                         _ => {}
                     }
                 }
@@ -1264,6 +1274,19 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
             "project event must have at most {PROJECT_MEMBER_CAP} member `a` tags (got {})",
             members.len()
         ));
+    }
+    // `member-tag-arity`: every member `a` tag has exactly 2 or 3 elements per
+    // NIP-01's `a` tag grammar. A one-element tag names no coordinate; a fourth
+    // element has no defined meaning, and accepting it would let a writer park
+    // unbounded unvalidated data in a position no consumer reads.
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(|s| s.as_str()) == Some("a") && !(2..=3).contains(&parts.len()) {
+            return Err(format!(
+                "project event member `a` tag must have exactly 2 or 3 elements (got {})",
+                parts.len()
+            ));
+        }
     }
     let mut seen = std::collections::HashSet::with_capacity(members.len());
     for member in &members {
@@ -1296,6 +1319,22 @@ fn validate_project_envelope(event: &Event) -> Result<(), String> {
             return Err(format!(
                 "project event `description` tag too long ({} bytes, max {PROJECT_DESCRIPTION_MAX_LEN})",
                 description.len()
+            ));
+        }
+    }
+    if let Some(buzz_channel) = buzz_channel {
+        if buzz_channel.len() > PROJECT_METADATA_TAG_MAX_LEN {
+            return Err(format!(
+                "project event `buzz-channel` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
+                buzz_channel.len()
+            ));
+        }
+    }
+    if let Some(buzz_visibility) = buzz_visibility {
+        if buzz_visibility.len() > PROJECT_METADATA_TAG_MAX_LEN {
+            return Err(format!(
+                "project event `buzz-visibility` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
+                buzz_visibility.len()
             ));
         }
     }
@@ -4339,9 +4378,11 @@ mod tests {
 
     #[test]
     fn project_envelope_rejects_valueless_member_tag() {
+        // A one-element `a` tag names no coordinate — caught by the arity check
+        // (rule 4) before the coordinate parse (rule 5) even runs.
         let ev = make_project(&[&["d", "platform"], &["a"]]);
         let err = validate_project_envelope(&ev).unwrap_err();
-        assert!(err.contains("member `a` tag must be"), "got: {err}");
+        assert!(err.contains("exactly 2 or 3 elements"), "got: {err}");
     }
 
     #[test]
@@ -4422,6 +4463,61 @@ mod tests {
         // keyed by (pubkey, kind, d), so one signer can never overwrite another's
         // project. No relay-side permission check exists or is needed.
         assert!(is_parameterized_replaceable(KIND_PROJECT));
+    }
+
+    /// Drive every case in the shared NIP-MP fixture file against
+    /// `validate_project_envelope`. All 11 accept cases must pass; all 20
+    /// reject cases must return an error. This is the machine-readable oracle
+    /// the spec promises ("the shared fixtures are wired as its test oracle").
+    #[test]
+    fn project_envelope_validates_all_shared_fixtures() {
+        #[derive(serde::Deserialize)]
+        struct FixtureFile {
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            expect: String,
+            template: Template,
+        }
+        #[derive(serde::Deserialize)]
+        struct Template {
+            content: String,
+            tags: Vec<Vec<String>>,
+        }
+
+        let raw = include_str!("../../../../docs/nips/NIP-MP.fixtures.json");
+        let file: FixtureFile = serde_json::from_str(raw).expect("fixture file must parse");
+
+        for case in &file.cases {
+            let tag_strs: Vec<Vec<&str>> = case
+                .template
+                .tags
+                .iter()
+                .map(|t| t.iter().map(|s| s.as_str()).collect())
+                .collect();
+            let tag_refs: Vec<&[&str]> = tag_strs.iter().map(|t| t.as_slice()).collect();
+            let ev = make_event_with_tags(KIND_PROJECT, &case.template.content, &tag_refs);
+            let result = validate_project_envelope(&ev);
+            match case.expect.as_str() {
+                "accept" => assert!(
+                    result.is_ok(),
+                    "fixture {:?} expected accept, got err: {:?}",
+                    case.name,
+                    result.unwrap_err()
+                ),
+                "reject" => assert!(
+                    result.is_err(),
+                    "fixture {:?} expected reject, but was accepted",
+                    case.name
+                ),
+                other => panic!(
+                    "unknown expect value {:?} in fixture {:?}",
+                    other, case.name
+                ),
+            }
+        }
     }
 
     // ─── agent_turn_metric envelope tests ────────────────────────────────────
