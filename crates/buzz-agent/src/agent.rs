@@ -1,868 +1,641 @@
+//! The turn driver: Goose's agent loop, translated onto buzz-agent's ACP wire.
+//!
+//! This replaces roughly 8,000 lines of `crates/buzz-agent`:
+//!
+//! | buzz-agent file | lines | who owns it now |
+//! |---|---:|---|
+//! | `llm.rs`      | 3846 | `goose::providers` (superset of the 4 providers) |
+//! | `mcp.rs`      | 1139 | `goose::agents::extension_manager` |
+//! | `auth.rs`     |  845 | `goose::providers` (incl. Databricks OAuth) |
+//! | `agent.rs`    |  746 | `goose::agents::Agent::reply` |
+//! | `hints.rs`    |  726 | kept -- goose's loader can't replace it (below) |
+//! | `catalog.rs`  |  631 | `goose::providers::init` model discovery |
+//! | `builtin.rs`  |  575 | kept -- served as a goose *frontend* tool (below) |
+//! | `handoff.rs`  |  430 | `goose::context_mgmt` (auto-compaction) |
+//!
+//! Two entries above are NOT goose substitutions; the old buzz-agent modules
+//! are kept and wired into goose instead, because goose's own equivalents
+//! don't cover them:
+//!
+//! * **`builtin.rs` / `load_skill`.** `Agent::with_config` loads zero
+//!   extensions and `build_agent` only adds the `mcpServers` the harness
+//!   declares, so goose's `skills` platform extension is never loaded. Instead
+//!   `build_agent` registers `load_skill` as a goose *platform* extension
+//!   backed by an `McpClientTrait` (see [`crate::builtin_client`]), so goose
+//!   dispatches it on its ordinary tool path.
+//! * **`AGENTS.md` hints / skill index.** Goose's loader keys off
+//!   `GOOSE_HINTS_FILENAME` (`.goosehints`); the old code walked the directory
+//!   chain for `AGENTS.md` plus `~/AGENTS.md`. Every repo here ships the
+//!   latter shape, so `hints.rs` is kept and its output injected via
+//!   `extend_system_prompt` at session build.
+//!
+//! What this file keeps is the part Goose does *not* know about: the mapping
+//! from `AgentEvent` onto the exact `session/update` notifications `buzz-acp`
+//! consumes (`acp.rs:1528-1627`), and the `keepalive` ticker that resets the
+//! harness idle clock.
+
 use std::sync::Arc;
 
-use serde_json::json;
-use tokio::sync::{mpsc, watch, Semaphore};
-use tokio::task::JoinSet;
+use futures::StreamExt;
+use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
-use crate::builtin;
-use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
-use crate::handoff::HandoffOutcome;
-use crate::hints::SkillEntry;
-use crate::llm::Llm;
-use crate::mcp::McpRegistry;
-use crate::mcp::ResultBudget;
+use goose::agents::{Agent, AgentEvent, SessionConfig};
+use goose_provider_types::conversation::message::{Message, MessageContent};
 
-use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent, TurnTotalState,
-};
+use crate::types::{AgentError, ContentBlock, StopReason};
 use crate::wire::{self, WireSender};
 
-const ERROR_REFLECTION_SUFFIX: &str =
-    "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+/// How often to emit `keepalive` while waiting on the provider.
+///
+/// NOT part of ACP. `buzz-acp` runs an idle-timeout clock that is reset on
+/// every line of valid JSON (`acp.rs:1197-1199`); a silent agent is killed.
+/// buzz-agent emitted this from inside its provider `select!`
+/// (`agent.rs:122-127`) and `buzz-acp` treats it as a no-op that only resets
+/// the clock (`acp.rs:1623`).
+///
+/// Goose streams, so during generation the chunks themselves keep the clock
+/// alive — but there is no traffic during a long *pre-first-token* wait (big
+/// prompt processing, provider queueing, reasoning models). So the ticker
+/// stays.
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-pub struct RunCtx<'a> {
-    pub cfg: &'a Config,
-    /// Effective model for this session. Usually equals `cfg.model`; overridden
-    /// per-session by `session/set_model`. All LLM calls use this value.
-    pub effective_model: &'a str,
-    pub session_id: &'a str,
-    pub system_prompt: &'a str,
-    pub llm: &'a Llm,
-    pub mcp: &'a Arc<McpRegistry>,
-    /// Skills discovered at session creation; used by the built-in `load_skill` tool.
-    pub skills: &'a [SkillEntry],
-    pub wire: &'a WireSender,
-    pub cancel: &'a mut watch::Receiver<bool>,
-    /// Mid-turn steer queue. Drained at each round boundary (before the next
-    /// LLM call): queued messages are appended to history as user turns so the
-    /// model sees them on its next request, without restarting the turn. Fed by
-    /// the `_goose/unstable/session/steer` handler.
-    pub steer: &'a mut mpsc::UnboundedReceiver<Vec<ContentBlock>>,
-    pub history: &'a mut Vec<HistoryItem>,
-    pub original_task: &'a mut Option<String>,
-    pub handoff_count: &'a mut usize,
-    /// Cache-summed input tokens reported by the provider on this session's
-    /// most recent request (persists across `session/prompt` calls), or `None`
-    /// before the first response and immediately after a handoff resets the
-    /// context. The handoff gate reads this to compare against the token
-    /// budget; falls back to the byte heuristic when `None`.
-    pub last_request_input_tokens: &'a mut Option<u64>,
-    /// History byte size at the moment `last_request_input_tokens` was
-    /// measured. Paired with it so the gate can add a conservative token
-    /// estimate of history that has grown since (tool results, next prompt),
-    /// which the exact-but-stale token count would otherwise miss. Cleared and
-    /// preserved in lockstep with `last_request_input_tokens`.
-    pub last_request_history_bytes: &'a mut Option<usize>,
-    /// Accumulated input tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_input_tokens: &'a mut Option<u64>,
-    /// Accumulated output tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_output_tokens: &'a mut Option<u64>,
-    /// The cache-served subset of `turn_input_tokens`, accumulated across all
-    /// LLM rounds in this turn. Reset to `None` at turn start in `run()`.
-    /// Consumers price this slice at the provider's cached rate; without it
-    /// every round of a growing conversation is billed at full price.
-    pub turn_cached_input_tokens: &'a mut Option<u64>,
-    /// Tri-state total-token accumulator for this turn.
-    ///
-    /// - `Unseen`: no usage-bearing response observed yet this turn (initial state).
-    /// - `Exact(n)`: every usage-bearing response so far reported a genuine
-    ///   provider total; `n` is their sum.
-    /// - `Unknown`: at least one usage-bearing response lacked a provider total;
-    ///   this turn can never produce a reliable total.
-    ///
-    /// Reset to `Unseen` at turn start in `run()`. Callers must not derive a
-    /// total by summing input+output — that is the UI display approximation only.
-    pub turn_total_state: &'a mut TurnTotalState,
+/// Appended by buzz-agent to every failed tool result (`agent.rs:21-22`) so
+/// the model diagnoses a failure instead of blindly retrying it.
+///
+/// buzz-agent mutated the tool result itself. Goose gives no interception
+/// point for that: its `PostToolUseFailure` hook is fire-and-forget and its
+/// output is discarded (`agent.rs:589-620`). So we deliver the same text as a
+/// steer instead — goose drains pending steers at the round boundary
+/// (`agent.rs:1951-1974`), which is exactly when the model would next act on
+/// the failed result. Agent-visible, user-invisible.
+const ERROR_REFLECTION: &str =
+    "[Reflect] Before retrying, identify the cause and change your approach.";
+
+/// Cap on reflections per turn, so a tool failing in a loop cannot flood the
+/// conversation.
+const MAX_REFLECTIONS: usize = 8;
+
+/// How long to let goose unwind after `session/cancel` before giving up.
+///
+/// Cancellation is cooperative: goose has to notice the token, send
+/// `notifications/cancelled` to each in-flight MCP request
+/// (`mcp_client.rs:687-690`), emit the resulting tool responses, and end the
+/// stream. Dropping the stream instead skips all of that. This bounds the
+/// wait so a wedged MCP child cannot hold the turn open indefinitely.
+const CANCEL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Per-turn token accounting, mirroring buzz-agent's contract.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TurnTokens {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    /// Cache reads+writes. A *subset* of `input`, not an addition to it --
+    /// goose documents `cache_read_input_tokens`/`cache_write_input_tokens` as
+    /// already counted in `input_tokens` (`token_usage.rs:72-78`). buzz-acp
+    /// reads this as `accumulatedCachedInputTokens` for pricing (#3463).
+    pub cached_input: Option<u64>,
+    /// Provider-reported total, when it reports one. buzz-acp treats a missing
+    /// total as unknown rather than zero (#3593).
+    pub total: Option<u64>,
 }
 
-impl RunCtx<'_> {
-    pub async fn run(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
-        let user_text = prompt_to_text(prompt)?;
-        if user_text.len() > MAX_PROMPT_BYTES {
-            return Err(AgentError::InvalidParams(format!(
-                "prompt: exceeds {MAX_PROMPT_BYTES} bytes"
-            )));
-        }
-        if self.original_task.is_none() {
-            *self.original_task = Some(user_text.clone());
-        }
-        self.history.push(HistoryItem::User(user_text));
+impl TurnTokens {
+    pub fn observed(&self) -> bool {
+        self.input.is_some() || self.output.is_some()
+    }
+}
 
-        // Reset per-turn token accumulators for this prompt.
-        *self.turn_input_tokens = None;
-        *self.turn_output_tokens = None;
-        *self.turn_cached_input_tokens = None;
-        *self.turn_total_state = TurnTotalState::Unseen;
-
-        let mut round = 0u32;
-        // Per-prompt `_Stop` objection count. Bounded per prompt (not per
-        // session) so a stubborn exchange can't permanently disable the stop
-        // guard for a long-lived session; `max_rounds` still caps the loop.
-        let mut stop_rejections = 0u32;
-        loop {
-            if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
-                return Ok(StopReason::MaxTurnRequests);
-            }
-            if *self.cancel.borrow() {
-                return Ok(StopReason::Cancelled);
-            }
-            // Round boundary: fold in any steer messages queued since the last
-            // round. They land as user turns so the model incorporates them on
-            // its next request — the turn continues, it is not restarted. Drain
-            // non-blocking; an empty queue is the common case.
-            self.drain_steers();
-            match self.maybe_handoff().await {
-                HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
-                // Context was just reset — the prior request's token count no
-                // longer describes the (now much smaller) history. Clear both
-                // the token count and its byte baseline so a stale over-
-                // threshold reading can't immediately re-fire the handoff
-                // before the next response reports fresh usage.
-                HandoffOutcome::Performed => {
-                    *self.last_request_input_tokens = None;
-                    *self.last_request_history_bytes = None;
+/// Flatten ACP prompt blocks into the text Goose's `Message` carries.
+pub fn prompt_to_text(blocks: &[ContentBlock]) -> String {
+    let mut out = String::new();
+    for b in blocks {
+        match b {
+            ContentBlock::Text { text } => {
+                if !out.is_empty() {
+                    out.push('\n');
                 }
-                HandoffOutcome::Skipped => {
-                    truncate_history(self.history, self.cfg.max_history_bytes)
+                out.push_str(text);
+            }
+            ContentBlock::ResourceLink { uri } => {
+                if !out.is_empty() {
+                    out.push('\n');
                 }
+                out.push_str(uri);
+            }
+            ContentBlock::Unsupported => {}
+        }
+    }
+    out
+}
+
+/// Drive one `session/prompt` turn to completion.
+///
+/// Returns the ACP stop reason plus the turn's token counts. The caller is
+/// responsible for emitting `usage_update` *before* the `session/prompt`
+/// response — that ordering is load-bearing for kind-44200 metrics
+/// (`buzz-agent/src/lib.rs:701-706`).
+///
+/// `hook_extension` names the MCP extension carrying `_Stop`/`_PostCompact`
+/// (buzz-dev-mcp). When set, the turn is not allowed to end while `_Stop`
+/// objects — see [`crate::hooks`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn(
+    agent: Arc<Agent>,
+    session_id: &str,
+    prompt: Vec<ContentBlock>,
+    max_rounds: Option<u32>,
+    wire_tx: &WireSender,
+    cancel: CancellationToken,
+    hook_extension: Option<&str>,
+) -> (Result<StopReason, AgentError>, TurnTokens) {
+    let mut tokens = TurnTokens::default();
+    let mut next_message = Message::user().with_text(prompt_to_text(&prompt));
+    let mut stop_blocks: u32 = 0;
+
+    // Outer loop exists solely for the `_Stop` veto: goose's `reply()` stream
+    // ends when the model stops, so continuing means re-entering `reply()`
+    // with the objection appended. Goose's own Stop hook does the equivalent
+    // internally (`agent.rs:2891-2917`); we do it here because its
+    // `hook_manager` is private.
+    loop {
+        let stop = match drive_stream(
+            &agent,
+            session_id,
+            next_message,
+            max_rounds,
+            wire_tx,
+            &cancel,
+            &mut tokens,
+            hook_extension,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => return (Err(e), tokens),
+        };
+
+        // Only a clean end-of-turn is vetoable. Cancellation and refusals pass
+        // through untouched.
+        if !matches!(stop, StopReason::EndTurn) || cancel.is_cancelled() {
+            return (Ok(stop), tokens);
+        }
+
+        let Some(extension) = hook_extension else {
+            return (Ok(stop), tokens);
+        };
+
+        if stop_blocks >= crate::hooks::MAX_STOP_BLOCKS {
+            tracing::warn!(
+                blocks = stop_blocks,
+                "_Stop veto cap reached; ending turn anyway"
+            );
+            return (Ok(stop), tokens);
+        }
+
+        let Some(session) = current_session(session_id).await else {
+            return (Ok(stop), tokens);
+        };
+        let Some(objection) = crate::hooks::stop_objection(&agent, &session, extension).await
+        else {
+            return (Ok(stop), tokens);
+        };
+
+        stop_blocks += 1;
+        tracing::info!(blocks = stop_blocks, "_Stop hook vetoed end of turn");
+
+        // Agent-visible, user-invisible — the objection steers the model
+        // without appearing in the channel, matching both buzz-agent and
+        // goose's own Deny handling.
+        next_message = Message::user()
+            .with_text(format!("[Stop] {objection}"))
+            .with_visibility(false, true);
+    }
+}
+
+/// Look up the goose `Session` record needed to dispatch a hook tool.
+async fn current_session(session_id: &str) -> Option<goose::session::session_manager::Session> {
+    goose::session::session_manager::SessionManager::instance()
+        .get_session(session_id, false)
+        .await
+        .ok()
+}
+
+/// Drive a single `reply()` stream to completion.
+#[allow(clippy::too_many_arguments)]
+async fn drive_stream(
+    agent: &Arc<Agent>,
+    session_id: &str,
+    message: Message,
+    max_rounds: Option<u32>,
+    wire_tx: &WireSender,
+    cancel: &CancellationToken,
+    tokens: &mut TurnTokens,
+    hook_extension: Option<&str>,
+) -> Result<StopReason, AgentError> {
+    let session_config = SessionConfig {
+        id: session_id.to_string(),
+        schedule_id: None,
+        max_turns: max_rounds,
+        retry_config: None,
+    };
+
+    let mut stream = match agent
+        .reply(message, session_config, Some(cancel.clone()))
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => return Err(AgentError::Llm(e.to_string())),
+    };
+
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    keepalive.tick().await; // first tick is immediate; discard it
+
+    let mut stop = StopReason::EndTurn;
+    let mut compacted = false;
+    let mut reflections = 0usize;
+
+    // Set once cancellation is observed; bounds how long we let goose unwind.
+    let mut drain: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+
+    // Tool calls announced to the harness, minus those that reached a terminal
+    // state. Anything still here when the stream ends gets a synthetic
+    // terminal update — see the cancel arm below.
+    let mut open_tool_calls: Vec<String> = Vec::new();
+
+    loop {
+        tokio::select! {
+            // Keep the harness idle clock alive during provider silence.
+            _ = keepalive.tick() => {
+                wire::send(
+                    wire_tx,
+                    wire::session_update(session_id, json!({ "sessionUpdate": "keepalive" })),
+                )
+                .await;
             }
 
-            let mut tools = self.mcp.tools();
-            // Inject the built-in load_skill tool when skills are available.
-            if !self.skills.is_empty() {
-                tools.push(builtin::load_skill_def());
-            }
-            round = round.saturating_add(1);
-            let response = tokio::select! {
-                biased;
-                _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
-                _ = async {
-                    // Keepalive ticker: emit a lightweight session update every 30s
-                    // while waiting on the LLM provider. This resets the ACP harness
-                    // idle clock so long provider responses don't trigger timeout.
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                    interval.tick().await; // first tick fires immediately — skip it
-                    loop {
-                        interval.tick().await;
-                        tracing::debug!("llm keepalive tick");
-                        wire::send(
-                            self.wire,
-                            wire::session_update(
-                                self.session_id,
-                                json!({
-                                    "sessionUpdate": "keepalive",
-                                }),
-                            ),
-                        )
-                        .await;
-                    }
-                } => unreachable!(),
-            };
-
-            // Record provider-reported input usage so the next loop iteration's
-            // handoff gate can compare it against the token budget. We capture
-            // it together with the history byte size AT THIS MOMENT — which is
-            // exactly the history that was just sent to `complete()` (the
-            // assistant response is appended below, after this point). Pairing
-            // them lets the gate add a conservative estimate for any history
-            // appended before the next request. Uses `context_pressure_bytes`
-            // (the same measure the gate's `current_bytes` uses) so the
-            // `grown` delta is coherent — an image contributes its visual-
-            // token equivalent here, not its base64 length. Preserve both when
-            // a response omits usage (`None`) rather than clobbering — a
-            // one-off missing field shouldn't blind the gate or zero the
-            // growth baseline.
-            if let Some(tokens) = response.input_tokens {
-                *self.last_request_input_tokens = Some(tokens);
-                *self.last_request_history_bytes = Some(
-                    self.history
-                        .iter()
-                        .map(HistoryItem::context_pressure_bytes)
-                        .sum(),
-                );
-                // Accumulate per-turn input tokens for NIP-AM metric publishing.
-                *self.turn_input_tokens =
-                    Some(self.turn_input_tokens.unwrap_or(0).saturating_add(tokens));
-            }
-            // Accumulate per-turn output tokens for NIP-AM metric publishing.
-            if let Some(out) = response.output_tokens {
-                *self.turn_output_tokens =
-                    Some(self.turn_output_tokens.unwrap_or(0).saturating_add(out));
-            }
-            // Accumulate the cache-served subset of this turn's input. Tracked
-            // separately from `turn_input_tokens` rather than subtracted from
-            // it: the input total must stay inclusive for the handoff gate,
-            // which cares how much context was sent, not what it cost.
-            if let Some(cached) = response.cached_input_tokens {
-                *self.turn_cached_input_tokens = Some(
-                    self.turn_cached_input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(cached),
-                );
-            }
-            // Fold the provider-reported total into the turn tri-state, but only
-            // when this response was usage-bearing (had input or output tokens).
-            // A response with no usage at all is not evidence of a missing total
-            // and must not poison the accumulator.
+            // Cancellation is a cooperative DRAIN, not an abort.
             //
-            // Shape assumption: documented OpenAI-compatible responses that carry
-            // `total_tokens` always co-report at least one of `prompt_tokens` /
-            // `completion_tokens`. A response that supplies only `total_tokens`
-            // with neither category is therefore not a supported shape and would
-            // be silently ignored here. If that shape is ever encountered, extend
-            // this gate rather than representing absent categories as zero.
-            if response.input_tokens.is_some() || response.output_tokens.is_some() {
-                *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
+            // Breaking here drops `stream`, which drops the futures goose is
+            // awaiting — so `mcp_client.rs:688` never reaches its
+            // `cancel_token.cancelled()` arm and never sends
+            // `notifications/cancelled`. The MCP child keeps running its tool
+            // after the turn is over, and any announced `tool_call` never
+            // reaches a terminal state, leaving the desktop UI spinning
+            // (the invariant buzz-agent held at `agent.rs:470-477`).
+            //
+            // So we keep polling the stream and let goose unwind: it emits the
+            // tool responses, sends the MCP cancellations, and ends the stream
+            // itself. `drain` only bounds how long we are willing to wait.
+            _ = cancel.cancelled(), if drain.is_none() => {
+                stop = StopReason::Cancelled;
+                drain = Some(Box::pin(tokio::time::sleep(CANCEL_DRAIN_TIMEOUT)));
             }
 
-            if !response.reasoning.is_empty() {
-                wire::send(
-                    self.wire,
-                    wire::session_update(
-                        self.session_id,
-                        json!({
-                            "sessionUpdate": "agent_thought_chunk",
-                            "content": { "type": "text", "text": &response.reasoning }
-                        }),
-                    ),
-                )
-                .await;
+            // Goose did not unwind in time. Give up and synthesise terminal
+            // states, because a stuck spinner is worse than a wrong status.
+            _ = async { drain.as_mut().unwrap().await }, if drain.is_some() => {
+                tracing::warn!("cancel drain timed out; forcing terminal tool states");
+                break;
             }
 
-            if !response.text.is_empty() {
-                wire::send(
-                    self.wire,
-                    wire::session_update(
-                        self.session_id,
-                        json!({
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": { "type": "text", "text": &response.text }
-                        }),
-                    ),
-                )
-                .await;
-            }
-
-            if response.tool_calls.is_empty() {
-                if response.stop == ProviderStop::ToolUse {
-                    return Err(AgentError::Llm(
-                        "provider: stop=tool_use but zero tool_calls".into(),
-                    ));
-                }
-                self.history.push(HistoryItem::Assistant {
-                    text: response.text,
-                    tool_calls: Vec::new(),
-                    reasoning_details: response.reasoning_details.clone(),
-                });
-                let stop = map_stop(response.stop);
-                // Only gate genuine end_turn — don't override max_tokens/refusal.
-                if stop == StopReason::EndTurn {
-                    if stop_rejections >= self.cfg.stop_max_rejections {
-                        return Ok(stop);
+            next = stream.next() => {
+                let Some(event) = next else { break };
+                match event {
+                    Ok(ev) => {
+                        if let Some(reason) = handle_event(
+                            ev,
+                            agent,
+                            session_id,
+                            wire_tx,
+                            tokens,
+                            &mut compacted,
+                            &mut reflections,
+                            &mut open_tool_calls,
+                        )
+                        .await
+                        {
+                            stop = reason;
+                            break;
+                        }
                     }
-                    let objections = self
-                        .mcp
-                        .call_hooks(
-                            "_Stop",
-                            &json!({}),
-                            self.cfg.hook_timeout,
-                            &self.cfg.hook_servers,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        // Preserve buzz-agent's error taxonomy so the harness's
+                        // JSON-RPC code mapping stays meaningful.
+                        let err = if msg.contains("auth") || msg.contains("401") {
+                            AgentError::LlmAuth(msg)
+                        } else if msg.contains("model") && msg.contains("not found") {
+                            AgentError::LlmModelNotFound(msg)
+                        } else {
+                            AgentError::Llm(msg)
+                        };
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+
+    // Anything announced but never resolved gets a synthetic terminal update.
+    // buzz-agent guaranteed this invariant (`agent.rs:470-477`) because the
+    // desktop renders an unresolved `tool_call` as a spinner forever. Normally
+    // the drain above means this list is already empty; it only fires when
+    // goose failed to unwind inside CANCEL_DRAIN_TIMEOUT.
+    for tool_call_id in open_tool_calls.drain(..) {
+        wire::send(
+            wire_tx,
+            wire::session_update(
+                session_id,
+                json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": tool_call_id,
+                    "status": "failed",
+                }),
+            ),
+        )
+        .await;
+    }
+
+    // Goose compacted history mid-turn. Re-inject the todo list so it survives
+    // the truncation — this is what buzz-agent's `_PostCompact` existed for
+    // (`handoff.rs:73-81`). Steering is the right channel: goose drains it at
+    // the next round boundary (`agent.rs:1951-1974`).
+    if compacted && !cancel.is_cancelled() {
+        if let Some(extension) = hook_extension {
+            if let Some(session) = current_session(session_id).await {
+                if let Some(state) =
+                    crate::hooks::post_compact_state(agent, &session, extension).await
+                {
+                    agent
+                        .steer(
+                            session_id,
+                            Message::user()
+                                .with_text(format!("[PostCompact] {state}"))
+                                .with_visibility(false, true),
                         )
                         .await;
-                    if !objections.is_empty() {
-                        stop_rejections = stop_rejections.saturating_add(1);
-                        push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
-                        continue;
-                    }
-                }
-                return Ok(stop);
-            }
-
-            let mut calls = response.tool_calls;
-            if calls.len() > MAX_TOOL_CALLS_PER_TURN {
-                tracing::warn!(
-                    "capping tool_calls {} -> {MAX_TOOL_CALLS_PER_TURN}",
-                    calls.len()
-                );
-                calls.truncate(MAX_TOOL_CALLS_PER_TURN);
-            }
-            self.history.push(HistoryItem::Assistant {
-                text: response.text,
-                tool_calls: calls.clone(),
-                reasoning_details: response.reasoning_details,
-            });
-
-            if let Some(stop) = self.execute_calls(&calls).await {
-                return Ok(stop);
-            }
-        }
-    }
-
-    /// Non-blocking drain of the steer queue. Each queued steer is appended to
-    /// history as a user turn so the model picks it up on its next request. A
-    /// steer whose blocks all fail to render (e.g. unsupported content) is
-    /// skipped rather than aborting the turn — steering is best-effort
-    /// augmentation, not a hard input contract like the initial prompt.
-    fn drain_steers(&mut self) {
-        while let Ok(blocks) = self.steer.try_recv() {
-            match prompt_to_text(blocks) {
-                Ok(text) if !text.trim().is_empty() => {
-                    self.history.push(HistoryItem::User(text));
-                }
-                Ok(_) => {
-                    tracing::debug!("dropping empty steer message");
-                }
-                Err(e) => {
-                    tracing::warn!("dropping unrenderable steer message: {e}");
                 }
             }
         }
     }
 
-    /// Unified tool-call execution. Three phases:
-    ///   1. Preflight (sequential): emit `pending`; unknown tools fail fast
-    ///      with a synthetic result. Cancel here fills every still-empty
-    ///      slot as cancelled.
-    ///   2. Execute: spawn runnable calls into a `JoinSet` bounded by a
-    ///      `Semaphore(max_parallel_tools)`. `select!` between cancel and
-    ///      `join_next`. On cancel: close semaphore, drain in-flight tasks
-    ///      (each sends `notifications/cancelled` internally), synthesize
-    ///      cancelled for unfilled slots and emit `failed`.
-    ///   3. Append: push results into history in original call order.
-    ///
-    /// `max_parallel_tools = 1` makes phase 2 effectively sequential
-    /// (one in-flight call at a time via the semaphore). Larger values
-    /// run that many calls concurrently.
-    async fn execute_calls(&mut self, calls: &[ToolCall]) -> Option<StopReason> {
-        let mut results: Vec<Option<ToolResult>> = vec![None; calls.len()];
-        let mut runnable: Vec<usize> = Vec::with_capacity(calls.len());
+    if cancel.is_cancelled() {
+        stop = StopReason::Cancelled;
+    }
 
-        for (idx, call) in calls.iter().enumerate() {
-            if *self.cancel.borrow() {
-                for (j, c) in calls.iter().enumerate() {
-                    if results[j].is_none() {
-                        // Calls 0..idx already had `pending` emitted; emit
-                        // a terminal `failed` so the client doesn't see
-                        // them stuck.
-                        if j < idx {
-                            emit_failed(self.wire, self.session_id, c, "cancelled").await;
-                        }
-                        results[j] = Some(synthetic_tool_result(c, "cancelled".into()));
+    Ok(stop)
+}
+
+/// Translate one `AgentEvent` into ACP notifications.
+///
+/// Returns `Some(StopReason)` if the event terminates the turn.
+#[allow(clippy::too_many_arguments)]
+async fn handle_event(
+    event: AgentEvent,
+    agent: &Arc<Agent>,
+    session_id: &str,
+    wire_tx: &WireSender,
+    tokens: &mut TurnTokens,
+    compacted: &mut bool,
+    reflections: &mut usize,
+    open_tool_calls: &mut Vec<String>,
+) -> Option<StopReason> {
+    match event {
+        AgentEvent::Message(msg) => {
+            for content in &msg.content {
+                emit_content(content, session_id, wire_tx).await;
+
+                if let MessageContent::ToolRequest(req) = content {
+                    open_tool_calls.push(req.id.clone());
+                }
+
+                if let MessageContent::ToolResponse(resp) = content {
+                    open_tool_calls.retain(|id| id != &resp.id);
+
+                    let failed = match &resp.tool_result {
+                        Ok(r) => r.is_error.unwrap_or(false),
+                        Err(_) => true,
+                    };
+                    if failed && *reflections < MAX_REFLECTIONS {
+                        *reflections += 1;
+                        agent
+                            .steer(
+                                session_id,
+                                Message::user()
+                                    .with_text(ERROR_REFLECTION)
+                                    .with_visibility(false, true),
+                            )
+                            .await;
                     }
                 }
-                self.append_results(calls, &mut results);
-                return Some(StopReason::Cancelled);
             }
-            emit_pending(self.wire, self.session_id, call).await;
-
-            // Built-in load_skill: execute inline, no MCP round-trip.
-            if call.name == builtin::LOAD_SKILL_TOOL {
-                emit_in_progress(self.wire, self.session_id, call).await;
-                let mut result = builtin::call_load_skill(&call.arguments, self.skills).await;
-                result.provider_id = call.provider_id.clone();
-                emit_completed(self.wire, self.session_id, call, &result).await;
-                results[idx] = Some(result);
-                continue;
-            }
-
-            // Hook tools (bare name starts with `_`) are invisible to the
-            // LLM and only callable via `call_hooks`. Treat any direct
-            // invocation as if the tool didn't exist.
-            if !self.mcp.has(&call.name) || self.mcp.is_hook(&call.name) {
-                let err = format!("unknown tool: {}", call.name);
-                emit_failed(self.wire, self.session_id, call, &err).await;
-                results[idx] = Some(synthetic_tool_result(call, err));
-                continue;
-            }
-            runnable.push(idx);
-        }
-
-        self.execute_parallel(calls, &runnable, &mut results).await;
-
-        self.append_results(calls, &mut results);
-
-        if *self.cancel.borrow() {
-            Some(StopReason::Cancelled)
-        } else {
             None
         }
-    }
 
-    fn append_results(&mut self, calls: &[ToolCall], results: &mut [Option<ToolResult>]) {
-        for (i, call) in calls.iter().enumerate() {
-            let mut result = results[i].take().unwrap_or_else(|| ToolResult {
-                provider_id: call.provider_id.clone(),
-                content: vec![ToolResultContent::Text(
-                    "internal error: missing result".into(),
-                )],
-                is_error: true,
-            });
-            // On tool error: append a reflection prompt so the LLM
-            // diagnoses the failure before blindly retrying.
-            if result.is_error {
-                result
-                    .content
-                    .push(ToolResultContent::Text(ERROR_REFLECTION_SUFFIX.to_string()));
+        // Usage arrives per provider chunk, already cost-enriched. Accumulate
+        // rather than overwrite: `MessageUsage` is suppressed when the last
+        // assistant message has no user-visible content (goose
+        // `agent.rs:299`), so it is not a reliable sole source.
+        AgentEvent::Usage(usage) => {
+            let u = &usage.usage;
+            if let Some(i) = u.input_tokens {
+                tokens.input = Some(tokens.input.unwrap_or(0) + i.max(0) as u64);
             }
-            self.history.push(HistoryItem::ToolResult(result));
+            if let Some(o) = u.output_tokens {
+                tokens.output = Some(tokens.output.unwrap_or(0) + o.max(0) as u64);
+            }
+            let cached = u.cache_read_input_tokens.unwrap_or(0).max(0) as u64
+                + u.cache_write_input_tokens.unwrap_or(0).max(0) as u64;
+            if u.cache_read_input_tokens.is_some() || u.cache_write_input_tokens.is_some() {
+                tokens.cached_input = Some(tokens.cached_input.unwrap_or(0) + cached);
+            }
+            if let Some(t) = u.total_tokens {
+                tokens.total = Some(tokens.total.unwrap_or(0) + t.max(0) as u64);
+            }
+            None
         }
+
+        // Compaction happened. buzz-agent surfaced this as a `[Context
+        // Handoff]` history rewrite; Goose has already done the rewrite, so we
+        // only flag it — the caller then asks `_PostCompact` for state to
+        // re-inject once the stream settles.
+        AgentEvent::HistoryReplaced(_) => {
+            tracing::info!(target: "buzz_agent::compaction", "history compacted");
+            *compacted = true;
+            None
+        }
+
+        _ => None,
     }
+}
 
-    async fn execute_parallel(
-        &mut self,
-        calls: &[ToolCall],
-        runnable: &[usize],
-        results: &mut [Option<ToolResult>],
-    ) {
-        let limit = self.cfg.max_parallel_tools.max(1);
-        let sem = Arc::new(Semaphore::new(limit));
-        let mut set: JoinSet<(usize, InvokeOutcome)> = JoinSet::new();
+/// Map message content onto the nine `sessionUpdate` variants `buzz-acp`
+/// recognises (`acp.rs:1528-1627`). Anything else it debug-logs and drops.
+async fn emit_content(content: &MessageContent, session_id: &str, wire_tx: &WireSender) {
+    match content {
+        MessageContent::Text(t) if !t.text.is_empty() => {
+            wire::send(
+                wire_tx,
+                wire::session_update(
+                    session_id,
+                    json!({
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": t.text },
+                    }),
+                ),
+            )
+            .await;
+        }
 
-        for &i in runnable {
-            let call = calls[i].clone();
-            let mcp = Arc::clone(self.mcp);
-            let wire = self.wire.clone();
-            let session_id = self.session_id.to_owned();
-            let timeout = self.cfg.tool_timeout;
-            let budget = ResultBudget {
-                total: MAX_TOOL_RESULT_BYTES,
-                text: self.cfg.max_tool_result_text_bytes,
+        MessageContent::Thinking(t) if !t.thinking.is_empty() => {
+            wire::send(
+                wire_tx,
+                wire::session_update(
+                    session_id,
+                    json!({
+                        "sessionUpdate": "agent_thought_chunk",
+                        "content": { "type": "text", "text": t.thinking },
+                    }),
+                ),
+            )
+            .await;
+        }
+
+        // Tool lifecycle. buzz-agent guaranteed every announced tool reached a
+        // terminal state, or the desktop UI shows a stuck spinner
+        // (`agent.rs:470-477`). Goose emits request and response as separate
+        // messages, so the pairing is by tool-call id.
+        MessageContent::ToolRequest(req) => {
+            let (name, raw) = match &req.tool_call {
+                Ok(call) => (
+                    call.name.to_string(),
+                    serde_json::to_value(&call.arguments).unwrap_or(Value::Null),
+                ),
+                Err(e) => (String::from("unknown"), json!({ "error": e.to_string() })),
             };
-            let cancel = self.cancel.clone();
-            let sem = Arc::clone(&sem);
-            set.spawn(async move {
-                // Acquire a permit; if the semaphore is closed (cancel),
-                // emit a terminal wire update and skip the call.
-                let _permit = match sem.acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        emit_failed(&wire, &session_id, &call, "cancelled").await;
-                        return (i, InvokeOutcome::Failed("cancelled".into()));
-                    }
-                };
-                emit_in_progress(&wire, &session_id, &call).await;
-                let outcome = invoke_tool_inner(&mcp, &call, timeout, budget, cancel).await;
-                match &outcome {
-                    InvokeOutcome::Done(result) => {
-                        emit_completed(&wire, &session_id, &call, result).await;
-                    }
-                    InvokeOutcome::Failed(msg) => {
-                        emit_failed(&wire, &session_id, &call, msg).await;
-                    }
-                }
-                (i, outcome)
-            });
+            wire::send(
+                wire_tx,
+                wire::session_update(
+                    session_id,
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": req.id,
+                        "title": name,
+                        "kind": "other",
+                        "status": "in_progress",
+                        "rawInput": raw,
+                    }),
+                ),
+            )
+            .await;
         }
 
-        let mut cancel_rx = self.cancel.clone();
-        let mut cancelled = if *cancel_rx.borrow() {
-            sem.close();
-            true
-        } else {
-            false
-        };
-        while !cancelled {
-            tokio::select! {
-                biased;
-                _ = cancel_rx.changed() => {
-                    // Cancel: stop accepting new permits. Do NOT abort
-                    // tasks — each in-flight `mcp.call` observes the same
-                    // cancel receiver via its internal `select!` and
-                    // returns promptly with an "cancelled" error after
-                    // sending `notifications/cancelled` to the server.
-                    sem.close();
-                    cancelled = true;
-                    break;
-                }
-                next = set.join_next() => {
-                    match next {
-                        Some(Ok((i, outcome))) => {
-                            results[i] = Some(outcome_to_result(&calls[i], outcome));
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!("tool task join error: {e}");
-                        }
-                        None => break,
-                    }
-                }
-            }
+        // Frontend tool calls (`load_skill`) are stripped out of the normal
+        // `ToolRequest` flow by goose and arrive as this variant instead. The
+        // desktop still needs the announcement: its response comes back as a
+        // plain `ToolResponse`, and an update for a never-announced id would
+        // break the announce→terminal pairing.
+        MessageContent::FrontendToolRequest(req) => {
+            let (name, raw) = match &req.tool_call {
+                Ok(call) => (
+                    call.name.to_string(),
+                    serde_json::to_value(&call.arguments).unwrap_or(Value::Null),
+                ),
+                Err(e) => (String::from("unknown"), json!({ "error": e.to_string() })),
+            };
+            wire::send(
+                wire_tx,
+                wire::session_update(
+                    session_id,
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": req.id,
+                        "title": name,
+                        "kind": "other",
+                        "status": "in_progress",
+                        "rawInput": raw,
+                    }),
+                ),
+            )
+            .await;
         }
 
-        // After cancel, drain in-flight tasks. Each task's internal
-        // `do_call` observes the cancel receiver and returns promptly
-        // after sending `notifications/cancelled`. We bound the drain
-        // to avoid hanging if a task is stuck in restart/reconnect.
-        if cancelled {
-            let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                match tokio::time::timeout_at(drain_deadline, set.join_next()).await {
-                    Ok(Some(Ok((i, outcome)))) => {
-                        if results[i].is_none() {
-                            results[i] = Some(outcome_to_result(&calls[i], outcome));
-                        }
-                    }
-                    Ok(Some(Err(e))) => {
-                        tracing::warn!("tool task join error (drain): {e}");
-                    }
-                    Ok(None) => break, // all tasks drained
-                    Err(_) => {
-                        // Drain timed out — abort remaining tasks.
-                        set.abort_all();
-                        tracing::warn!("cancel drain timed out; aborting remaining tasks");
-                        break;
-                    }
-                }
-            }
+        MessageContent::ToolResponse(resp) => {
+            let failed = match &resp.tool_result {
+                Ok(r) => r.is_error.unwrap_or(false),
+                Err(_) => true,
+            };
+            wire::send(
+                wire_tx,
+                wire::session_update(
+                    session_id,
+                    json!({
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": resp.id,
+                        "status": if failed { "failed" } else { "completed" },
+                    }),
+                ),
+            )
+            .await;
         }
 
-        // Fill any remaining unfilled runnable slots as cancelled. Tasks
-        // that didn't complete (timed out in drain or never started) need
-        // a terminal wire update so the client doesn't see "pending" forever.
-        for &i in runnable {
-            if results[i].is_none() {
-                results[i] = Some(synthetic_tool_result(&calls[i], "cancelled".into()));
-                emit_failed(self.wire, self.session_id, &calls[i], "cancelled").await;
-            }
-        }
-    }
-}
-
-/// Outcome of invoking a single tool. The wire notification is emitted by
-/// the caller so the spawn loop and the (degenerate, max_parallel=1) path
-/// share the same logic.
-enum InvokeOutcome {
-    Done(ToolResult),
-    Failed(String),
-}
-
-/// Standalone tool invocation. Takes only owned/cloned handles so it can
-/// run inside a spawned task. On timeout, kills the offending MCP server's
-/// process group and marks it dead; the registry's lazy restart handles it
-/// on the next call.
-async fn invoke_tool_inner(
-    mcp: &Arc<McpRegistry>,
-    call: &ToolCall,
-    tool_timeout: std::time::Duration,
-    budget: ResultBudget,
-    mut cancel: watch::Receiver<bool>,
-) -> InvokeOutcome {
-    if *cancel.borrow() {
-        return InvokeOutcome::Failed("cancelled".into());
-    }
-    match tokio::time::timeout(
-        tool_timeout,
-        mcp.call(
-            &call.name,
-            &call.provider_id,
-            &call.arguments,
-            budget,
-            &mut cancel,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(result)) => InvokeOutcome::Done(result),
-        Ok(Err(AgentError::Cancelled)) => InvokeOutcome::Failed("cancelled".into()),
-        Ok(Err(e)) => InvokeOutcome::Failed(e.to_string()),
-        Err(_) => {
-            // If the session was cancelled, the timeout fired because
-            // do_call returned quickly with "cancelled" and the outer
-            // timeout raced. Don't kill a healthy server for that.
-            if *cancel.borrow() {
-                return InvokeOutcome::Failed("cancelled".into());
-            }
-            if let Some(server) = mcp.server_of(&call.name) {
-                mcp.kill_server(server, "tool timeout");
-            }
-            let msg = format!(
-                "tool: timeout after {}s. The command took too long. Try a faster approach.",
-                tool_timeout.as_secs()
-            );
-            InvokeOutcome::Failed(msg)
-        }
-    }
-}
-
-fn outcome_to_result(call: &ToolCall, outcome: InvokeOutcome) -> ToolResult {
-    match outcome {
-        InvokeOutcome::Done(r) => r,
-        InvokeOutcome::Failed(m) => synthetic_tool_result(call, m),
-    }
-}
-
-async fn emit_pending(wire: &WireSender, sid: &str, call: &ToolCall) {
-    wire::send(
-        wire,
-        wire::session_update(
-            sid,
-            json!({
-                "sessionUpdate": "tool_call",
-                "toolCallId": call.provider_id,
-                "title": call.name,
-                "kind": "other",
-                "status": "pending",
-                "rawInput": call.arguments,
-            }),
-        ),
-    )
-    .await;
-}
-
-async fn emit_in_progress(wire: &WireSender, sid: &str, call: &ToolCall) {
-    wire::send(
-        wire,
-        wire::session_update(
-            sid,
-            json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": call.provider_id,
-                "status": "in_progress",
-            }),
-        ),
-    )
-    .await;
-}
-
-async fn emit_completed(wire: &WireSender, sid: &str, call: &ToolCall, result: &ToolResult) {
-    wire::send(
-        wire,
-        wire::session_update(
-            sid,
-            json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": call.provider_id,
-                "status": "completed",
-                "content": [{ "type": "content", "content": { "type": "text", "text": result.text() } }],
-                "rawOutput": { "isError": result.is_error },
-            }),
-        ),
-    )
-    .await;
-}
-
-async fn emit_failed(wire: &WireSender, sid: &str, call: &ToolCall, err: &str) {
-    wire::send(
-        wire,
-        wire::session_update(
-            sid,
-            json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": call.provider_id,
-                "status": "failed",
-                "rawOutput": { "error": err },
-            }),
-        ),
-    )
-    .await;
-}
-
-fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
-    let mut parts = Vec::with_capacity(prompt.len());
-    for block in prompt {
-        match block {
-            ContentBlock::Text { text } => parts.push(text),
-            ContentBlock::ResourceLink { uri } => parts.push(format!("[resource: {uri}]")),
-            ContentBlock::Unsupported => {
-                return Err(AgentError::InvalidParams(
-                    "prompt: unsupported content block (only text and resource_link are advertised)".into(),
-                ));
-            }
-        }
-    }
-    Ok(parts.join("\n"))
-}
-
-/// Format a single hook output as a structured tool-result body.
-///
-/// We emit a JSON object rather than XML-style tags. JSON is unambiguous:
-/// the inner `text` field is escaped, so a malicious hook cannot break
-/// out by including a literal `</hook_output>` (or any other delimiter)
-/// in its output. The LLM still sees the source attribution via the
-/// `hook` and `server` fields.
-fn format_hook_output_body(hook: &str, server: &str, text: &str) -> String {
-    // serde_json::to_string never fails on owned strings.
-    serde_json::to_string(&json!({
-        "hook": hook,
-        "server": server,
-        "text": text,
-    }))
-    .unwrap_or_else(|_| String::from("{\"hook\":\"\",\"server\":\"\",\"text\":\"\"}"))
-}
-
-/// Synthetic provider id for an injected hook tool-call/result pair. Must
-/// be unique per pair so the LLM wire format (which keys tool results by
-/// id) stays valid across multiple objections in one session.
-fn synthetic_hook_id(hook: &str, server: &str, ordinal: u64) -> String {
-    format!("buzz_hook_{hook}_{server}_{ordinal}")
-}
-
-/// Append a synthetic Assistant tool-call + ToolResult pair for each hook
-/// output. Modeling hook output as a tool result (rather than as a User
-/// message) means a malicious hook can't impersonate the user or system
-/// — the LLM treats tool results as lower-trust, structured data.
-///
-/// Each pair uses the hook's qualified tool name (e.g. `fake___Stop`) so
-/// attribution is preserved in the wire format. Empty arguments are sent
-/// as `{}`. The `Assistant` turn carries no text (tool_calls only).
-pub(crate) fn push_hook_outputs_as_tool_results(
-    history: &mut Vec<HistoryItem>,
-    hook: &str,
-    outputs: &[(String, String)],
-) {
-    for (server, text) in outputs.iter() {
-        let provider_id = synthetic_hook_id(hook, server, unique_nonce());
-        // Tool name is `<server>__<hook>` — same shape as a real qname
-        // for that hook, so the LLM never sees an unknown synthetic name.
-        let tool_name = format!("{server}__{hook}");
-        history.push(HistoryItem::Assistant {
-            text: String::new(),
-            tool_calls: vec![ToolCall {
-                provider_id: provider_id.clone(),
-                name: tool_name,
-                arguments: serde_json::json!({}),
-                // Synthesised locally, so there is no provider wire form to
-                // preserve.
-                provider_extra: Default::default(),
-            }],
-            reasoning_details: None,
-        });
-        history.push(HistoryItem::ToolResult(ToolResult {
-            provider_id,
-            content: vec![ToolResultContent::Text(format_hook_output_body(
-                hook, server, text,
-            ))],
-            is_error: false,
-        }));
-    }
-}
-
-/// Monotonic counter for synthetic hook ids within a single process. The
-/// uniqueness target is "no collision within the lifetime of one history
-/// vec", which a process-wide counter satisfies trivially.
-fn unique_nonce() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-fn synthetic_tool_result(call: &ToolCall, msg: String) -> ToolResult {
-    ToolResult {
-        provider_id: call.provider_id.clone(),
-        content: vec![ToolResultContent::Text(msg)],
-        is_error: true,
-    }
-}
-
-pub(crate) fn truncate_history(history: &mut Vec<HistoryItem>, max_bytes: usize) {
-    let mut total: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
-    if total <= max_bytes {
-        return;
-    }
-    let original_len = history.len();
-    while total > max_bytes && !history.is_empty() {
-        let mut end = 1usize;
-        while end < history.len() && !matches!(history[end], HistoryItem::User(_)) {
-            end += 1;
-        }
-        if end >= history.len() {
-            break;
-        }
-        let dropped: usize = history[..end]
-            .iter()
-            .map(HistoryItem::estimated_bytes)
-            .sum();
-        history.drain(..end);
-        total = total.saturating_sub(dropped);
-    }
-    if history.len() < original_len {
-        tracing::info!(
-            "history truncated {original_len} -> {} items ({total} bytes)",
-            history.len()
-        );
-    }
-}
-
-fn map_stop(p: ProviderStop) -> StopReason {
-    match p {
-        ProviderStop::EndTurn | ProviderStop::ToolUse | ProviderStop::Other => StopReason::EndTurn,
-        ProviderStop::MaxTokens => StopReason::MaxTokens,
-        ProviderStop::Refusal => StopReason::Refusal,
+        _ => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    /// A9 regression: `reasoning_details` contributes real bytes to
-    /// `estimated_bytes` (see `types.rs::HistoryItem::size_with`), so a
-    /// history item carrying a large opaque reasoning array must actually
-    /// drive `truncate_history` eviction — not be silently invisible to the
-    /// sizing gate that decides what survives a turn.
     #[test]
-    fn truncate_history_evicts_oldest_turn_with_reasoning_details() {
-        let big_reasoning = json!([{ "type": "reasoning.text", "text": "x".repeat(400) }]);
-        let mut history = vec![
-            HistoryItem::User("first question".into()),
-            HistoryItem::Assistant {
-                text: "first answer".into(),
-                tool_calls: vec![],
-                reasoning_details: Some(big_reasoning),
+    fn prompt_flattens_text_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "hello".into(),
             },
-            HistoryItem::User("second question".into()),
-            HistoryItem::Assistant {
-                text: "second answer".into(),
-                tool_calls: vec![],
-                reasoning_details: None,
+            ContentBlock::Text {
+                text: "world".into(),
             },
         ];
-
-        let total_before: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
-        // Budget below the total but above the second (smaller) turn alone,
-        // so only the oldest user+assistant pair — the one carrying
-        // reasoning_details — must be dropped.
-        let max_bytes = total_before - 100;
-        assert!(
-            max_bytes > 0,
-            "test fixture must leave room to evict only one turn"
-        );
-
-        truncate_history(&mut history, max_bytes);
-
-        assert_eq!(
-            history.len(),
-            2,
-            "the oldest user+assistant turn (with reasoning_details) must be evicted"
-        );
-        assert!(matches!(&history[0], HistoryItem::User(s) if s == "second question"));
-        assert!(
-            matches!(&history[1], HistoryItem::Assistant { text, .. } if text == "second answer")
-        );
-        let total_after: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
-        assert!(total_after <= max_bytes);
+        assert_eq!(prompt_to_text(&blocks), "hello\nworld");
     }
 
     #[test]
-    fn truncate_history_noop_when_under_budget() {
-        let mut history = vec![
-            HistoryItem::User("hi".into()),
-            HistoryItem::Assistant {
-                text: "hello".into(),
-                tool_calls: vec![],
-                reasoning_details: None,
+    fn prompt_includes_resource_links() {
+        let blocks = vec![
+            ContentBlock::Text { text: "see".into() },
+            ContentBlock::ResourceLink {
+                uri: "file:///a".into(),
             },
         ];
-        let original_len = history.len();
-        truncate_history(&mut history, 1_000_000);
-        assert_eq!(
-            history.len(),
-            original_len,
-            "under budget must not evict anything"
-        );
+        assert_eq!(prompt_to_text(&blocks), "see\nfile:///a");
+    }
+
+    #[test]
+    fn prompt_skips_unsupported() {
+        let blocks = vec![
+            ContentBlock::Unsupported,
+            ContentBlock::Text {
+                text: "only".into(),
+            },
+        ];
+        assert_eq!(prompt_to_text(&blocks), "only");
+    }
+
+    #[test]
+    fn turn_tokens_observed_requires_a_count() {
+        assert!(!TurnTokens::default().observed());
+        assert!(TurnTokens {
+            input: Some(1),
+            ..Default::default()
+        }
+        .observed());
+        assert!(TurnTokens {
+            output: Some(1),
+            ..Default::default()
+        }
+        .observed());
     }
 }

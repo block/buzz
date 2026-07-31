@@ -7,7 +7,7 @@
 use serde_json::{json, Value};
 
 use crate::hints::{strip_frontmatter, SkillEntry, MAX_SKILL_BODY_BYTES};
-use crate::mcp::truncate_at_boundary;
+use crate::types::truncate_at_boundary;
 use crate::types::{ToolDef, ToolResult, ToolResultContent};
 
 pub const LOAD_SKILL_TOOL: &str = "load_skill";
@@ -229,7 +229,7 @@ async fn load_supporting_file(
     }
 }
 
-fn error_result(msg: &str) -> ToolResult {
+pub fn error_result(msg: &str) -> ToolResult {
     ToolResult {
         provider_id: String::new(),
         content: vec![ToolResultContent::Text(msg.to_owned())],

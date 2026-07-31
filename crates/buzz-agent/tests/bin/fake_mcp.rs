@@ -22,6 +22,7 @@
 //!                              tree dies on timeout.
 //!   FAKE_MCP_GRANDCHILD_PID_FILE=path
 //!                            — path to write the grandchild PID to.
+//!   FAKE_MCP_TOOL_ERROR=1    — `tools/call` returns isError: true
 //!   FAKE_MCP_STOP_HOOK=1     — expose a `_Stop` hook tool
 //!   FAKE_MCP_STOP_TEXT=text  — `_Stop` returns this text (default: "keep going")
 //!   FAKE_MCP_STOP_DELAY=N    — `_Stop` sleeps N seconds before replying
@@ -271,7 +272,10 @@ fn main() {
                 if tool_delay_secs > 0 {
                     std::thread::sleep(std::time::Duration::from_secs(tool_delay_secs));
                 }
-                let result_text = if result_size > 0 {
+                let tool_error = env_flag("FAKE_MCP_TOOL_ERROR");
+                let result_text = if tool_error {
+                    "boom: the tool failed".to_owned()
+                } else if result_size > 0 {
                     "x".repeat(result_size)
                 } else {
                     "ok".to_owned()
@@ -280,7 +284,7 @@ fn main() {
                     id,
                     json!({
                         "content": [{ "type": "text", "text": result_text }],
-                        "isError": false,
+                        "isError": tool_error,
                     }),
                 );
             }

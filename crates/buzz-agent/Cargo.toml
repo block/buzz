@@ -25,6 +25,22 @@ name = "fake-mcp"
 path = "tests/bin/fake_mcp.rs"
 
 [dependencies]
+# For the `buzz-agent auth <provider>` subcommand only. Provider auth for the
+# agent loop itself is goose's; this is the interactive PKCE login that seeds
+# the token cache that goose (and the desktop model picker) then read.
+buzz-model-catalog = { path = "../buzz-model-catalog" }
+goose = { git = "https://github.com/aaif-goose/goose", rev = "305849b71709b95b86ed9f11bd3bc939899c0aab", default-features = false, features = ["rustls-tls"] }
+goose-provider-types = { git = "https://github.com/aaif-goose/goose", rev = "305849b71709b95b86ed9f11bd3bc939899c0aab" }
+# Resolution guard: goose pins icu_locale "=2.1.1" (needs icu_collections
+# ~2.1.1) while url 2.5.x -> idna -> idna_adapter 1.2.2 pulls icu_normalizer
+# 2.2.0 (needs icu_collections ~2.2.0). Only one 2.x icu_collections can be
+# selected. 1.2.0 is the last idna_adapter on ICU4X 1.x, which keeps IDNA off
+# the icu_collections 2.x line entirely and lets both resolve.
+idna_adapter = "=1.2.0"
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+anyhow = "1"
+
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

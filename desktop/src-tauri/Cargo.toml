@@ -97,7 +97,17 @@ url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
-buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
+# Model discovery + Windows shell env only. NOT the agent loop.
+#
+# The desktop used to link `buzz-agent` wholesale. Once that crate's loop moved
+# onto the goose library it became unlinkable here: goose pulls
+# sqlx-sqlite -> libsqlite3-sys 0.30, this crate already has
+# rusqlite 0.37 -> libsqlite3-sys 0.35, and both declare `links = "sqlite3"`.
+# Cargo refuses two packages linking the same native library; no pin fixes it.
+#
+# The desktop only ever used discover_databricks_models, config::Provider and
+# WINDOWS_SHELL_RESOLUTION_ENV, so those live in buzz-model-catalog now.
+buzz_agent_pkg = { package = "buzz-model-catalog", path = "../../crates/buzz-model-catalog" }
 iroh = { version = "1.0.2", optional = true }
 mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
 mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }

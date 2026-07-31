@@ -1,0 +1,39 @@
+[package]
+name = "buzz-model-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Databricks model discovery + the PKCE/static token sources it needs.
+#
+# Extracted from `buzz-agent` when the agent loop moved onto the goose library.
+# The desktop model picker calls this directly as a library
+# (`desktop/src-tauri/src/commands/agent_models.rs:791`), and linking the whole
+# agent for it is now impossible: goose pulls `sqlx-sqlite` -> `libsqlite3-sys
+# 0.30`, desktop already has `rusqlite 0.37` -> `libsqlite3-sys 0.35`, and both
+# declare `links = "sqlite3"`. Cargo forbids two packages linking the same
+# native library, and no version pin can resolve it.
+#
+# So the desktop depends on this crate instead — no goose, no sqlite, same API.
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+reqwest = { workspace = true, features = ["json", "rustls", "form"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing = { workspace = true }
+
+axum = { workspace = true }
+urlencoding = "2"
+webbrowser = "1"
+hex = { workspace = true }
+getrandom = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
