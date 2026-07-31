@@ -54,13 +54,32 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+/**
+ * Keep non-agent identities, plus agent identities this client can actually
+ * invoke.
+ *
+ * An agent is invocable when it runs locally (`managedAgentPubkeys`) **or**
+ * when the relay directory advertises it as reachable for us — that second set
+ * is what `getMentionableAgentPubkeys` computes from kind:10100 entries.
+ *
+ * Without `mentionableAgentPubkeys` this drops every agent hosted on another
+ * machine before {@link shouldHideAgentFromMentions} can apply the finer
+ * directory rules, which makes remotely hosted agents impossible to mention.
+ * The parameter is optional so existing callers that only care about locally
+ * managed agents keep their previous behavior.
+ */
 export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
+  mentionableAgentPubkeys?: ReadonlySet<string>,
 ) {
+  if (candidate.isAgent !== true) {
+    return true;
+  }
+  const normalized = normalizePubkey(candidate.pubkey);
   return (
-    candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    managedAgentPubkeys.has(normalized) ||
+    mentionableAgentPubkeys?.has(normalized) === true
   );
 }
 

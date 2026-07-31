@@ -162,6 +162,52 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   );
 });
 
+test("isAgentIdentityInManagedList: keeps relay-directory agents this client can invoke", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+  const mentionableAgentPubkeys = new Set([PUB_A, PUB_B]);
+
+  // Hosted on another machine, but advertised as invocable by the relay
+  // directory (kind:10100) — must survive so the mention picker can offer it.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+
+  // Case-insensitive, same as the locally managed path.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B.toUpperCase() },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+
+  // Neither local nor invocable => still dropped.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_C },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    false,
+  );
+
+  // People are never filtered by this gate.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: false, pubkey: PUB_C },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+});
+
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
