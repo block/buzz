@@ -108,7 +108,7 @@ pub async fn start_pairing(
     // relay is reachable.
     let pairing_relay = probe_pairing_relay(&ws_url).await;
     let pairing_endpoint = PairingEndpoint {
-        uses_legacy_pair_path: matches!(&pairing_relay, PairingRelay::LegacyPath),
+        source: PairingEndpointSource::from(&pairing_relay),
         url: resolve_pairing_relay_url(&ws_url, pairing_relay)?,
     };
 
@@ -274,11 +274,7 @@ async fn pairing_ws_task_inner(
     let (ws, _) = connect_async(&pairing_endpoint.url)
         .await
         .map_err(|error| {
-            pairing_connection_error(
-                &pairing_endpoint.url,
-                pairing_endpoint.uses_legacy_pair_path,
-                &error,
-            )
+            pairing_connection_error(&pairing_endpoint.url, pairing_endpoint.source, &error)
         })?;
     let (mut write, mut read) = ws.split();
 
@@ -491,24 +487,35 @@ enum PairingRelay {
 
 struct PairingEndpoint {
     url: String,
-    uses_legacy_pair_path: bool,
+    source: PairingEndpointSource,
+}
+
+#[derive(Clone, Copy)]
+enum PairingEndpointSource {
+    Configured,
+    LegacyPath,
+    MainRelay,
+}
+
+impl From<&PairingRelay> for PairingEndpointSource {
+    fn from(relay: &PairingRelay) -> Self {
+        match relay {
+            PairingRelay::Configured(_) => Self::Configured,
+            PairingRelay::LegacyPath => Self::LegacyPath,
+            PairingRelay::MainRelay => Self::MainRelay,
+        }
+    }
 }
 
 fn pairing_connection_error(
     relay_url: &str,
-    uses_legacy_pair_path: bool,
+    source: PairingEndpointSource,
     error: &WebSocketError,
 ) -> String {
-    if uses_legacy_pair_path {
+    if matches!(source, PairingEndpointSource::LegacyPath) {
         if let WebSocketError::Http(response) = error {
             if response.status() == tokio_tungstenite::tungstenite::http::StatusCode::NOT_FOUND {
-                let endpoint = url::Url::parse(relay_url)
-                    .map(|mut url| {
-                        url.set_query(None);
-                        url.set_fragment(None);
-                        url.to_string()
-                    })
-                    .unwrap_or_else(|_| "/pair".to_string());
+                let endpoint = pairing_endpoint_for_display(relay_url, "/pair");
                 return format!(
                     "Pairing endpoint {endpoint} returned 404. This relay advertises NIP-43 \
                      without a pairing_relay_url, but nothing serves /pair. Set \
@@ -518,7 +525,25 @@ fn pairing_connection_error(
         }
     }
 
+    if matches!(source, PairingEndpointSource::Configured) {
+        let endpoint = pairing_endpoint_for_display(relay_url, "the configured endpoint");
+        return format!(
+            "Connection to configured pairing endpoint {endpoint} failed: {error}. Check the \
+             relay's pairing_relay_url and that the pairing service is reachable, then try again."
+        );
+    }
+
     format!("WebSocket connection failed: {error}")
+}
+
+fn pairing_endpoint_for_display(relay_url: &str, fallback: &str) -> String {
+    url::Url::parse(relay_url)
+        .map(|mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|_| fallback.to_string())
 }
 
 /// Prefer the relay-advertised dedicated pairing URL. The legacy `/pair`
@@ -672,7 +697,7 @@ mod pairing_generation_tests {
 mod pairing_relay_tests {
     use super::{
         pairing_connection_error, pairing_relay_from_nip11, probe_pairing_relay,
-        resolve_pairing_relay_url, PairingRelay,
+        resolve_pairing_relay_url, PairingEndpointSource, PairingRelay,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::{http::Response, Error as WebSocketError};
@@ -791,7 +816,7 @@ mod pairing_relay_tests {
         let error = websocket_http_error(404);
         let message = pairing_connection_error(
             "wss://relay.example.com/pair?token=do-not-display#fragment",
-            true,
+            PairingEndpointSource::LegacyPath,
             &error,
         );
 
@@ -805,11 +830,34 @@ mod pairing_relay_tests {
     }
 
     #[test]
-    fn non_legacy_pairing_404_keeps_the_generic_connection_error() {
+    fn configured_pairing_error_names_configured_endpoint_and_remedy() {
+        let error = websocket_http_error(404);
+        let message = pairing_connection_error(
+            "wss://pairing.example.com/connect?token=do-not-display#fragment",
+            PairingEndpointSource::Configured,
+            &error,
+        );
+
+        assert_eq!(
+            message,
+            "Connection to configured pairing endpoint wss://pairing.example.com/connect failed: \
+             HTTP error: 404 Not Found. Check the relay's pairing_relay_url and that the pairing \
+             service is reachable, then try again."
+        );
+        assert!(!message.contains("do-not-display"));
+        assert!(!message.contains("route /pair"));
+    }
+
+    #[test]
+    fn main_relay_pairing_404_keeps_the_generic_connection_error() {
         let error = websocket_http_error(404);
 
         assert_eq!(
-            pairing_connection_error("wss://pairing.example.com", false, &error),
+            pairing_connection_error(
+                "wss://pairing.example.com",
+                PairingEndpointSource::MainRelay,
+                &error,
+            ),
             "WebSocket connection failed: HTTP error: 404 Not Found"
         );
     }
