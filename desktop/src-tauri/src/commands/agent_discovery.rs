@@ -1068,12 +1068,92 @@ pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAg
         .get("agents")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
+    Ok(parse_relay_agents(agents))
+}
+
+/// Parse the agent directory leniently: entries that fail to deserialize are
+/// logged and skipped instead of failing the whole set.
+///
+/// Kind:10100 content is free-form JSON under each agent author's control,
+/// and the relay persists the event even when its own side-effect validation
+/// fails — so one profile with a mistyped field (e.g. a numeric
+/// `channel_add_policy`) must not blank the entire directory for every
+/// surface that mounts `list_relay_agents`.
+fn parse_relay_agents(agents: serde_json::Value) -> Vec<RelayAgentInfo> {
+    let serde_json::Value::Array(items) = agents else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let pubkey_hint = item
+                .get("pubkey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing pubkey>")
+                .to_owned();
+            match serde_json::from_value::<RelayAgentInfo>(item) {
+                Ok(agent) => Some(agent),
+                Err(e) => {
+                    tracing::warn!(
+                        "list_relay_agents: skipping unparseable agent profile ({pubkey_hint}): {e}"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── parse_relay_agents ────────────────────────────────────────────────────
+
+    fn directory_entry(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "pubkey": "ab".repeat(32),
+            "name": name,
+            "agent_type": "agent",
+            "channels": [],
+            "capabilities": [],
+            "status": "online",
+        })
+    }
+
+    #[test]
+    fn parse_relay_agents_parses_valid_entries() {
+        let parsed = parse_relay_agents(serde_json::json!([
+            directory_entry("Scout"),
+            directory_entry("Rover"),
+        ]));
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "Scout");
+        assert_eq!(parsed[1].name, "Rover");
+    }
+
+    #[test]
+    fn parse_relay_agents_skips_malformed_entries_and_keeps_the_rest() {
+        // One profile with a mistyped field (respond_to must be a string enum)
+        // must not blank the directory — the other agents still parse.
+        let mut poisoned = directory_entry("Broken");
+        poisoned["respond_to"] = serde_json::json!(123);
+
+        let parsed = parse_relay_agents(serde_json::json!([
+            directory_entry("Scout"),
+            poisoned,
+            directory_entry("Rover"),
+        ]));
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "Scout");
+        assert_eq!(parsed[1].name, "Rover");
+    }
+
+    #[test]
+    fn parse_relay_agents_returns_empty_for_non_array_input() {
+        assert!(parse_relay_agents(serde_json::json!(null)).is_empty());
+        assert!(parse_relay_agents(serde_json::json!({})).is_empty());
+    }
 
     // ── is_npm_global_install ─────────────────────────────────────────────────
 
