@@ -26,12 +26,21 @@ export type SurfaceTone = (typeof TONES)[number];
 const toneSchema = z.enum(TONES).catch("default");
 
 const finiteNumber = z.number().refine(Number.isFinite);
-const scalarSchema = z.union([z.string().max(MAX_SCALAR), finiteNumber]);
+
+// Length limits count Unicode code points ([...s].length), matching the
+// relay's chars().count() — JS .length counts UTF-16 code units and would
+// reject relay-valid strings containing astral-plane characters (emoji).
+const maxCodePoints = (max: number) => (s: string) => [...s].length <= max;
+
+const scalarSchema = z.union([
+  z.string().refine(maxCodePoints(MAX_SCALAR)),
+  finiteNumber,
+]);
 
 const nonBlank = (max: number) =>
   z
     .string()
-    .max(max)
+    .refine(maxCodePoints(max))
     .refine((s) => s.trim().length > 0);
 
 const headingSchema = z.object({
@@ -117,10 +126,27 @@ export interface SurfaceSpec {
 // to the fallbackText path.
 const envelopeSchema = z.object({
   version: z.number(),
-  fallbackText: z.string().min(1).max(1024),
-  title: z.string().max(512).optional(),
+  fallbackText: z
+    .string()
+    .refine(maxCodePoints(1024))
+    .refine((s) => s.trim().length > 0),
+  title: z.string().refine(maxCodePoints(512)).optional(),
   nodes: z.array(z.unknown()),
 });
+
+// Salvage a usable fallbackText from an envelope that failed schema parse
+// (unknown future shape, nodes not an array, etc.). The fallback matrix
+// prefers plain fallbackText over raw JSON whenever one is present.
+function salvageFallbackText(json: unknown): string | null {
+  if (typeof json !== "object" || json === null) {
+    return null;
+  }
+  const value = (json as { fallbackText?: unknown }).fallbackText;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+  return [...value].length <= 1024 ? value : null;
+}
 
 export type SurfaceParseResult =
   | { outcome: "card"; spec: SurfaceSpec }
@@ -145,7 +171,10 @@ export function parseSurfaceSpec(raw: string): SurfaceParseResult {
 
   const envelope = envelopeSchema.safeParse(json);
   if (!envelope.success) {
-    return { outcome: "raw" };
+    const salvaged = salvageFallbackText(json);
+    return salvaged
+      ? { outcome: "fallback", text: salvaged }
+      : { outcome: "raw" };
   }
 
   if (envelope.data.version !== 1) {
@@ -183,4 +212,22 @@ export function formatScalar(value: string | number): string {
 /** True when the value should render with tabular-nums (numeric column). */
 export function isNumeric(value: string | number): boolean {
   return typeof value === "number";
+}
+
+/**
+ * Plain-text preview for a surface event's content — for notification
+ * bodies, home-feed previews, and any other single-line context. Returns
+ * `fallbackText` when the envelope carries one, else a generic label.
+ * Never returns raw spec JSON.
+ */
+export function surfacePreviewText(content: string): string {
+  const parsed = parseSurfaceSpec(content);
+  switch (parsed.outcome) {
+    case "card":
+      return parsed.spec.fallbackText;
+    case "fallback":
+      return parsed.text;
+    case "raw":
+      return "Surface card";
+  }
 }

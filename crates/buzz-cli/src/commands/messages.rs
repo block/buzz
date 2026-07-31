@@ -843,6 +843,13 @@ fn read_spec_arg(value: &str) -> Result<String, CliError> {
     if trimmed.starts_with('{') {
         return Ok(value.to_string());
     }
+    // Anything else that still looks like inline JSON (array, quoted string)
+    // is a shape mistake, not a file path — say so instead of ENOENT noise.
+    if trimmed.starts_with('[') || trimmed.starts_with('"') {
+        return Err(CliError::Usage(
+            "--spec: inline spec must be a JSON object like {\"version\":1,\"fallbackText\":\"...\",\"nodes\":[...]}".into(),
+        ));
+    }
     std::fs::read_to_string(value)
         .map_err(|e| CliError::Usage(format!("--spec: cannot read file {value}: {e}")))
 }
@@ -852,12 +859,18 @@ fn read_spec_arg(value: &str) -> Result<String, CliError> {
 /// Errors are field-specific (`nodes[3].table: 14 columns exceeds max 12`) so
 /// the payload can be fixed without a relay round-trip.
 fn parse_surface_spec(raw: &str) -> Result<buzz_core::surface::SurfaceSpecV1, CliError> {
+    // Syntax errors come from the FIRST parse so line/column point into the
+    // user's own file. Schema errors are decoded from the parsed value —
+    // serde reports field paths there, never positions in some internal
+    // re-serialization the user has no way to line up with their input.
     let mut value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| CliError::Usage(format!("--spec is not valid JSON: {e}")))?;
     buzz_core::surface::normalize_spec_aliases(&mut value);
-    let canonical_input = value.to_string();
-    buzz_core::surface::parse_and_validate(&canonical_input)
-        .map_err(|e| CliError::Usage(format!("invalid surface spec: {e}")))
+    let spec: buzz_core::surface::SurfaceSpecV1 = serde_json::from_value(value)
+        .map_err(|e| CliError::Usage(format!("invalid surface spec: {e}")))?;
+    spec.validate()
+        .map_err(|e| CliError::Usage(format!("invalid surface spec: {e}")))?;
+    Ok(spec)
 }
 
 /// Publish a surface card to a channel.

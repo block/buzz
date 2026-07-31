@@ -168,3 +168,45 @@ test("parseSurfaceSpec_nodesBeyondCap_truncatedNotFatal", () => {
   assert.equal(result.outcome, "card");
   assert.equal(result.spec.nodes.length, 32);
 });
+
+test("parseSurfaceSpec_envelopeInvalid_salvagesUsableFallbackText", () => {
+  // Future/restructured envelope (nodes not an array) still has a usable
+  // fallbackText — the matrix prefers it over raw JSON.
+  const result = parseSurfaceSpec(
+    JSON.stringify({
+      version: 3,
+      fallbackText: "Deploy status: healthy",
+      nodes: { restructured: true },
+    }),
+  );
+  assert.deepEqual(result, {
+    outcome: "fallback",
+    text: "Deploy status: healthy",
+  });
+});
+
+test("parseSurfaceSpec_whitespaceFallbackText_isRawNotBlank", () => {
+  const result = parseSurfaceSpec(
+    JSON.stringify({
+      version: 1,
+      fallbackText: "   ",
+      nodes: [{ type: "text", text: "y" }],
+    }),
+  );
+  assert.deepEqual(result, { outcome: "raw" });
+});
+
+test("parseSurfaceSpec_astralPlaneLengths_countCodePoints", () => {
+  // 300 emoji = 300 code points (relay-valid) but 600 UTF-16 units — the
+  // node must survive, matching the relay's chars().count() gate.
+  const emoji = "🐝".repeat(300);
+  const result = parseSurfaceSpec(
+    JSON.stringify({
+      version: 1,
+      fallbackText: "x",
+      nodes: [{ type: "heading", text: emoji }],
+    }),
+  );
+  assert.equal(result.outcome, "card");
+  assert.equal(result.spec.nodes.length, 1);
+});

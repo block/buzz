@@ -72,3 +72,9 @@ test("isConversationalUnreadKind_unknownKind_countsAsConversational", () => {
   // (e.g. a future conversational kind) is kept.
   assert.equal(isConversationalUnreadKind(12345), true);
 });
+
+test("isConversationalUnreadKind_surface_counts", () => {
+  // Surfaces are conversational content: they must trigger unread dots,
+  // home-feed rows, and mention counts exactly like a kind-9 message.
+  assert.equal(isConversationalUnreadKind(40110), true);
+});

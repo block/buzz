@@ -1,3 +1,5 @@
+import { surfacePreviewText } from "@/features/surfaces/spec";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -203,6 +205,11 @@ function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
 }
 
 function feedPreview(item: FeedItem) {
+  // Surface events: show the spec's fallbackText, never raw JSON.
+  if (item.kind === KIND_SURFACE) {
+    return surfacePreviewText(item.content);
+  }
+
   const content = item.content.trim();
   if (content.length > 0) {
     return content;

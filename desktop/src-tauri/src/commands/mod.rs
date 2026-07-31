@@ -55,6 +55,7 @@ mod relay_reconnect;
 mod social;
 mod team_snapshot;
 mod teams;
+mod timeline_kinds;
 mod updater;
 mod window_chrome;
 mod window_vibrancy;

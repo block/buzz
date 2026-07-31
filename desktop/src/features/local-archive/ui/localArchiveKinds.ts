@@ -73,6 +73,8 @@ function kindLabel(kind: number): string {
       return "Stream messages v2 (kind 40002)";
     case 40003:
       return "Message edits (kind 40003)";
+    case 40110:
+      return "Surface cards (kind 40110)";
     case 45001:
       return "Forum posts (kind 45001)";
     case 45003:

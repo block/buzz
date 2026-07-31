@@ -484,7 +484,8 @@ pub const KIND_CANVAS: u32 = 40100;
 ///
 /// Content is canonical `SurfaceSpec v1` JSON (see [`crate::surface`]).
 /// Regular, stored, channel-scoped like stream messages; live updates reuse
-/// [`KIND_STREAM_MESSAGE_EDIT`] with full-spec replacement.
+/// [`KIND_STREAM_MESSAGE_EDIT`] with full-spec replacement. See
+/// `docs/nips/NIP-SC.md`.
 ///
 /// Number pending maintainer assignment on block/buzz#2480 — 40110 proposed
 /// (free, adjacent to canvas at 40100).
@@ -887,6 +888,10 @@ const _: () = assert!(KIND_REPORT <= u16::MAX as u32);
 const _: () = assert!(KIND_MODERATION_RESOLVE_REPORT <= u16::MAX as u32);
 const _: () = assert!(!is_ephemeral(KIND_REPORT));
 const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_BAN));
+// KIND_SURFACE is cast to u16 for nostr::Kind::Custom at every producer —
+// keep any future renumbering (pending maintainer assignment on #2480)
+// inside the encodable range, at compile time.
+const _: () = assert!(KIND_SURFACE <= u16::MAX as u32);
 const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_RESOLVE_REPORT));
 const _: () = assert!(!is_moderation_command_kind(KIND_REPORT));
 

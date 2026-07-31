@@ -3156,3 +3156,167 @@ async fn test_surface_edit_replacement_author_gated() {
     alice_client.disconnect().await.expect("disconnect alice");
     bob_client.disconnect().await.expect("disconnect bob");
 }
+
+/// An edit targeting a surface in a DIFFERENT channel than the edit's own `h`
+/// tag is rejected — a cross-channel edit must not mutate a foreign surface.
+#[tokio::test]
+#[ignore]
+async fn test_surface_edit_cross_channel_rejected() {
+    let url = relay_url();
+    let alice = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect");
+    let channel_a = create_private_channel_ws(&mut client, &alice).await;
+    let channel_b = create_private_channel_ws(&mut client, &alice).await;
+
+    // Publish a surface in channel A.
+    let surface = build_surface_event(
+        &channel_a,
+        &alice,
+        &surface_demo_spec("in channel A", "success", 100),
+    );
+    let surface_id = surface.id.to_hex();
+    let ok = client.send_event(surface).await.expect("publish A");
+    assert!(ok.accepted, "publish in A: {}", ok.message);
+
+    // Edit event carries channel B's h tag but points its e tag at A's surface.
+    let ok = client
+        .send_event(build_surface_edit_event(
+            &channel_b,
+            &surface_id,
+            &alice,
+            &surface_demo_spec("hijacked into B", "danger", 1),
+        ))
+        .await
+        .expect("send cross-channel edit");
+    assert!(
+        !ok.accepted,
+        "cross-channel surface edit must be rejected, got: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// An accepted surface edit is actually stored and fanned out: after editing,
+/// a fresh subscription for the surface id returns the REPLACEMENT spec, not
+/// the original — proving the edit took effect, not merely that it was OK'd.
+#[tokio::test]
+#[ignore]
+async fn test_surface_edit_replacement_is_observable() {
+    let url = relay_url();
+    let alice = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect");
+    let channel_id = create_private_channel_ws(&mut client, &alice).await;
+
+    let surface = build_surface_event(
+        &channel_id,
+        &alice,
+        &surface_demo_spec("original", "success", 100),
+    );
+    let surface_id = surface.id.to_hex();
+    client.send_event(surface).await.expect("publish");
+
+    // Edit to a spec whose fallbackText carries a unique marker.
+    let marker = format!("edited-{}", uuid::Uuid::new_v4());
+    let ok = client
+        .send_event(build_surface_edit_event(
+            &channel_id,
+            &surface_id,
+            &alice,
+            &surface_demo_spec(&marker, "danger", 20),
+        ))
+        .await
+        .expect("send edit");
+    assert!(ok.accepted, "edit rejected: {}", ok.message);
+
+    // Read the edit event back by referencing the surface via #e.
+    let sid = sub_id("surface-edit-readback");
+    let filter = Filter::new().kind(Kind::Custom(KIND_EDIT_U16)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::E),
+        [surface_id.as_str()],
+    );
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    assert!(
+        events.iter().any(|e| e.content.contains(&marker)),
+        "stored edit must contain the replacement spec marker {marker}; got {} events",
+        events.len()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Surfaces are excluded from NIP-50 full-text search: a unique token placed
+/// in a surface's spec is NOT found by search, while the same token in a
+/// kind-9 message IS — proving the search path works and the exclusion is
+/// intentional (FTS allowlist, migration 0008).
+#[tokio::test]
+#[ignore]
+async fn test_surface_excluded_from_fts() {
+    let url = relay_url();
+    let alice = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect");
+    let channel_id = create_private_channel_ws(&mut client, &alice).await;
+
+    let token = format!("surfacefts{}", uuid::Uuid::new_v4().simple());
+
+    // Publish the token inside a surface spec AND inside a kind-9 message.
+    let surface = build_surface_event(
+        &channel_id,
+        &alice,
+        &surface_demo_spec(&token, "success", 100),
+    );
+    client.send_event(surface).await.expect("publish surface");
+
+    let msg = EventBuilder::new(Kind::Custom(9), format!("plain {token} message"))
+        .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&alice)
+        .unwrap();
+    client.send_event(msg).await.expect("publish message");
+
+    // NIP-50 search scoped to both content kinds.
+    let sid = sub_id("surface-fts");
+    let filter = Filter::new()
+        .kinds([Kind::Custom(9), Kind::Custom(KIND_SURFACE_U16)])
+        .search(&token)
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [channel_id.as_str()],
+        );
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    let kinds: Vec<u16> = events.iter().map(|e| e.kind.as_u16()).collect();
+    assert!(
+        kinds.contains(&9),
+        "kind-9 message with the token must be searchable (proves FTS works); got {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&KIND_SURFACE_U16),
+        "surface content must NOT be full-text searchable; got {kinds:?}"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}

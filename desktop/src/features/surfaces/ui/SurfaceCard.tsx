@@ -12,7 +12,7 @@ import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
 // Pure presentational renderer for a parsed SurfaceSpec. All content is
 // data-only plain text — no markdown, no links, no media. Tone is expressed
-// with color plus a paired glyph/text (never color alone).
+// with color plus a distinct per-tone glyph (never color alone).
 
 const badgeToneClass: Record<SurfaceTone, string> = {
   default: "bg-muted text-muted-foreground",
@@ -30,6 +30,31 @@ const textToneClass: Record<SurfaceTone, string> = {
   info: "text-sky-600 dark:text-sky-400",
 };
 
+// Distinct per-tone glyphs so tone survives without color perception
+// (WCAG use-of-color): success check, warning bang, danger cross, info i.
+const toneGlyph: Record<SurfaceTone, string | null> = {
+  default: null,
+  success: "✓",
+  warning: "!",
+  danger: "✕",
+  info: "i",
+};
+
+function ToneGlyph({ tone }: { tone: SurfaceTone }) {
+  const glyph = toneGlyph[tone];
+  if (glyph === null) {
+    return null;
+  }
+  return (
+    <>
+      <span aria-hidden className="font-semibold">
+        {glyph}
+      </span>
+      <span className="sr-only">({tone})</span>
+    </>
+  );
+}
+
 function ToneBadge({ text, tone }: { text: string; tone: SurfaceTone }) {
   return (
     <span
@@ -40,9 +65,7 @@ function ToneBadge({ text, tone }: { text: string; tone: SurfaceTone }) {
       data-testid="surface-badge"
       data-tone={tone}
     >
-      {tone !== "default" && (
-        <span aria-hidden className="size-1.5 rounded-full bg-current" />
-      )}
+      <ToneGlyph tone={tone} />
       {text}
     </span>
   );
@@ -82,11 +105,12 @@ function NodeView({ node }: { node: SurfaceNode }) {
               <dt className="text-sm text-muted-foreground">{item.label}</dt>
               <dd
                 className={cn(
-                  "text-sm font-medium",
+                  "inline-flex items-baseline gap-1 text-sm font-medium",
                   isNumeric(item.value) && "tabular-nums",
                   textToneClass[item.tone],
                 )}
               >
+                <ToneGlyph tone={item.tone} />
                 {formatScalar(item.value)}
               </dd>
             </React.Fragment>
@@ -110,10 +134,11 @@ function NodeView({ node }: { node: SurfaceNode }) {
               </div>
               <div
                 className={cn(
-                  "text-sm font-semibold tabular-nums",
+                  "flex items-baseline gap-1 text-sm font-semibold tabular-nums",
                   textToneClass[stat.tone],
                 )}
               >
+                <ToneGlyph tone={stat.tone} />
                 {formatScalar(stat.value)}
               </div>
               {stat.delta !== undefined && (
@@ -182,7 +207,7 @@ function NodeView({ node }: { node: SurfaceNode }) {
               {Math.round(node.value)}%
             </span>
           </div>
-          <Progress aria-label={node.label} value={node.value} />
+          <Progress aria-label={node.label ?? "Progress"} value={node.value} />
         </div>
       );
   }

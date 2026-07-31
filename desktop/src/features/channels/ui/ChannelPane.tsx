@@ -61,7 +61,7 @@ import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
-import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
+import { KIND_SURFACE, KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -270,6 +270,9 @@ export const ChannelPane = React.memo(function ChannelPane({
       for (const message of candidates) {
         if (
           message.kind === KIND_SYSTEM_MESSAGE ||
+          // Surfaces are edited via full-spec replacement (CLI/SDK), not the
+          // inline composer — ArrowUp must not open a textarea full of JSON.
+          message.kind === KIND_SURFACE ||
           message.pubkey !== currentPubkey ||
           message.pending
         ) {
