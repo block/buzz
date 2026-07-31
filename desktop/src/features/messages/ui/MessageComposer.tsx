@@ -164,6 +164,8 @@ function MessageComposerImpl({
     media.queuedAttachmentsRef.current.length === 0;
   const ownsDropZone = mediaController === undefined;
   const backgroundUpload = useBackgroundMediaUpload();
+  const hydrationRef =
+    React.useRef<ReturnType<typeof usePersistentAgentMentionHydration>>(null);
   useDraftPersistLifecycle({
     effectiveDraftKey,
     channelId,
@@ -189,6 +191,7 @@ function MessageComposerImpl({
     setSpoileredAttachmentUrls,
     spoileredAttachmentUrlsRef,
     syncComposerContentFromEditor,
+    draftContentResolverRef: hydrationRef,
   });
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
@@ -273,7 +276,7 @@ function MessageComposerImpl({
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
-      persistentMentionHydrationRef.current?.reconcile(text);
+      hydrationRef.current?.reconcile(text);
       if (text.trim().length > 0) {
         notifyTyping();
       }
@@ -298,10 +301,7 @@ function MessageComposerImpl({
     richText,
   });
   const persistentAudience = persistentMentionHydration.audience;
-  const persistentMentionHydrationRef = React.useRef(
-    persistentMentionHydration,
-  );
-  persistentMentionHydrationRef.current = persistentMentionHydration;
+  hydrationRef.current = persistentMentionHydration;
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
