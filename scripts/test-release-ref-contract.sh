@@ -73,6 +73,7 @@ jq -e --argjson ruleset_id 13596885 -f "$bypass_filter" "$bypass_fixture" >/dev/
 }
 for mutation in \
   '.result = "pass"' \
+  '(.rule_evaluations[] | select(.rule_type == "pull_request")).result = "pass"' \
   '(.rule_evaluations[] | select(.rule_type == "pull_request")).rule_source.id = 0' \
   '(.rule_evaluations[] | select(.rule_type == "pull_request")).enforcement = "evaluate"' \
   'del(.rule_evaluations[] | select(.rule_type == "pull_request"))'; do
