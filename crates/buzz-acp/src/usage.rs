@@ -1,14 +1,25 @@
 //! Usage tracking for NIP-AM agent turn metrics.
 //!
-//! Agents that support usage reporting emit a `_goose/unstable/session/update`
-//! notification (with `sessionUpdate: "usage_update"`) at the end of every
-//! turn.  Both goose and buzz-agent use this same wire format.  The payload
-//! carries session-cumulative token counts from which we derive per-turn
-//! deltas.
+//! Agents report usage at the end of every turn through one of two wire
+//! formats, both normalized into a [`UsageSnapshot`] before tracking:
+//!
+//! * **goose / buzz-agent** — a `_goose/unstable/session/update` notification
+//!   (with `sessionUpdate: "usage_update"`) carrying session-cumulative token
+//!   counts and an optional cumulative cost.
+//! * **standard ACP** — a core `session/update` notification carrying the
+//!   `usage_update` variant. Agents built on the ACP SDK (claude-agent-acp,
+//!   codex-acp) speak only this one. It reports `used`/`size` (a *context
+//!   window* snapshot, not a running total) and an optional cumulative
+//!   `cost` — the protocol has no cumulative input/output token split, so
+//!   those counters stay unknown for these harnesses.
+//!
+//! Unknown counters are `None` end to end and reach the wire as JSON `null`.
+//! NIP-AM is explicit that a null must never be recorded or summed as zero, so
+//! nothing here substitutes a default for a counter the harness did not send.
 //!
 //! # Delta computation
 //!
-//! Because goose only reports cumulative counters, the per-turn counts are
+//! Because harnesses only report cumulative counters, the per-turn counts are
 //! computed as `current − previous`. Three cases require special handling per
 //! NIP-AM:
 //!
@@ -19,7 +30,7 @@
 //! 3. **Session restart** (caller supplies a new `session_id` not seen
 //!    before): treated as case 1 — fresh baseline, no delta for this turn.
 //!
-//! Goose may emit **multiple** `usage_update` notifications per turn. The
+//! A harness may emit **multiple** `usage_update` notifications per turn. The
 //! tracker handles this correctly: the committed baseline (and `turn_seq`)
 //! advance only when `take()` is called (i.e. at publish time), never on
 //! individual notifications. Within a turn all notifications measure their
@@ -106,6 +117,141 @@ pub(crate) struct UsageUpdatePayload {
     pub model: Option<String>,
 }
 
+/// Wire-format deserialization for a standard ACP `session/update` params
+/// object.
+///
+/// Method: `session/update` (ACP core — *not* the goose extension)
+/// Shape (camelCase on the wire):
+/// ```json
+/// {
+///   "sessionId": "...",
+///   "update": {
+///     "sessionUpdate": "usage_update",
+///     "used": 15247,
+///     "size": 200000,
+///     "cost": { "amount": 0.0234, "currency": "USD" }
+///   }
+/// }
+/// ```
+///
+/// Agents built on the ACP SDK emit this instead of the goose extension.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AcpSessionUpdateNotification {
+    pub session_id: String,
+    pub update: AcpSessionUpdateVariant,
+}
+
+/// Discriminated union over the ACP `SessionUpdate` variants. Only
+/// `usage_update` carries usage; everything else is handled elsewhere.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "sessionUpdate", rename_all = "snake_case")]
+pub(crate) enum AcpSessionUpdateVariant {
+    UsageUpdate(AcpUsageUpdatePayload),
+    #[serde(other)]
+    Other,
+}
+
+/// The standard ACP `usage_update` payload (`UsageUpdate` in the ACP schema).
+///
+/// Every field is optional here even though the schema requires `used` and
+/// `size`: a usage notification is best-effort observability data, and a
+/// harness that omits a field should still contribute whatever it did send.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AcpUsageUpdatePayload {
+    /// Tokens currently in context. This is a **context-window snapshot**, not
+    /// a cumulative counter — it falls as often as it rises (compaction), so it
+    /// must never be diffed into a per-turn token count. Logged only.
+    #[serde(default)]
+    pub used: u64,
+    /// Total context window size in tokens. Logged only.
+    #[serde(default)]
+    pub size: u64,
+    /// Cumulative session cost. The only counter in the standard payload that
+    /// NIP-AM can consume.
+    #[serde(default)]
+    pub cost: Option<AcpCost>,
+}
+
+/// The ACP `Cost` object.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct AcpCost {
+    /// Total cumulative cost for the session.
+    pub amount: f64,
+    /// ISO 4217 currency code. Retained for logging and for a future
+    /// non-USD guard; NIP-AM `costUsd` is USD by definition.
+    #[allow(dead_code)]
+    pub currency: String,
+}
+
+/// A harness-agnostic cumulative usage snapshot — the single input to
+/// [`UsageTracker::record`].
+///
+/// Each counter is independently optional: `None` means "this harness did not
+/// report it", which NIP-AM requires be published as `null` rather than `0`.
+/// goose and buzz-agent fill the token counters; standard-ACP harnesses fill
+/// only `cost_usd`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct UsageSnapshot {
+    /// Session-cumulative input tokens, cache reads folded in.
+    pub input_tokens: Option<u64>,
+    /// Session-cumulative output tokens.
+    pub output_tokens: Option<u64>,
+    /// Session-cumulative provider-reported total tokens. Never derived by
+    /// summing input and output (NIP-AM forbids it).
+    pub total_tokens: Option<u64>,
+    /// Session-cumulative estimated cost in USD.
+    pub cost_usd: Option<f64>,
+    /// Effective model id for this turn.
+    pub model: Option<String>,
+}
+
+impl UsageSnapshot {
+    /// Whether the harness reported at least one counter NIP-AM can carry.
+    ///
+    /// Notifications that fail this test are dropped by `record`: NIP-AM
+    /// forbids publishing a metric whose counters are all unknown, and an
+    /// empty snapshot must not overwrite a baseline built from real ones.
+    /// Standard-ACP harnesses emit exactly such counter-free notifications —
+    /// claude-agent-acp sends a bare `{used, size}` on context-window changes.
+    fn has_any_counter(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.total_tokens.is_some()
+            || self.cost_usd.is_some()
+    }
+}
+
+impl From<&UsageUpdatePayload> for UsageSnapshot {
+    fn from(p: &UsageUpdatePayload) -> Self {
+        Self {
+            input_tokens: Some(p.accumulated_input_tokens),
+            output_tokens: Some(p.accumulated_output_tokens),
+            total_tokens: p.accumulated_total_tokens,
+            cost_usd: p.accumulated_cost,
+            model: p.model.clone(),
+        }
+    }
+}
+
+impl From<&AcpUsageUpdatePayload> for UsageSnapshot {
+    fn from(p: &AcpUsageUpdatePayload) -> Self {
+        Self {
+            // The standard payload has no cumulative token split. `used` is a
+            // context snapshot and `size` a window size; neither is a running
+            // total, so both stay out of the tracker.
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cost_usd: p.cost.as_ref().map(|c| c.amount),
+            // The standard payload carries no model id; `pool.rs` publishes
+            // `model: null` for these harnesses.
+            model: None,
+        }
+    }
+}
+
 /// Per-session normalization state: the last cumulative snapshot we saw.
 #[derive(Debug, Clone)]
 struct SessionState {
@@ -116,9 +262,11 @@ struct SessionState {
     published_seq: u64,
     /// Cumulative input tokens at the end of the LAST PUBLISHED turn.
     /// Advanced only on publish (i.e. in `take()`), not on every notification.
-    last_input: u64,
+    /// `None` when the harness does not report token counters at all.
+    last_input: Option<u64>,
     /// Cumulative output tokens at the end of the LAST PUBLISHED turn.
-    last_output: u64,
+    /// `None` when the harness does not report token counters at all.
+    last_output: Option<u64>,
     /// Cumulative cost at the end of the LAST PUBLISHED turn.
     last_cost: Option<f64>,
     /// Cumulative total tokens at the end of the LAST PUBLISHED turn.
@@ -151,10 +299,12 @@ pub struct TurnUsage {
     /// Per-turn cost delta (`current − previous`); `None` when unreliable or
     /// either snapshot is missing.
     pub turn_cost_usd: Option<f64>,
-    /// Session-cumulative input tokens as reported by goose at end of turn.
-    pub cumulative_input_tokens: u64,
-    /// Session-cumulative output tokens as reported by goose at end of turn.
-    pub cumulative_output_tokens: u64,
+    /// Session-cumulative input tokens as reported at end of turn; `None` when
+    /// the harness does not report token counters (standard ACP).
+    pub cumulative_input_tokens: Option<u64>,
+    /// Session-cumulative output tokens as reported at end of turn; `None` when
+    /// the harness does not report token counters (standard ACP).
+    pub cumulative_output_tokens: Option<u64>,
     /// Session-cumulative genuine provider total tokens as reported by buzz-agent;
     /// `None` when the session has never emitted one or any turn lacked one.
     pub cumulative_total_tokens: Option<u64>,
@@ -163,6 +313,26 @@ pub struct TurnUsage {
     /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
     /// harness did not include the model in its usage notification.
     pub model: Option<String>,
+}
+
+/// Per-turn delta for a cumulative counter.
+///
+/// `None` when either snapshot is absent — unknown, which NIP-AM publishes as
+/// null — or when the counter went backwards (the caller nulls the whole turn
+/// object in that case; this guard only keeps the subtraction from wrapping).
+fn delta(current: Option<u64>, previous: Option<u64>) -> Option<u64> {
+    match (current, previous) {
+        (Some(c), Some(p)) if c >= p => Some(c - p),
+        _ => None,
+    }
+}
+
+/// Whether a cumulative counter went backwards between two snapshots.
+///
+/// A counter absent on either side is unknown, not a decrease — a harness that
+/// never reports tokens must not be treated as one whose tokens reset.
+fn decreased<T: PartialOrd>(current: Option<T>, previous: Option<T>) -> bool {
+    matches!((current, previous), (Some(c), Some(p)) if c < p)
 }
 
 /// Tracks per-session cumulative usage state across turns.
@@ -175,8 +345,8 @@ pub struct TurnUsage {
 ///    notifications that arrive *before* the first `begin_turn` (e.g. during
 ///    `session/new` setup) will still update the cumulative baseline but will
 ///    NOT produce a publishable record.
-/// 2. **`record(session_id, payload)`** — called for each
-///    `_goose/unstable/session/update` notification. When in-flight, updates
+/// 2. **`record(session_id, snapshot)`** — called for each `usage_update`
+///    notification, in either wire format. When in-flight, updates
 ///    `pending` with the latest cumulative values and a delta measured from
 ///    the committed baseline (end of the previous published turn). Multiple
 ///    notifications per turn are fine — the last one wins and `turn_seq` stays
@@ -234,11 +404,20 @@ impl UsageTracker {
     /// 3. **In-flight for another session** (`in_flight_session == Some(other)`):
     ///    ignored entirely — touching this session's baseline while another is
     ///    in-flight would undercount this session's next published delta.
-    pub(crate) fn record(&mut self, session_id: &str, payload: &UsageUpdatePayload) {
-        let current_input = payload.accumulated_input_tokens;
-        let current_output = payload.accumulated_output_tokens;
-        let current_cost = payload.accumulated_cost;
-        let current_total = payload.accumulated_total_tokens;
+    pub(crate) fn record(&mut self, session_id: &str, snapshot: &UsageSnapshot) {
+        if !snapshot.has_any_counter() {
+            // Nothing NIP-AM can carry. Returning early also protects the
+            // committed baseline: standard-ACP harnesses interleave bare
+            // `{used, size}` notifications with the ones that carry cost, and
+            // treating those as a snapshot would wipe the cost baseline and
+            // make the next turn's delta unreliable.
+            return;
+        }
+
+        let current_input = snapshot.input_tokens;
+        let current_output = snapshot.output_tokens;
+        let current_cost = snapshot.cost_usd;
+        let current_total = snapshot.total_tokens;
 
         // Determine whether this session is currently in-flight so we know
         // whether to set `pending`. We compute the delta regardless so that
@@ -256,29 +435,28 @@ impl UsageTracker {
                     // *published* seq — constant for all notifications in this
                     // turn, advanced only on publish.
                     let seq = prev.published_seq + 1;
-                    // Token counter decrease → unreliable delta.
-                    if current_input < prev.last_input || current_output < prev.last_output {
+                    // A counter that went *backwards* is a reset or a harness
+                    // bug. NIP-AM: negative delta ⇒ delta_reliable false and
+                    // every turn field nulled — not just the counter at fault.
+                    // A counter absent on either side is merely unknown, which
+                    // is field-local and leaves the others reliable.
+                    let any_decreased = decreased(current_input, prev.last_input)
+                        || decreased(current_output, prev.last_output)
+                        || decreased(current_cost, prev.last_cost);
+                    if any_decreased {
                         (false, None, None, None, seq)
                     } else {
-                        let di = current_input - prev.last_input;
-                        let dout = current_output - prev.last_output;
-                        // Cost delta: only when both snapshots have cost.
-                        // A cost *decrease* is also unreliable (NIP-AM: negative
-                        // delta ⇒ delta_reliable false, null all turn fields).
-                        let (dc, cost_reliable) = match (current_cost, prev.last_cost) {
-                            (Some(c), Some(p)) if c >= p => (Some(c - p), true),
-                            (Some(_), Some(_)) => {
-                                // Both present but current < prev — counter decreased.
-                                (None, false)
-                            }
-                            _ => (None, true), // absent on either side: null cost, reliable tokens
+                        let dc = match (current_cost, prev.last_cost) {
+                            (Some(c), Some(p)) => Some(c - p),
+                            _ => None,
                         };
-                        if cost_reliable {
-                            (true, Some(di), Some(dout), dc, seq)
-                        } else {
-                            // Cost decrease overrides the whole record to unreliable.
-                            (false, None, None, None, seq)
-                        }
+                        (
+                            true,
+                            delta(current_input, prev.last_input),
+                            delta(current_output, prev.last_output),
+                            dc,
+                            seq,
+                        )
                     }
                 }
             };
@@ -309,7 +487,7 @@ impl UsageTracker {
                 cumulative_output_tokens: current_output,
                 cumulative_total_tokens: current_total,
                 cumulative_cost_usd: current_cost,
-                model: payload.model.clone(),
+                model: snapshot.model.clone(),
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -396,8 +574,11 @@ mod tests {
         assert_eq!(p.accumulated_cached_input_tokens, 0);
     }
 
-    fn payload(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
-        UsageUpdatePayload {
+    /// A goose-shaped payload, normalized the way the production handler does.
+    /// Building the wire struct (rather than a `UsageSnapshot` literal) keeps
+    /// these tests exercising the goose → snapshot conversion.
+    fn payload(input: u64, output: u64, cost: Option<f64>) -> UsageSnapshot {
+        UsageSnapshot::from(&UsageUpdatePayload {
             used: input + output,
             context_limit: 200_000,
             accumulated_input_tokens: input,
@@ -406,11 +587,11 @@ mod tests {
             accumulated_cost: cost,
             accumulated_total_tokens: None,
             model: None,
-        }
+        })
     }
 
-    fn payload_no_context(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
-        UsageUpdatePayload {
+    fn payload_no_context(input: u64, output: u64, cost: Option<f64>) -> UsageSnapshot {
+        UsageSnapshot::from(&UsageUpdatePayload {
             used: 0,
             context_limit: 0,
             accumulated_input_tokens: input,
@@ -419,7 +600,7 @@ mod tests {
             accumulated_cost: cost,
             accumulated_total_tokens: None,
             model: None,
-        }
+        })
     }
 
     // ── Turn scoping: setup notifications must not pollute the first real turn ─
@@ -495,7 +676,7 @@ mod tests {
         let a1 = tracker.take().expect("A turn 1");
         assert_eq!(a1.turn_seq, 1);
         assert!(!a1.delta_reliable, "first turn is unreliable");
-        assert_eq!(a1.cumulative_input_tokens, 1000);
+        assert_eq!(a1.cumulative_input_tokens, Some(1000));
 
         // ── B is now in-flight; A late notification arrives ──
         tracker.begin_turn("sess-b");
@@ -528,8 +709,8 @@ mod tests {
              late cross-session advance (500)"
         );
         assert_eq!(a2.turn_output_tokens, Some(150));
-        assert_eq!(a2.cumulative_input_tokens, 2000);
-        assert_eq!(a2.cumulative_output_tokens, 250);
+        assert_eq!(a2.cumulative_input_tokens, Some(2000));
+        assert_eq!(a2.cumulative_output_tokens, Some(250));
     }
 
     // ── Delta computation: non-happy paths ─────────────────────────────────
@@ -551,8 +732,8 @@ mod tests {
         assert!(usage.turn_output_tokens.is_none());
         assert!(usage.turn_cost_usd.is_none());
         // Cumulative is still populated.
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
     }
 
@@ -608,8 +789,8 @@ mod tests {
         assert!(usage.turn_output_tokens.is_none());
         assert!(usage.turn_cost_usd.is_none());
         // Cumulative values are unaffected.
-        assert_eq!(usage.cumulative_input_tokens, 1500);
-        assert_eq!(usage.cumulative_output_tokens, 350);
+        assert_eq!(usage.cumulative_input_tokens, Some(1500));
+        assert_eq!(usage.cumulative_output_tokens, Some(350));
         assert_eq!(usage.cumulative_cost_usd, Some(0.05));
     }
 
@@ -680,8 +861,8 @@ mod tests {
         // cost delta: 0.018 - 0.01 = 0.008 (floating-point; use approx check)
         let dc = usage.turn_cost_usd.expect("cost delta present");
         assert!((dc - 0.008).abs() < 1e-9, "cost delta: {dc}");
-        assert_eq!(usage.cumulative_input_tokens, 1800);
-        assert_eq!(usage.cumulative_output_tokens, 450);
+        assert_eq!(usage.cumulative_input_tokens, Some(1800));
+        assert_eq!(usage.cumulative_output_tokens, Some(450));
     }
 
     #[test]
@@ -718,8 +899,8 @@ mod tests {
         let usage = tracker.take().expect("turn 2");
 
         // Cumulative from the last notification.
-        assert_eq!(usage.cumulative_input_tokens, 2000);
-        assert_eq!(usage.cumulative_output_tokens, 250);
+        assert_eq!(usage.cumulative_input_tokens, Some(2000));
+        assert_eq!(usage.cumulative_output_tokens, Some(250));
         // Delta is from committed baseline (1000, 100) → (2000, 250) = 1000/150.
         assert_eq!(usage.turn_input_tokens, Some(1000));
         assert_eq!(usage.turn_output_tokens, Some(150));
@@ -852,17 +1033,17 @@ mod tests {
         tracker.begin_turn("buzz-s1");
         let notif1: GooseSessionUpdateNotification = serde_json::from_value(raw1).expect("deser");
         if let GooseSessionUpdateVariant::UsageUpdate(p) = notif1.update {
-            tracker.record("buzz-s1", &p);
+            tracker.record("buzz-s1", &UsageSnapshot::from(&p));
         }
         let t1 = tracker.take().expect("turn 1");
         assert!(!t1.delta_reliable, "first turn: unreliable");
-        assert_eq!(t1.cumulative_input_tokens, 300);
+        assert_eq!(t1.cumulative_input_tokens, Some(300));
 
         // Turn 2 — delta reliable.
         tracker.begin_turn("buzz-s1");
         let notif2: GooseSessionUpdateNotification = serde_json::from_value(raw2).expect("deser");
         if let GooseSessionUpdateVariant::UsageUpdate(p) = notif2.update {
-            tracker.record("buzz-s1", &p);
+            tracker.record("buzz-s1", &UsageSnapshot::from(&p));
         }
         let t2 = tracker.take().expect("turn 2");
         assert!(t2.delta_reliable, "second turn: reliable");
@@ -907,8 +1088,8 @@ mod tests {
         output: u64,
         cost: Option<f64>,
         model: Option<&str>,
-    ) -> UsageUpdatePayload {
-        UsageUpdatePayload {
+    ) -> UsageSnapshot {
+        UsageSnapshot::from(&UsageUpdatePayload {
             used: input + output,
             context_limit: 200_000,
             accumulated_input_tokens: input,
@@ -917,7 +1098,7 @@ mod tests {
             accumulated_cost: cost,
             accumulated_total_tokens: None,
             model: model.map(str::to_string),
-        }
+        })
     }
 
     #[test]
@@ -961,7 +1142,7 @@ mod tests {
         // And it should produce a TurnUsage with model = None.
         let mut tracker = UsageTracker::default();
         tracker.begin_turn("sess-goose-compat");
-        tracker.record("sess-goose-compat", &payload);
+        tracker.record("sess-goose-compat", &UsageSnapshot::from(&payload));
         let usage = tracker.take().expect("pending");
         assert!(
             usage.model.is_none(),
@@ -971,8 +1152,8 @@ mod tests {
 
     // ── accumulatedTotalTokens: field-local delta, session poisoning ───────
 
-    fn payload_with_total(input: u64, output: u64, total: Option<u64>) -> UsageUpdatePayload {
-        UsageUpdatePayload {
+    fn payload_with_total(input: u64, output: u64, total: Option<u64>) -> UsageSnapshot {
+        UsageSnapshot::from(&UsageUpdatePayload {
             used: input + output,
             context_limit: 200_000,
             accumulated_input_tokens: input,
@@ -981,7 +1162,7 @@ mod tests {
             accumulated_cost: None,
             accumulated_total_tokens: total,
             model: None,
-        }
+        })
     }
 
     #[test]
@@ -1104,7 +1285,7 @@ mod tests {
         // And it must flow through the tracker correctly.
         let mut tracker = UsageTracker::default();
         tracker.begin_turn("sess-goose-nototal");
-        tracker.record("sess-goose-nototal", &payload);
+        tracker.record("sess-goose-nototal", &UsageSnapshot::from(&payload));
         let usage = tracker.take().expect("pending");
         assert!(
             usage.cumulative_total_tokens.is_none(),
@@ -1131,5 +1312,154 @@ mod tests {
             "absent baseline total → turn total null even when current has a total"
         );
         assert_eq!(usage.cumulative_total_tokens, Some(250));
+    }
+
+    // ── Standard ACP wire format ──────────────────────────────────────────
+
+    /// The exact frame claude-agent-acp puts on the wire must deserialize.
+    /// A field-name drift here is invisible at runtime — `record` never sees
+    /// the payload and the harness silently stops publishing metrics.
+    #[test]
+    fn acp_usage_update_deserializes_from_the_wire_shape() {
+        let notif: AcpSessionUpdateNotification = serde_json::from_value(serde_json::json!({
+            "sessionId": "sess-acp",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "used": 15_247,
+                "size": 200_000,
+                "cost": { "amount": 0.0234, "currency": "USD" },
+            }
+        }))
+        .expect("standard ACP usage_update must deserialize");
+        assert_eq!(notif.session_id, "sess-acp");
+        let AcpSessionUpdateVariant::UsageUpdate(p) = notif.update else {
+            panic!("expected the usage_update variant");
+        };
+        assert_eq!(p.used, 15_247);
+        assert_eq!(p.size, 200_000);
+        assert_eq!(p.cost.as_ref().map(|c| c.amount), Some(0.0234));
+    }
+
+    /// Non-usage variants must deserialize into `Other` rather than erroring —
+    /// every `session/update` frame passes through this parse.
+    #[test]
+    fn acp_non_usage_variant_deserializes_as_other() {
+        let notif: AcpSessionUpdateNotification = serde_json::from_value(serde_json::json!({
+            "sessionId": "sess-acp",
+            "update": { "sessionUpdate": "agent_message_chunk",
+                        "content": { "text": "hello" } }
+        }))
+        .expect("non-usage variants must not fail the parse");
+        assert!(matches!(notif.update, AcpSessionUpdateVariant::Other));
+    }
+
+    /// The standard payload carries no cumulative token split. Mapping `used`
+    /// into a token counter would be wrong — it is a context snapshot that
+    /// falls on compaction — so the snapshot leaves tokens unknown.
+    #[test]
+    fn acp_snapshot_carries_cost_only() {
+        let p = AcpUsageUpdatePayload {
+            used: 15_247,
+            size: 200_000,
+            cost: Some(AcpCost {
+                amount: 0.0234,
+                currency: "USD".to_string(),
+            }),
+        };
+        assert_eq!(
+            UsageSnapshot::from(&p),
+            UsageSnapshot {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cost_usd: Some(0.0234),
+                model: None,
+            }
+        );
+    }
+
+    fn acp_snapshot(cost: Option<f64>) -> UsageSnapshot {
+        UsageSnapshot::from(&AcpUsageUpdatePayload {
+            used: 10_000,
+            size: 200_000,
+            cost: cost.map(|amount| AcpCost {
+                amount,
+                currency: "USD".to_string(),
+            }),
+        })
+    }
+
+    /// A cost-only harness still produces usable per-turn metrics: the cost
+    /// delta is reliable from the second turn on, and the token fields stay
+    /// null rather than being reported as zero (NIP-AM).
+    #[test]
+    fn acp_cost_only_second_turn_delta_is_reliable_with_null_tokens() {
+        let mut tracker = UsageTracker::default();
+
+        tracker.begin_turn("acp-s1");
+        tracker.record("acp-s1", &acp_snapshot(Some(0.10)));
+        let t1 = tracker.take().expect("turn 1");
+        assert!(!t1.delta_reliable, "first turn has no baseline");
+        assert_eq!(t1.cumulative_cost_usd, Some(0.10));
+
+        tracker.begin_turn("acp-s1");
+        tracker.record("acp-s1", &acp_snapshot(Some(0.25)));
+        let t2 = tracker.take().expect("turn 2");
+        assert!(t2.delta_reliable, "baseline observed, nothing decreased");
+        let d = t2.turn_cost_usd.expect("cost delta");
+        assert!((d - 0.15).abs() < 1e-9, "expected 0.15, got {d}");
+        assert_eq!(t2.turn_input_tokens, None);
+        assert_eq!(t2.turn_output_tokens, None);
+        assert_eq!(t2.cumulative_input_tokens, None);
+        assert_eq!(t2.cumulative_output_tokens, None);
+    }
+
+    /// A snapshot with no NIP-AM counter at all is dropped: it must neither
+    /// produce a publishable record (NIP-AM forbids an all-null metric) nor
+    /// overwrite the baseline that real snapshots established.
+    #[test]
+    fn counter_free_snapshot_is_dropped_and_preserves_the_baseline() {
+        let mut tracker = UsageTracker::default();
+
+        tracker.begin_turn("acp-s2");
+        tracker.record("acp-s2", &acp_snapshot(Some(0.10)));
+        let _ = tracker.take();
+
+        tracker.begin_turn("acp-s2");
+        tracker.record("acp-s2", &acp_snapshot(None));
+        assert!(
+            tracker.take().is_none(),
+            "no counters → nothing to publish for this turn"
+        );
+
+        tracker.begin_turn("acp-s2");
+        tracker.record("acp-s2", &acp_snapshot(Some(0.30)));
+        let t3 = tracker.take().expect("turn 3");
+        let d = t3.turn_cost_usd.expect("cost delta");
+        assert!(
+            (d - 0.20).abs() < 1e-9,
+            "delta must run from the surviving 0.10 baseline, got {d}"
+        );
+    }
+
+    /// A harness that reports tokens must keep working exactly as before when
+    /// a counter it never sends is absent — absence is field-local and must not
+    /// mark the record unreliable.
+    #[test]
+    fn absent_counter_does_not_make_the_record_unreliable() {
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("mixed");
+        tracker.record("mixed", &payload(1000, 200, None));
+        let _ = tracker.take();
+
+        tracker.begin_turn("mixed");
+        tracker.record("mixed", &payload(1800, 450, None));
+        let usage = tracker.take().expect("turn 2");
+        assert!(
+            usage.delta_reliable,
+            "a never-reported cost must not flip delta_reliable"
+        );
+        assert_eq!(usage.turn_input_tokens, Some(800));
+        assert!(usage.turn_cost_usd.is_none());
     }
 }
