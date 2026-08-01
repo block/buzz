@@ -163,7 +163,7 @@ nak req -k 9 --tag "h=<channel-uuid>" --stream \
 nak event -k 7 -c "+" --tag "h=<channel-uuid>" --tag "e=<message-event-id>" \
   --auth --sec <privkey> ws://localhost:3000
 
-# Subscribe to reactions — include #h for live delivery (see note below)
+# Subscribe to reactions to channel messages — include #h for live delivery (see note below)
 nak req -k 7 --tag "h=<channel-uuid>" --stream \
   --auth --sec <privkey> ws://localhost:3000
 
@@ -190,12 +190,12 @@ nak req -k 1059 --tag "p=<your-hex-pubkey>" \
 ```
 
 > **Note:** The relay derives a reaction's channel from its `#e` target (client `#h` is
-> ignored for channel determination), so reactions are channel-scoped events. Live
-> fan-out keeps channel-scoped and global subscriptions strictly separate, which means a
-> kinds-only subscription (`{"kinds":[7]}`) receives no reactions — subscribe with
-> `{"kinds":[7],"#h":["<channel-uuid>"]}` instead. `#h` matching works whether or not
-> the signed reaction carries an `h` tag: explicit `h` tags are matched directly, and
-> tagless reactions match via their stored channel.
+> ignored for channel determination). Reactions to channel-scoped events are therefore
+> channel-scoped. Live fan-out keeps channel-scoped and global subscriptions strictly
+> separate, which means a kinds-only subscription (`{"kinds":[7]}`) receives none of
+> those reactions — subscribe with `{"kinds":[7],"#h":["<channel-uuid>"]}` instead.
+> `#h` matching works whether or not the signed reaction carries an `h` tag: explicit
+> `h` tags are matched directly, and tagless reactions match via their stored channel.
 
 ### Tested Clients (Direct)
 
