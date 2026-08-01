@@ -275,17 +275,25 @@ async fn run_remote_checks(
     // Unauthenticated reachability probe: try the public NIP-11 document.
     // We do this with a bare reqwest client so that doctor works even when
     // the identity is invalid — reachability is independent of auth.
-    match probe_reachability(relay_url).await {
-        Ok(()) => checks.push(Check::ok(
-            "relay_reachable",
-            format!("relay at {relay_url} responded to an unauthenticated probe"),
-        )),
-        Err(msg) => checks.push(Check::error(
-            "relay_reachable",
-            msg,
-            Some("Check BUZZ_RELAY_URL, DNS, and network connectivity"),
-        )),
-    }
+    // Track the outcome so we can avoid re-emitting the same error when
+    // the authed probe below also fails.
+    let relay_reachable = match probe_reachability(relay_url).await {
+        Ok(()) => {
+            checks.push(Check::ok(
+                "relay_reachable",
+                format!("relay at {relay_url} responded to an unauthenticated probe"),
+            ));
+            true
+        }
+        Err(msg) => {
+            checks.push(Check::error(
+                "relay_reachable",
+                msg,
+                Some("Check BUZZ_RELAY_URL, DNS, and network connectivity"),
+            ));
+            false
+        }
+    };
 
     // NIP-11 probe. Public per spec; relay may also accept the metadata
     // unauthenticated.  The same probe result feeds both the reachability
@@ -359,10 +367,13 @@ async fn run_remote_checks(
                         ));
                     }
                 }
-                Err(CliError::Auth(msg)) => {
+                // True auth rejection — either an explicit Auth variant or a
+                // relay 401/403 — classifies as auth (exit 3).
+                Err(e @ CliError::Auth(_))
+                | Err(e @ CliError::Relay { status: 401 | 403, .. }) => {
                     checks.push(Check::error(
                         "auth_read",
-                        format!("relay rejected authentication: {msg}"),
+                        format!("relay rejected authentication: {e}"),
                         Some("Verify BUZZ_PRIVATE_KEY and BUZZ_AUTH_TAG"),
                     ));
                     checks.push(Check::skipped(
@@ -370,15 +381,28 @@ async fn run_remote_checks(
                         "skipped (authentication failed)",
                     ));
                 }
+                // Anything else — network/transport or non-401 relay — means
+                // the relay couldn't be queried authoritatively.  If the
+                // unauthenticated reachability probe already failed, the
+                // check list already carries that signal; don't double-report.
+                // Otherwise, this path means the relay was reachable publicly
+                // but rejected our authed call network-side: report as a
+                // relay-side failure (exit 2), NOT as an auth failure.
                 Err(e) => {
-                    checks.push(Check::error(
+                    if relay_reachable {
+                        checks.push(Check::error(
+                            "relay_reachable",
+                            format!("authenticated read failed: {e}"),
+                            Some("Check relay availability, DNS, and network connectivity"),
+                        ));
+                    }
+                    checks.push(Check::skipped(
                         "auth_read",
-                        format!("authenticated read failed: {e}"),
-                        Some("Check relay availability and credential validity"),
+                        "skipped (relay unreachable for authenticated read)",
                     ));
                     checks.push(Check::skipped(
                         "membership",
-                        "skipped (authentication read failed)",
+                        "skipped (relay unreachable for authenticated read)",
                     ));
                 }
             }
