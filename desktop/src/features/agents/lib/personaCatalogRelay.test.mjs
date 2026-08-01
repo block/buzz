@@ -367,7 +367,7 @@ test("test_foreign_entry_with_no_local_copy_stays_unselected", () => {
     BOB,
   );
 
-  assert.equal(personas[0].id, "catalog:" + ALICE + ":reviewer");
+  assert.equal(personas[0].id, `catalog:${ALICE}:reviewer`);
   assert.equal(personas[0].isActive, false);
 });
 
@@ -388,7 +388,7 @@ test("test_catalog_source_match_is_scoped_to_the_publishing_owner", () => {
     ALICE,
   );
 
-  assert.equal(personas[0].id, "catalog:" + BOB + ":reviewer");
+  assert.equal(personas[0].id, `catalog:${BOB}:reviewer`);
   assert.equal(personas[0].isActive, false);
 });
 
