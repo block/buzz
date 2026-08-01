@@ -16,6 +16,7 @@ import type { GlobalAgentConfig } from "@/shared/api/types";
 
 const EMPTY_CONFIG: GlobalAgentConfig = {
   env_vars: {},
+  community_env_vars: {},
   provider: null,
   model: null,
   preferred_runtime: null,

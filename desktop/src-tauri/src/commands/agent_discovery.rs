@@ -473,11 +473,14 @@ async fn restart_setup_mode_agents_after_install(
                     .find(|(key, _)| key.pubkey == record.pubkey)
                     .map(|(_, p)| p.setup_mode)
                     .unwrap_or(false);
+                // Readiness probe with no single relay context — community
+                // env is relay-scoped, so resolve without it (base layers only).
                 let effective = resolve_effective_agent_env(
                     record,
                     &personas,
                     known_acp_runtime(&effective_cmd),
                     &global,
+                    None,
                 );
                 let now_ready = matches!(agent_readiness(&effective), AgentReadiness::Ready);
                 let pid_alive = runtimes.iter().any(|(key, runtime)| {
@@ -607,7 +610,7 @@ async fn restart_single_agent_after_install(
         }
 
         let runtime_meta = known_acp_runtime(&effective_cmd);
-        let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
+        let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global, None);
         if !matches!(agent_readiness(&effective), AgentReadiness::Ready) {
             return Err(format!(
                 "agent {pubkey_owned} readiness is still NotReady after install — not bouncing"

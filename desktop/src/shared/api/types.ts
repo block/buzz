@@ -1008,6 +1008,13 @@ export type ChannelMessagesPageResponse = {
 export type GlobalAgentConfig = {
   /** Global env vars injected into all agents unconditionally. */
   env_vars: Record<string, string>;
+  /**
+   * Community-scoped env vars keyed by relay URL — injected only into agents
+   * spawned for that community's relay. Precedence: global < community <
+   * persona < per-agent. Mirrors the Rust field; carried through saves even
+   * when the UI has no editor for it yet.
+   */
+  community_env_vars: Record<string, Record<string, string>>;
   /** Global fallback provider (e.g. "anthropic", "databricks_v2"). Null = no global default. */
   provider: string | null;
   /** Global fallback model identifier. Null = no global default. */

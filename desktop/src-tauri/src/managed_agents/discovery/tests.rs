@@ -1630,13 +1630,13 @@ fn deleted_harness_summary_display_and_spawn_sentence_agree() {
     let record = record_with(Some("doomed"), None, None);
     let global = GlobalAgentConfig::default();
     assert!(
-        resolve_effective_harness_descriptor(&record, &[], &global).is_ok(),
+        resolve_effective_harness_descriptor(&record, &[], &global, None).is_ok(),
         "must resolve before delete"
     );
 
     // Delete it — the shared resolver used by BOTH spawn and summary errors.
     delete_and_warm(dir.path(), "doomed").unwrap();
-    let err = resolve_effective_harness_descriptor(&record, &[], &global).unwrap_err();
+    let err = resolve_effective_harness_descriptor(&record, &[], &global, None).unwrap_err();
 
     // Summary half: renders the missing id, never the default command.
     let id = super::dangling_harness_id(&err).expect("resolver must emit the typed sentinel");
