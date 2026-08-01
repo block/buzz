@@ -529,6 +529,12 @@ export type AcpRuntimeCatalogEntry = {
   definitionEnv?: Record<string, string>;
   /** Spawn-time parallelism cap; absent for uncapped harnesses. */
   maxParallelism?: number;
+  /** Buzz-owned static fact from KnownAcpRuntime; null when an older backend did not report it. */
+  supportsAcpNativeConfig: boolean | null;
+  /** Buzz-owned static fact from KnownAcpRuntime; null when an older backend did not report it. */
+  supportsAcpModelSwitching: boolean | null;
+  /** Buzz-owned static fact from KnownAcpRuntime; null when an older backend did not report it. */
+  mcpHooks: boolean | null;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */

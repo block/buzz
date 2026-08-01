@@ -1251,16 +1251,33 @@ async fn create_session_and_apply_model(
             "relayUrl": ctx.relay_url,
         }),
     );
-
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
-    // are safely skipped — the harness auto-approves via handle_permission_request.
-    if !ctx.permission_mode.is_default()
+    // are safely skipped — the harness rejects interactive permission requests.
+    let permission_mode_applied = if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
-    }
+        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?
+    } else {
+        false
+    };
+
+    // Emit session config for desktop consumption (config bridge tier 1b).
+    // Emitted AFTER desired-model and permission-mode resolution so the owner
+    // capability manifest can distinguish requested policy from observed
+    // effective behavior. `capabilityManifest` is a safe projection: MCP
+    // commands, arguments, env vars, prompts, paths, and credentials never
+    // enter it.
+    agent.acp.observe(
+        "session_config_captured",
+        build_session_config_observation(
+            &resp.raw,
+            agent.model_overridden && switch_succeeded,
+            ctx,
+            permission_mode_applied,
+        ),
+    );
 
     Ok(resp.session_id)
 }
@@ -1526,7 +1543,65 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
         .unwrap_or(false)
 }
 
-/// per-tool auto-approval in `handle_permission_request`.
+fn build_session_config_observation(
+    session_new_result: &serde_json::Value,
+    model_overridden: bool,
+    ctx: &PromptContext,
+    permission_mode_applied: bool,
+) -> serde_json::Value {
+    let requested_permission_mode = ctx.permission_mode.as_wire_str();
+    let advertised_permission_mode = session_new_result
+        .get("modes")
+        .and_then(|modes| modes.get("currentModeId"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|mode| !mode.trim().is_empty());
+    let (effective_permission_mode, permission_mode_source) = if permission_mode_applied {
+        (requested_permission_mode, "runtime")
+    } else if let Some(current_mode) = advertised_permission_mode {
+        (current_mode, "runtime")
+    } else {
+        // When no runtime mode was applied, buzz-acp resolves each emitted
+        // permission request with allow_once (or reject_once when allow_once is
+        // absent). Name that harness behavior instead of claiming the runtime's
+        // built-in mode is known.
+        ("perToolAutoDecision", "buzzHarness")
+    };
+    let mut tool_sources: Vec<&str> = ctx
+        .mcp_servers
+        .iter()
+        .map(|server| server.name.trim())
+        .filter(|name| !name.is_empty())
+        .collect();
+    tool_sources.sort_unstable();
+    tool_sources.dedup();
+
+    serde_json::json!({
+        "configOptions": session_new_result.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+        "modes": session_new_result.get("modes").cloned().unwrap_or(serde_json::Value::Null),
+        "models": session_new_result.get("models").cloned().unwrap_or(serde_json::Value::Null),
+        "modelOverridden": model_overridden,
+        // Pair identity for the desktop session-config cache, which is
+        // keyed by (agent, relay) like the lifecycle frames.
+        "relayUrl": ctx.relay_url,
+        "capabilityManifest": {
+            "toolSources": tool_sources
+                .into_iter()
+                .map(|name| serde_json::json!({ "name": name, "kind": "mcp" }))
+                .collect::<Vec<_>>(),
+            "permissionMode": {
+                "requested": requested_permission_mode,
+                "effective": effective_permission_mode,
+                "source": permission_mode_source,
+            },
+        },
+    })
+}
+
+/// Set the session permission mode via `session/set_config_option`.
+///
+/// Non-fatal for most errors: logs and proceeds. The agent falls back to its
+/// default mode, and any interactive permission request is rejected by
+/// `handle_permission_request`.
 ///
 /// **Fatal exception:** if the agent process exits (e.g., goose crashes on
 /// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
@@ -1534,7 +1609,7 @@ async fn apply_permission_mode(
     acp: &mut AcpClient,
     session_id: &str,
     mode: &PermissionMode,
-) -> Result<(), AcpError> {
+) -> Result<bool, AcpError> {
     let wire = mode.as_wire_str();
     let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
         acp.session_set_config_option(session_id, "mode", wire)
@@ -1548,6 +1623,7 @@ async fn apply_permission_mode(
                 target: "pool::permission",
                 "applied permission mode {wire:?} on session {session_id}"
             );
+            return Ok(true);
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent.
@@ -1578,7 +1654,7 @@ async fn apply_permission_mode(
             return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Prepend a legacy agent's standing context to a user-message body.
@@ -8007,6 +8083,99 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &owner.public_key(),
         )
         .is_none());
+    }
+
+    // ── capability manifests ─────────────────────────────────────────
+
+    #[test]
+    fn capability_manifest_projection_exposes_names_not_mcp_secrets() {
+        let agent_keys = nostr::Keys::generate();
+        let mut ctx = make_prompt_context_impl(&agent_keys, None);
+        ctx.permission_mode = PermissionMode::BypassPermissions;
+        ctx.mcp_servers = vec![McpServer {
+            name: "github".to_string(),
+            command: "/private/bin/secret-mcp".to_string(),
+            args: vec!["--token".to_string(), "argument-canary".to_string()],
+            env: vec![crate::acp::EnvVar {
+                name: "TOKEN".to_string(),
+                value: "credential-canary".to_string(),
+            }],
+        }];
+
+        let observation = build_session_config_observation(
+            &json!({
+                "models": {
+                    "currentModelId": "model-1",
+                    "availableModels": [],
+                },
+            }),
+            false,
+            &ctx,
+            false,
+        );
+        let manifest = &observation["capabilityManifest"];
+        assert_eq!(manifest["toolSources"][0]["name"], "github");
+        assert_eq!(
+            manifest["permissionMode"],
+            json!({
+                "requested": "bypassPermissions",
+                "effective": "perToolAutoDecision",
+                "source": "buzzHarness",
+            })
+        );
+
+        let serialized_manifest = serde_json::to_string(manifest).unwrap();
+        for secret in [
+            "/private/bin/secret-mcp",
+            "--token",
+            "argument-canary",
+            "TOKEN",
+            "credential-canary",
+        ] {
+            assert!(!serialized_manifest.contains(secret));
+        }
+    }
+
+    #[test]
+    fn capability_manifest_reports_runtime_applied_permission_mode() {
+        let agent_keys = nostr::Keys::generate();
+        let mut ctx = make_prompt_context_impl(&agent_keys, None);
+        ctx.permission_mode = PermissionMode::Plan;
+
+        let observation = build_session_config_observation(&json!({}), false, &ctx, true);
+        assert_eq!(
+            observation["capabilityManifest"]["permissionMode"],
+            json!({
+                "requested": "plan",
+                "effective": "plan",
+                "source": "runtime",
+            })
+        );
+    }
+
+    #[test]
+    fn capability_manifest_reports_runtime_advertised_default_permission_mode() {
+        let agent_keys = nostr::Keys::generate();
+        let ctx = make_prompt_context_impl(&agent_keys, None);
+        let observation = build_session_config_observation(
+            &json!({
+                "modes": {
+                    "currentModeId": "plan",
+                    "availableModes": [{"id": "plan"}],
+                },
+            }),
+            false,
+            &ctx,
+            false,
+        );
+        assert_eq!(
+            observation["capabilityManifest"]["permissionMode"],
+            json!({
+                "requested": "default",
+                "effective": "plan",
+                "source": "runtime",
+            })
+        );
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────

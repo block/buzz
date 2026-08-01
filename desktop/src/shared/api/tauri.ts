@@ -197,6 +197,9 @@ export type RawAcpRuntimeCatalogEntry = {
   /** Definition-level env vars for `source: custom` entries; absent for builtin/preset. */
   definition_env?: Record<string, string>;
   max_parallelism?: number;
+  supports_acp_native_config?: boolean;
+  supports_acp_model_switching?: boolean;
+  mcp_hooks?: boolean;
 };
 
 export type {
@@ -707,6 +710,9 @@ export function fromRawAcpRuntimeCatalogEntry(
     ...(entry.max_parallelism !== undefined && {
       maxParallelism: entry.max_parallelism,
     }),
+    supportsAcpNativeConfig: entry.supports_acp_native_config ?? null,
+    supportsAcpModelSwitching: entry.supports_acp_model_switching ?? null,
+    mcpHooks: entry.mcp_hooks ?? null,
   };
 }
 

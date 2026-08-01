@@ -250,6 +250,15 @@ with a TypeScript lookup table or an id comparison in a component.
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
 
+15. **Capability manifests project evidence; they never infer it.**
+    `lib/capabilityManifest.ts` combines `KnownAcpRuntime` facts,
+    managed-agent lifecycle, presence, and the encrypted owner observer stream.
+    A missing runtime field is `unknown`, an explicit `false` is
+    `unavailable`, and only a supplied fact is `reported`. Manifest projection
+    is allowlist-only: do not surface raw config, executable commands,
+    arguments, environment variables, prompts, paths, credentials, tool inputs,
+    or tool results.
+
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
@@ -290,8 +299,6 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
-- Rust: `definition_validation` and inbound persona tests pin the shared
-  Unicode/control-character policy at local, import, publish, and sync gates.
 
 ## Keep this file true
 

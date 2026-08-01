@@ -659,6 +659,12 @@ pub struct AcpRuntimeCatalogEntry {
     /// Spawn-time parallelism cap; absent for uncapped harnesses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_parallelism: Option<u32>,
+    /// Buzz-owned static fact: this runtime exposes native ACP config read/write.
+    pub supports_acp_native_config: bool,
+    /// Buzz-owned static fact: this runtime handles ACP model switching natively.
+    pub supports_acp_model_switching: bool,
+    /// Buzz-owned static fact: this runtime receives Buzz MCP lifecycle hooks.
+    pub mcp_hooks: bool,
 }
 
 /// Result of a single install step (CLI or adapter).
