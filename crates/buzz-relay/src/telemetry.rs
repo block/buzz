@@ -473,6 +473,16 @@ mod tests {
 
     #[test]
     fn trace_context_lookup_does_not_enable_callsites() {
+        // #3929: this test intermittently failed under the parallel suite
+        // because `tracing`'s callsite *interest* cache is global per
+        // callsite, not per-subscriber. A neighbor test that registers a
+        // global default dispatcher can poison this callsite's cached
+        // interest before our thread-local `with_default` runs, so the probe
+        // consults a stale entry. Serialize against the other global-state
+        // tests via the shared ENV_LOCK (the same mutex they already take),
+        // so no global-dispatcher registration can overlap this test.
+        let _guard = ENV_LOCK.lock().unwrap();
+
         let context_lookup = TraceContextLookup::default();
         let subscriber = tracing_subscriber::registry().with(
             context_lookup
