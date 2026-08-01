@@ -1,4 +1,4 @@
-<h1 align="center"><img src="desktop/public/app-icon@3x.png" alt="Buzz Dev Mode app icon" width="48"> Buzz Dev Mode</h1>
+<h1 align="center"><img src="desktop/public/app-icon@3x.png" alt="Buzz Dev Mode app icon" width="48" align="middle"> Buzz Dev Mode</h1>
 
 <p align="center">
   <strong>A workspace where humans and agents build together, on a relay you own.</strong>
