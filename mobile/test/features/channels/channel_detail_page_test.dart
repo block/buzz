@@ -898,8 +898,8 @@ void main() {
       await tester.tap(find.text('Manage channel').last);
       await tester.pumpAndSettle();
 
-      final sheet = find.byType(BottomSheet);
-      expect(sheet, findsOneWidget);
+      final sheet = find.byType(BottomSheet).last;
+      expect(find.byType(BottomSheet), findsNWidgets(2));
       expect(tester.getSize(sheet).height, lessThanOrEqualTo(720));
 
       final sheetTop = tester.getTopLeft(sheet).dy;
@@ -909,7 +909,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(sheet, findsNothing);
+      expect(find.text('Manage channel'), findsOneWidget);
     });
 
     testWidgets('shows empty state when no messages', (tester) async {
