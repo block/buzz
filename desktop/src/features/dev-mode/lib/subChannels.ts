@@ -30,10 +30,16 @@ export function subChannelName(parentName: string, subSlug: string): string {
 export type SubChannelIndex = {
   /** Channels that render in the left list: everything except paired subs. */
   mains: Channel[];
-  /** Sub-channels per parent id, sorted by name for stable tab order. */
+  /** Sub-channels per parent id, newest activity first. */
   subsByParentId: ReadonlyMap<string, Channel[]>;
   parentIdByChildId: ReadonlyMap<string, string>;
 };
+
+function lastMessageTime(channel: Channel): number {
+  if (!channel.lastMessageAt) return 0;
+  const timestamp = Date.parse(channel.lastMessageAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
 
 /**
  * Pair subs with their parents in one O(n) pass — parents can have hundreds
@@ -65,7 +71,10 @@ export function indexSubChannels(channels: Channel[]): SubChannelIndex {
     }
   }
   for (const siblings of subsByParentId.values()) {
-    siblings.sort((left, right) => left.name.localeCompare(right.name));
+    siblings.sort((left, right) => {
+      const activityOrder = lastMessageTime(right) - lastMessageTime(left);
+      return activityOrder || left.name.localeCompare(right.name);
+    });
   }
   return { mains, subsByParentId, parentIdByChildId };
 }

@@ -18,6 +18,7 @@ import {
   resolveObservedUnreadRootId,
 } from "./unreadReadMarker.ts";
 import {
+  advanceChannelLastMessageAt,
   isChannelUnreadTriggerKind,
   trackSeenEvent,
   withChannelTagFallback,
@@ -100,6 +101,31 @@ test("notification event guard suppresses reconnect replay and stays bounded", (
   assert.equal(trackSeenEvent(seen, "event-b", 2), true);
   assert.equal(trackSeenEvent(seen, "event-c", 2), true);
   assert.deepEqual([...seen], ["event-b", "event-c"]);
+});
+
+test("live message advances the cached channel activity monotonically", () => {
+  const channels = [
+    {
+      id: "channel-a",
+      name: "a",
+      lastMessageAt: "2026-07-30T12:00:00Z",
+    },
+    { id: "channel-b", name: "b", lastMessageAt: null },
+  ];
+
+  const advanced = advanceChannelLastMessageAt(
+    channels,
+    "channel-b",
+    Date.parse("2026-07-31T12:00:00Z") / 1_000,
+  );
+  assert.equal(advanced[1].lastMessageAt, "2026-07-31T12:00:00.000Z");
+
+  const unchanged = advanceChannelLastMessageAt(
+    advanced,
+    "channel-b",
+    Date.parse("2026-07-29T12:00:00Z") / 1_000,
+  );
+  assert.equal(unchanged, advanced);
 });
 
 test("dmHuddleStart_isDmOnlyUnreadTrigger", () => {

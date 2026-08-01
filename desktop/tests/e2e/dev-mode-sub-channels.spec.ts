@@ -52,6 +52,52 @@ async function createChannel(
   }, name);
 }
 
+async function waitForMockLiveSubscription(
+  page: import("@playwright/test").Page,
+  channelName: string,
+) {
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        ({ ch }) =>
+          (
+            window as Window & {
+              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                channelName: string;
+              }) => boolean;
+            }
+          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
+          false,
+        { ch: channelName },
+      ),
+    )
+    .toBe(true);
+}
+
+async function emitMockMessage(
+  page: import("@playwright/test").Page,
+  channelName: string,
+  createdAt: number,
+) {
+  await page.evaluate(
+    ({ ch, ts }) =>
+      (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            createdAt: number;
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: ch,
+        content: `activity in ${ch}`,
+        createdAt: ts,
+      }),
+    { ch: channelName, ts: createdAt },
+  );
+}
+
 test("subs hide from the left list and surface as tabs in the parent", async ({
   page,
 }) => {
@@ -82,6 +128,26 @@ test("subs hide from the left list and surface as tabs in the parent", async ({
   await page.keyboard.press("Escape");
   await expect(navigator.getByText("# general", { exact: true })).toBeVisible();
   await expect(navigator.getByText("▸")).toBeVisible();
+});
+
+test("main stays pinned while sub tabs reorder by live message activity", async ({
+  page,
+}) => {
+  await openDevModeChannel(page, "general");
+  await createChannel(page, "general--alpha");
+  await createChannel(page, "general--zeta");
+
+  const tabs = page.getByTestId("dev-mode-channel-tab");
+  await expect(tabs).toHaveText(["main", "alpha", "zeta"]);
+  await waitForMockLiveSubscription(page, "general--alpha");
+  await waitForMockLiveSubscription(page, "general--zeta");
+
+  const now = Math.floor(Date.now() / 1_000);
+  await emitMockMessage(page, "general--zeta", now);
+  await expect(tabs).toHaveText(["main", "zeta", "alpha"]);
+
+  await emitMockMessage(page, "general--alpha", now + 1);
+  await expect(tabs).toHaveText(["main", "alpha", "zeta"]);
 });
 
 test("+ tab drafts a prompt that spawns and announces a sub-channel", async ({

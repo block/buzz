@@ -80,6 +80,34 @@ const CHANNELS_INVALIDATE_DEBOUNCE_MS = 500;
 // catch-up query in useUnreadChannels so the two paths stay in lockstep.
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
 
+/** Advance one cached channel's activity timestamp without replay regressions. */
+export function advanceChannelLastMessageAt(
+  channels: Channel[] | undefined,
+  channelId: string,
+  createdAt: number,
+): Channel[] | undefined {
+  if (!channels) return channels;
+
+  const incomingTimestamp = createdAt * 1_000;
+  const nextLastMessageAt = new Date(incomingTimestamp).toISOString();
+  let changed = false;
+  const next = channels.map((channel) => {
+    if (channel.id !== channelId) return channel;
+    const currentTimestamp = channel.lastMessageAt
+      ? Date.parse(channel.lastMessageAt)
+      : 0;
+    if (
+      Number.isFinite(currentTimestamp) &&
+      currentTimestamp >= incomingTimestamp
+    ) {
+      return channel;
+    }
+    changed = true;
+    return { ...channel, lastMessageAt: nextLastMessageAt };
+  });
+  return changed ? next : channels;
+}
+
 export const EMPTY_SET: ReadonlySet<string> = new Set();
 
 export function isChannelUnreadTriggerKind(kind: number, isDmChannel: boolean) {
@@ -239,6 +267,12 @@ export function useLiveChannelUpdates(
         invalidateChannelsDebounced();
       }
       return;
+    }
+
+    if (UNREAD_TRIGGER_KINDS.has(event.kind)) {
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        advanceChannelLastMessageAt(current, channelId, event.created_at),
+      );
     }
 
     const isDmChannel = dmChannelMap.has(channelId);

@@ -72,6 +72,21 @@ test("indexSubChannels_pairsSubsWithParents", () => {
   assert.equal(index.parentIdByChildId.get("c2"), "p1");
 });
 
+test("indexSubChannels_ordersTabsByLatestMessageThenName", () => {
+  const index = indexSubChannels([
+    channel("p1", "work"),
+    channel("quiet-b", "work--quiet-b"),
+    channel("older", "work--older", "2026-07-20T00:00:00Z"),
+    channel("newest", "work--newest", "2026-07-31T00:00:00.000Z"),
+    channel("quiet-a", "work--quiet-a"),
+  ]);
+
+  assert.deepEqual(
+    index.subsByParentId.get("p1").map((c) => c.id),
+    ["newest", "older", "quiet-a", "quiet-b"],
+  );
+});
+
 test("indexSubChannels_orphanSubStaysVisibleAsMain", () => {
   const index = indexSubChannels([channel("c1", "ghost--task")]);
   assert.deepEqual(
