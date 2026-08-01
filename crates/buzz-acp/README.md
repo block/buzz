@@ -111,6 +111,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_MCP_CONFIG` | no | `""` (empty) | Path to a version 1 JSON file defining additional stdio MCP servers. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
@@ -118,6 +119,60 @@ All configuration is via environment variables (or CLI flags — every env var h
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
+
+### Multiple MCP servers
+
+Use `--mcp-config <path>` or `BUZZ_ACP_MCP_CONFIG` to add named stdio MCP
+servers:
+
+```json
+{
+  "version": 1,
+  "servers": [
+    {
+      "name": "analytics",
+      "command": "/opt/mcp/analytics-server",
+      "args": ["--stdio"],
+      "env": {
+        "ANALYTICS_TOKEN": "replace-me"
+      }
+    }
+  ]
+}
+```
+
+The JSON is strict. The only top-level fields are `version` and `servers`.
+Each server has `name`, `command`, `args`, and `env`. Server names must be
+unique, contain 1 to 128 ASCII bytes using only letters, digits, `_`, or `-`,
+and cannot contain `__`. Names are checked across both structured entries and
+the legacy server.
+
+The config file is limited to 64 KiB. A harness can have at most 16 MCP
+servers in total, including the server from `BUZZ_ACP_MCP_COMMAND`. An
+unreadable file, malformed JSON, an unsupported version, an unknown field, or
+an invalid server entry stops startup. Buzz does not silently drop a server.
+
+`BUZZ_ACP_MCP_COMMAND` keeps its current behavior. It defines one privileged
+Buzz companion and receives the relay URL and Buzz identity credentials.
+For a structured server, Buzz puts only the values listed in its `env` object
+into the ACP `env` list. Protected Buzz identity and authentication keys are
+rejected. Buzz sends the list to the ACP adapter in `session/new`, and the
+adapter controls the MCP processes. Treat the adapter as a credential broker
+and use one you trust.
+
+The adapter still inherits the harness environment so its shell tools can use
+the `buzz` CLI. Some adapters may propagate inherited variables to MCP child
+processes. Per-server `env` entries are explicit configuration, not a process
+isolation boundary. Use a separate account, container, or credential-brokered
+service when the MCP process must not inherit adapter credentials.
+
+If the JSON contains secrets, keep it outside Git and restrict the file to its
+owner. On Unix:
+
+```bash
+chmod 600 /absolute/path/to/mcp-servers.json
+buzz-acp --mcp-config /absolute/path/to/mcp-servers.json
+```
 
 ### Parallel Agents & Heartbeat
 

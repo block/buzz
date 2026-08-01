@@ -3,7 +3,8 @@
 //! CLI-first: every option is a CLI flag with env var fallback.
 //! Config file (TOML) for complex subscription rules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -45,6 +46,250 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+}
+
+const MCP_CONFIG_VERSION: u32 = 1;
+const MCP_CONFIG_MAX_BYTES: u64 = 64 * 1024;
+const MCP_SERVER_MAX_COUNT: usize = 16;
+const MCP_SERVER_MAX_ARGS: usize = 128;
+const MCP_SERVER_MAX_ENV: usize = 128;
+const MCP_SERVER_NAME_MAX_BYTES: usize = 128;
+const PROTECTED_MCP_ENV_NAMES: [&str; 6] = [
+    "BUZZ_PRIVATE_KEY",
+    "NOSTR_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
+    "BUZZ_API_TOKEN",
+    "BUZZ_ACP_PRIVATE_KEY",
+    "BUZZ_ACP_API_TOKEN",
+];
+
+/// One local stdio MCP server loaded from the structured MCP configuration.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredMcpServer {
+    /// Stable ACP identifier for this server.
+    pub name: String,
+    /// Executable to invoke, passed directly without shell parsing.
+    pub command: String,
+    /// Arguments passed to the executable in their configured order.
+    pub args: Vec<String>,
+    /// Server-specific environment in deterministic key order.
+    #[serde(deserialize_with = "deserialize_mcp_env")]
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpConfigDocument {
+    version: u32,
+    servers: Vec<ConfiguredMcpServer>,
+}
+
+fn deserialize_mcp_env<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct EnvVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for EnvVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object containing unique environment variable names")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut env = BTreeMap::new();
+            let mut normalized_names = HashSet::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if !normalized_names.insert(key.to_ascii_uppercase()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate environment key '{key}'"
+                    )));
+                }
+                env.insert(key, value);
+            }
+            Ok(env)
+        }
+    }
+
+    deserializer.deserialize_map(EnvVisitor)
+}
+
+/// Derive the ACP name used by the legacy single-command MCP configuration.
+///
+/// This preserves the existing `build_mcp_servers` behavior so collision
+/// validation and runtime construction use the same name.
+pub fn legacy_mcp_server_name(command: &str) -> String {
+    std::path::Path::new(command)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("mcp")
+        .to_string()
+}
+
+fn read_mcp_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "failed to open MCP config {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "failed to inspect MCP config {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(ConfigError::ConfigFile(format!(
+            "MCP config {} must be a regular file",
+            path.display()
+        )));
+    }
+    let mut content = Vec::new();
+    file.take(MCP_CONFIG_MAX_BYTES + 1)
+        .read_to_end(&mut content)
+        .map_err(|error| {
+            ConfigError::ConfigFile(format!(
+                "failed to read MCP config {}: {error}",
+                path.display()
+            ))
+        })?;
+    if content.len() as u64 > MCP_CONFIG_MAX_BYTES {
+        return Err(ConfigError::ConfigFile(format!(
+            "MCP config {} exceeds the {} byte limit",
+            path.display(),
+            MCP_CONFIG_MAX_BYTES
+        )));
+    }
+    Ok(content)
+}
+
+fn valid_mcp_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MCP_SERVER_NAME_MAX_BYTES
+        && !name.contains("__")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_mcp_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn load_mcp_config(
+    path: &std::path::Path,
+    legacy_mcp_command: &str,
+) -> Result<Vec<ConfiguredMcpServer>, ConfigError> {
+    let content = read_mcp_config(path)?;
+    let document: McpConfigDocument = serde_json::from_slice(&content).map_err(|error| {
+        ConfigError::ConfigFile(format!("invalid MCP config {}: {error}", path.display()))
+    })?;
+
+    if document.version != MCP_CONFIG_VERSION {
+        return Err(ConfigError::ConfigFile(format!(
+            "unsupported MCP config version {} (expected {})",
+            document.version, MCP_CONFIG_VERSION
+        )));
+    }
+
+    let legacy_count = usize::from(!legacy_mcp_command.is_empty());
+    if document.servers.len() + legacy_count > MCP_SERVER_MAX_COUNT {
+        return Err(ConfigError::ConfigFile(format!(
+            "too many MCP servers ({} structured + {legacy_count} legacy, max {MCP_SERVER_MAX_COUNT})",
+            document.servers.len()
+        )));
+    }
+
+    let legacy_name =
+        (!legacy_mcp_command.is_empty()).then(|| legacy_mcp_server_name(legacy_mcp_command));
+    let mut names = HashSet::with_capacity(document.servers.len());
+    for (index, server) in document.servers.iter().enumerate() {
+        if !valid_mcp_server_name(&server.name) {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server {} has invalid name '{}': use 1 to {MCP_SERVER_NAME_MAX_BYTES} ASCII letters, digits, underscores, or hyphens, without '__'",
+                index + 1,
+                server.name
+            )));
+        }
+        if !names.insert(server.name.as_str()) {
+            return Err(ConfigError::ConfigFile(format!(
+                "duplicate MCP server name '{}'",
+                server.name
+            )));
+        }
+        if legacy_name.as_deref() == Some(server.name.as_str()) {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server name '{}' collides with the legacy --mcp-command server",
+                server.name
+            )));
+        }
+        if server.command.is_empty() || server.command.contains('\0') {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{}' command must be nonempty and contain no NUL bytes",
+                server.name
+            )));
+        }
+        if server.args.len() > MCP_SERVER_MAX_ARGS {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{}' has too many arguments ({}, max {MCP_SERVER_MAX_ARGS})",
+                server.name,
+                server.args.len()
+            )));
+        }
+        if server.args.iter().any(|argument| argument.contains('\0')) {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{}' arguments must contain no NUL bytes",
+                server.name
+            )));
+        }
+        if server.env.len() > MCP_SERVER_MAX_ENV {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{}' has too many environment entries ({}, max {MCP_SERVER_MAX_ENV})",
+                server.name,
+                server.env.len()
+            )));
+        }
+        for (key, value) in &server.env {
+            if !valid_mcp_env_name(key) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "MCP server '{}' has invalid environment key '{key}'",
+                    server.name
+                )));
+            }
+            if PROTECTED_MCP_ENV_NAMES
+                .iter()
+                .any(|protected| key.eq_ignore_ascii_case(protected))
+            {
+                return Err(ConfigError::ConfigFile(format!(
+                    "MCP server '{}' may not configure protected environment key '{key}'",
+                    server.name
+                )));
+            }
+            if value.contains('\0') {
+                return Err(ConfigError::ConfigFile(format!(
+                    "MCP server '{}' environment value for '{key}' contains a NUL byte",
+                    server.name
+                )));
+            }
+        }
+    }
+
+    Ok(document.servers)
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -260,6 +505,10 @@ pub struct CliArgs {
 
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
+
+    /// Path to a versioned JSON document defining additional local MCP servers.
+    #[arg(long, env = "BUZZ_ACP_MCP_CONFIG")]
+    pub mcp_config: Option<PathBuf>,
 
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
@@ -500,6 +749,8 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    /// Additional local MCP servers loaded once from `--mcp-config`.
+    pub configured_mcp_servers: Vec<ConfiguredMcpServer>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -827,10 +1078,23 @@ pub fn propagate_legacy_env_vars() {
     }
 }
 
+/// Prepare environment fallbacks before Clap and Tokio read process state.
+///
+/// Deployment templates commonly render optional values as empty strings.
+/// Clap treats an empty value for `Option<PathBuf>` as an invalid supplied
+/// value, so normalize this one optional path to the same state as an unset
+/// variable before argument parsing starts.
+pub fn prepare_process_env() {
+    propagate_legacy_env_vars();
+    if std::env::var_os("BUZZ_ACP_MCP_CONFIG").is_some_and(|value| value.is_empty()) {
+        std::env::remove_var("BUZZ_ACP_MCP_CONFIG");
+    }
+}
+
 impl Config {
     pub fn from_cli() -> Result<Self, ConfigError> {
         // Legacy env-var propagation is intentionally NOT done here.
-        // Call `propagate_legacy_env_vars()` before the tokio runtime starts
+        // Call `prepare_process_env()` before the tokio runtime starts
         // (in the sync `fn main()` wrapper) — see Rust 2024 edition safety.
         let args = CliArgs::parse();
         Self::from_args(args)
@@ -913,6 +1177,10 @@ impl Config {
         }
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let configured_mcp_servers = match args.mcp_config.as_deref() {
+            Some(path) => load_mcp_config(path, &args.mcp_command)?,
+            None => Vec::new(),
+        };
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1066,6 +1334,7 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            configured_mcp_servers,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1131,12 +1400,13 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} legacy_mcp_server={} structured_mcp_servers={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
-            self.mcp_command,
+            !self.mcp_command.is_empty(),
+            self.configured_mcp_servers.len(),
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
@@ -1445,6 +1715,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            configured_mcp_servers: Vec::new(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -2922,6 +3193,414 @@ channels = "ALL"
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
         assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    struct TempMcpConfig {
+        path: PathBuf,
+    }
+
+    impl TempMcpConfig {
+        fn write(content: &[u8]) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("buzz-acp-mcp-config-{}.json", Uuid::new_v4()));
+            std::fs::write(&path, content).expect("write temporary MCP config");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempMcpConfig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn config_from_mcp_file(
+        file: &TempMcpConfig,
+        legacy_command: Option<&str>,
+    ) -> Result<Config, ConfigError> {
+        let mut argv = vec![
+            "buzz-acp".to_string(),
+            "--private-key".to_string(),
+            TEST_PRIVATE_KEY.to_string(),
+            "--mcp-config".to_string(),
+            file.path.display().to_string(),
+        ];
+        if let Some(command) = legacy_command {
+            argv.push("--mcp-command".to_string());
+            argv.push(command.to_string());
+        }
+        let args = CliArgs::try_parse_from(argv).expect("clap should parse MCP config arguments");
+        Config::from_args(args)
+    }
+
+    fn server_json(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "command": "mcp",
+            "args": [],
+            "env": {}
+        })
+    }
+
+    fn document_json(servers: Vec<serde_json::Value>) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "version": MCP_CONFIG_VERSION,
+            "servers": servers
+        }))
+        .expect("serialize MCP test document")
+    }
+
+    #[test]
+    fn structured_mcp_config_preserves_order_and_exact_values() {
+        let posix_command = "/Applications/Tool Suite/工具 mcp";
+        let windows_command = r"C:\Program Files\Agent Tools\server.exe";
+        let literal_metacharacters = r#"$HOME;$(echo nope)|&<>*?`literal`"#;
+        let file = TempMcpConfig::write(&document_json(vec![
+            serde_json::json!({
+                "name": "analytics-primary",
+                "command": posix_command,
+                "args": [
+                    "",
+                    "with spaces",
+                    "comma,value",
+                    "quote\"value",
+                    r"C:\data\reports",
+                    literal_metacharacters,
+                    "雪"
+                ],
+                "env": {
+                    "Z_LAST": "backslash\\quote\"雪",
+                    "A_FIRST": ""
+                }
+            }),
+            serde_json::json!({
+                "name": "windows_server",
+                "command": windows_command,
+                "args": ["--stdio"],
+                "env": {}
+            }),
+        ]));
+
+        let config = config_from_mcp_file(&file, None).expect("structured config should load");
+        assert_eq!(config.configured_mcp_servers.len(), 2);
+        assert_eq!(config.configured_mcp_servers[0].name, "analytics-primary");
+        assert_eq!(config.configured_mcp_servers[0].command, posix_command);
+        assert_eq!(
+            config.configured_mcp_servers[0].args,
+            vec![
+                "",
+                "with spaces",
+                "comma,value",
+                "quote\"value",
+                r"C:\data\reports",
+                literal_metacharacters,
+                "雪"
+            ]
+        );
+        assert_eq!(
+            config.configured_mcp_servers[0]
+                .env
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["A_FIRST", "Z_LAST"]
+        );
+        assert_eq!(
+            config.configured_mcp_servers[0].env["Z_LAST"],
+            "backslash\\quote\"雪"
+        );
+        assert_eq!(config.configured_mcp_servers[1].command, windows_command);
+    }
+
+    #[test]
+    fn summary_reports_only_structured_mcp_count() {
+        let secret_value = "value-that-must-not-be-logged";
+        let command = "/private/path/tool";
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "safe",
+            "command": command,
+            "args": [],
+            "env": {"DOMAIN_TOKEN": secret_value}
+        })]));
+        let config =
+            config_from_mcp_file(&file, Some("/legacy/private/tool")).expect("config should load");
+
+        let summary = config.summary();
+        assert!(summary.contains("legacy_mcp_server=true"));
+        assert!(summary.contains("structured_mcp_servers=1"));
+        assert!(!summary.contains(secret_value));
+        assert!(!summary.contains(command));
+        assert!(!summary.contains("/legacy/private/tool"));
+        assert!(!summary.contains("DOMAIN_TOKEN"));
+    }
+
+    #[test]
+    fn legacy_mcp_name_matches_existing_file_stem_behavior() {
+        assert_eq!(
+            legacy_mcp_server_name("/opt/bin/my-mcp-server"),
+            "my-mcp-server"
+        );
+        assert_eq!(legacy_mcp_server_name("."), "mcp");
+        assert_eq!(legacy_mcp_server_name(""), "mcp");
+    }
+
+    #[test]
+    fn mcp_config_rejects_unreadable_file() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-acp-missing-mcp-config-{}.json",
+            Uuid::new_v4()
+        ));
+        let argv = vec![
+            "buzz-acp".to_string(),
+            "--private-key".to_string(),
+            TEST_PRIVATE_KEY.to_string(),
+            "--mcp-config".to_string(),
+            path.display().to_string(),
+        ];
+        let args = CliArgs::try_parse_from(argv).expect("clap should parse arguments");
+        let error = Config::from_args(args).expect_err("missing MCP config must fail");
+        assert!(error.to_string().contains("failed to open MCP config"));
+    }
+
+    #[test]
+    fn mcp_config_rejects_non_regular_files() {
+        let path = std::env::temp_dir().join(format!("buzz-acp-mcp-config-dir-{}", Uuid::new_v4()));
+        std::fs::create_dir(&path).expect("create temporary MCP config directory");
+
+        let error = read_mcp_config(&path).expect_err("directories must not be read as MCP config");
+        let _ = std::fs::remove_dir(&path);
+        assert!(error.to_string().contains("must be a regular file"));
+    }
+
+    #[test]
+    fn mcp_config_enforces_file_size_boundary() {
+        let base = document_json(Vec::new());
+        let mut at_limit = base.clone();
+        at_limit.resize(MCP_CONFIG_MAX_BYTES as usize, b' ');
+        let file = TempMcpConfig::write(&at_limit);
+        config_from_mcp_file(&file, None).expect("64 KiB MCP config should be accepted");
+
+        let mut over_limit = base;
+        over_limit.resize(MCP_CONFIG_MAX_BYTES as usize + 1, b' ');
+        let file = TempMcpConfig::write(&over_limit);
+        let error =
+            config_from_mcp_file(&file, None).expect_err("MCP config over 64 KiB must fail");
+        assert!(error.to_string().contains("65536 byte limit"));
+    }
+
+    #[test]
+    fn mcp_config_rejects_malformed_wrong_version_and_unknown_fields() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("malformed", br#"{"version":1,"servers":["#.to_vec()),
+            (
+                "wrong version",
+                br#"{"version":2,"servers":[]}"#.to_vec(),
+            ),
+            (
+                "unknown document field",
+                br#"{"version":1,"servers":[],"extra":true}"#.to_vec(),
+            ),
+            (
+                "unknown server field",
+                br#"{"version":1,"servers":[{"name":"one","command":"mcp","args":[],"env":{},"extra":true}]}"#.to_vec(),
+            ),
+            (
+                "missing required field",
+                br#"{"version":1,"servers":[{"name":"one","command":"mcp","env":{}}]}"#.to_vec(),
+            ),
+        ];
+
+        for (label, content) in cases {
+            let file = TempMcpConfig::write(&content);
+            assert!(
+                config_from_mcp_file(&file, None).is_err(),
+                "{label} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_config_validates_server_names_and_collisions() {
+        let invalid_names = vec![
+            String::new(),
+            "contains space".to_string(),
+            "contains.dot".to_string(),
+            "double__underscore".to_string(),
+            "unicodé".to_string(),
+            "a".repeat(MCP_SERVER_NAME_MAX_BYTES + 1),
+        ];
+        for invalid_name in invalid_names {
+            let file = TempMcpConfig::write(&document_json(vec![server_json(&invalid_name)]));
+            assert!(
+                config_from_mcp_file(&file, None).is_err(),
+                "invalid name {invalid_name:?} should fail"
+            );
+        }
+
+        let file = TempMcpConfig::write(&document_json(vec![
+            server_json("same"),
+            server_json("same"),
+        ]));
+        let error =
+            config_from_mcp_file(&file, None).expect_err("duplicate server name should fail");
+        assert!(error.to_string().contains("duplicate MCP server name"));
+
+        let file = TempMcpConfig::write(&document_json(vec![server_json("my-mcp-server")]));
+        let error = config_from_mcp_file(&file, Some("/opt/bin/my-mcp-server"))
+            .expect_err("legacy name collision should fail");
+        assert!(error.to_string().contains("collides"));
+    }
+
+    #[test]
+    fn mcp_config_limits_total_servers_including_legacy() {
+        let sixteen = (0..MCP_SERVER_MAX_COUNT)
+            .map(|index| server_json(&format!("server-{index}")))
+            .collect::<Vec<_>>();
+        let file = TempMcpConfig::write(&document_json(sixteen));
+        config_from_mcp_file(&file, None).expect("16 structured servers should be accepted");
+        assert!(
+            config_from_mcp_file(&file, Some("legacy-mcp")).is_err(),
+            "16 structured plus one legacy server should fail"
+        );
+
+        let seventeen = (0..=MCP_SERVER_MAX_COUNT)
+            .map(|index| server_json(&format!("server-{index}")))
+            .collect::<Vec<_>>();
+        let file = TempMcpConfig::write(&document_json(seventeen));
+        assert!(
+            config_from_mcp_file(&file, None).is_err(),
+            "17 structured servers should fail"
+        );
+    }
+
+    #[test]
+    fn mcp_config_enforces_argument_limit() {
+        let args = (0..MCP_SERVER_MAX_ARGS)
+            .map(|index| format!("arg-{index}"))
+            .collect::<Vec<_>>();
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "limit",
+            "command": "mcp",
+            "args": args,
+            "env": {}
+        })]));
+        config_from_mcp_file(&file, None).expect("128 arguments should be accepted");
+
+        let args = (0..=MCP_SERVER_MAX_ARGS)
+            .map(|index| format!("arg-{index}"))
+            .collect::<Vec<_>>();
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "over-limit",
+            "command": "mcp",
+            "args": args,
+            "env": {}
+        })]));
+        let error =
+            config_from_mcp_file(&file, None).expect_err("129 arguments should be rejected");
+        assert!(error.to_string().contains("too many arguments"));
+    }
+
+    #[test]
+    fn mcp_config_enforces_environment_limit() {
+        let env = (0..MCP_SERVER_MAX_ENV)
+            .map(|index| (format!("KEY_{index}"), format!("value-{index}")))
+            .collect::<BTreeMap<_, _>>();
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "limit",
+            "command": "mcp",
+            "args": [],
+            "env": env
+        })]));
+        config_from_mcp_file(&file, None).expect("128 environment entries should be accepted");
+
+        let env = (0..=MCP_SERVER_MAX_ENV)
+            .map(|index| (format!("KEY_{index}"), format!("value-{index}")))
+            .collect::<BTreeMap<_, _>>();
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "over-limit",
+            "command": "mcp",
+            "args": [],
+            "env": env
+        })]));
+        let error = config_from_mcp_file(&file, None)
+            .expect_err("129 environment entries should be rejected");
+        assert!(error.to_string().contains("too many environment entries"));
+    }
+
+    #[test]
+    fn mcp_config_rejects_invalid_duplicate_and_protected_env_names() {
+        for invalid_key in ["", "1STARTS_WITH_DIGIT", "BAD-NAME", "UNICODÉ"] {
+            let content = format!(
+                r#"{{"version":1,"servers":[{{"name":"one","command":"mcp","args":[],"env":{{"{invalid_key}":"value"}}}}]}}"#
+            );
+            let file = TempMcpConfig::write(content.as_bytes());
+            assert!(
+                config_from_mcp_file(&file, None).is_err(),
+                "invalid environment key {invalid_key:?} should fail"
+            );
+        }
+
+        for protected in PROTECTED_MCP_ENV_NAMES {
+            let lowercase = protected.to_ascii_lowercase();
+            let content = format!(
+                r#"{{"version":1,"servers":[{{"name":"one","command":"mcp","args":[],"env":{{"{lowercase}":"value"}}}}]}}"#
+            );
+            let file = TempMcpConfig::write(content.as_bytes());
+            let error = config_from_mcp_file(&file, None)
+                .expect_err("protected environment key should fail case-insensitively");
+            assert!(error.to_string().contains("protected environment key"));
+        }
+
+        for duplicate_env in [
+            r#"{"KEY":"one","KEY":"two"}"#,
+            r#"{"KEY":"one","key":"two"}"#,
+        ] {
+            let content = format!(
+                r#"{{"version":1,"servers":[{{"name":"one","command":"mcp","args":[],"env":{duplicate_env}}}]}}"#
+            );
+            let file = TempMcpConfig::write(content.as_bytes());
+            let error =
+                config_from_mcp_file(&file, None).expect_err("duplicate env key should fail");
+            assert!(error.to_string().contains("duplicate environment key"));
+        }
+    }
+
+    #[test]
+    fn mcp_config_rejects_empty_or_nul_process_values() {
+        let cases = vec![
+            serde_json::json!({
+                "name": "empty-command",
+                "command": "",
+                "args": [],
+                "env": {}
+            }),
+            serde_json::json!({
+                "name": "nul-command",
+                "command": "mc\u{0}p",
+                "args": [],
+                "env": {}
+            }),
+            serde_json::json!({
+                "name": "nul-arg",
+                "command": "mcp",
+                "args": ["ok", "bad\u{0}arg"],
+                "env": {}
+            }),
+            serde_json::json!({
+                "name": "nul-value",
+                "command": "mcp",
+                "args": [],
+                "env": {"DOMAIN_KEY": "bad\u{0}value"}
+            }),
+        ];
+
+        for server in cases {
+            let file = TempMcpConfig::write(&document_json(vec![server]));
+            assert!(
+                config_from_mcp_file(&file, None).is_err(),
+                "invalid process value should fail"
+            );
+        }
     }
 
     /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
