@@ -1,13 +1,15 @@
 //! Runtime-neutral relay client for a standalone Buzz execution node.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use buzz_core::execution::{
     ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope, ExecutionNodeId,
     ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, ReceiptOutcome, SafeErrorCode,
-    WorkloadId, WorkloadLifecycle, WorkloadSpec, EXECUTION_PROTOCOL_VERSION,
+    WorkloadId, WorkloadLifecycle, WorkloadSpec, WorkloadStatus, EXECUTION_PROTOCOL_VERSION,
 };
 use buzz_core::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
@@ -15,7 +17,9 @@ use buzz_core::kind::{
 use chrono::{DateTime, Utc};
 use nostr::{nips::nip44, Event, EventBuilder, Keys, Kind, PublicKey, Tag, ToBech32};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::{Mutex, Semaphore};
 
 /// Environment-driven configuration for a node process.
 #[derive(Debug, Clone)]
@@ -169,13 +173,31 @@ impl OwnerStore {
 
 /// Build the safe replaceable announcement published by a node.
 pub fn build_announcement(identity: &NodeIdentity, display_name: &str) -> Result<Event, NodeError> {
+    build_announcement_with_workloads(identity, display_name, &[])
+}
+
+/// Build a replaceable announcement including the node's durable workload view.
+pub fn build_announcement_with_workloads(
+    identity: &NodeIdentity,
+    display_name: &str,
+    workloads: &[buzz_core::execution::WorkloadStatus],
+) -> Result<Event, NodeError> {
     let node_id = identity.node_id()?;
     let status = ExecutionNodeStatus::new(
         node_id.clone(),
         display_name,
         ExecutionNodeLifecycle::Ready,
-        [ExecutionCapability::Deploy],
+        [
+            ExecutionCapability::Deploy,
+            ExecutionCapability::Start,
+            ExecutionCapability::Stop,
+            ExecutionCapability::Restart,
+            ExecutionCapability::Remove,
+        ],
     )?;
+    let status = status
+        .with_workloads(workloads.iter().cloned())
+        .map_err(|error| NodeError::InvalidCommand(error.to_string()))?;
     let content = serde_json::to_string(&status)?;
     let d_tag = Tag::parse(["d", node_id.as_str()])
         .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
@@ -218,22 +240,80 @@ pub fn parse_desktop_pairing_payload(payload: &str) -> Result<DesktopPairingPayl
 /// not launch a process or retain credential material; a later ticket can swap
 /// this implementation for a durable provider-backed runtime without changing
 /// the command and receipt protocol.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FakeWorkloadRuntime {
-    workloads: BTreeMap<WorkloadId, WorkloadSpec>,
+    workloads: BTreeMap<WorkloadId, RuntimeWorkload>,
+    removed_workloads: BTreeSet<WorkloadId>,
     deploy_invocations: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeWorkload {
+    spec: WorkloadSpec,
+    lifecycle: WorkloadLifecycle,
 }
 
 impl FakeWorkloadRuntime {
     /// Reconcile a deploy request into the fake runtime.
     pub fn deploy(&mut self, workload: &WorkloadSpec) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        if self.removed_workloads.contains(&workload.workload_id) {
+            return Err(SafeErrorCode::Conflict);
+        }
         let is_new = !self.workloads.contains_key(&workload.workload_id);
-        self.workloads
-            .insert(workload.workload_id.clone(), workload.clone());
+        self.workloads.insert(
+            workload.workload_id.clone(),
+            RuntimeWorkload {
+                spec: workload.clone(),
+                lifecycle: WorkloadLifecycle::Running,
+            },
+        );
         if is_new {
             self.deploy_invocations += 1;
         }
         Ok(WorkloadLifecycle::Running)
+    }
+
+    /// Start an existing workload.
+    pub fn start(&mut self, workload_id: &WorkloadId) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        self.transition(workload_id, WorkloadLifecycle::Running)
+    }
+
+    /// Stop an existing workload.
+    pub fn stop(&mut self, workload_id: &WorkloadId) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        self.transition(workload_id, WorkloadLifecycle::Stopped)
+    }
+
+    /// Restart an existing workload.
+    pub fn restart(
+        &mut self,
+        workload_id: &WorkloadId,
+    ) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        self.transition(workload_id, WorkloadLifecycle::Running)
+    }
+
+    /// Remove an existing workload.
+    pub fn remove(&mut self, workload_id: &WorkloadId) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        if self.workloads.remove(workload_id).is_some() {
+            self.removed_workloads.insert(workload_id.clone());
+            return Ok(WorkloadLifecycle::Removed);
+        }
+        if self.removed_workloads.contains(workload_id) {
+            return Ok(WorkloadLifecycle::Removed);
+        }
+        Err(SafeErrorCode::WorkloadNotFound)
+    }
+
+    fn transition(
+        &mut self,
+        workload_id: &WorkloadId,
+        lifecycle: WorkloadLifecycle,
+    ) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        let workload = self
+            .workloads
+            .get_mut(workload_id)
+            .ok_or(SafeErrorCode::WorkloadNotFound)?;
+        workload.lifecycle = lifecycle;
+        Ok(lifecycle)
     }
 
     /// Number of distinct workload rows currently known to the runtime.
@@ -245,41 +325,166 @@ impl FakeWorkloadRuntime {
     pub fn deploy_invocations(&self) -> usize {
         self.deploy_invocations
     }
+
+    fn statuses(&self, sequences: &BTreeMap<WorkloadId, u64>) -> Vec<WorkloadStatus> {
+        let mut statuses: Vec<_> = self
+            .workloads
+            .iter()
+            .filter_map(|(workload_id, workload)| {
+                sequences.get(workload_id).and_then(|sequence| {
+                    WorkloadStatus::new(workload_id.clone(), workload.lifecycle, *sequence).ok()
+                })
+            })
+            .collect();
+        statuses.extend(self.removed_workloads.iter().filter_map(|workload_id| {
+            sequences.get(workload_id).and_then(|sequence| {
+                WorkloadStatus::new(workload_id.clone(), WorkloadLifecycle::Removed, *sequence).ok()
+            })
+        }));
+        statuses.sort_by(|left, right| left.workload_id.cmp(&right.workload_id));
+        statuses
+    }
 }
 
-/// Node-side command processor for the first encrypted execution slice.
-#[derive(Debug, Default)]
+/// Node-side durable command processor for encrypted execution commands.
+#[derive(Debug, Clone)]
 pub struct ExecutionController {
-    runtime: FakeWorkloadRuntime,
-    processed: HashMap<buzz_core::execution::CommandId, Vec<ExecutionReceipt>>,
-    next_sequences: BTreeMap<WorkloadId, u64>,
+    state: Arc<Mutex<ControllerState>>,
+    workload_locks: Arc<Mutex<HashMap<WorkloadKey, Arc<Mutex<()>>>>>,
+    concurrency: Arc<Semaphore>,
+}
+
+impl Default for ExecutionController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Default)]
+struct ControllerState {
+    runtimes: BTreeMap<String, FakeWorkloadRuntime>,
+    processed: HashMap<JournalKey, ProcessedCommand>,
+    conflicts: HashMap<JournalKey, StoredEvents>,
+    next_sequences: BTreeMap<String, BTreeMap<WorkloadId, u64>>,
     data_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessedCommand {
+    fingerprint: String,
+    receipts: Vec<ExecutionReceipt>,
+    #[serde(default)]
+    events: Vec<Event>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredEvents {
+    receipts: Vec<ExecutionReceipt>,
+    events: Vec<Event>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct JournalKey {
+    owner: String,
+    command_id: buzz_core::execution::CommandId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkloadKey {
+    owner: String,
+    workload_id: WorkloadId,
+}
+
 impl ExecutionController {
+    /// Create an in-memory controller with bounded concurrent command work.
+    pub fn new() -> Self {
+        Self::with_concurrency(8)
+    }
+
+    /// Create an in-memory controller with an explicit concurrency limit.
+    pub fn with_concurrency(limit: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ControllerState::default())),
+            workload_locks: Arc::new(Mutex::new(HashMap::new())),
+            concurrency: Arc::new(Semaphore::new(limit.max(1))),
+        }
+    }
+
     /// Load command idempotency state from a node data directory.
     pub fn load(data_dir: &Path) -> Result<Self, NodeError> {
         let path = data_dir.join("execution-state.json");
         if !path.exists() {
-            return Ok(Self {
-                data_dir: Some(data_dir.to_path_buf()),
-                ..Self::default()
-            });
+            let controller = Self::new();
+            controller
+                .state
+                .try_lock()
+                .map_err(|_| {
+                    NodeError::InvalidConfiguration(
+                        "new execution controller was unexpectedly locked".into(),
+                    )
+                })?
+                .data_dir = Some(data_dir.to_path_buf());
+            return Ok(controller);
         }
-        let state: PersistedExecutionState = serde_json::from_str(&fs::read_to_string(path)?)?;
-        Ok(Self {
-            runtime: FakeWorkloadRuntime::default(),
-            processed: state.processed,
+        let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        let state = match serde_json::from_value::<PersistedExecutionState>(raw.clone()) {
+            Ok(state) => state,
+            Err(_) => {
+                let legacy: LegacyPersistedExecutionState = serde_json::from_value(raw)?;
+                PersistedExecutionState {
+                    runtimes: legacy
+                        .runtime
+                        .map(|runtime| BTreeMap::from([("legacy".to_string(), runtime)]))
+                        .unwrap_or_default(),
+                    runtime: None,
+                    processed: legacy
+                        .processed
+                        .into_iter()
+                        .map(|(command_id, receipts)| PersistedProcessedCommand {
+                            key: JournalKey {
+                                owner: "legacy".to_string(),
+                                command_id,
+                            },
+                            value: ProcessedCommand {
+                                fingerprint: String::new(),
+                                receipts,
+                                events: Vec::new(),
+                            },
+                        })
+                        .collect(),
+                    conflicts: Vec::new(),
+                    next_sequences: BTreeMap::from([("legacy".to_string(), legacy.next_sequences)]),
+                }
+            }
+        };
+        let controller = Self::new();
+        *controller.state.try_lock().map_err(|_| {
+            NodeError::InvalidConfiguration(
+                "new execution controller was unexpectedly locked".into(),
+            )
+        })? = ControllerState {
+            runtimes: state.runtimes,
+            processed: state
+                .processed
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect(),
+            conflicts: state
+                .conflicts
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect(),
             next_sequences: state.next_sequences,
             data_dir: Some(data_dir.to_path_buf()),
-        })
+        };
+        Ok(controller)
     }
 
     /// Process one signed, owner-authorized command event and return its signed
     /// encrypted receipt events. Invalid or unauthorized events are ignored by
     /// the caller's subscription loop and never reach the fake runtime.
-    pub fn handle_command_event(
-        &mut self,
+    pub async fn handle_command_event(
+        &self,
         identity: &NodeIdentity,
         owners: &OwnerStore,
         event: &Event,
@@ -313,64 +518,175 @@ impl ExecutionController {
                 NodeError::InvalidCommand(format!("invalid envelope JSON: {error}"))
             })?;
 
-        if let Some(previous) = self.processed.get(&envelope.command_id()).cloned() {
-            return self.receipt_events(identity, &owner, previous);
+        let journal_key = JournalKey {
+            owner: owner_hex,
+            command_id: envelope.command_id(),
+        };
+        let fingerprint = command_fingerprint(&envelope)?;
+        {
+            let state = self.state.lock().await;
+            if let Some(previous) = state.processed.get(&journal_key) {
+                if previous.fingerprint == fingerprint {
+                    if !previous.events.is_empty() {
+                        return Ok(previous.events.clone());
+                    }
+                    return self.receipt_events(identity, &owner, previous.receipts.clone());
+                }
+                if let Some(conflict) = state.conflicts.get(&journal_key) {
+                    if !conflict.events.is_empty() {
+                        return Ok(conflict.events.clone());
+                    }
+                    return self.receipt_events(identity, &owner, conflict.receipts.clone());
+                }
+            }
+        }
+
+        if self.state.lock().await.processed.contains_key(&journal_key) {
+            let mut state = self.state.lock().await;
+            let receipts = vec![next_receipt(
+                &mut state,
+                &journal_key.owner,
+                &envelope,
+                ReceiptOutcome::Rejected {
+                    error: SafeErrorCode::Conflict,
+                },
+            )?];
+            let events = self.receipt_events(identity, &owner, receipts.clone())?;
+            state.conflicts.insert(
+                journal_key.clone(),
+                StoredEvents {
+                    receipts,
+                    events: events.clone(),
+                },
+            );
+            let snapshot = persisted_state(&state);
+            let data_dir = state.data_dir.clone();
+            drop(state);
+            persist_snapshot(&snapshot, data_dir.as_deref())?;
+            return Ok(events);
+        }
+
+        let workload_lock = {
+            let mut locks = self.workload_locks.lock().await;
+            let workload_key = WorkloadKey {
+                owner: journal_key.owner.clone(),
+                workload_id: envelope.command.workload_id().clone(),
+            };
+            locks
+                .entry(workload_key)
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _workload_guard = workload_lock.lock().await;
+        let _concurrency_guard = self
+            .concurrency
+            .acquire()
+            .await
+            .map_err(|_| NodeError::InvalidCommand("execution controller is closed".into()))?;
+
+        // The runtime seam is asynchronous even for the fake runtime. Yielding
+        // here lets commands for different workloads make progress concurrently
+        // while the per-workload guard keeps same-workload ordering strict.
+        tokio::task::yield_now().await;
+        let mut state = self.state.lock().await;
+        if let Some(previous) = state.processed.get(&journal_key) {
+            if previous.fingerprint == fingerprint {
+                if !previous.events.is_empty() {
+                    let events = previous.events.clone();
+                    drop(state);
+                    return Ok(events);
+                }
+                let receipts = previous.receipts.clone();
+                drop(state);
+                return self.receipt_events(identity, &owner, receipts);
+            }
+            if let Some(conflict) = state.conflicts.get(&journal_key) {
+                if !conflict.events.is_empty() {
+                    let events = conflict.events.clone();
+                    drop(state);
+                    return Ok(events);
+                }
+                let receipts = conflict.receipts.clone();
+                drop(state);
+                return self.receipt_events(identity, &owner, receipts);
+            }
+            let receipts = vec![next_receipt(
+                &mut state,
+                &journal_key.owner,
+                &envelope,
+                ReceiptOutcome::Rejected {
+                    error: SafeErrorCode::Conflict,
+                },
+            )?];
+            let events = self.receipt_events(identity, &owner, receipts.clone())?;
+            state.conflicts.insert(
+                journal_key.clone(),
+                StoredEvents {
+                    receipts,
+                    events: events.clone(),
+                },
+            );
+            let snapshot = persisted_state(&state);
+            let data_dir = state.data_dir.clone();
+            drop(state);
+            persist_snapshot(&snapshot, data_dir.as_deref())?;
+            return Ok(events);
         }
 
         let receipts = if envelope.node_id() != &node_id {
-            vec![self.rejected_receipt(&envelope, SafeErrorCode::Unauthorized)?]
+            vec![next_receipt(
+                &mut state,
+                &journal_key.owner,
+                &envelope,
+                ReceiptOutcome::Rejected {
+                    error: SafeErrorCode::Unauthorized,
+                },
+            )?]
         } else if let Err(error) = envelope.validate_at(now) {
-            vec![self.rejected_receipt(&envelope, safe_error_for_validation(&error))?]
+            vec![next_receipt(
+                &mut state,
+                &journal_key.owner,
+                &envelope,
+                ReceiptOutcome::Rejected {
+                    error: safe_error_for_validation(&error),
+                },
+            )?]
         } else {
-            self.execute(&envelope)?
+            execute(&mut state, &journal_key.owner, &envelope)?
         };
 
-        self.processed
-            .insert(envelope.command_id(), receipts.clone());
-        self.persist()?;
-        self.receipt_events(identity, &owner, receipts)
+        let events = self.receipt_events(identity, &owner, receipts.clone())?;
+        state.processed.insert(
+            journal_key,
+            ProcessedCommand {
+                fingerprint,
+                receipts,
+                events: events.clone(),
+            },
+        );
+        let snapshot = persisted_state(&state);
+        let data_dir = state.data_dir.clone();
+        drop(state);
+        persist_snapshot(&snapshot, data_dir.as_deref())?;
+        Ok(events)
     }
 
     /// Inspect the fake runtime for diagnostics and tests.
-    pub fn runtime(&self) -> &FakeWorkloadRuntime {
-        &self.runtime
+    pub async fn runtime(&self) -> FakeWorkloadRuntime {
+        let state = self.state.lock().await;
+        state.runtimes.values().next().cloned().unwrap_or_default()
     }
 
-    fn execute(
-        &mut self,
-        envelope: &ExecutionCommandEnvelope,
-    ) -> Result<Vec<ExecutionReceipt>, NodeError> {
-        let accepted = self.next_receipt(envelope, ReceiptOutcome::Accepted)?;
-        let outcome = match &envelope.command {
-            ExecutionCommand::Deploy { workload } => match self.runtime.deploy(workload) {
-                Ok(_) => ReceiptOutcome::Succeeded,
-                Err(error) => ReceiptOutcome::Failed { error },
-            },
-            _ => ReceiptOutcome::Failed {
-                error: SafeErrorCode::Unsupported,
-            },
-        };
-        Ok(vec![accepted, self.next_receipt(envelope, outcome)?])
-    }
-
-    fn rejected_receipt(
-        &mut self,
-        envelope: &ExecutionCommandEnvelope,
-        error: SafeErrorCode,
-    ) -> Result<ExecutionReceipt, NodeError> {
-        self.next_receipt(envelope, ReceiptOutcome::Rejected { error })
-    }
-
-    fn next_receipt(
-        &mut self,
-        envelope: &ExecutionCommandEnvelope,
-        outcome: ReceiptOutcome,
-    ) -> Result<ExecutionReceipt, NodeError> {
-        let workload_id = envelope.command.workload_id().clone();
-        let sequence = self.next_sequences.entry(workload_id.clone()).or_insert(0);
-        *sequence += 1;
-        ExecutionReceipt::for_command(envelope, workload_id, *sequence, outcome)
-            .map_err(|error| NodeError::InvalidCommand(error.to_string()))
+    /// Return the current durable workload projection for node announcements.
+    pub async fn workload_statuses(&self) -> Vec<buzz_core::execution::WorkloadStatus> {
+        let state = self.state.lock().await;
+        state
+            .runtimes
+            .iter()
+            .flat_map(|(owner, runtime)| {
+                runtime.statuses(state.next_sequences.get(owner).unwrap_or(&BTreeMap::new()))
+            })
+            .collect()
     }
 
     fn receipt_events(
@@ -399,26 +715,128 @@ impl ExecutionController {
             })
             .collect()
     }
+}
 
-    fn persist(&self) -> Result<(), NodeError> {
-        let Some(data_dir) = &self.data_dir else {
-            return Ok(());
-        };
-        fs::create_dir_all(data_dir)?;
-        let state = PersistedExecutionState {
-            processed: self.processed.clone(),
-            next_sequences: self.next_sequences.clone(),
-        };
-        let path = data_dir.join("execution-state.json");
-        fs::write(&path, serde_json::to_string_pretty(&state)?)?;
-        set_private_file_permissions(&path)
+fn execute(
+    state: &mut ControllerState,
+    owner: &str,
+    envelope: &ExecutionCommandEnvelope,
+) -> Result<Vec<ExecutionReceipt>, NodeError> {
+    let accepted = next_receipt(state, owner, envelope, ReceiptOutcome::Accepted)?;
+    let runtime = state.runtimes.entry(owner.to_string()).or_default();
+    let outcome = match &envelope.command {
+        ExecutionCommand::Deploy { workload } => runtime.deploy(workload),
+        ExecutionCommand::Start { workload_id } => runtime.start(workload_id),
+        ExecutionCommand::Stop { workload_id } => runtime.stop(workload_id),
+        ExecutionCommand::Restart { workload_id } => runtime.restart(workload_id),
+        ExecutionCommand::Remove { workload_id } => runtime.remove(workload_id),
+        ExecutionCommand::AuthenticateProvider { .. } => Err(SafeErrorCode::Unsupported),
+    };
+    let outcome = match outcome {
+        Ok(_) => ReceiptOutcome::Succeeded,
+        Err(error) => ReceiptOutcome::Failed { error },
+    };
+    Ok(vec![
+        accepted,
+        next_receipt(state, owner, envelope, outcome)?,
+    ])
+}
+
+fn next_receipt(
+    state: &mut ControllerState,
+    owner: &str,
+    envelope: &ExecutionCommandEnvelope,
+    outcome: ReceiptOutcome,
+) -> Result<ExecutionReceipt, NodeError> {
+    let workload_id = envelope.command.workload_id().clone();
+    let sequence = state
+        .next_sequences
+        .entry(owner.to_string())
+        .or_default()
+        .entry(workload_id.clone())
+        .or_insert(0);
+    *sequence += 1;
+    ExecutionReceipt::for_command(envelope, workload_id, *sequence, outcome)
+        .map_err(|error| NodeError::InvalidCommand(error.to_string()))
+}
+
+fn command_fingerprint(envelope: &ExecutionCommandEnvelope) -> Result<String, NodeError> {
+    let encoded = serde_json::to_vec(&(envelope.node_id(), &envelope.command))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn persisted_state(state: &ControllerState) -> PersistedExecutionState {
+    PersistedExecutionState {
+        runtimes: state.runtimes.clone(),
+        runtime: None,
+        processed: state
+            .processed
+            .iter()
+            .map(|(key, value)| PersistedProcessedCommand {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        conflicts: state
+            .conflicts
+            .iter()
+            .map(|(key, value)| PersistedConflict {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        next_sequences: state.next_sequences.clone(),
     }
+}
+
+fn persist_snapshot(
+    state: &PersistedExecutionState,
+    data_dir: Option<&Path>,
+) -> Result<(), NodeError> {
+    let Some(data_dir) = data_dir else {
+        return Ok(());
+    };
+    fs::create_dir_all(data_dir)?;
+    let path = data_dir.join("execution-state.json");
+    let temporary_path = path.with_extension("json.tmp");
+    fs::write(&temporary_path, serde_json::to_string_pretty(state)?)?;
+    set_private_file_permissions(&temporary_path)?;
+    fs::rename(&temporary_path, &path)?;
+    File::open(&path)?.sync_all()?;
+    File::open(data_dir)?.sync_all()?;
+    set_private_file_permissions(&path)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedExecutionState {
+    #[serde(default)]
+    runtimes: BTreeMap<String, FakeWorkloadRuntime>,
+    #[serde(default)]
+    runtime: Option<FakeWorkloadRuntime>,
+    processed: Vec<PersistedProcessedCommand>,
+    #[serde(default)]
+    conflicts: Vec<PersistedConflict>,
+    next_sequences: BTreeMap<String, BTreeMap<WorkloadId, u64>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyPersistedExecutionState {
+    #[serde(default)]
+    runtime: Option<FakeWorkloadRuntime>,
     processed: HashMap<buzz_core::execution::CommandId, Vec<ExecutionReceipt>>,
     next_sequences: BTreeMap<WorkloadId, u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedProcessedCommand {
+    key: JournalKey,
+    value: ProcessedCommand,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedConflict {
+    key: JournalKey,
+    value: StoredEvents,
 }
 
 fn has_exact_p_tag(event: &Event, expected: &str) -> bool {
@@ -555,8 +973,8 @@ mod tests {
             .expect("command event")
     }
 
-    #[test]
-    fn encrypted_deploy_is_reconciled_once_and_receipts_are_terminal() {
+    #[tokio::test]
+    async fn encrypted_deploy_is_reconciled_once_and_receipts_are_terminal() {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
@@ -583,19 +1001,22 @@ mod tests {
         )
         .expect("command");
         let event = deploy_command_event(&owner, &node, &command);
-        let mut controller = ExecutionController::default();
+        let controller = ExecutionController::default();
 
         let first = controller
             .handle_command_event(&node, &owners, &event, now + Duration::seconds(1))
+            .await
             .expect("first delivery");
         let second = controller
             .handle_command_event(&node, &owners, &event, now + Duration::seconds(2))
+            .await
             .expect("duplicate delivery");
 
         assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 2);
-        assert_eq!(controller.runtime().workload_count(), 1);
-        assert_eq!(controller.runtime().deploy_invocations(), 1);
+        let runtime = controller.runtime().await;
+        assert_eq!(runtime.workload_count(), 1);
+        assert_eq!(runtime.deploy_invocations(), 1);
         for receipt_event in first {
             assert!(receipt_event.verify_id());
             assert!(receipt_event.verify_signature());
@@ -612,8 +1033,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn persisted_command_state_blocks_duplicate_after_restart() {
+    #[tokio::test]
+    async fn persisted_command_state_blocks_duplicate_after_restart() {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
@@ -640,24 +1061,249 @@ mod tests {
         )
         .expect("command");
         let event = deploy_command_event(&owner, &node, &command);
-        let mut first_controller = ExecutionController::load(&dir).expect("load controller");
-        first_controller
+        let first_controller = ExecutionController::load(&dir).expect("load controller");
+        let first_receipts = first_controller
             .handle_command_event(&node, &owners, &event, now + Duration::seconds(1))
+            .await
             .expect("first delivery");
 
-        let mut restarted_controller = ExecutionController::load(&dir).expect("restart controller");
+        let restarted_controller = ExecutionController::load(&dir).expect("restart controller");
         let receipts = restarted_controller
             .handle_command_event(&node, &owners, &event, now + Duration::seconds(2))
+            .await
             .expect("duplicate delivery after restart");
 
         assert_eq!(receipts.len(), 2);
-        assert_eq!(restarted_controller.runtime().workload_count(), 0);
-        assert_eq!(restarted_controller.runtime().deploy_invocations(), 0);
+        assert_eq!(receipts, first_receipts);
+        let runtime = restarted_controller.runtime().await;
+        assert_eq!(runtime.workload_count(), 1);
+        assert_eq!(runtime.deploy_invocations(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_commands_update_durable_runtime_state() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let mut owners = OwnerStore::default();
+        owners
+            .add(&owner.public_key().to_hex(), &dir)
+            .expect("pair owner");
+        let workload_id = WorkloadId::random();
+        let now = Utc::now();
+        let workload = WorkloadSpec::agent(
+            workload_id.clone(),
+            "Lifecycle agent",
+            "fake-runtime",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload");
+        let command = |operation| {
+            ExecutionCommandEnvelope::new(
+                node.node_id().expect("node id"),
+                now,
+                now + Duration::minutes(5),
+                operation,
+            )
+            .expect("command")
+        };
+        let commands = [
+            ExecutionCommand::Deploy {
+                workload: workload.clone(),
+            },
+            ExecutionCommand::Stop {
+                workload_id: workload_id.clone(),
+            },
+            ExecutionCommand::Start {
+                workload_id: workload_id.clone(),
+            },
+            ExecutionCommand::Restart {
+                workload_id: workload_id.clone(),
+            },
+            ExecutionCommand::Remove {
+                workload_id: workload_id.clone(),
+            },
+        ];
+
+        let controller = ExecutionController::default();
+        let mut sequences = Vec::new();
+        for operation in commands {
+            let envelope = command(operation);
+            let receipts = controller
+                .handle_command_event(
+                    &node,
+                    &owners,
+                    &deploy_command_event(&owner, &node, &envelope),
+                    now + Duration::seconds(1),
+                )
+                .await
+                .expect("lifecycle command");
+            let plaintext = nip44::decrypt(
+                owner.secret_key(),
+                &node.keys.public_key(),
+                &receipts[1].content,
+            )
+            .expect("decrypt lifecycle receipt");
+            sequences.push(serde_json::from_str::<ExecutionReceipt>(&plaintext).expect("receipt"));
+        }
+
+        assert!(sequences.iter().all(ExecutionReceipt::is_terminal));
+        assert!(sequences
+            .windows(2)
+            .all(|pair| pair[1].sequence > pair[0].sequence));
+        assert_eq!(controller.runtime().await.workload_count(), 0);
+        let statuses = controller.workload_statuses().await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].lifecycle, WorkloadLifecycle::Removed);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn command_id_reuse_with_different_payload_is_rejected_and_cached() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let mut owners = OwnerStore::default();
+        owners
+            .add(&owner.public_key().to_hex(), &dir)
+            .expect("pair owner");
+        let now = Utc::now();
+        let first = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::Deploy {
+                workload: WorkloadSpec::agent(
+                    WorkloadId::random(),
+                    "Original",
+                    "fake-runtime",
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .expect("workload"),
+            },
+        )
+        .expect("command");
+        let mut conflicting = first.clone();
+        if let ExecutionCommand::Deploy { workload } = &mut conflicting.command {
+            workload.display_name = "Changed".into();
+        }
+        let controller = ExecutionController::default();
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &first),
+                now + Duration::seconds(1),
+            )
+            .await
+            .expect("first command");
+        let first_conflict = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &conflicting),
+                now + Duration::seconds(2),
+            )
+            .await
+            .expect("conflict receipt");
+        let second_conflict = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &conflicting),
+                now + Duration::seconds(3),
+            )
+            .await
+            .expect("cached conflict receipt");
+
+        assert_eq!(first_conflict, second_conflict);
+        let plaintext = nip44::decrypt(
+            owner.secret_key(),
+            &node.keys.public_key(),
+            &first_conflict[0].content,
+        )
+        .expect("decrypt conflict");
+        let receipt: ExecutionReceipt = serde_json::from_str(&plaintext).expect("receipt");
+        assert_eq!(
+            receipt.outcome,
+            ReceiptOutcome::Rejected {
+                error: SafeErrorCode::Conflict
+            }
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn different_workloads_can_progress_concurrently() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let mut owners = OwnerStore::default();
+        owners
+            .add(&owner.public_key().to_hex(), &dir)
+            .expect("pair owner");
+        let now = Utc::now();
+        let make_command = |name| {
+            ExecutionCommandEnvelope::new(
+                node.node_id().expect("node id"),
+                now,
+                now + Duration::minutes(5),
+                ExecutionCommand::Deploy {
+                    workload: WorkloadSpec::agent(
+                        WorkloadId::random(),
+                        name,
+                        "fake-runtime",
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("workload"),
+                },
+            )
+            .expect("command")
+        };
+        let first = make_command("first");
+        let second = make_command("second");
+        let first_event = deploy_command_event(&owner, &node, &first);
+        let second_event = deploy_command_event(&owner, &node, &second);
+        let controller = ExecutionController::with_concurrency(2);
+
+        let (first_result, second_result) = tokio::join!(
+            controller.handle_command_event(&node, &owners, &first_event, now),
+            controller.handle_command_event(&node, &owners, &second_event, now),
+        );
+
+        assert!(first_result.is_ok());
+        assert!(second_result.is_ok());
+        assert_eq!(controller.runtime().await.workload_count(), 2);
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn unpaired_command_never_reaches_the_runtime() {
+    fn legacy_execution_state_is_migrated_without_startup_failure() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).expect("data directory");
+        fs::write(
+            dir.join("execution-state.json"),
+            serde_json::json!({
+                "processed": {},
+                "next_sequences": {}
+            })
+            .to_string(),
+        )
+        .expect("legacy state");
+
+        ExecutionController::load(&dir).expect("migrate legacy state");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn unpaired_command_never_reaches_the_runtime() {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
@@ -680,19 +1326,20 @@ mod tests {
         )
         .expect("command");
         let event = deploy_command_event(&owner, &node, &command);
-        let mut controller = ExecutionController::default();
+        let controller = ExecutionController::default();
 
         let receipts = controller
             .handle_command_event(&node, &OwnerStore::default(), &event, now)
+            .await
             .expect("unpaired command is ignored");
 
         assert!(receipts.is_empty());
-        assert_eq!(controller.runtime().workload_count(), 0);
+        assert_eq!(controller.runtime().await.workload_count(), 0);
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn expired_command_is_rejected_without_runtime_side_effects() {
+    #[tokio::test]
+    async fn expired_command_is_rejected_without_runtime_side_effects() {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
@@ -719,10 +1366,11 @@ mod tests {
         )
         .expect("command");
         let event = deploy_command_event(&owner, &node, &command);
-        let mut controller = ExecutionController::default();
+        let controller = ExecutionController::default();
 
         let receipts = controller
             .handle_command_event(&node, &owners, &event, Utc::now())
+            .await
             .expect("expired command receipt");
         let plaintext = nip44::decrypt(
             owner.secret_key(),
@@ -738,7 +1386,7 @@ mod tests {
                 error: SafeErrorCode::Expired
             }
         );
-        assert_eq!(controller.runtime().workload_count(), 0);
+        assert_eq!(controller.runtime().await.workload_count(), 0);
         let _ = fs::remove_dir_all(dir);
     }
 }

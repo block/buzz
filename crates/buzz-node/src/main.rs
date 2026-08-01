@@ -5,10 +5,11 @@ use buzz_core::kind::{KIND_EXECUTION_NODE_COMMAND, KIND_PAIRING};
 use buzz_core::pairing::session::PairingSession;
 use buzz_core::pairing::{qr::decode_qr, types::PayloadType, PairingError};
 use buzz_node::{
-    build_announcement, parse_desktop_pairing_payload, DesktopPairingPayload, ExecutionController,
-    NodeConfig, NodeError, NodeIdentity, OwnerStore,
+    build_announcement_with_workloads, parse_desktop_pairing_payload, DesktopPairingPayload,
+    ExecutionController, NodeConfig, NodeError, NodeIdentity, OwnerStore,
 };
 use clap::{Parser, Subcommand};
+use futures_util::stream::FuturesUnordered;
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, RelayUrl};
 use serde_json::Value;
@@ -95,7 +96,9 @@ async fn run_connection(
         .await
         .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
 
-    let announcement = build_announcement(identity, &config.display_name)?;
+    let workloads = controller.workload_statuses().await;
+    let announcement =
+        build_announcement_with_workloads(identity, &config.display_name, &workloads)?;
     let response = connection
         .send_event(announcement)
         .await
@@ -118,18 +121,42 @@ async fn run_connection(
         .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
     info!(node = %identity.keys.public_key().to_hex(), "execution node connected");
 
+    let mut work = FuturesUnordered::new();
     loop {
-        match connection.next_event(Duration::from_secs(300)).await {
-            Ok(buzz_ws_client::RelayMessage::Event { event, .. }) => {
-                let receipts = match controller.handle_command_event(
-                    identity,
-                    owners,
-                    &event,
-                    chrono::Utc::now(),
-                ) {
-                    Ok(receipts) => receipts,
+        tokio::select! {
+            result = connection.next_event(Duration::from_secs(300)) => match result {
+                Ok(buzz_ws_client::RelayMessage::Event { event, .. }) => {
+                    let controller = controller.clone();
+                    let identity = identity.clone();
+                    let owners = owners.clone();
+                    work.push(tokio::spawn(async move {
+                        controller
+                            .handle_command_event(&identity, &owners, &event, chrono::Utc::now())
+                            .await
+                            .map(|receipts| (event.id, receipts))
+                    }));
+                }
+                Ok(buzz_ws_client::RelayMessage::Closed { message, .. }) => {
+                    while work.next().await.is_some() {}
+                    return Err(NodeError::InvalidConfiguration(format!(
+                        "execution subscription closed: {message}"
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    while work.next().await.is_some() {}
+                    return Err(NodeError::InvalidConfiguration(error.to_string()));
+                }
+            },
+            Some(result) = work.next(), if !work.is_empty() => {
+                let (event_id, receipts) = match result {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        warn!(%error, "execution command rejected");
+                        continue;
+                    }
                     Err(error) => {
-                        warn!(event_id = %event.id, %error, "execution command rejected");
+                        warn!(%error, "execution command task failed");
                         continue;
                     }
                 };
@@ -142,14 +169,20 @@ async fn run_connection(
                         warn!(event_id = %response.event_id, message = %response.message, "relay rejected execution receipt");
                     }
                 }
+                let workloads = controller.workload_statuses().await;
+                let announcement = build_announcement_with_workloads(
+                    identity,
+                    &config.display_name,
+                    &workloads,
+                )?;
+                let response = connection
+                    .send_event(announcement)
+                    .await
+                    .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+                if !response.accepted {
+                    warn!(event_id = %event_id, message = %response.message, "relay rejected execution-node status announcement");
+                }
             }
-            Ok(buzz_ws_client::RelayMessage::Closed { message, .. }) => {
-                return Err(NodeError::InvalidConfiguration(format!(
-                    "execution subscription closed: {message}"
-                )));
-            }
-            Ok(_) => {}
-            Err(error) => return Err(NodeError::InvalidConfiguration(error.to_string())),
         }
     }
 }

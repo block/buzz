@@ -6,6 +6,7 @@ use std::time::Duration as StdDuration;
 use buzz_core_pkg::execution::{
     CredentialRef, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
     ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, WorkloadSpec,
+    WorkloadStatus,
 };
 use buzz_core_pkg::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
@@ -51,6 +52,8 @@ pub struct ExecutionNodeTarget {
     pub observed_at: chrono::DateTime<Utc>,
     /// Client-facing connectivity classification.
     pub availability: ExecutionNodeAvailability,
+    /// Durable workloads currently known by the node.
+    pub workloads: Vec<WorkloadStatus>,
 }
 
 /// Safe workload input for the first remote execution deployment flow.
@@ -90,6 +93,24 @@ pub struct DeployExecutionWorkloadResponse {
     pub receipt: Option<ExecutionReceipt>,
 }
 
+/// Input for a lifecycle command targeting an existing workload.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionWorkloadCommandInput {
+    /// Target node public key.
+    pub node_id: String,
+    /// Existing workload identity.
+    pub workload_id: buzz_core_pkg::execution::WorkloadId,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WorkloadLifecycleOperation {
+    Start,
+    Stop,
+    Restart,
+    Remove,
+}
+
 /// Query the relay for the latest signed execution-node announcements.
 #[tauri::command]
 pub async fn list_execution_nodes(
@@ -105,7 +126,7 @@ pub async fn list_execution_nodes(
     .await?;
 
     let now = Utc::now();
-    let mut nodes = BTreeMap::new();
+    let mut nodes: BTreeMap<String, (u64, String, ExecutionNodeTarget)> = BTreeMap::new();
     for event in events {
         if event.kind.as_u16() as u32 != KIND_EXECUTION_NODE_ANNOUNCEMENT
             || !event.verify_id()
@@ -140,17 +161,19 @@ pub async fn list_execution_nodes(
             capabilities: status.capabilities,
             observed_at: status.observed_at,
             availability,
+            workloads: status.workloads,
         };
+        let version = (event.created_at.as_secs(), event.id.to_hex());
         nodes
             .entry(target.node_id.clone())
-            .and_modify(|existing: &mut ExecutionNodeTarget| {
-                if target.observed_at > existing.observed_at {
-                    *existing = target.clone();
+            .and_modify(|existing| {
+                if version > (existing.0, existing.1.clone()) {
+                    *existing = (version.0, version.1.clone(), target.clone());
                 }
             })
-            .or_insert(target);
+            .or_insert((version.0, version.1, target));
     }
-    let mut nodes: Vec<_> = nodes.into_values().collect();
+    let mut nodes: Vec<_> = nodes.into_values().map(|(_, _, target)| target).collect();
     nodes.sort_by(|left, right| left.display_name.cmp(&right.display_name));
     Ok(nodes)
 }
@@ -175,12 +198,80 @@ pub async fn deploy_execution_workload(
         input.credential_refs,
     )
     .map_err(|error| format!("invalid execution workload: {error}"))?;
+    send_execution_command(&state, node_id, ExecutionCommand::Deploy { workload }).await
+}
+
+/// Start a durable workload through the encrypted execution command path.
+#[tauri::command]
+pub async fn start_execution_workload(
+    input: ExecutionWorkloadCommandInput,
+    state: State<'_, AppState>,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    send_lifecycle_command(&state, input, WorkloadLifecycleOperation::Start).await
+}
+
+/// Stop a durable workload through the encrypted execution command path.
+#[tauri::command]
+pub async fn stop_execution_workload(
+    input: ExecutionWorkloadCommandInput,
+    state: State<'_, AppState>,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    send_lifecycle_command(&state, input, WorkloadLifecycleOperation::Stop).await
+}
+
+/// Restart a durable workload through the encrypted execution command path.
+#[tauri::command]
+pub async fn restart_execution_workload(
+    input: ExecutionWorkloadCommandInput,
+    state: State<'_, AppState>,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    send_lifecycle_command(&state, input, WorkloadLifecycleOperation::Restart).await
+}
+
+/// Remove a durable workload through the encrypted execution command path.
+#[tauri::command]
+pub async fn remove_execution_workload(
+    input: ExecutionWorkloadCommandInput,
+    state: State<'_, AppState>,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    send_lifecycle_command(&state, input, WorkloadLifecycleOperation::Remove).await
+}
+
+async fn send_lifecycle_command(
+    state: &State<'_, AppState>,
+    input: ExecutionWorkloadCommandInput,
+    operation: WorkloadLifecycleOperation,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    let node_id = ExecutionNodeId::new(input.node_id.trim().to_string())
+        .map_err(|error| format!("invalid execution node id: {error}"))?;
+    let command = match operation {
+        WorkloadLifecycleOperation::Start => ExecutionCommand::Start {
+            workload_id: input.workload_id,
+        },
+        WorkloadLifecycleOperation::Stop => ExecutionCommand::Stop {
+            workload_id: input.workload_id,
+        },
+        WorkloadLifecycleOperation::Restart => ExecutionCommand::Restart {
+            workload_id: input.workload_id,
+        },
+        WorkloadLifecycleOperation::Remove => ExecutionCommand::Remove {
+            workload_id: input.workload_id,
+        },
+    };
+    send_execution_command(state, node_id, command).await
+}
+
+async fn send_execution_command(
+    state: &State<'_, AppState>,
+    node_id: ExecutionNodeId,
+    command: ExecutionCommand,
+) -> Result<DeployExecutionWorkloadResponse, String> {
     let issued_at = Utc::now();
     let envelope = ExecutionCommandEnvelope::new(
         node_id.clone(),
         issued_at,
         issued_at + Duration::minutes(5),
-        ExecutionCommand::Deploy { workload },
+        command,
     )
     .map_err(|error| format!("could not build execution command: {error}"))?;
     let keys = state.signing_keys()?;

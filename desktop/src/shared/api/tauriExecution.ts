@@ -8,6 +8,14 @@ export type ExecutionNodeTarget = {
   capabilities: string[];
   observedAt: string;
   availability: "connected" | "unavailable" | "degraded";
+  workloads: ExecutionWorkloadStatus[];
+};
+
+/** Durable workload projection reconstructed from a node announcement. */
+export type ExecutionWorkloadStatus = {
+  workloadId: string;
+  lifecycle: string;
+  sequence: number;
 };
 
 /** Fetch the currently announced execution nodes. */
@@ -52,6 +60,12 @@ export type DeployExecutionWorkloadResponse = {
   receipt: ExecutionReceipt | null;
 };
 
+/** Input for a lifecycle command targeting an existing remote workload. */
+export type ExecutionWorkloadCommandInput = {
+  nodeId: string;
+  workloadId: string;
+};
+
 /** Return the safe error code from a failed or rejected receipt, if present. */
 export function executionReceiptFailure(
   receipt: ExecutionReceipt | null,
@@ -76,4 +90,42 @@ export async function deployExecutionWorkload(
       },
     },
   );
+}
+
+async function sendExecutionWorkloadCommand(
+  command: "start" | "stop" | "restart" | "remove",
+  input: ExecutionWorkloadCommandInput,
+): Promise<DeployExecutionWorkloadResponse> {
+  return invokeTauri<DeployExecutionWorkloadResponse>(
+    `${command}_execution_workload`,
+    { input },
+  );
+}
+
+/** Start a remote workload through its paired execution node. */
+export function startExecutionWorkload(
+  input: ExecutionWorkloadCommandInput,
+): Promise<DeployExecutionWorkloadResponse> {
+  return sendExecutionWorkloadCommand("start", input);
+}
+
+/** Stop a remote workload through its paired execution node. */
+export function stopExecutionWorkload(
+  input: ExecutionWorkloadCommandInput,
+): Promise<DeployExecutionWorkloadResponse> {
+  return sendExecutionWorkloadCommand("stop", input);
+}
+
+/** Restart a remote workload through its paired execution node. */
+export function restartExecutionWorkload(
+  input: ExecutionWorkloadCommandInput,
+): Promise<DeployExecutionWorkloadResponse> {
+  return sendExecutionWorkloadCommand("restart", input);
+}
+
+/** Remove a remote workload through its paired execution node. */
+export function removeExecutionWorkload(
+  input: ExecutionWorkloadCommandInput,
+): Promise<DeployExecutionWorkloadResponse> {
+  return sendExecutionWorkloadCommand("remove", input);
 }
