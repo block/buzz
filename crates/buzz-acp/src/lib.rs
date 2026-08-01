@@ -3666,11 +3666,13 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
-    fn shared_base_prompt_requires_origin_channel_commit_trailer() {
+    fn shared_base_prompt_requires_origin_message_commit_trailer() {
         let prompt = include_str!("base_prompt.md");
-        assert!(prompt.contains("Every commit created for channel-scoped Buzz work MUST include"));
-        assert!(prompt.contains("`Buzz-Channel: <channel-uuid>` trailer"));
-        assert!(prompt.contains("channel UUID from the current `[Context]`"));
+        assert!(prompt.contains("Every commit created while handling a Buzz message MUST include"));
+        assert!(prompt.contains(
+            "`Buzz-Message: buzz://message?channel=<channel-uuid>&id=<event-id>` trailer"
+        ));
+        assert!(prompt.contains("supplied in the current `[Context]`"));
         assert!(prompt.contains("in addition to any repository-required trailers"));
     }
 }

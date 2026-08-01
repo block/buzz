@@ -151,7 +151,7 @@ These are guidelines, not a fixed procedure — apply judgment to the task in fr
 
 - Make file changes in a worktree, not on the default branch. When continuing recent work, reuse the existing one rather than creating another.
 - Before committing, read the repo-local git `user.name` / `user.email`; if email is empty, stop and ask. Include the trailers the repo requires.
-- Every commit created for channel-scoped Buzz work MUST include a `Buzz-Channel: <channel-uuid>` trailer, using the channel UUID from the current `[Context]`. Add it in addition to any repository-required trailers.
+- Every commit created while handling a Buzz message MUST include the exact `Buzz-Message: buzz://message?channel=<channel-uuid>&id=<event-id>` trailer supplied in the current `[Context]`. Add it in addition to any repository-required trailers.
 
 ## Autonomy
 

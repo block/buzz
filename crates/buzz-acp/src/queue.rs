@@ -1232,6 +1232,7 @@ fn resolve_reply_anchor(
 /// triggering event.
 fn format_context_hints(
     channel_id: Uuid,
+    triggering_event_id: &str,
     channel_info: Option<&PromptChannelInfo>,
     thread_tags: &ThreadTags,
     is_dm: bool,
@@ -1244,7 +1245,7 @@ fn format_context_hints(
     };
     let commit_provenance = format!(
         "Commit provenance: Every git commit created for this work MUST include the trailer \
-         `Buzz-Channel: {channel_id}`."
+         `Buzz-Message: buzz://message?channel={channel_id}&id={triggering_event_id}`."
     );
 
     // DM check comes first — a DM reply has both thread tags AND is_dm=true,
@@ -1472,21 +1473,23 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
+    let triggering_event_id = last_event.event.id.to_hex();
     let reply_anchor = if is_dm {
         thread_tags
             .root_event_id
             .is_some()
-            .then(|| last_event.event.id.to_hex())
+            .then(|| triggering_event_id.clone())
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
             &thread_tags,
-            &last_event.event.id.to_hex(),
+            &triggering_event_id,
             args.profile_lookup,
         )
     };
     sections.push(format_context_hints(
         batch.channel_id,
+        &triggering_event_id,
         args.channel_info,
         &thread_tags,
         is_dm,
@@ -1695,10 +1698,14 @@ mod tests {
         !q.in_flight_channels.is_empty()
     }
 
-    fn assert_buzz_channel_commit_trailer(prompt: &str, channel_id: Uuid) {
+    fn assert_buzz_message_commit_trailer(
+        prompt: &str,
+        channel_id: Uuid,
+        triggering_event_id: &str,
+    ) {
         assert!(prompt.contains(&format!(
             "Every git commit created for this work MUST include the trailer \
-             `Buzz-Channel: {channel_id}`."
+             `Buzz-Message: buzz://message?channel={channel_id}&id={triggering_event_id}`."
         )));
     }
 
@@ -2977,6 +2984,7 @@ mod tests {
     fn test_format_prompt_with_channel_info() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3002,13 +3010,14 @@ mod tests {
         .join("\n\n");
         assert!(prompt.contains("engineering (#"));
         assert!(prompt.contains("Scope: channel"));
-        assert_buzz_channel_commit_trailer(&prompt, ch);
+        assert_buzz_message_commit_trailer(&prompt, ch, &event_id);
     }
 
     #[test]
     fn test_format_prompt_dm_scope() {
         let ch = Uuid::new_v4();
         let event = make_event("hey");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3033,7 +3042,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(prompt.contains("Scope: dm"));
-        assert_buzz_channel_commit_trailer(&prompt, ch);
+        assert_buzz_message_commit_trailer(&prompt, ch, &event_id);
     }
 
     #[test]
@@ -3048,6 +3057,7 @@ mod tests {
                 "reply".into(),
             ]],
         );
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3062,7 +3072,7 @@ mod tests {
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(prompt.contains("Scope: thread"));
         assert!(prompt.contains("Thread root: root123"));
-        assert_buzz_channel_commit_trailer(&prompt, ch);
+        assert_buzz_message_commit_trailer(&prompt, ch, &event_id);
     }
 
     #[test]
