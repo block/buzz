@@ -28,7 +28,7 @@ use buzz_core::kind::{
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
+    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
@@ -301,6 +301,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_HUDDLE_GUIDELINES => Ok(Scope::ChannelsWrite),
         // NIP-34: Git repository events
         KIND_GIT_REPO_ANNOUNCEMENT | KIND_GIT_REPO_STATE => Ok(Scope::ReposWrite),
+        // NIP-MP: a project is repository metadata — grouping repositories needs
+        // the same scope as announcing them.
+        KIND_PROJECT => Ok(Scope::ReposWrite),
         KIND_GIT_PATCH
         | KIND_GIT_PULL_REQUEST
         | KIND_GIT_PR_UPDATE
@@ -437,6 +440,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_GIT_STATUS_MERGED
             | KIND_GIT_STATUS_CLOSED
             | KIND_GIT_STATUS_DRAFT
+            // NIP-MP: projects are addressed by (pubkey, kind, d_tag). The
+            // `buzz-channel` tag is a metadata reference, not a routing directive,
+            // so a project's state is never channel-scoped.
+            | KIND_PROJECT
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -1157,6 +1164,284 @@ fn validate_team_catalog_envelope(event: &Event) -> Result<(), String> {
     const LABEL: &str = "team-catalog event";
     validate_shared_tag(event, LABEL)?;
     single_bounded_d_tag(event, LABEL)?;
+    Ok(())
+}
+
+/// Maximum number of member `a` tags on a kind:30621 project.
+///
+/// Counted over raw tags, not distinct coordinates: a duplicate-heavy event
+/// naming one coordinate thousands of times would otherwise be bounded only by
+/// the relay frame limit (`config.rs`), so the cap must be checked before any
+/// set proportional to the tag list is built.
+const PROJECT_MEMBER_CAP: usize = 64;
+
+/// Maximum byte length of a project `name` tag value.
+const PROJECT_NAME_MAX_LEN: usize = 256;
+
+/// Maximum byte length of a project `description` tag value.
+const PROJECT_DESCRIPTION_MAX_LEN: usize = 2048;
+
+/// Maximum byte length of `buzz-channel` and `buzz-visibility` tag values.
+///
+/// Both are opaque strings at the relay layer; the bound exists only so an
+/// unbounded value cannot ride into storage on a tag ingest does not interpret.
+const PROJECT_METADATA_TAG_MAX_LEN: usize = 256;
+
+/// Metadata tags a project may carry at most once each.
+///
+/// Duplicates would make the effective value reader-dependent — one client
+/// taking the first, another the last.
+const PROJECT_SINGLETON_METADATA_TAGS: [&str; 4] =
+    ["name", "description", "buzz-channel", "buzz-visibility"];
+
+/// The kind segment every project member coordinate must carry: a project groups
+/// repository *announcements*, so a coordinate naming any other kind (notably
+/// kind:30618 repository state) is malformed.
+const PROJECT_MEMBER_KIND_SEGMENT: &str = "30617";
+const _: () = assert!(KIND_GIT_REPO_ANNOUNCEMENT == 30617);
+
+/// A validation failure from [`validate_project_envelope`] or
+/// [`parse_project_member_coordinate`].
+///
+/// Carries the stable NIP-MP rule identifier alongside the human-readable
+/// rejection message. The rule ID allows the fixture oracle and any future
+/// cross-implementation conformance test to assert *which* rule fired, not just
+/// that rejection occurred — an implementation cannot pass a reject fixture by
+/// refusing for an unrelated reason.
+///
+/// The eight IDs match the `reject_rules` strings in `NIP-MP.fixtures.json`
+/// exactly: `d-cardinality`, `d-empty`, `member-cap`, `member-tag-arity`,
+/// `member-coordinate-malformed`, `member-duplicate`, `metadata-cardinality`,
+/// `metadata-length`.
+#[derive(Debug)]
+struct ProjectRejection {
+    /// Stable rule identifier matching the fixture file's `reject_rules` set.
+    rule: &'static str,
+    /// Human-readable explanation forwarded to the client's NOTICE/OK message.
+    message: String,
+}
+
+impl std::fmt::Display for ProjectRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.rule, self.message)
+    }
+}
+
+impl ProjectRejection {
+    fn new(rule: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            rule,
+            message: message.into(),
+        }
+    }
+}
+
+/// Validate the envelope of a kind:30621 NIP-MP project event.
+///
+/// Enforces the structural contract in `docs/nips/NIP-MP.md` — exactly one
+/// non-empty `d` tag, at most [`PROJECT_MEMBER_CAP`] member `a` tags each
+/// holding a canonical `30617:<lowercase-64-hex-owner>:<non-empty-d>`
+/// coordinate with no duplicates, and bounded metadata.
+///
+/// Deliberately absent: any membership authorization. The signer may reference
+/// any repository coordinate, including another owner's, because membership
+/// grants nothing — push policy reads the repository's own kind:30617
+/// (`api/git/policy.rs`) and never a project. Owner-only replacement comes free
+/// from NIP-33 addressing.
+///
+/// Duplicates are rejected rather than deduped: a relay cannot rewrite tags
+/// inside a signed event without invalidating its id and signature, so the
+/// choice is reject or force every consumer to apply a first-wins rule.
+fn validate_project_envelope(event: &Event) -> Result<(), ProjectRejection> {
+    let mut d_tags: Vec<&str> = Vec::new();
+    let mut members: Vec<&str> = Vec::new();
+    let mut name: Option<&str> = None;
+    let mut description: Option<&str> = None;
+    let mut buzz_channel: Option<&str> = None;
+    let mut buzz_visibility: Option<&str> = None;
+    let mut singleton_counts = [0usize; PROJECT_SINGLETON_METADATA_TAGS.len()];
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        let Some(tag_name) = parts.first().map(|s| s.as_str()) else {
+            continue;
+        };
+        let value = parts.get(1).map(|s| s.as_str()).unwrap_or("");
+        match tag_name {
+            "d" => d_tags.push(value),
+            "a" => members.push(value),
+            _ => {
+                if let Some(i) = PROJECT_SINGLETON_METADATA_TAGS
+                    .iter()
+                    .position(|k| *k == tag_name)
+                {
+                    singleton_counts[i] += 1;
+                    match tag_name {
+                        "name" => name = Some(value),
+                        "description" => description = Some(value),
+                        "buzz-channel" => buzz_channel = Some(value),
+                        "buzz-visibility" => buzz_visibility = Some(value),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // `d-cardinality` / `d-empty`: under NIP-33 a missing `d` is treated as
+    // empty, which collapses every such project into the `(pubkey, 30621, "")`
+    // slot where unrelated projects silently overwrite each other. Several `d`
+    // tags make the address reader-dependent. Length is bounded by the generic
+    // `D_TAG_MAX_LEN` check the ingest pipeline already applies.
+    if d_tags.len() != 1 {
+        return Err(ProjectRejection::new(
+            "d-cardinality",
+            format!(
+                "project event must have exactly one `d` tag (got {})",
+                d_tags.len()
+            ),
+        ));
+    }
+    if d_tags[0].is_empty() {
+        return Err(ProjectRejection::new(
+            "d-empty",
+            "project event `d` tag must not be empty",
+        ));
+    }
+
+    // `member-cap` before `member-coordinate-malformed` and `member-duplicate`:
+    // refuse on count before doing per-tag work.
+    if members.len() > PROJECT_MEMBER_CAP {
+        return Err(ProjectRejection::new(
+            "member-cap",
+            format!(
+                "project event must have at most {PROJECT_MEMBER_CAP} member `a` tags (got {})",
+                members.len()
+            ),
+        ));
+    }
+    // `member-tag-arity`: every member `a` tag has exactly 2 or 3 elements per
+    // NIP-01's `a` tag grammar. A one-element tag names no coordinate; a fourth
+    // element has no defined meaning, and accepting it would let a writer park
+    // unbounded unvalidated data in a position no consumer reads.
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(|s| s.as_str()) == Some("a") && !(2..=3).contains(&parts.len()) {
+            return Err(ProjectRejection::new(
+                "member-tag-arity",
+                format!(
+                    "project event member `a` tag must have exactly 2 or 3 elements (got {})",
+                    parts.len()
+                ),
+            ));
+        }
+    }
+    let mut seen = std::collections::HashSet::with_capacity(members.len());
+    for member in &members {
+        parse_project_member_coordinate(member)?;
+        if !seen.insert(*member) {
+            return Err(ProjectRejection::new(
+                "member-duplicate",
+                format!("project event has duplicate member coordinate {member:?}"),
+            ));
+        }
+    }
+
+    for (i, count) in singleton_counts.iter().enumerate() {
+        if *count > 1 {
+            return Err(ProjectRejection::new(
+                "metadata-cardinality",
+                format!(
+                    "project event must have at most one `{}` tag (got {count})",
+                    PROJECT_SINGLETON_METADATA_TAGS[i]
+                ),
+            ));
+        }
+    }
+    if let Some(name) = name {
+        if name.len() > PROJECT_NAME_MAX_LEN {
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `name` tag too long ({} bytes, max {PROJECT_NAME_MAX_LEN})",
+                    name.len()
+                ),
+            ));
+        }
+    }
+    if let Some(description) = description {
+        if description.len() > PROJECT_DESCRIPTION_MAX_LEN {
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `description` tag too long ({} bytes, max {PROJECT_DESCRIPTION_MAX_LEN})",
+                    description.len()
+                ),
+            ));
+        }
+    }
+    if let Some(buzz_channel) = buzz_channel {
+        if buzz_channel.len() > PROJECT_METADATA_TAG_MAX_LEN {
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `buzz-channel` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
+                    buzz_channel.len()
+                ),
+            ));
+        }
+    }
+    if let Some(buzz_visibility) = buzz_visibility {
+        if buzz_visibility.len() > PROJECT_METADATA_TAG_MAX_LEN {
+            return Err(ProjectRejection::new(
+                "metadata-length",
+                format!(
+                    "project event `buzz-visibility` tag too long ({} bytes, max {PROJECT_METADATA_TAG_MAX_LEN})",
+                    buzz_visibility.len()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check that `coordinate` is a canonical repository-announcement address.
+///
+/// Splits on the first two colons only, matching how NIP-09 deletion handling
+/// parses coordinates (`side_effects.rs`), so a repository whose `d` tag
+/// contains a colon stays addressable and a project can never disagree with a
+/// deletion about where the `d` value begins.
+fn parse_project_member_coordinate(coordinate: &str) -> Result<(), ProjectRejection> {
+    let malformed = || {
+        ProjectRejection::new(
+            "member-coordinate-malformed",
+            format!(
+                "project event member `a` tag must be \
+                 `{PROJECT_MEMBER_KIND_SEGMENT}:<lowercase-64-hex-owner>:<repo-d>` (got {coordinate:?})"
+            ),
+        )
+    };
+    let mut segments = coordinate.splitn(3, ':');
+    let (Some(kind), Some(owner), Some(repo_d)) =
+        (segments.next(), segments.next(), segments.next())
+    else {
+        return Err(malformed());
+    };
+    if kind != PROJECT_MEMBER_KIND_SEGMENT {
+        return Err(malformed());
+    }
+    // Lowercase-only: `#a` filter matching is byte-exact, so an uppercase-owner
+    // head would be invisible to the lowercase-coordinate queries readers issue.
+    if owner.len() != 64
+        || !owner
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(malformed());
+    }
+    if repo_d.is_empty() {
+        return Err(malformed());
+    }
     Ok(())
 }
 
@@ -2127,6 +2412,11 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_TEAM_CATALOG {
         validate_team_catalog_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_PROJECT {
+        validate_project_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
@@ -3944,6 +4234,407 @@ mod tests {
     fn team_catalog_is_global_only() {
         assert!(is_global_only_kind(KIND_TEAM_CATALOG));
         assert!(!requires_h_channel_scope(KIND_TEAM_CATALOG));
+    }
+
+    // ─── project (NIP-MP kind:30621) envelope tests ──────────────────────────
+
+    const OWNER_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OWNER_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn make_project(tags: &[&[&str]]) -> Event {
+        make_event_with_tags(KIND_PROJECT, "", tags)
+    }
+
+    fn member_coord(owner: &str, repo_d: &str) -> String {
+        format!("30617:{owner}:{repo_d}")
+    }
+
+    #[test]
+    fn project_envelope_accepts_minimal() {
+        let ev = make_project(&[&["d", "platform"]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_envelope_accepts_full_cross_owner_membership() {
+        // The motivating case: one project spanning two owners' repositories.
+        let a = member_coord(OWNER_A, "buzz");
+        let b = member_coord(OWNER_B, "buzz-infra");
+        let ev = make_project(&[
+            &["d", "platform"],
+            &["name", "Platform"],
+            &["description", "Relay, desktop, and mobile."],
+            &["a", &a],
+            &["a", &b],
+            &["buzz-channel", "3580ca9b-47b4-4af9-b22a-1068778f26c6"],
+            &["buzz-visibility", "listed"],
+        ]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_envelope_accepts_zero_members() {
+        // Legal at the protocol layer: the natural state after removing a final
+        // member. The create UI requires >= 1; the relay must not.
+        let ev = make_project(&[&["d", "empty"], &["name", "Empty"]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_envelope_accepts_same_repo_d_under_two_owners() {
+        // The NIP-34 fork case. Identity is the whole coordinate, so these are
+        // two distinct members, not a duplicate.
+        let a = member_coord(OWNER_A, "buzz");
+        let b = member_coord(OWNER_B, "buzz");
+        let ev = make_project(&[&["d", "forks"], &["a", &a], &["a", &b]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_envelope_accepts_member_repo_d_containing_colon() {
+        // Coordinates split on the first two colons only, matching NIP-09
+        // deletion parsing, so a colon-bearing repository `d` stays addressable.
+        let coord = member_coord(OWNER_A, "group:repo");
+        let ev = make_project(&[&["d", "external"], &["a", &coord]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_envelope_accepts_member_cap_boundary() {
+        let coords: Vec<String> = (0..PROJECT_MEMBER_CAP)
+            .map(|i| member_coord(OWNER_A, &format!("repo-{i}")))
+            .collect();
+        let mut tags: Vec<Vec<&str>> = vec![vec!["d", "wide"]];
+        tags.extend(coords.iter().map(|c| vec!["a", c.as_str()]));
+        let tag_refs: Vec<&[&str]> = tags.iter().map(|t| t.as_slice()).collect();
+        let ev = make_project(&tag_refs);
+        assert!(
+            validate_project_envelope(&ev).is_ok(),
+            "exactly {PROJECT_MEMBER_CAP} members must be accepted"
+        );
+    }
+
+    #[test]
+    fn project_envelope_ignores_unknown_tags() {
+        // Forward compatibility: a newer writer's extra metadata must not
+        // invalidate the event for this relay.
+        let ev = make_project(&[&["d", "platform"], &["future-field", "whatever"]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_envelope_rejects_missing_d_tag() {
+        let ev = make_project(&[&["name", "No Identity"]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly one `d` tag"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_multiple_d_tags() {
+        let ev = make_project(&[&["d", "one"], &["d", "two"]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly one `d` tag"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_empty_d_tag() {
+        // An empty `d` collapses every such project into the (pubkey, 30621, "")
+        // slot, where unrelated projects silently overwrite each other.
+        let ev = make_project(&[&["d", ""]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn project_envelope_rejects_valueless_d_tag() {
+        // `["d"]` with no value is treated as empty, not as absent.
+        let ev = make_project(&[&["d"]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn project_envelope_rejects_duplicate_member_coordinate() {
+        let coord = member_coord(OWNER_A, "buzz");
+        let ev = make_project(&[&["d", "platform"], &["a", &coord], &["a", &coord]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate member coordinate"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_member_cap_exceeded() {
+        let coords: Vec<String> = (0..=PROJECT_MEMBER_CAP)
+            .map(|i| member_coord(OWNER_A, &format!("repo-{i}")))
+            .collect();
+        let mut tags: Vec<Vec<&str>> = vec![vec!["d", "wide"]];
+        tags.extend(coords.iter().map(|c| vec!["a", c.as_str()]));
+        let tag_refs: Vec<&[&str]> = tags.iter().map(|t| t.as_slice()).collect();
+        let ev = make_project(&tag_refs);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(err.to_string().contains("at most 64 member"), "got: {err}");
+    }
+
+    #[test]
+    fn project_envelope_rejects_duplicate_heavy_list_on_cap_not_duplicate() {
+        // The cap counts raw `a` tags, so a duplicate-heavy list is refused on
+        // count — parse volume is never bounded only by the frame limit.
+        let coord = member_coord(OWNER_A, "buzz");
+        let mut tags: Vec<Vec<&str>> = vec![vec!["d", "wide"]];
+        for _ in 0..=PROJECT_MEMBER_CAP {
+            tags.push(vec!["a", coord.as_str()]);
+        }
+        let tag_refs: Vec<&[&str]> = tags.iter().map(|t| t.as_slice()).collect();
+        let ev = make_project(&tag_refs);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("at most 64 member"),
+            "cap must be evaluated before the duplicate set is built, got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_member_wrong_kind_prefix() {
+        // kind:30618 is repository *state*; a project groups announcements.
+        let coord = format!("30618:{OWNER_A}:buzz");
+        let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_member_owner_not_hex() {
+        let coord = member_coord(&"z".repeat(64), "buzz");
+        let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_member_owner_uppercase_hex() {
+        // `#a` filter matching is byte-exact: an uppercase-owner head would be
+        // invisible to the lowercase-coordinate queries every reader issues.
+        let coord = member_coord(&"A".repeat(64), "buzz");
+        let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_member_owner_wrong_length() {
+        let coord = member_coord(&"a".repeat(63), "buzz");
+        let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_member_empty_repo_d() {
+        let coord = member_coord(OWNER_A, "");
+        let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_member_missing_segment() {
+        let coord = format!("30617:{OWNER_A}");
+        let ev = make_project(&[&["d", "platform"], &["a", &coord]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("member `a` tag must be"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_valueless_member_tag() {
+        // A one-element `a` tag names no coordinate — caught by the arity check
+        // (rule 4) before the coordinate parse (rule 5) even runs.
+        let ev = make_project(&[&["d", "platform"], &["a"]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly 2 or 3 elements"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_rejects_duplicate_metadata_tags() {
+        // Every singleton metadata tag is bounded: a duplicate would make the
+        // effective value reader-dependent.
+        for tag_name in PROJECT_SINGLETON_METADATA_TAGS {
+            let ev = make_project(&[&["d", "platform"], &[tag_name, "x"], &[tag_name, "y"]]);
+            let err = validate_project_envelope(&ev).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("at most one `{tag_name}` tag")),
+                "duplicate `{tag_name}` must be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_envelope_rejects_name_too_long() {
+        let name = "x".repeat(PROJECT_NAME_MAX_LEN + 1);
+        let ev = make_project(&[&["d", "platform"], &["name", &name]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("`name` tag too long"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_accepts_name_at_max_length() {
+        let name = "x".repeat(PROJECT_NAME_MAX_LEN);
+        let ev = make_project(&[&["d", "platform"], &["name", &name]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_envelope_rejects_description_too_long() {
+        let description = "x".repeat(PROJECT_DESCRIPTION_MAX_LEN + 1);
+        let ev = make_project(&[&["d", "platform"], &["description", &description]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains("`description` tag too long"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn project_envelope_accepts_description_at_max_length() {
+        let description = "x".repeat(PROJECT_DESCRIPTION_MAX_LEN);
+        let ev = make_project(&[&["d", "platform"], &["description", &description]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    /// Membership is an assertion, not a permission grant: the relay must accept
+    /// a project naming a repository the signer does not own. Cross-owner
+    /// grouping is the entire point of the kind, and it is safe precisely because
+    /// membership confers nothing.
+    #[test]
+    fn project_envelope_accepts_member_owned_by_another_pubkey() {
+        let stranger = member_coord(OWNER_B, "not-mine");
+        let ev = make_project(&[&["d", "collection"], &["a", &stranger]]);
+        assert!(validate_project_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn project_is_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_PROJECT, &dummy).unwrap(),
+            Scope::ReposWrite,
+            "a project is repository metadata — same scope as announcing a repo"
+        );
+    }
+
+    #[test]
+    fn project_is_global_only() {
+        // `buzz-channel` is a metadata reference, not a routing directive.
+        assert!(is_global_only_kind(KIND_PROJECT));
+        assert!(!requires_h_channel_scope(KIND_PROJECT));
+    }
+
+    #[test]
+    fn project_is_parameterized_replaceable() {
+        // Owner-only editing comes free from NIP-33 addressing: replacement is
+        // keyed by (pubkey, kind, d), so one signer can never overwrite another's
+        // project. No relay-side permission check exists or is needed.
+        assert!(is_parameterized_replaceable(KIND_PROJECT));
+    }
+
+    /// Drive every case in the shared NIP-MP fixture file against
+    /// `validate_project_envelope`. All 11 accept cases must pass; all 20
+    /// reject cases must return an error whose rule is in the case's allowed
+    /// `reject_rules` set — an implementation cannot pass by rejecting for an
+    /// unrelated reason. This is the machine-readable oracle the spec promises.
+    #[test]
+    fn project_envelope_validates_all_shared_fixtures() {
+        #[derive(serde::Deserialize)]
+        struct FixtureFile {
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            expect: String,
+            #[serde(default)]
+            reject_rules: Vec<String>,
+            template: Template,
+        }
+        #[derive(serde::Deserialize)]
+        struct Template {
+            content: String,
+            tags: Vec<Vec<String>>,
+        }
+
+        let raw = include_str!("../../../../docs/nips/NIP-MP.fixtures.json");
+        let file: FixtureFile = serde_json::from_str(raw).expect("fixture file must parse");
+
+        for case in &file.cases {
+            let tag_strs: Vec<Vec<&str>> = case
+                .template
+                .tags
+                .iter()
+                .map(|t| t.iter().map(|s| s.as_str()).collect())
+                .collect();
+            let tag_refs: Vec<&[&str]> = tag_strs.iter().map(|t| t.as_slice()).collect();
+            let ev = make_event_with_tags(KIND_PROJECT, &case.template.content, &tag_refs);
+            let result = validate_project_envelope(&ev);
+            match case.expect.as_str() {
+                "accept" => assert!(
+                    result.is_ok(),
+                    "fixture {:?} expected accept, got err: {:?}",
+                    case.name,
+                    result.unwrap_err()
+                ),
+                "reject" => {
+                    let rejection = match result {
+                        Err(r) => r,
+                        Ok(()) => {
+                            panic!("fixture {:?} expected reject, but was accepted", case.name)
+                        }
+                    };
+                    assert!(
+                        case.reject_rules.iter().any(|r| r == rejection.rule),
+                        "fixture {:?} fired rule {:?}, which is not in allowed set {:?}",
+                        case.name,
+                        rejection.rule,
+                        case.reject_rules,
+                    );
+                }
+                other => panic!(
+                    "unknown expect value {:?} in fixture {:?}",
+                    other, case.name
+                ),
+            }
+        }
     }
 
     // ─── agent_turn_metric envelope tests ────────────────────────────────────
