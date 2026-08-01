@@ -547,6 +547,51 @@ mod tests {
     }
 
     #[test]
+    fn long_model_load_never_reaches_the_restart_path() {
+        // Pins the exact false positive this fix removes. A big model stays
+        // bound-but-unresponsive for MINUTES while it loads weights and
+        // downloads package layers, so the watchdog sees an unbroken run of
+        // `Unhealthy` probes. Walk ~5 minutes of watchdog passes at its 15s
+        // base interval and assert the eviction gate stays shut the whole way
+        // — for a serve node, one `true` here is a whole-app restart.
+        let state = MeshRecoveryState::default();
+        let runtime_id = 42;
+        let passes = (5 * 60) / 15;
+
+        for pass in 1..=passes {
+            let consecutive = state.record_dead_probe(runtime_id);
+            // The streak really does climb — the non-eviction below is the
+            // rule refusing to act, not the counter quietly resetting.
+            assert_eq!(
+                consecutive, pass,
+                "probe streak should keep climbing across a long load"
+            );
+            for urgency in [
+                MeshRecoveryUrgency::Watchdog,
+                MeshRecoveryUrgency::Foreground,
+            ] {
+                assert!(
+                    !should_evict_after_probe(urgency, MeshIngressProbe::Unhealthy, consecutive),
+                    "a still-loading node must never be evicted \
+                     (urgency={urgency:?}, minute={}, streak={consecutive})",
+                    pass * 15 / 60
+                );
+            }
+        }
+
+        // Sanity: the streak blew far past the threshold that used to evict,
+        // so the old logic WOULD have restarted this healthy loading node.
+        assert!(
+            passes >= DEAD_PROBE_EVICT_THRESHOLD,
+            "test must exceed the old eviction threshold to be meaningful"
+        );
+
+        // Once the load finishes and the ingress answers, the streak clears.
+        state.reset_probe_streak();
+        assert_eq!(state.record_dead_probe(runtime_id), 1);
+    }
+
+    #[test]
     fn probe_streak_is_scoped_to_runtime_identity() {
         let state = MeshRecoveryState::default();
         assert_eq!(state.record_dead_probe(7), 1);
