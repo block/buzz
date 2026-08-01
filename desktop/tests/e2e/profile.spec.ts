@@ -1343,7 +1343,14 @@ test("desktop notification clicks open the matching forum thread", async ({
       kind: 45001,
       pubkey:
         "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
-      tags: [["h", "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11"]],
+      tags: [
+        ["h", "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11"],
+        [
+          "p",
+          "e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34",
+        ],
+        ["buzz-notification", "blocked"],
+      ],
     });
   });
 

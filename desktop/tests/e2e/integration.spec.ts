@@ -276,7 +276,7 @@ test("live mentions refetch the home feed without waiting for polling", async ({
 
   try {
     await installRelayBridge(targetPage, "tyler");
-    await installRelayBridge(senderPage, "alice");
+    await installRelayBridge(senderPage, "bob");
 
     await targetPage.goto("/");
     await senderPage.goto("/");
@@ -299,7 +299,7 @@ test("live mentions refetch the home feed without waiting for polling", async ({
     await expectLoggedNotifications(targetPage, [
       {
         body: message,
-        title: "alice mentioned you in #general",
+        title: "bob mentioned you in #general",
       },
     ]);
 
@@ -337,7 +337,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
 
   try {
     await installRelayBridge(targetPage, "tyler");
-    await installRelayBridge(senderPage, "alice");
+    await installRelayBridge(senderPage, "bob");
 
     await targetPage.goto("/");
     await senderPage.goto("/");
@@ -360,7 +360,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
     await expectLoggedNotifications(targetPage, [
       {
         body: message,
-        title: "alice mentioned you in #watercooler",
+        title: "bob mentioned you in #watercooler",
       },
     ]);
 

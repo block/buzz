@@ -28,10 +28,11 @@ async function getLoggedNotifications(page: import("@playwright/test").Page) {
 }
 
 /**
- * Publishes a REAL signed DM message from alice through the relay ingest
+ * Publishes a REAL signed blocked-agent DM from alice through the relay ingest
  * path. Like every DM send in the product, it carries a recipient `p` tag
  * (see messageMentionPubkeys) — which is exactly what makes the event match
- * both the live DM subscription and the home-feed mention query.
+ * both the live DM subscription and the home-feed mention query. The blocked
+ * tier opts the agent message into a desktop alert without opting into sound.
  */
 async function publishAliceDm(content: string) {
   const event = finalizeEvent(
@@ -41,6 +42,7 @@ async function publishAliceDm(content: string) {
       tags: [
         ["h", ALICE_TYLER_DM_CHANNEL_ID],
         ["p", TEST_IDENTITIES.tyler.pubkey],
+        ["buzz-notification", "blocked"],
       ],
       created_at: Math.floor(Date.now() / 1000),
     },
