@@ -211,6 +211,14 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text the agent streamed as `agent_message_chunk` during the current
+    /// turn that was NOT followed by a successful publish tool call. Used to
+    /// surface a "turn ended without publishing" signal (#3980).
+    unpublished_turn_text: String,
+    /// Whether the agent completed at least one tool call this turn. An agent
+    /// that produced text but completed zero tool calls never shelled out to
+    /// `buzz messages send`, so its reply is invisible on the relay.
+    completed_tool_call_this_turn: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +558,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            unpublished_turn_text: String::new(),
+            completed_tool_call_this_turn: false,
         })
     }
 
@@ -560,6 +570,19 @@ impl AcpClient {
     }
 
     /// Update metadata that will be attached to subsequent raw wire events.
+    /// Drain per-turn unpublished-text state. Returns `Some(text)` when the
+    /// agent streamed non-empty reply text but completed no tool call — i.e.
+    /// its reply never reached the relay (#3980). Resets both fields so the
+    /// next turn starts clean; safe to call on every turn boundary.
+    pub fn take_unpublished_turn_notice(&mut self) -> Option<String> {
+        let text = std::mem::take(&mut self.unpublished_turn_text);
+        let had_tool = std::mem::take(&mut self.completed_tool_call_this_turn);
+        if had_tool || text.trim().is_empty() {
+            return None;
+        }
+        Some(text)
+    }
+
     pub fn set_observer_context(&mut self, context: ObserverContext) {
         self.observer_context = context;
     }
@@ -1715,6 +1738,9 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Accumulate silent (unpublished) reply text so a turn that
+                    // ends without a publish surfaces a notice (#3980).
+                    self.unpublished_turn_text.push_str(text);
                 }
                 false
             }
@@ -1737,6 +1763,12 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                // A successfully completed tool call means the agent shelled
+                // out (potentially to publish) — don't flag the turn as
+                // silent-unpublished (#3980).
+                if status == "completed" {
+                    self.completed_tool_call_this_turn = true;
+                }
                 false
             }
             "plan" => {
