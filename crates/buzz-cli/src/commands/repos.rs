@@ -141,13 +141,16 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
-    let next_created_at = existing
+    // Advance past the observed head so a delayed writer cannot leapfrog an
+    // intervening update and silently erase metadata — but never stamp earlier
+    // than now: a stale head would otherwise produce a timestamp outside the
+    // relay's clock-skew window ("event timestamp too far from server time").
+    let head_plus_one = existing
         .created_at
         .as_secs()
         .checked_add(1)
         .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    let next_created_at = head_plus_one.max(Timestamp::now().as_secs());
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -520,7 +523,10 @@ mod tests {
         .expect("sign update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        // created_at = max(head+1, now): must supersede the head (>100) and
+        // sit inside the relay clock-skew window (>= now - small slack).
+        assert!(updated.created_at.as_secs() > 100);
+        assert!(updated.created_at.as_secs() + 5 >= Timestamp::now().as_secs());
         assert!(!updated
             .tags
             .iter()
@@ -714,7 +720,10 @@ mod tests {
                 .expect("sign bind update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        // created_at = max(head+1, now): must supersede the head (>100) and
+        // sit inside the relay clock-skew window (>= now - small slack).
+        assert!(updated.created_at.as_secs() > 100);
+        assert!(updated.created_at.as_secs() + 5 >= Timestamp::now().as_secs());
         // Exactly one binding remains, and it is the requested one.
         let bindings: Vec<_> = updated
             .tags
