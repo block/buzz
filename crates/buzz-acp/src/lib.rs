@@ -4574,17 +4574,23 @@ mod heartbeat_base_prompt_tests {
     // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
     // the second half of the round-2 regression (the first being initial_message).
 
+    fn heartbeat_standing() -> queue::StandingContext<'static> {
+        queue::StandingContext {
+            base_prompt: Some("you are a helpful agent"),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_heartbeat_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
         // with the [Base] section exactly as the legacy session/new path would.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(1, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_standing_for_legacy(1, &heartbeat_standing(), prompt);
         assert_eq!(
             composed,
             "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
         );
-        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
     }
 
     #[test]
@@ -4592,7 +4598,7 @@ mod heartbeat_base_prompt_tests {
         // protocol_version 2 gets base_prompt via session/new; the heartbeat
         // prompt is sent verbatim.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_standing_for_legacy(2, &heartbeat_standing(), prompt);
         assert_eq!(composed, prompt);
     }
 }
