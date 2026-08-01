@@ -1,6 +1,7 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
-    io::{Read as _, Seek as _, SeekFrom},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Mutex, OnceLock},
@@ -19,8 +20,15 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_RECORDS_PER_BATCH: usize = 200;
 const MAX_IDENTIFIER_CHARS: usize = 160;
 const MAX_LOCAL_RECORD_BYTES: u64 = 8 * 1024 * 1024;
+const CURSOR_OFFSET_BITS: u32 = 32;
+const CURSOR_OFFSET_MASK: u64 = (1_u64 << CURSOR_OFFSET_BITS) - 1;
+const CURSOR_GENERATION_MASK: u64 = (1_u64 << 21) - 1;
 const NUMBAT_INSTALL_TIMEOUT: Duration = Duration::from_secs(10);
+const RETENTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 static NUMBAT_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static NUMBAT_RETENTION_WORKERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static NUMBAT_VERIFICATION_BASELINES: OnceLock<Mutex<HashMap<String, (u64, u64)>>> =
+    OnceLock::new();
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +62,43 @@ pub struct NumbatGuardianHealth {
     detail: String,
 }
 
+fn active_health() -> NumbatGuardianHealth {
+    NumbatGuardianHealth {
+        state: "active".into(),
+        detail:
+            "Guardian callback execution is verified by a valid finding from this managed runtime."
+                .into(),
+    }
+}
+
+fn record_verification_baseline(agent_pubkey: &str, generation: u64, offset: u64) {
+    let baselines = NUMBAT_VERIFICATION_BASELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut baselines) = baselines.lock() {
+        baselines.insert(agent_pubkey.to_string(), (generation, offset));
+    }
+}
+
+fn is_post_configuration_finding(
+    agent_pubkey: &str,
+    generation: u64,
+    next_offset: u64,
+    active_findings_observed: bool,
+) -> bool {
+    let baselines = NUMBAT_VERIFICATION_BASELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut baselines) = baselines.lock() else {
+        return false;
+    };
+    let Some((baseline_generation, baseline_offset)) = baselines.get(agent_pubkey).copied() else {
+        baselines.insert(agent_pubkey.to_string(), (generation, next_offset));
+        return false;
+    };
+    if baseline_generation != generation {
+        baselines.insert(agent_pubkey.to_string(), (generation, next_offset));
+        return false;
+    }
+    active_findings_observed && next_offset > baseline_offset
+}
+
 #[derive(Debug, Deserialize)]
 struct NumbatFindingRecord {
     schema_version: String,
@@ -80,6 +125,10 @@ fn numbat_findings_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, 
 
 fn numbat_findings_template(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(numbat_dir(app)?.join("${BUZZ_MANAGED_AGENT_PUBKEY}.ndjson"))
+}
+
+fn previous_findings_path(path: &Path) -> PathBuf {
+    path.with_extension("previous.ndjson")
 }
 
 fn health_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, String> {
@@ -198,6 +247,59 @@ fn align_to_next_record(file: &mut File, start: u64) -> Result<u64, String> {
 
     file.stream_position()
         .map_err(|error| format!("failed to locate Numbat record end: {error}"))
+}
+
+#[cfg(unix)]
+fn findings_generation(path: &Path) -> Result<u64, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    path.metadata()
+        .map(|metadata| metadata.ino() & CURSOR_GENERATION_MASK)
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(0)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| format!("failed to identify Guardian storage: {error}"))
+}
+
+#[cfg(not(unix))]
+fn findings_generation(path: &Path) -> Result<u64, String> {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .and_then(|modified| {
+            modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(std::io::Error::other)
+        })
+        .map(|duration| duration.as_nanos() as u64 & CURSOR_GENERATION_MASK)
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(0)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| format!("failed to identify Guardian storage: {error}"))
+}
+
+fn encode_cursor(generation: u64, offset: u64) -> Result<u64, String> {
+    if offset > CURSOR_OFFSET_MASK {
+        return Err("Guardian cursor offset exceeds its supported range".into());
+    }
+    Ok((generation << CURSOR_OFFSET_BITS) | offset)
+}
+
+fn decode_cursor(cursor: u64, generation: u64) -> (u64, bool) {
+    if cursor == 0 {
+        return (0, false);
+    }
+    let cursor_generation = cursor >> CURSOR_OFFSET_BITS;
+    if cursor_generation != generation {
+        return (0, true);
+    }
+    (cursor & CURSOR_OFFSET_MASK, false)
 }
 
 fn read_numbat_findings_from_path(
@@ -322,6 +424,101 @@ fn set_private_permissions(_path: &Path, _mode: u32) -> Result<(), String> {
     Err("Guardian evidence storage is disabled because owner-only permissions are unavailable on this platform.".into())
 }
 
+fn enforce_continuous_retention(path: &Path) -> Result<bool, String> {
+    let file_len = match path.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("failed to inspect Guardian storage: {error}")),
+    };
+    if file_len <= MAX_LOCAL_RECORD_BYTES {
+        return Ok(false);
+    }
+
+    let mut source = File::open(path)
+        .map_err(|error| format!("failed to open Guardian storage for retention: {error}"))?;
+    let start = align_to_next_record(&mut source, file_len.saturating_sub(MAX_BACKLOG_BYTES))?;
+    source
+        .seek(SeekFrom::Start(start))
+        .map_err(|error| format!("failed to seek Guardian storage for retention: {error}"))?;
+    let mut retained = Vec::with_capacity((file_len - start) as usize);
+    source
+        .read_to_end(&mut retained)
+        .map_err(|error| format!("failed to read Guardian storage for retention: {error}"))?;
+
+    let temporary = path.with_extension("retention.tmp");
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut target = options
+        .open(&temporary)
+        .map_err(|error| format!("failed to create retained Guardian storage: {error}"))?;
+    target
+        .write_all(&retained)
+        .and_then(|()| target.sync_all())
+        .map_err(|error| format!("failed to persist retained Guardian storage: {error}"))?;
+    set_private_permissions(&temporary, 0o600)?;
+    let previous = previous_findings_path(path);
+    if previous.exists() {
+        std::fs::remove_file(&previous)
+            .map_err(|error| format!("failed to expire prior Guardian storage: {error}"))?;
+    }
+    std::fs::rename(path, &previous)
+        .map_err(|error| format!("failed to preserve prior Guardian storage: {error}"))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|error| format!("failed to replace Guardian storage after retention: {error}"))?;
+    Ok(true)
+}
+
+fn read_previous_findings_tail(
+    path: &Path,
+    expected_context: Option<(&str, &str, &str, &str)>,
+    health: NumbatGuardianHealth,
+) -> Result<Vec<NumbatFindingProjection>, String> {
+    let previous = previous_findings_path(path);
+    let file_len = match previous.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("failed to inspect prior Guardian storage: {error}")),
+    };
+    let mut file = File::open(&previous)
+        .map_err(|error| format!("failed to open prior Guardian storage: {error}"))?;
+    let offset = align_to_next_record(&mut file, file_len.saturating_sub(MAX_BATCH_BYTES))?;
+    read_numbat_findings_from_path(&previous, offset, expected_context, health)
+        .map(|batch| batch.findings)
+}
+
+fn start_retention_worker(app: AppHandle, agent_pubkey: String) {
+    let workers = NUMBAT_RETENTION_WORKERS.get_or_init(|| Mutex::new(HashSet::new()));
+    let Ok(mut workers) = workers.lock() else {
+        return;
+    };
+    if !workers.insert(agent_pubkey.clone()) {
+        return;
+    }
+    drop(workers);
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(RETENTION_CHECK_INTERVAL);
+        let Ok(path) = numbat_findings_path(&app, &agent_pubkey) else {
+            return;
+        };
+        if let Err(detail) = enforce_continuous_retention(&path) {
+            write_health(
+                &app,
+                &agent_pubkey,
+                &NumbatGuardianHealth {
+                    state: "stale".into(),
+                    detail,
+                },
+            );
+        }
+    });
+}
+
 fn run_numbat_install(
     binary: &Path,
     runtime: &str,
@@ -396,18 +593,7 @@ fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str)
             .map_err(|error| format!("failed to create Guardian storage: {error}"))?;
         set_private_permissions(&dir, 0o700)?;
         let findings = numbat_findings_path(app, agent_pubkey)?;
-        if findings
-            .metadata()
-            .is_ok_and(|meta| meta.len() > MAX_LOCAL_RECORD_BYTES)
-        {
-            let previous = dir.join(format!("{agent_pubkey}.previous.ndjson"));
-            if previous.exists() {
-                std::fs::remove_file(&previous)
-                    .map_err(|error| format!("failed to rotate Guardian storage: {error}"))?;
-            }
-            std::fs::rename(&findings, previous)
-                .map_err(|error| format!("failed to rotate Guardian storage: {error}"))?;
-        }
+        enforce_continuous_retention(&findings)?;
         let mut options = OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
@@ -440,6 +626,14 @@ fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str)
         },
     };
     write_health(app, agent_pubkey, &health);
+    if health.state == "configured" {
+        if let Ok(path) = numbat_findings_path(app, agent_pubkey) {
+            let generation = findings_generation(&path).unwrap_or(0);
+            let offset = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            record_verification_baseline(agent_pubkey, generation, offset);
+        }
+        start_retention_worker(app.clone(), agent_pubkey.to_string());
+    }
 }
 
 pub(crate) fn prepare_numbat_monitoring_async(
@@ -463,18 +657,47 @@ pub fn read_numbat_findings(
     turn_id: Option<String>,
 ) -> Result<NumbatFindingBatch, String> {
     let path = numbat_findings_path(&app, &agent_pubkey)?;
+    let generation = findings_generation(&path)?;
+    let (physical_offset, generation_reset) = decode_cursor(offset.unwrap_or(0), generation);
     let expected_context = session_id
         .as_deref()
         .zip(channel_id.as_deref())
         .zip(turn_id.as_deref())
         .map(|((session, channel), turn)| (agent_pubkey.as_str(), session, channel, turn));
-    read_numbat_findings_from_path(
+    let mut batch = read_numbat_findings_from_path(
         &path,
-        offset.unwrap_or(0),
+        physical_offset,
         expected_context,
         read_health(&app, &agent_pubkey),
-    )
+    )?;
+    let active_findings_observed = !batch.findings.is_empty();
+    for finding in read_previous_findings_tail(&path, expected_context, batch.health.clone())? {
+        if !batch
+            .findings
+            .iter()
+            .any(|current| current.finding_id == finding.finding_id)
+        {
+            batch.findings.push(finding);
+        }
+    }
+    let physical_next_offset = batch.next_offset;
+    batch.reset |= generation_reset;
+    batch.next_offset = encode_cursor(generation, physical_next_offset)?;
+    if is_post_configuration_finding(
+        &agent_pubkey,
+        generation,
+        physical_next_offset,
+        active_findings_observed,
+    ) && batch.health.state != "active"
+    {
+        batch.health = active_health();
+        write_health(&app, &agent_pubkey, &batch.health);
+    }
+    Ok(batch)
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
@@ -676,6 +899,40 @@ mod tests {
         .expect("batch");
         assert!(batch.reset);
         assert_eq!(batch.findings.len(), 1);
+    }
+
+    #[test]
+    fn continuous_retention_keeps_complete_recent_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("findings.ndjson");
+        let padding = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(1024));
+        let mut file = File::create(&path).expect("create");
+        while file.stream_position().expect("position") <= MAX_LOCAL_RECORD_BYTES {
+            file.write_all(padding.as_bytes()).expect("write padding");
+        }
+        let newest = finding_json(serde_json::json!({"finding_id": "fnd-newest"}));
+        writeln!(file, "{newest}").expect("write newest");
+        file.sync_all().expect("sync");
+        drop(file);
+
+        assert!(enforce_continuous_retention(&path).expect("retain"));
+        let retained = std::fs::read(&path).expect("read retained");
+        let previous = std::fs::read(previous_findings_path(&path)).expect("read prior");
+        assert!(retained.len() as u64 <= MAX_BACKLOG_BYTES + MAX_LINE_BYTES as u64);
+        assert!(retained.ends_with(format!("{newest}\n").as_bytes()));
+        assert!(previous.ends_with(format!("{newest}\n").as_bytes()));
+        assert!(!retained.starts_with(b"x"));
+        assert!(!enforce_continuous_retention(&path).expect("already bounded"));
+    }
+
+    #[test]
+    fn cursor_resets_when_retention_replaces_the_file_generation() {
+        let cursor = encode_cursor(41, 12_345).expect("cursor");
+        assert_eq!(decode_cursor(cursor, 41), (12_345, false));
+        assert_eq!(decode_cursor(cursor, 42), (0, true));
+        assert_eq!(decode_cursor(0, 42), (0, false));
+        assert!(encode_cursor(1, CURSOR_OFFSET_MASK + 1).is_err());
+        assert!(cursor <= (1_u64 << 53) - 1, "cursor must be exact in JS");
     }
 
     #[test]
