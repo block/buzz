@@ -122,14 +122,34 @@ fn is_lowercase_hex(c: char) -> bool {
 }
 
 fn parse_json_array(s: &str) -> Result<Vec<Value>, SdkError> {
-    let v: Value = serde_json::from_str(s)
-        .map_err(|e| SdkError::InvalidInput(format!("invalid JSON: {e}")))?;
-    match v {
-        Value::Array(arr) => Ok(arr),
-        _ => Err(SdkError::InvalidInput(
-            "auth tag must be a JSON array".into(),
-        )),
+    let trimmed = s.trim();
+    // Fast path: well-formed JSON array.
+    if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(trimmed) {
+        return Ok(arr);
     }
+
+    // Fallback: the raw Nostr tag form, e.g. `[auth,deadbeef,,a1b2...]`.
+    //
+    // This is how an `auth` tag serializes inside a Nostr event (unquoted,
+    // comma-delimited) and how `.env` files and shell variables commonly
+    // carry `BUZZ_AUTH_TAG`. Accept it so consumers don't have to re-quote
+    // the value into JSON before calling `parse_auth_tag` / `verify_auth_tag`.
+    // An empty field (`,,`) parses to an empty string, matching the tag's
+    // JSON form `["auth","hex","","hex"]`.
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let arr: Vec<Value> = inner
+            .split(',')
+            .map(|part| Value::String(part.trim().to_owned()))
+            .collect();
+        if !arr.is_empty() {
+            return Ok(arr);
+        }
+    }
+
+    Err(SdkError::InvalidInput(format!(
+        "invalid JSON: expected array, got {trimmed:?}"
+    )))
 }
 
 /// Compute a NIP-OA `auth` tag authorizing `agent_pubkey` under `conditions`.
@@ -424,6 +444,44 @@ mod tests {
         assert_eq!(slice[1], OWNER_PUBKEY_HEX);
         assert_eq!(slice[2], CONDITIONS);
         assert_eq!(slice[3], "a".repeat(128));
+    }
+
+    /// parse_auth_tag accepts the raw Nostr tag form `[auth,hex,,hex]`
+    /// (unquoted, comma-delimited), which is how an `auth` tag serializes
+    /// inside a Nostr event and how `.env` files commonly store it.
+    #[test]
+    fn test_parse_auth_tag_raw_nostr_form() {
+        let sig_hex = "a".repeat(128);
+
+        // Raw form with non-empty conditions.
+        let raw = format!("[auth,{OWNER_PUBKEY_HEX},{CONDITIONS},{sig_hex}]");
+        let tag = parse_auth_tag(&raw).expect("raw Nostr form must parse");
+        let slice = tag.as_slice();
+        assert_eq!(slice[0], "auth");
+        assert_eq!(slice[1], OWNER_PUBKEY_HEX);
+        assert_eq!(slice[2], CONDITIONS);
+        assert_eq!(slice[3], sig_hex);
+
+        // Raw form with empty conditions (`,,`).
+        let raw_empty = format!("[auth,{OWNER_PUBKEY_HEX},,{sig_hex}]");
+        let tag = parse_auth_tag(&raw_empty).expect("raw form with empty conditions must parse");
+        let slice = tag.as_slice();
+        assert_eq!(slice[0], "auth");
+        assert_eq!(slice[1], OWNER_PUBKEY_HEX);
+        assert_eq!(slice[2], ""); // empty conditions field
+        assert_eq!(slice[3], sig_hex);
+    }
+
+    /// parse_auth_tag accepts the raw form with surrounding whitespace
+    /// (common when read from shell variables / `.env`).
+    #[test]
+    fn test_parse_auth_tag_raw_form_with_whitespace() {
+        let sig_hex = "a".repeat(128);
+        let raw = format!("  [auth, {OWNER_PUBKEY_HEX} , {CONDITIONS}, {sig_hex}]  \n");
+        let tag = parse_auth_tag(&raw).expect("raw form with whitespace must parse");
+        let slice = tag.as_slice();
+        assert_eq!(slice[0], "auth");
+        assert_eq!(slice[1], OWNER_PUBKEY_HEX);
     }
 
     /// Various malformed inputs to parse_auth_tag must return errors.
