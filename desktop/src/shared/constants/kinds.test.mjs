@@ -7,6 +7,7 @@ import {
   KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_DIFF,
   KIND_SYSTEM_MESSAGE,
+  CHANNEL_EVENT_KINDS,
   KIND_JOB_REQUEST,
   KIND_JOB_ACCEPTED,
   KIND_JOB_PROGRESS,
@@ -48,6 +49,19 @@ test("isConversationalUnreadKind_allJobKinds_excluded", () => {
     KIND_JOB_ERROR,
   ]) {
     assert.equal(isConversationalUnreadKind(kind), false, `kind ${kind}`);
+  }
+});
+
+test("channel live subscriptions include all signed job kinds", () => {
+  for (const kind of [
+    KIND_JOB_REQUEST,
+    KIND_JOB_ACCEPTED,
+    KIND_JOB_PROGRESS,
+    KIND_JOB_RESULT,
+    KIND_JOB_CANCEL,
+    KIND_JOB_ERROR,
+  ]) {
+    assert.equal(CHANNEL_EVENT_KINDS.includes(kind), true, `kind ${kind}`);
   }
 });
 

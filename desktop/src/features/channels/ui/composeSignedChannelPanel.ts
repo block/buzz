@@ -26,7 +26,7 @@ const JOB_KINDS = new Set([
 ]);
 const EVENT_ID_RE = /^[0-9a-f]{64}$/;
 const CHANNEL_ID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_SOURCE_EVENTS = 64;
 const MAX_NOTE_LENGTH = 512;
 

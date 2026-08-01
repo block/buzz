@@ -5,6 +5,7 @@ import { composeSignedChannelPanelState } from "./composeSignedChannelPanel.ts";
 
 const CHANNEL_ID = "00000000-0000-4000-8000-000000000001";
 const OTHER_CHANNEL_ID = "00000000-0000-4000-8000-000000000002";
+const NON_V4_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
 function id(hex) {
   return hex.repeat(64);
@@ -75,4 +76,12 @@ test("renders a bounded plain-text note", () => {
 
   assert.equal(state.kind, "ready");
   assert.equal(state.manifest.sections[0].fields[4].value, "line 1 line 2");
+});
+
+test("accepts signed activity in non-v4 channel identifiers", () => {
+  const state = composeSignedChannelPanelState(NON_V4_CHANNEL_ID, [
+    event({ tags: [["h", NON_V4_CHANNEL_ID]] }),
+  ]);
+
+  assert.equal(state.kind, "ready");
 });
