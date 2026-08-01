@@ -95,6 +95,70 @@ fn normalizes_buzz_agent_args_to_empty() {
 }
 
 #[test]
+fn canonicalizes_stray_acp_flag_to_subcommand() {
+    // Regression for #4106: subcommand-style harnesses (kimi, omp, opencode,
+    // devin, cursor-agent…) reject the `--acp` flag form with
+    // "unknown option '--acp'". Earlier releases persisted `--acp` into
+    // harness definitions and instance args; normalize it to the subcommand.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["--acp".into()]),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["-acp".into()]),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("/Users/dev/.kimi-code/bin/kimi", vec!["--acp".into()]),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("opencode", vec!["--acp".into()]),
+        vec!["acp".to_string()]
+    );
+    // Case-insensitive, and extra args are preserved.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["--ACP".into(), "--verbose".into()]),
+        vec!["acp".to_string(), "--verbose".to_string()]
+    );
+    // The correct subcommand form passes through unchanged.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["acp".into()]),
+        vec!["acp".to_string()]
+    );
+    // Flag-style agents (codex/claude/buzz-agent) still strip the ACP arg.
+    assert_eq!(
+        normalize_agent_args("codex-acp", vec!["--acp".into()]),
+        Vec::<String>::new()
+    );
+    // Unrelated flags are left alone for subcommand-style CLIs.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["--model".into(), "kimi-k3".into()]),
+        vec!["--model".to_string(), "kimi-k3".to_string()]
+    );
+}
+
+#[test]
+fn kimi_default_args_fallback_covers_empty_args() {
+    // When no args are persisted at all (empty instance args + empty harness
+    // definition args), kimi still launches as `kimi acp` via the same
+    // known-harness fallback that covers goose.
+    assert_eq!(
+        normalize_agent_args("kimi", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["  ".into(), "".into()]),
+        vec!["acp".to_string()]
+    );
+    // Explicit instance args still win over the fallback.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["--verbose".into()]),
+        vec!["--verbose".to_string()]
+    );
+}
+
+#[test]
 fn login_shell_lookup_treats_command_as_data() {
     let marker =
         std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
