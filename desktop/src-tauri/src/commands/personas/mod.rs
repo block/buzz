@@ -3,10 +3,10 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        current_instance_id, delete_agent_key, load_managed_agents, load_personas, load_teams,
-        save_managed_agents, save_personas, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_persona_activation_change,
-        validate_persona_deletion, AgentDefinition, ManagedAgentRecord,
+        delete_agent_key, load_managed_agents, load_personas, load_teams, save_managed_agents,
+        save_personas, stop_managed_agent_process, sync_managed_agent_processes,
+        try_regenerate_nest, validate_persona_activation_change, validate_persona_deletion,
+        AgentDefinition, ManagedAgentRecord,
     },
     util::now_iso,
 };
@@ -93,6 +93,19 @@ fn collect_remote_deployed(
         .collect()
 }
 
+/// Fail closed before cascade commit when any linked runtime did not stop.
+/// This pure seam keeps record/key deletion mechanically after the safety gate.
+fn require_cascade_stop_success(errors: &[String]) -> Result<(), String> {
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "persona deletion blocked because one or more managed agents did not stop: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
 /// Remove cascade agents from `agents` and persist via the injectable `save`.
 ///
 /// Extracted from `delete_persona` so unit tests can inject a failing save and
@@ -114,6 +127,10 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|error| error.to_string())?;
 
         {
             // Store lock held across all three phases.
@@ -152,16 +169,13 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     .managed_agent_processes
                     .lock()
                     .map_err(|error| error.to_string())?;
-                let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-                    &mut agents,
-                    &mut runtimes,
-                    &current_instance_id(&app),
-                );
+                let (sync_changed, exited_pubkeys) =
+                    sync_managed_agent_processes(&app, &mut agents, &mut runtimes);
                 if sync_changed {
                     save_managed_agents(&app, &agents)?;
                 }
-                for pk in &exited_pubkeys {
-                    state.clear_agent_session_caches(pk);
+                for key in &exited_pubkeys {
+                    state.clear_agent_session_caches(&key.pubkey);
                 }
                 // runtimes drops here (process lock released before Phase 2).
             }
@@ -184,26 +198,26 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
 
             // ── Phase 2: Stop ───────────────────────────────────────────────
             //
-            // Best-effort stop each running cascade instance. Lock ordering:
-            // store lock (held) → process lock acquired per-agent and released
-            // between stops so the process lock is not held across the full poll
-            // cycle (stop_managed_agent_process polls 100ms×10 before SIGKILL).
-            //
-            // Per-agent stop errors are swallowed — these records are deleted in
-            // Phase 3 regardless. Intentional difference from delete_managed_agent
-            // (single-agent, fatal on stop failure); here the cascade is multi-agent
-            // and deletion must proceed even if one instance cannot be stopped.
+            // Stop every running cascade instance before any record/key
+            // deletion. If any stop fails, preserve the complete cascade so
+            // the remaining Job/Child authority stays visible and retryable.
+            let mut stop_errors = Vec::new();
             for pk in &cascade {
                 if let Some(rec) = agents.iter_mut().find(|a| a.pubkey == *pk) {
                     let mut runtimes = state
                         .managed_agent_processes
                         .lock()
                         .map_err(|error| error.to_string())?;
-                    if let Err(e) = stop_managed_agent_process(&app, rec, &mut runtimes) {
-                        eprintln!("buzz-desktop: delete_persona: failed to stop agent {pk}: {e}");
+                    if let Err(error) = stop_managed_agent_process(&app, rec, &mut runtimes) {
+                        stop_errors.push(format!("{pk}: {error}"));
                     }
                     // runtimes drops here (per-agent, process lock not held across stops).
                 }
+            }
+            if let Err(stop_error) = require_cascade_stop_success(&stop_errors) {
+                return crate::managed_agents::persist_failed_stop(stop_error, || {
+                    save_managed_agents(&app, &agents)
+                });
             }
 
             // ── Phase 3: Commit ─────────────────────────────────────────────

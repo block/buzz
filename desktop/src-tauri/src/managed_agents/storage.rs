@@ -52,6 +52,15 @@ fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+mod recovery;
+
+pub(crate) use recovery::{
+    admission_error as recovery_admission_error, authority_for as recovery_authority_for,
+    clear_pair_with_terminal_proof as clear_pair_recovery_with_terminal_proof,
+    ensure_admission as ensure_recovery_admission, has_uncertainty as has_recovery_uncertainty,
+    mark_pair_uncertain as mark_pair_recovery_uncertain,
+};
+
 /// Install-log path for `runtime_id`, alongside the agent logs.
 pub fn install_log_path(app: &AppHandle, runtime_id: &str) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(install_log_filename(runtime_id)?))
@@ -263,6 +272,9 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
+    for record in &mut records {
+        recovery_authority_for(app, record)?.project_compatibility(record);
+    }
     Ok(records)
 }
 
@@ -378,7 +390,8 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     // keyring is unreachable, the key stays inline.
     persist_agent_keys(&mut sorted);
 
-    write_agent_store(app, definitions, sorted)
+    write_agent_store(app, definitions, sorted.clone())?;
+    recovery::compact_tombstones(app, &sorted)
 }
 
 /// Save the key-less agent *definitions*, preserving the keyed instances —
@@ -736,41 +749,105 @@ pub fn write_agent_runtime_receipt(
     receipt: &ManagedAgentRuntimeReceipt,
 ) -> Result<(), String> {
     let path = agent_pids_dir(app)?.join(format!("{}.json", receipt.key.runtime_id()));
+    super::finish_pending_agent_runtime_receipt_deletion(&path)?;
     let payload = serde_json::to_vec(receipt)
         .map_err(|error| format!("failed to serialize runtime receipt: {error}"))?;
     atomic_write_json_restricted(&path, &payload)
 }
 
-pub fn remove_agent_runtime_receipt(app: &AppHandle, key: &ManagedAgentRuntimeKey) {
-    if let Ok(dir) = agent_pids_dir(app) {
-        let _ = fs::remove_file(dir.join(format!("{}.json", key.runtime_id())));
+fn read_agent_runtime_receipts_with<List, ResolveTombstone, Read>(
+    dir: &Path,
+    list: List,
+    mut resolve_tombstone: ResolveTombstone,
+    read: Read,
+) -> Result<Vec<(PathBuf, ManagedAgentRuntimeReceipt)>, String>
+where
+    List: FnOnce(&Path) -> Result<Vec<PathBuf>, String>,
+    ResolveTombstone: FnMut(&Path) -> Result<(), String>,
+    Read: Fn(&Path) -> Result<Vec<u8>, String>,
+{
+    let mut receipts = Vec::new();
+    for path in list(dir)? {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".json.delete-pending"))
+        {
+            resolve_tombstone(&path)?;
+            continue;
+        }
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let bytes = read(&path)?;
+        let receipt: ManagedAgentRuntimeReceipt =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                format!(
+                    "failed to parse runtime receipt {}: {error}",
+                    path.display()
+                )
+            })?;
+        let expected_path = dir.join(format!("{}.json", receipt.key.runtime_id()));
+        if path != expected_path {
+            return Err(format!(
+                "runtime receipt path {} does not match embedded runtime key (expected {})",
+                path.display(),
+                expected_path.display()
+            ));
+        }
+        receipts.push((path, receipt));
     }
+    Ok(receipts)
 }
 
-pub fn remove_agent_runtime_receipt_path(path: &Path) {
-    let _ = fs::remove_file(path);
+fn resolve_runtime_receipt_tombstone(tombstone: &Path) -> Result<(), String> {
+    let receipt_path = tombstone.with_extension("");
+    match fs::symlink_metadata(&receipt_path) {
+        Ok(_) => Err(format!(
+            "both runtime receipt and deletion tombstone exist for {}",
+            receipt_path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            super::finish_pending_agent_runtime_receipt_deletion(&receipt_path)
+        }
+        Err(error) => Err(format!(
+            "failed to inspect runtime receipt paired with tombstone {}: {error}",
+            tombstone.display()
+        )),
+    }
 }
 
 pub fn read_all_agent_runtime_receipts(
     app: &AppHandle,
-) -> Vec<(PathBuf, ManagedAgentRuntimeReceipt)> {
-    let Ok(dir) = agent_pids_dir(app) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|entry| {
-            let path = entry.path();
-            let bytes = fs::read(&path).ok()?;
-            serde_json::from_slice(&bytes)
-                .ok()
-                .map(|receipt| (path, receipt))
-        })
-        .collect()
+) -> Result<Vec<(PathBuf, ManagedAgentRuntimeReceipt)>, String> {
+    let dir = agent_pids_dir(app)?;
+    read_agent_runtime_receipts_with(
+        &dir,
+        |dir| {
+            fs::read_dir(dir)
+                .map_err(|error| {
+                    format!(
+                        "failed to read runtime receipt directory {}: {error}",
+                        dir.display()
+                    )
+                })?
+                .map(|entry| {
+                    entry.map(|entry| entry.path()).map_err(|error| {
+                        format!(
+                            "failed to inspect runtime receipt directory entry in {}: {error}",
+                            dir.display()
+                        )
+                    })
+                })
+                .collect()
+        },
+        resolve_runtime_receipt_tombstone,
+        |path| {
+            fs::read(path).map_err(|error| {
+                format!("failed to read runtime receipt {}: {error}", path.display())
+            })
+        },
+    )
 }
 
 /// Remove the PID file for an agent (e.g. on normal stop).

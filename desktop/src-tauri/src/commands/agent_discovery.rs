@@ -465,6 +465,7 @@ async fn restart_setup_mode_agents_after_install(
             .iter()
             .filter(|record| {
                 let is_local = record.backend == BackendKind::Local;
+                let auto_restart = record.auto_restart_on_config_change;
                 let effective_cmd = record_agent_command(record, &personas);
                 let runtime_matches =
                     known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
@@ -485,7 +486,7 @@ async fn restart_setup_mode_agents_after_install(
                         && crate::managed_agents::process_is_running(runtime.child.id())
                 });
                 should_restart_after_install(
-                    is_local,
+                    is_local && auto_restart,
                     pid_alive,
                     runtime_matches,
                     setup_mode,
@@ -517,11 +518,6 @@ async fn restart_setup_mode_agents_after_install(
     (restarted_count, failed_restart_count)
 }
 
-/// Stop-then-start a single setup-mode agent after a successful adapter install.
-///
-/// Mirrors `restart_local_agent_on_config_change` from `global_agent_config.rs`:
-/// eligibility is re-verified under the store lock before the stop, then the
-/// agent is restarted via `start_local_agent_with_preflight`.
 async fn restart_single_agent_after_install(
     app: &tauri::AppHandle,
     pubkey: &str,
@@ -530,50 +526,54 @@ async fn restart_single_agent_after_install(
     use crate::{
         app_state::AppState,
         managed_agents::{
-            agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-            load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
+            agent_readiness, find_managed_agent_mut, known_acp_runtime, load_global_agent_config,
+            load_managed_agents, load_personas, persist_stop, record_agent_command,
             resolve_effective_agent_env, save_managed_agents, stop_managed_agent_process,
             sync_managed_agent_processes, AgentReadiness, BackendKind,
         },
     };
     use tauri::Manager;
-
+    let state = app.state::<AppState>();
+    let mesh_model_id = match super::agents::preflight_local_agent_pairs(app, &state, pubkey).await
+    {
+        Ok(model_id) => model_id,
+        Err(error) => {
+            eprintln!("buzz-desktop: install_acp_runtime: preflight failed for {pubkey}: {error}");
+            return InstallRestartOutcome::Skipped;
+        }
+    };
     let app_for_stop = app.clone();
     let pubkey_owned = pubkey.to_string();
     let runtime_id_owned = runtime_id.to_string();
-
     let stop_result = tokio::task::spawn_blocking(move || {
         let state = app_for_stop.state::<AppState>();
-
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|e| format!("failed to acquire store lock: {e}"))?;
-
         let mut records = load_managed_agents(&app_for_stop)?;
         let mut runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|e| format!("failed to acquire runtimes lock: {e}"))?;
 
-        // Sync process state so PID liveness reflects current reality.
-        let (sync_changed, _) = sync_managed_agent_processes(
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app_for_stop),
-        );
+        let (sync_changed, _) =
+            sync_managed_agent_processes(&app_for_stop, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app_for_stop, &records)?;
         }
-
-        // Re-verify eligibility under lock.
         let record = records
             .iter()
             .find(|r| r.pubkey == pubkey_owned)
             .ok_or_else(|| format!("agent {pubkey_owned} not found"))?;
-
-        if record.backend != BackendKind::Local {
-            return Err(format!("agent {pubkey_owned} is no longer a local agent"));
+        if record.backend != BackendKind::Local || !record.auto_restart_on_config_change {
+            return Err(format!(
+                "agent {pubkey_owned} is no longer eligible for automatic restart"
+            ));
         }
         let runtime_keys =
             crate::managed_agents::managed_agent_runtime_keys(&runtimes, &pubkey_owned);
@@ -614,56 +614,56 @@ async fn restart_single_agent_after_install(
             ));
         }
 
-        // Stop the process.
         let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
-        stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
+        let stopped = stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes);
+        persist_stop(stopped, || save_managed_agents(&app_for_stop, &records))?;
         save_managed_agents(&app_for_stop, &records)?;
-
-        Ok(runtime_keys)
+        let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
+        drop(runtimes);
+        drop(_store_guard);
+        super::agents::start_local_agent_pairs_under_transition(
+            &app_for_stop,
+            &state,
+            &pubkey_owned,
+            &relay_urls,
+            &mesh_model_id,
+            &_transition,
+        )
+        .map(|_| ())
+        .map_err(|error| format!("start failed after serialized stop: {error}"))
     })
     .await;
 
-    let runtime_keys = match stop_result {
-        Ok(Ok(runtime_keys)) => runtime_keys,
-        Ok(Err(e)) => {
-            eprintln!("buzz-desktop: install_acp_runtime: skipping restart of {pubkey}: {e}");
-            return InstallRestartOutcome::Skipped;
-        }
-        Err(e) => {
-            eprintln!(
-                "buzz-desktop: install_acp_runtime: spawn_blocking failed for stop of {pubkey}: {e}"
-            );
-            return InstallRestartOutcome::Skipped;
-        }
-    };
-
-    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
-    let state = app.state::<AppState>();
-    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
-        .await
-    {
-        Ok(_) => {
+    match stop_result {
+        Ok(Ok(())) => {
             eprintln!(
                 "buzz-desktop: install_acp_runtime: restarted setup-mode agent {pubkey} after install"
             );
             InstallRestartOutcome::Restarted
         }
-        Err(e) => {
-            eprintln!(
-                "buzz-desktop: install_acp_runtime: failed to start {pubkey} after install: {e}"
-            );
-            if let Err(save_err) = persist_last_error_on_install(app, pubkey, &e) {
+        Ok(Err(error)) if error.starts_with("start failed after serialized stop:") => {
+            eprintln!("buzz-desktop: install_acp_runtime: {error}");
+            if let Err(save_error) = persist_last_error_on_install(app, pubkey, &error) {
                 eprintln!(
-                    "buzz-desktop: install_acp_runtime: failed to persist last_error for {pubkey}: {save_err}"
+                    "buzz-desktop: install_acp_runtime: failed to persist last_error for {pubkey}: {save_error}"
                 );
             }
             InstallRestartOutcome::FailedAfterStop
         }
+        Ok(Err(error)) => {
+            eprintln!("buzz-desktop: install_acp_runtime: skipping restart of {pubkey}: {error}");
+            InstallRestartOutcome::Skipped
+        }
+        Err(error) => {
+            eprintln!(
+                "buzz-desktop: install_acp_runtime: spawn_blocking failed for restart of {pubkey}: {error}"
+            );
+            InstallRestartOutcome::Skipped
+        }
     }
 }
 
-/// Persist a `last_error` on the agent record under the store lock.
-/// Best-effort: called only after a failed restart.
+/// Best-effort persistence of install-restart failures under the store lock.
 fn persist_last_error_on_install(
     app: &tauri::AppHandle,
     pubkey: &str,

@@ -1,6 +1,5 @@
 use crate::managed_agents::known_acp_runtime;
-
-// ── desktop binary name tests ───────────────────────────────────────────
+mod windows_receipt_recovery;
 
 #[test]
 fn appimage_binary_matches_truncated_linux_comm_name() {
@@ -897,7 +896,6 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
 }
 
 // ── pair receipt validation tests ───────────────────────────────────────
-
 fn receipt_fixture(
     key: crate::managed_agents::ManagedAgentRuntimeKey,
 ) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
@@ -906,6 +904,7 @@ fn receipt_fixture(
         pid: std::process::id(),
         desktop_instance_id: "test-instance".into(),
         started_at: "now".into(),
+        windows_job_contained: true,
     }
 }
 
@@ -962,7 +961,10 @@ fn replacement_removes_receipt_only_after_confirmed_exit() {
             polls.set(poll);
             poll < 2
         },
-        |path| *removed.borrow_mut() = Some(path.to_path_buf()),
+        |path| {
+            *removed.borrow_mut() = Some(path.to_path_buf());
+            Ok(())
+        },
     )
     .unwrap();
 
@@ -985,21 +987,18 @@ fn replacement_failure_keeps_receipt() {
         &receipt,
         |_| Err("signal failed".into()),
         |_| false,
-        |_| removed.set(true),
+        |_| {
+            removed.set(true);
+            Ok(())
+        },
     )
     .unwrap_err();
 
     assert_eq!(error, "signal failed");
     assert!(!removed.get());
 }
-
-// ── workspace pair-key resolution (summary/stop scoping) ────────────────
-
 #[test]
 fn unpinned_record_resolves_pair_key_per_workspace() {
-    // Community-scoped truth: an unpinned agent running only on relay A must
-    // read as running in workspace A and stopped in workspace B — the pair
-    // key the summary looks up differs per workspace.
     let pubkey = "aa".repeat(32);
     let key_a = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
     let key_b = super::resolve_workspace_pair_key(&pubkey, "", "wss://two.example").unwrap();
@@ -1254,10 +1253,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
     // `true` exits immediately with 0 — just a handle we need for type purposes.
     //
-    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
-    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
+    // Use an absolute path on unix because parallel PATH tests can hide `true`.
     #[cfg(unix)]
     let program = "/usr/bin/true";
     #[cfg(windows)]
@@ -1268,6 +1264,8 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn true for placeholder");
+    #[cfg(windows)]
+    let child = crate::managed_agents::ManagedAgentChild::from_std_for_test(child);
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
         log_path: std::path::PathBuf::new(),
@@ -1314,3 +1312,5 @@ fn restart_eligible_false_when_orphan_has_no_drift() {
 fn restart_eligible_false_when_non_orphan_has_no_drift() {
     assert!(!super::restart_eligible(false, false, false));
 }
+
+mod lifecycle_regressions;

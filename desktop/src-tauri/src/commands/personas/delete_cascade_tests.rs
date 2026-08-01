@@ -6,7 +6,10 @@
 //! helper that identifies the agents to cascade-delete, using plain
 //! in-memory data structures (no `AppHandle` required).
 
-use super::{collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents};
+use super::{
+    collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents,
+    require_cascade_stop_success,
+};
 use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -161,6 +164,17 @@ fn failing_save_is_retry_safe() {
     // By construction: commit_cascade_agents returns Err before reaching the
     // keyring deletions and tombstones at the delete_persona call site.
     // Retrying delete_persona re-runs the full cascade cleanly from scratch.
+}
+
+#[test]
+fn failed_runtime_stop_blocks_cascade_commit() {
+    let errors = vec!["pk-a: bounded Stop failed".to_string()];
+    let result = require_cascade_stop_success(&errors);
+    assert!(
+        result.is_err(),
+        "any Stop failure must block record/key deletion"
+    );
+    assert!(result.unwrap_err().contains("pk-a"));
 }
 
 /// A provider-deployed cascade target (non-local backend with a live

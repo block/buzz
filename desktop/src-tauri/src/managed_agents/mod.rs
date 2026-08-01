@@ -15,13 +15,36 @@ mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;
+pub(crate) mod mesh_preflight;
 mod nest;
 mod persona_avatars;
 pub(crate) mod persona_events;
 mod personas;
 #[cfg(windows)]
+mod process_child;
+#[cfg(windows)]
 mod process_lifecycle;
+
+pub(crate) const UNVERIFIED_JOB_REAP_PREFIX: &str = "windows_job_reap_unverified:";
+
+pub(crate) fn lock_managed_agent_runtime_transition(
+    state: &crate::app_state::AppState,
+) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn has_unverified_job_reap(record: &ManagedAgentRecord) -> bool {
+    record.last_error.as_deref().is_some_and(|error| {
+        error
+            .lines()
+            .any(|line| line.starts_with(UNVERIFIED_JOB_REAP_PREFIX))
+    })
+}
 pub(crate) mod readiness;
+mod receipt_storage;
 pub(crate) mod reconcile;
 mod relay_mesh;
 mod repos;
@@ -61,11 +84,14 @@ pub(crate) use managed_node_paths::*;
 pub use nest::*;
 pub use personas::*;
 #[cfg(windows)]
-pub use process_lifecycle::*;
+pub(crate) use process_child::*;
+#[cfg(windows)]
+pub(crate) use process_lifecycle::*;
 pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, resolve_effective_harness_descriptor,
     AgentReadiness, Requirement,
 };
+pub use receipt_storage::*;
 pub use relay_mesh::*;
 pub use repos::{
     effective_repos_dir, ensure_repos_symlink, resolve_repos_at_boot, validate_repos_dir,

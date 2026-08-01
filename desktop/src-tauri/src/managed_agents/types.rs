@@ -1,5 +1,9 @@
+#[cfg(windows)]
+use super::process_child::ManagedAgentChild;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf, process::Child};
+#[cfg(not(windows))]
+use std::process::Child;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -221,7 +225,6 @@ pub struct ManagedAgentRecord {
     /// by `pubkey`) rather than serialized to `managed-agents.json`. The
     /// storage layer blanks this before writing JSON once the key is safely in
     /// the keyring, and re-hydrates it from the keyring on load.
-    ///
     /// It is only serialized inline (the `0o600` JSON fallback) when the
     /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
     /// the normal keyring-backed case. `default` also lets an old build parse a
@@ -338,9 +341,13 @@ pub struct ManagedAgentRecord {
     pub persona_name_in_team: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
     pub last_started_at: Option<String>,
+    #[serde(default)]
     pub last_stopped_at: Option<String>,
+    #[serde(default)]
     pub last_exit_code: Option<i32>,
+    #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
     pub last_error_code: Option<i64>,
@@ -458,16 +465,14 @@ pub struct RelayMeshConfig {
     pub model_ref: String,
 }
 
+#[cfg(not(windows))]
+pub type ManagedAgentChild = Child;
+
 #[derive(Debug)]
 pub struct ManagedAgentProcess {
-    pub child: Child,
+    pub child: ManagedAgentChild,
     pub log_path: PathBuf,
-    /// Digest of the effective spawn config at launch (see
-    /// `spawn_hash::spawn_config_hash`). Runtime-only — never persisted. The
-    /// summary builder recomputes the hash from current disk state and flags
-    /// `needs_restart` on mismatch. Agents adopted via a persisted
-    /// `runtime_pid` have no `ManagedAgentProcess` entry, so their spawn
-    /// config is unknown and the badge stays off.
+    /// Hash used to detect when effective spawn configuration has drifted.
     pub spawn_config_hash: u64,
     /// Whether this process was spawned in setup-listener mode (i.e.
     /// `BUZZ_ACP_SETUP_PAYLOAD` was set at launch because the agent was
@@ -483,12 +488,10 @@ pub struct ManagedAgentProcess {
     pub adapter_availability: Option<AcpAvailabilityStatus>,
     /// Unpredictable identity shared only with this harness generation.
     pub start_nonce: String,
-    /// Win32 Job Object owning the harness + its entire process tree. Closing
-    /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
-    /// tree — the Windows mirror of the Unix process-group teardown. `None`
-    /// if job creation/assignment failed (we fall back to `Child::kill()`).
+    /// Safe Job Object container owning the harness + its entire process tree.
+    /// Its kernel kill-on-close guarantee also covers abrupt Buzz exits.
     #[cfg(windows)]
-    pub job: Option<crate::managed_agents::JobHandle>,
+    pub job: Option<std::sync::Arc<processkit::ProcessGroup>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -982,18 +985,15 @@ pub fn resolve_mint_behavioral_defaults(
             None => None,
         },
     };
-
     Ok(MintBehavioralDefaults {
         respond_to,
         respond_to_allowlist,
         parallelism,
     })
 }
-
 mod catalog_source;
 pub use catalog_source::CatalogSource;
 mod requests;
 pub use requests::*;
-
 #[cfg(test)]
 mod tests;

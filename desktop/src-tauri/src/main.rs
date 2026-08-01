@@ -1,7 +1,12 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Prevents any additional console window on Windows, DO NOT REMOVE!!
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if buzz_lib::managed_launcher::run_if_requested() {
+        return;
+    }
+
     // Before anything else: WebKitGTK reads its rendering environment once at
     // process start, and this is the only point where the process is still
     // single threaded and no GTK object exists yet, which is what makes

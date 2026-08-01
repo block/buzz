@@ -1,5 +1,271 @@
 use super::{AgentDefinition, CatalogSource, ManagedAgentRecord};
+use crate::managed_agents::{
+    ManagedAgentPairRecoveryEvidence, ManagedAgentRecoveryAuthority, ManagedAgentRecoveryEvidence,
+    ManagedAgentRecoveryStore, ManagedAgentRuntimeKey, MANAGED_AGENT_RECOVERY_STORE_VERSION,
+};
 use std::path::PathBuf;
+
+fn recovery_record() -> ManagedAgentRecord {
+    serde_json::from_str(
+        r#"{
+            "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "name": "recovery-test",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "buzz-agent",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": "2026-01-02T00:00:00Z",
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("recovery record fixture")
+}
+
+fn recovery_key(relay: &str) -> ManagedAgentRuntimeKey {
+    ManagedAgentRuntimeKey::new("aa".repeat(32), relay).expect("recovery runtime key")
+}
+
+#[test]
+fn recovery_authority_legacy_pid_quarantines_every_pair() {
+    let authority = ManagedAgentRecoveryAuthority::from_legacy(Some(4242), None);
+
+    assert!(authority
+        .admission_error(&recovery_key("wss://one.example"))
+        .is_some());
+    assert!(authority
+        .admission_error(&recovery_key("wss://two.example"))
+        .is_some());
+    assert!(authority.agent_quarantine.is_some());
+}
+
+#[test]
+fn recovery_authority_malformed_legacy_evidence_remains_quarantined() {
+    let error = format!(
+        "{} pair=not-json pid=5151; uncertain",
+        crate::managed_agents::UNVERIFIED_JOB_REAP_PREFIX
+    );
+    let authority = ManagedAgentRecoveryAuthority::from_legacy(Some(5151), Some(&error));
+
+    assert!(authority.agent_quarantine.is_some());
+    assert!(!authority.is_empty());
+}
+
+#[test]
+fn recovery_authority_duplicate_legacy_pairs_remain_quarantined() {
+    let key = recovery_key("wss://one.example");
+    let encoded = serde_json::to_string(&key).expect("encode pair key");
+    let line = format!(
+        "{} pair={encoded} pid=5151; uncertain",
+        crate::managed_agents::UNVERIFIED_JOB_REAP_PREFIX
+    );
+    let error = format!("{line}\n{line}");
+
+    let authority = ManagedAgentRecoveryAuthority::from_legacy(Some(5151), Some(&error));
+
+    assert!(authority.agent_quarantine.is_some());
+    assert!(authority.uncertain_pairs.is_empty());
+}
+
+#[test]
+fn recovery_store_rejects_pair_key_owned_by_another_agent() {
+    let owner = "aa".repeat(32);
+    let other_key = ManagedAgentRuntimeKey::new("bb".repeat(32), "wss://one.example")
+        .expect("other-agent recovery key");
+    let mut authority = ManagedAgentRecoveryAuthority::default();
+    authority.mark_pair(&other_key, 5151, "uncertain".into());
+    let mut store = ManagedAgentRecoveryStore::default();
+    store.authorities.insert(owner, authority);
+
+    assert!(store.validate().is_err());
+}
+
+#[test]
+fn empty_recovery_authority_entry_is_semantically_invalid() {
+    let mut store = ManagedAgentRecoveryStore::default();
+    store
+        .authorities
+        .insert("aa".repeat(32), ManagedAgentRecoveryAuthority::default());
+
+    assert!(store.validate().is_err());
+}
+
+#[test]
+fn unknown_recovery_store_version_is_rejected() {
+    let mut store = ManagedAgentRecoveryStore::default();
+    store.version += 1;
+    assert!(store.validate().is_err());
+}
+
+#[test]
+fn recovery_store_rejects_unknown_fields() {
+    let parsed = serde_json::from_value::<ManagedAgentRecoveryStore>(serde_json::json!({
+        "version": MANAGED_AGENT_RECOVERY_STORE_VERSION,
+        "authorities": {},
+        "futureAuthority": true
+    }));
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn recovery_store_rejects_zero_pid_and_contradictory_authority() {
+    let owner = "7a".repeat(32);
+    let key = ManagedAgentRuntimeKey::new(owner.clone(), "wss://one.example").expect("key");
+    let mut authority = ManagedAgentRecoveryAuthority::default();
+    authority.agent_quarantine = Some(ManagedAgentRecoveryEvidence {
+        pid: Some(7),
+        detail: "legacy pid".to_string(),
+    });
+    authority
+        .uncertain_pairs
+        .push(ManagedAgentPairRecoveryEvidence {
+            key,
+            pid: 0,
+            detail: "pair".to_string(),
+        });
+    let mut store = ManagedAgentRecoveryStore::default();
+    store.authorities.insert(owner, authority);
+    assert!(store.validate().is_err());
+}
+
+#[test]
+fn recovery_store_rejects_zero_pair_pid() {
+    let owner = "7b".repeat(32);
+    let key = ManagedAgentRuntimeKey::new(owner.clone(), "wss://one.example").expect("key");
+    let mut authority = ManagedAgentRecoveryAuthority::default();
+    authority
+        .uncertain_pairs
+        .push(ManagedAgentPairRecoveryEvidence {
+            key,
+            pid: 0,
+            detail: "pair".to_string(),
+        });
+    authority.capture_compatibility_snapshot(&recovery_record());
+    let mut store = ManagedAgentRecoveryStore::default();
+    store.authorities.insert(owner, authority);
+    assert!(store.validate().is_err());
+}
+
+#[test]
+fn empty_default_authority_preserves_ordinary_lifecycle_history() {
+    let authority = ManagedAgentRecoveryAuthority::default();
+    let mut record = recovery_record();
+    record.last_exit_code = Some(0);
+    record.last_error = Some("ordinary prior error".into());
+
+    authority.project_compatibility(&mut record);
+
+    assert_eq!(
+        record.last_stopped_at.as_deref(),
+        Some("2026-01-02T00:00:00Z")
+    );
+    assert_eq!(record.last_exit_code, Some(0));
+    assert_eq!(record.last_error.as_deref(), Some("ordinary prior error"));
+}
+
+#[test]
+fn explicit_compatibility_tombstone_clears_only_stale_recovery_projection() {
+    let mut record = recovery_record();
+    record.runtime_pid = Some(5151);
+    record.last_error = Some(format!(
+        "{} quarantine; legacy",
+        crate::managed_agents::UNVERIFIED_JOB_REAP_PREFIX
+    ));
+    let mut authority = ManagedAgentRecoveryAuthority::default();
+    authority.capture_compatibility_snapshot(&record);
+    let stopped_at = record.last_stopped_at.clone();
+
+    authority.project_compatibility(&mut record);
+
+    assert_eq!(record.runtime_pid, None);
+    assert_eq!(record.last_error, None);
+    assert_eq!(record.last_stopped_at, stopped_at);
+}
+
+#[test]
+fn compatibility_tombstone_rejects_different_new_legacy_evidence() {
+    let mut record = recovery_record();
+    record.runtime_pid = Some(444);
+    record.last_error = Some(format!(
+        "{} old",
+        crate::managed_agents::UNVERIFIED_JOB_REAP_PREFIX
+    ));
+    let mut authority = ManagedAgentRecoveryAuthority::default();
+    authority.capture_compatibility_snapshot(&record);
+
+    record.runtime_pid = Some(445);
+    record.last_error = Some(format!(
+        "{} new",
+        crate::managed_agents::UNVERIFIED_JOB_REAP_PREFIX
+    ));
+    assert!(!authority.accepts_compatibility_record(&record));
+}
+
+#[path = "recovery_review_tests.rs"]
+mod recovery_review_tests;
+
+#[test]
+fn recovery_authority_exact_pairs_round_trip_and_clear_only_exact_key() {
+    let mut authority = ManagedAgentRecoveryAuthority::default();
+    let pair_a = recovery_key("wss://one.example");
+    let pair_b = recovery_key("wss://two.example");
+    authority.mark_pair(&pair_a, 6001, "pair A uncertain".into());
+    authority.mark_pair(&pair_b, 6002, "pair B uncertain".into());
+
+    let persisted = serde_json::to_string(&authority).expect("serialize recovery authority");
+    let mut reloaded: ManagedAgentRecoveryAuthority =
+        serde_json::from_str(&persisted).expect("reload recovery authority");
+
+    assert_eq!(reloaded.uncertain_pairs.len(), 2);
+    assert!(reloaded.clear_pair_with_terminal_proof(&pair_b));
+    assert!(reloaded.admission_error(&pair_a).is_some());
+    assert!(reloaded.admission_error(&pair_b).is_none());
+    assert!(!reloaded.is_empty());
+}
+
+#[test]
+fn recovery_authority_sibling_terminal_proof_does_not_launder_uncertainty() {
+    let mut authority = ManagedAgentRecoveryAuthority::default();
+    let pair_a = recovery_key("wss://one.example");
+    let sibling = recovery_key("wss://two.example");
+    authority.mark_pair(&pair_a, 7001, "pair A uncertain".into());
+
+    assert!(!authority.clear_pair_with_terminal_proof(&sibling));
+    assert!(!authority.is_empty());
+    assert!(authority.clear_pair_with_terminal_proof(&pair_a));
+    assert!(authority.is_empty());
+
+    let mut record = recovery_record();
+    authority.project_compatibility(&mut record);
+    assert_eq!(record.runtime_pid, None);
+    assert_eq!(record.last_error, None);
+}
+
+#[test]
+fn managed_agent_legacy_lifecycle_fields_default_independently() {
+    for field in ["runtime_pid", "last_stopped_at", "last_error"] {
+        let mut value = serde_json::to_value(recovery_record()).expect("serialize legacy fixture");
+        value
+            .as_object_mut()
+            .expect("managed-agent record object")
+            .remove(field);
+        let record: ManagedAgentRecord =
+            serde_json::from_value(value).expect("legacy lifecycle field should default");
+        match field {
+            "runtime_pid" => assert_eq!(record.runtime_pid, None),
+            "last_stopped_at" => assert_eq!(record.last_stopped_at, None),
+            "last_error" => assert_eq!(record.last_error, None),
+            _ => unreachable!("fixed lifecycle field fixture"),
+        }
+    }
+}
 
 #[test]
 fn persona_record_defaults_active_when_field_is_missing() {

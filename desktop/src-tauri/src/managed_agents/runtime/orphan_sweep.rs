@@ -10,13 +10,26 @@ use super::*;
 pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32]) {
     let legacy_entries = super::super::read_all_agent_pid_files(app);
     let instance_id = current_instance_id(app);
-    let receipt_entries: Vec<_> = super::super::read_all_agent_runtime_receipts(app)
+    let receipt_entries = match super::super::read_all_agent_runtime_receipts(app) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!(
+                "buzz-desktop: orphan sweep skipped because runtime receipt discovery is indeterminate: {error}"
+            );
+            return;
+        }
+    };
+    let receipt_entries: Vec<_> = receipt_entries
         .into_iter()
         .filter_map(|(path, receipt)| {
             if valid_agent_runtime_receipt(&path, &receipt, &instance_id) {
                 Some((path, receipt))
             } else {
-                super::super::remove_agent_runtime_receipt_path(&path);
+                if let Err(error) = super::super::remove_agent_runtime_receipt_path(&path) {
+                    eprintln!(
+                        "buzz-desktop: orphan sweep could not remove invalid receipt: {error}"
+                    );
+                }
                 None
             }
         })
@@ -60,7 +73,9 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32])
             continue;
         }
         if !process_is_running(receipt.pid) || !process_has_buzz_marker(receipt.pid, &instance_id) {
-            super::super::remove_agent_runtime_receipt(app, &receipt.key);
+            if let Err(error) = super::super::remove_agent_runtime_receipt(app, &receipt.key) {
+                eprintln!("buzz-desktop: orphan sweep could not remove finalized receipt: {error}");
+            }
         }
     }
 }

@@ -79,6 +79,7 @@ pub(super) fn rollback_failed_agent_update(
     rollback: AgentUpdateRollback,
 ) -> Result<(), String> {
     {
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
