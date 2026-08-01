@@ -123,7 +123,7 @@ By default the app connects to `ws://localhost:3000`. To point it at a relay you
 
 To run a relay for your team without managing servers, deploy one to Railway in a click:
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz-relay-block)
 
 It provisions the relay with Postgres, Redis, and media storage, migrates the database, and generates your owner identity on first boot — no configuration. The deploy logs print an `nsec1…` key; choose **Use an existing key** in the app, paste it, and point the app at `wss://<your-service>.up.railway.app`. One deployment can host several communities. (Community-maintained template; not an official Block build.)
 
