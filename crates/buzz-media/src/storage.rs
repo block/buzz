@@ -122,6 +122,29 @@ impl MediaStorage {
         match self.bucket.get_object_range(key, start, Some(end)).await {
             Ok(response) => Ok(response.to_vec()),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
+            Err(s3::error::S3Error::HttpFailWithBody(code, ref body)) => {
+                // Some S3-compatible backends (e.g. Cloudflare R2) return non-2xx
+                // errors for range GETs in edge cases where AWS S3 succeeds.
+                // Log the actual status/body so operators can diagnose, and map
+                // 416 to a caller-visible signal rather than an opaque 500.
+                tracing::warn!(
+                    s3_status = code,
+                    s3_body = body,
+                    key,
+                    start,
+                    end,
+                    "s3 range GET failed"
+                );
+                if code == 416 {
+                    Err(MediaError::StorageError(format!(
+                        "range not satisfiable (HTTP 416): {body}"
+                    )))
+                } else {
+                    Err(MediaError::StorageError(format!(
+                        "s3 range GET failed (HTTP {code}): {body}"
+                    )))
+                }
+            }
             Err(e) => Err(MediaError::StorageError(e.to_string())),
         }
     }
