@@ -1,3 +1,5 @@
+import type { AcpRuntimeCapabilityFacts } from "@/shared/api/acpRuntimeCapabilities";
+
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
@@ -510,12 +512,10 @@ export type AcpRuntimeCatalogEntry = {
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
-  /** True when the runtime depends on a separately installed vendor CLI. */
   requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;
-  /** Login/auth status for CLI-based runtimes. */
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
@@ -529,13 +529,7 @@ export type AcpRuntimeCatalogEntry = {
   definitionEnv?: Record<string, string>;
   /** Spawn-time parallelism cap; absent for uncapped harnesses. */
   maxParallelism?: number;
-  /** Buzz-owned static fact from KnownAcpRuntime; null when an older backend did not report it. */
-  supportsAcpNativeConfig: boolean | null;
-  /** Buzz-owned static fact from KnownAcpRuntime; null when an older backend did not report it. */
-  supportsAcpModelSwitching: boolean | null;
-  /** Buzz-owned static fact from KnownAcpRuntime; null when an older backend did not report it. */
-  mcpHooks: boolean | null;
-};
+} & AcpRuntimeCapabilityFacts;
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
 export type AcpRuntime = AcpRuntimeCatalogEntry & {
