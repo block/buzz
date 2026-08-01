@@ -24,11 +24,18 @@ export function WhereToRunSection({
   isPending: boolean;
   onDraftChange: (next: WhereToRunDraft) => void;
 }) {
-  const backendProviders = useBackendProvidersQuery().data ?? [];
+  // Provider backends are retained only for explicit development or
+  // compatibility builds. Production run targets are local or paired nodes.
+  const legacyProviderPathEnabled =
+    import.meta.env.DEV ||
+    import.meta.env.VITE_ENABLE_LEGACY_BACKEND_PROVIDERS === "1";
+  const backendProviders =
+    useBackendProvidersQuery({ enabled: legacyProviderPathEnabled }).data ?? [];
   const executionNodes = useExecutionNodesQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
   const isExecutionNode = draft.runOn.startsWith("execution-node:");
-  const isProviderMode = draft.runOn !== "local" && !isExecutionNode;
+  const isProviderMode =
+    legacyProviderPathEnabled && draft.runOn !== "local" && !isExecutionNode;
   const selectedBackendProvider = React.useMemo(
     () =>
       backendProviders.find((provider) => provider.id === draft.runOn) ?? null,
@@ -107,11 +114,13 @@ export function WhereToRunSection({
               {node.displayName} ({node.availability})
             </option>
           ))}
-          {backendProviders.map((provider) => (
-            <option key={provider.id} value={provider.id}>
-              {provider.id}
-            </option>
-          ))}
+          {legacyProviderPathEnabled
+            ? backendProviders.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.id} (compatibility)
+                </option>
+              ))
+            : null}
         </select>
       </div>
 

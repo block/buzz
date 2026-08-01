@@ -389,7 +389,7 @@ async fn send_execution_command(
         .tags([Tag::parse(["p", node_id.as_str()])
             .map_err(|error| format!("could not build execution target tag: {error}"))?]);
     let mut connection = buzz_ws_client_pkg::NostrWsConnection::connect_authenticated(
-        &relay_ws_url_with_override(&state),
+        &relay_ws_url_with_override(state),
         &keys,
         None,
     )
@@ -469,10 +469,11 @@ async fn wait_for_execution_receipt(
             continue;
         }
         if let Ok(receipt) = decrypt_execution_receipt(keys, &event) {
-            if receipt.command_id == command_id && &receipt.node_id == node_id {
-                if receipt.is_terminal() || receipt.detail.is_some() {
-                    return Ok(Some(receipt));
-                }
+            if receipt.command_id == command_id
+                && &receipt.node_id == node_id
+                && (receipt.is_terminal() || receipt.detail.is_some())
+            {
+                return Ok(Some(receipt));
             }
         }
     }
