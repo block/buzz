@@ -196,6 +196,9 @@ test("resolveRuntimeProviderCapability classifies known CLI-login runtimes as lo
   assert.equal(resolveRuntimeProviderCapability("claude", false), "locked");
   assert.equal(resolveRuntimeProviderCapability("codex", false), "locked");
   assert.equal(resolveRuntimeProviderCapability(" claude ", false), "locked");
+  // Hermes owns provider/model in its own ~/.hermes/config.yaml and exposes no
+  // provider env var, so Buzz must not offer provider selection for it.
+  assert.equal(resolveRuntimeProviderCapability("hermes", false), "locked");
 });
 
 test("resolveRuntimeProviderCapability leaves genuinely unknown/custom runtimes as unknown", () => {

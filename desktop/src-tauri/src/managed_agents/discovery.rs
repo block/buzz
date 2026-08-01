@@ -16,6 +16,8 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const HERMES_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/website/static/img/apple-touch-icon.png";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -161,6 +163,50 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "hermes",
+        label: "Hermes",
+        // `hermes acp` is built into the CLI — there is no separate adapter
+        // package, so the runtime command and the underlying CLI are the same
+        // binary (the Goose shape, not the Claude/Codex adapter shape).
+        commands: &["hermes"],
+        aliases: &["hermes-agent"],
+        avatar_url: HERMES_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("hermes"),
+        cli_install_commands: &["curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\""],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://hermes-agent.nousresearch.com/docs/getting-started/quickstart",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz requires the Hermes CLI; run `hermes portal` or `hermes model` once to configure a provider.",
+        adapter_install_hint: "",
+        // Hermes resolves skills from `~/.hermes/skills` plus the
+        // `skills.external_dirs` entries in its own config.yaml — it has no
+        // nest-relative skill directory for Buzz to symlink into.
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        // Hermes has no model/provider env vars: both live under the `model`
+        // key in `~/.hermes/config.yaml` and are owned by `hermes model` /
+        // `hermes portal`, so Buzz does not drive provider selection.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: Some("~/.hermes/config.yaml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        // No auth probe: `hermes auth status` requires a provider argument and
+        // `hermes doctor` exits 0 regardless of provider auth, so there is no
+        // fixed argv that reports login state. Same posture as Goose.
+        login_hint: None,
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -348,7 +394,7 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "hermes" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
