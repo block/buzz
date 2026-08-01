@@ -6,9 +6,12 @@
 //! message, but wrong for a surface card, whose entire update model is
 //! full-spec replacement.
 //!
-//! `created_at` is second-precision, so two edits can tie; ties break on event
-//! id lexicographically. That is the same rule the channel timeline uses
-//! (`formatTimelineMessages`), so every client converges on one state.
+//! `created_at` is second-precision, so two edits can tie. Ties break on the
+//! lexicographically SMALLEST event id — not an arbitrary choice: the relay
+//! orders `created_at DESC, id ASC`, so the winner under this rule is always
+//! the first row a query returns. That makes a `limit: 1` per-target lookup
+//! provably sufficient, and it is the same rule the channel timeline uses
+//! (`formatTimelineMessages`), so every reader converges on one state.
 //!
 //! Edits must be fetched **by target id**, never by scanning a channel window:
 //! an edit tags the event it replaces (`e` = that event's id), so a reply's
@@ -31,9 +34,9 @@ use crate::relay::query_relay;
 /// hide every other card's edit.
 const EDIT_FILTERS_PER_QUERY: usize = 25;
 
-/// Rows per target. Only the newest edit is applied, but a couple of extra
-/// rows let the `(created_at, id)` tie-break see same-second edits.
-const EDIT_ROWS_PER_TARGET: usize = 4;
+/// Rows per target. One is enough: the relay orders `created_at DESC, id ASC`
+/// and the tie-break picks the smallest id, so the first row IS the winner.
+const EDIT_ROWS_PER_TARGET: usize = 1;
 
 /// Fetch the latest edit content for exactly `target_ids`.
 ///
@@ -116,7 +119,7 @@ pub(crate) fn latest_edit_by_target(events: &[Event]) -> HashMap<String, String>
         let created_at = event.created_at.as_secs();
         let id = event.id.to_hex();
         let wins = best.get(&target).is_none_or(|(at, existing_id, _)| {
-            created_at > *at || (created_at == *at && id > *existing_id)
+            created_at > *at || (created_at == *at && id < *existing_id)
         });
         if wins {
             best.insert(target, (created_at, id, event.content.clone()));
@@ -159,7 +162,8 @@ mod tests {
         let target = "b".repeat(64);
         let a = edit(&keys, &target, "one", 1_700_000_000);
         let b = edit(&keys, &target, "two", 1_700_000_000);
-        let expected = if a.id.to_hex() > b.id.to_hex() {
+        // Smallest id wins — see the module docs for why that is the rule.
+        let expected = if a.id.to_hex() < b.id.to_hex() {
             "one"
         } else {
             "two"

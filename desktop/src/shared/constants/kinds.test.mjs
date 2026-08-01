@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CHANNEL_MESSAGE_CONVERSATIONAL_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
   isConversationalUnreadKind,
   KIND_STREAM_MESSAGE,
@@ -90,6 +91,18 @@ test("conversationalKinds_matchRustCONVERSATIONAL_KINDS", () => {
       CHANNEL_MESSAGE_EVENT_KINDS.includes(kind),
       `kind ${kind} is conversational in Rust but missing from CHANNEL_MESSAGE_EVENT_KINDS`,
     );
+    // The exported Set is what readers actually branch on (Projects inline
+    // chat, and anything else asking "is this a message?"), so assert it too —
+    // otherwise a kind could silently drop out of it with tests still green.
+    assert.ok(
+      CHANNEL_MESSAGE_CONVERSATIONAL_KINDS.has(kind),
+      `kind ${kind} missing from CHANNEL_MESSAGE_CONVERSATIONAL_KINDS`,
+    );
     assert.equal(isConversationalUnreadKind(kind), true);
   }
+  assert.equal(
+    CHANNEL_MESSAGE_CONVERSATIONAL_KINDS.size,
+    RUST_CONVERSATIONAL_KINDS.length,
+    "the conversational set must mirror Rust's CONVERSATIONAL_KINDS exactly",
+  );
 });

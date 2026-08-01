@@ -262,14 +262,20 @@ export function ForumThreadPanel({
             ) : null}
           </div>
           <div className="mt-3">
-            <Markdown
-              channelNames={channelNames}
-              className="text-sm"
-              content={post.content}
-              imetaByUrl={parseImetaTags(post.tags)}
-              mentionNames={postMentionNames}
-              mentionPubkeysByName={postMentionPubkeysByName}
-            />
+            {post.kind === KIND_SURFACE ? (
+              // A surface may be a thread root (NIP-SC §Event) — render the
+              // card, never spec JSON through markdown.
+              <SurfaceMessage content={post.content} />
+            ) : (
+              <Markdown
+                channelNames={channelNames}
+                className="text-sm"
+                content={post.content}
+                imetaByUrl={parseImetaTags(post.tags)}
+                mentionNames={postMentionNames}
+                mentionPubkeysByName={postMentionPubkeysByName}
+              />
+            )}
           </div>
         </div>
 

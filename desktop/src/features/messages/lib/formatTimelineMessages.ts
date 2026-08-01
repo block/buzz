@@ -250,7 +250,7 @@ export function formatTimelineMessages(
     if (
       !existing ||
       event.created_at > existing.createdAt ||
-      (event.created_at === existing.createdAt && event.id > existing.editId)
+      (event.created_at === existing.createdAt && event.id < existing.editId)
     ) {
       editsByTargetId.set(targetId, {
         content: event.content,

@@ -350,7 +350,9 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
-/// Overlay the latest `kind:40003` edit content onto the events it targets.
+/// Overlay the latest `kind:40003` edit content onto the events it targets,
+/// and report edits that landed in the polling window but target something
+/// outside this page.
 ///
 /// Agents poll with `messages get` / `messages thread`, so those must report
 /// the message's CURRENT content — a surface card's whole update model is a
@@ -362,17 +364,35 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
 /// could miss it entirely. Ties on `created_at` (second precision) break on
 /// event id, matching every other client so all readers converge.
 ///
+/// When `since` is given, a second pass also pulls edits made inside that
+/// window whose target is NOT on this page — a card published earlier and
+/// updated now produces only an edit event, and a polling reader that never
+/// saw it would keep acting on stale state. Those edits are appended as their
+/// own rows; edits folded into a target on this page are not, since they would
+/// duplicate it.
+///
 /// Best-effort: a failed lookup leaves original content rather than failing
-/// the read. Edit events already present in `events` are left in place — this
-/// only rewrites the content of their targets.
+/// the read.
 pub(crate) async fn overlay_latest_edits(client: &BuzzClient, events: &mut Vec<serde_json::Value>) {
+    overlay_latest_edits_in_window(client, events, None, None).await
+}
+
+/// [`overlay_latest_edits`] plus out-of-page edit reporting for a polling
+/// window (`channel_id` + `since`).
+pub(crate) async fn overlay_latest_edits_in_window(
+    client: &BuzzClient,
+    events: &mut Vec<serde_json::Value>,
+    channel_id: Option<&str>,
+    since: Option<i64>,
+) {
     const EDIT_KIND: u64 = 40003;
     // One filter per target: a single OR-ed `#e` filter shares one row budget
     // (the relay caps a filter at 1000 rows), so one heavily-edited event could
-    // hide every other target's edit. A few rows each leaves room for the
-    // `(created_at, id)` tie-break to see same-second edits.
+    // hide every other target's edit. One row each suffices — the relay orders
+    // `created_at DESC, id ASC` and the tie-break picks the smallest id, so the
+    // first row is the winner.
     const FILTERS_PER_QUERY: usize = 25;
-    const ROWS_PER_TARGET: usize = 4;
+    const ROWS_PER_TARGET: usize = 1;
 
     let target_ids: Vec<String> = events
         .iter()
@@ -431,7 +451,7 @@ pub(crate) async fn overlay_latest_edits(client: &BuzzClient, events: &mut Vec<s
             .unwrap_or_default()
             .to_string();
         let wins = latest.get(&target).is_none_or(|(at, existing_id, _)| {
-            created_at > *at || (created_at == *at && id > *existing_id)
+            created_at > *at || (created_at == *at && id < *existing_id)
         });
         if wins {
             latest.insert(target, (created_at, id, content));
@@ -458,6 +478,37 @@ pub(crate) async fn overlay_latest_edits(client: &BuzzClient, events: &mut Vec<s
     // so the raw row would just duplicate it. An edit whose target is NOT here
     // (an older message updated after this window) is kept: it is the only
     // signal a polling reader gets that something outside the page changed.
+    // Edits made inside the polling window whose target is not on this page:
+    // the only signal that something published earlier just changed.
+    if let (Some(channel_id), Some(since)) = (channel_id, since) {
+        let filter = serde_json::json!({
+            "kinds": [EDIT_KIND],
+            "#h": [channel_id],
+            "since": since,
+        });
+        if let Ok(raw) = client.query(&filter).await {
+            let window_edits: Vec<serde_json::Value> =
+                serde_json::from_str(&raw).unwrap_or_default();
+            let page_ids: std::collections::HashSet<String> = target_ids.iter().cloned().collect();
+            for edit in window_edits {
+                let target = edit
+                    .get("tags")
+                    .and_then(|t| t.as_array())
+                    .and_then(|tags| {
+                        tags.iter().find_map(|tag| {
+                            let parts = tag.as_array()?;
+                            (parts.first()?.as_str()? == "e")
+                                .then(|| parts.get(1)?.as_str().map(str::to_string))
+                                .flatten()
+                        })
+                    });
+                if target.is_some_and(|t| !page_ids.contains(&t)) {
+                    events.push(edit);
+                }
+            }
+        }
+    }
+
     events.retain(|event| {
         if event.get("kind").and_then(|v| v.as_u64()) != Some(EDIT_KIND) {
             return true;
@@ -489,13 +540,12 @@ pub async fn cmd_get_messages(
     validate_uuid(channel_id)?;
     let limit = limit.unwrap_or(50).min(200);
 
-    // Edits are part of the window on purpose: a card published before `since`
-    // and updated after it produces only a kind:40003 event, so a polling
-    // reader that asked for content kinds alone would never learn it changed.
-    // `overlay_latest_edits` folds an edit into its target when that target is
-    // also in the page, and leaves it as its own row when it is not.
+    // Content kinds only. Edits are fetched separately (see
+    // `overlay_latest_edits`): sharing this limit with kind:40003 would let a
+    // heavily-edited card fill the page with raw edit rows and return no
+    // messages at all.
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40003, 40008, 40110, 45001, 45003],
+        "kinds": [9, 40002, 40008, 40110, 45001, 45003],
         "#h": [channel_id],
         "limit": limit
     });
@@ -518,7 +568,7 @@ pub async fn cmd_get_messages(
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
-    overlay_latest_edits(client, &mut events).await;
+    overlay_latest_edits_in_window(client, &mut events, Some(channel_id), since).await;
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())

@@ -2869,12 +2869,7 @@ where
                 let merged = if ids.is_empty() {
                     json
                 } else {
-                    match timeout(
-                        CONTEXT_FETCH_TIMEOUT,
-                        query(vec![edits_for_ids_filter(&ids)]),
-                    )
-                    .await
-                    {
+                    match timeout(CONTEXT_FETCH_TIMEOUT, query(edits_for_ids_filters(&ids))).await {
                         Ok(Ok(edits)) => merge_event_arrays(json, edits),
                         _ => {
                             tracing::warn!(
@@ -3015,7 +3010,7 @@ async fn fetch_dm_context(
                 } else {
                     match timeout(
                         CONTEXT_FETCH_TIMEOUT,
-                        rest.query(std::slice::from_ref(&edits_for_ids_filter(&ids))),
+                        rest.query(&edits_for_ids_filters(&ids)),
                     )
                     .await
                     {
@@ -3136,19 +3131,29 @@ fn collect_event_ids(json: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Filter for the edits that target exactly `ids`.
+/// One filter per target for the edits addressing `ids`.
 ///
 /// Edits MUST be looked up by target id. Scanning a channel window instead
 /// would miss a reply's edit (its `e` tag holds the reply's id, not the
-/// thread root's) and could drop the relevant edit on a busy channel; mixing
-/// edits into the content filter would let them consume message slots.
-fn edits_for_ids_filter(ids: &[String]) -> nostr::Filter {
+/// thread root's); mixing edits into the content filter would let them consume
+/// message slots. And they must be one filter PER target: a single OR-ed `#e`
+/// filter shares one row budget (the relay caps a filter at 1000 rows), so a
+/// heavily-edited event could hide every other target's edit.
+///
+/// `limit(1)` is sufficient because the relay orders `created_at DESC, id ASC`
+/// and the tie-break picks the smallest id — the first row is the winner.
+fn edits_for_ids_filters(ids: &[String]) -> Vec<nostr::Filter> {
     let e_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
-    nostr::Filter::new()
-        .kind(nostr::Kind::Custom(
-            buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16,
-        ))
-        .custom_tags(e_tag, ids.iter().map(String::as_str))
+    ids.iter()
+        .map(|id| {
+            nostr::Filter::new()
+                .kind(nostr::Kind::Custom(
+                    buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16,
+                ))
+                .custom_tags(e_tag, [id.as_str()])
+                .limit(1)
+        })
+        .collect()
 }
 
 /// Append `extra` events onto a relay response array.
@@ -3199,7 +3204,7 @@ fn latest_edits_by_target(events: &[serde_json::Value]) -> HashMap<String, Strin
             .unwrap_or_default()
             .to_string();
         let wins = best.get(&target).is_none_or(|(at, existing_id, _)| {
-            created_at > *at || (created_at == *at && id > *existing_id)
+            created_at > *at || (created_at == *at && id < *existing_id)
         });
         if wins {
             best.insert(target, (created_at, id, content));
@@ -5084,11 +5089,15 @@ mod tests {
     /// True when a query is the second-phase edit lookup rather than the
     /// content page (see `edits_for_ids_filter`).
     fn is_edits_query(filters: &[nostr::Filter]) -> bool {
-        filters.len() == 1
-            && serde_json::to_value(&filters[0])
-                .ok()
-                .and_then(|v| v.get("kinds").cloned())
-                == Some(json!([buzz_core::kind::KIND_STREAM_MESSAGE_EDIT]))
+        // The edit phase sends one filter PER target, so match on every filter
+        // being an edit filter rather than on the filter count.
+        !filters.is_empty()
+            && filters.iter().all(|filter| {
+                serde_json::to_value(filter)
+                    .ok()
+                    .and_then(|v| v.get("kinds").cloned())
+                    == Some(json!([buzz_core::kind::KIND_STREAM_MESSAGE_EDIT]))
+            })
     }
 
     fn assert_thread_query_filters(
@@ -5190,9 +5199,14 @@ mod tests {
                 let payload = if is_edits_query(&filters) {
                     // The second phase must ask for the ids the page returned,
                     // including the reply that carries the card.
-                    let filter = serde_json::to_value(&filters[0]).expect("serialize");
-                    let targets = filter.get("#e").cloned().unwrap_or(json!([]));
-                    let targets = targets.as_array().expect("targets");
+                    let targets: Vec<String> = filters
+                        .iter()
+                        .filter_map(|f| {
+                            let v = serde_json::to_value(f).ok()?;
+                            let e = v.get("#e")?.as_array()?.first()?.as_str()?;
+                            Some(e.to_string())
+                        })
+                        .collect();
                     assert!(
                         targets.iter().any(|t| t == card_reply_id),
                         "edit lookup must target the reply carrying the card"

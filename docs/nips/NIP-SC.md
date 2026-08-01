@@ -184,8 +184,17 @@ are no partial patches.
   owning human — may edit it.
 - The edit's channel MUST match the target surface's channel.
 - Latest edit wins. Because `created_at` has one-second resolution, clients MUST
-  order edits by the composite `(created_at, id)` with a lexicographic id
-  tie-break, so two same-second edits resolve identically on every client.
+  order edits by `created_at`, breaking ties on the **lexicographically
+  smallest** event id, so two same-second edits resolve identically on every
+  client.
+
+  Smallest-id is not arbitrary: a relay that orders results
+  `created_at DESC, id ASC` returns the winner as the first row, so a reader
+  can resolve current state with a one-row lookup per target instead of
+  fetching an unbounded edit history. The consequence is worth stating plainly:
+  a burst of edits inside a single second has no defined "last" — every reader
+  converges on the same one, but which one is arbitrary. Authors who need a
+  specific final state should let a second elapse.
 
 ## Client behavior (tolerant)
 
