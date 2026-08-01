@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventId, Keys, Tag};
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
@@ -172,6 +174,57 @@ fn contains_private_auth_marker(text: &str, markers: &[String]) -> bool {
         .any(|marker| contains_private_marker(text, marker))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictPrivateEventEnvelope {
+    id: String,
+    pubkey: String,
+    created_at: u64,
+    kind: u16,
+    tags: Vec<Vec<String>>,
+    content: String,
+    sig: String,
+}
+
+fn has_exact_event_envelope(text: &str, subscription_id: &str, raw_event_json: &str) -> bool {
+    let Ok(parts) = serde_json::from_str::<Vec<Box<RawValue>>>(text) else {
+        return false;
+    };
+    parts.len() == 3
+        && parts
+            .first()
+            .and_then(|part| serde_json::from_str::<String>(part.get()).ok())
+            .as_deref()
+            == Some("EVENT")
+        && parts
+            .get(1)
+            .and_then(|part| serde_json::from_str::<String>(part.get()).ok())
+            .as_deref()
+            == Some(subscription_id)
+        && parts
+            .get(2)
+            .is_some_and(|part| part.get() == raw_event_json)
+}
+
+fn strict_raw_event_matches_typed(raw_event_json: &str, event: &Event) -> bool {
+    let Ok(raw) = serde_json::from_str::<StrictPrivateEventEnvelope>(raw_event_json) else {
+        return false;
+    };
+    let typed_tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .collect();
+
+    raw.id == event.id.to_hex()
+        && raw.pubkey == event.pubkey.to_hex()
+        && raw.created_at == event.created_at.as_secs()
+        && raw.kind == event.kind.as_u16()
+        && raw.tags == typed_tags
+        && raw.content == event.content
+        && raw.sig == event.sig.to_string()
+}
+
 fn is_expected_verified_authority_event(
     parsed: &Result<RelayMessage, WsClientError>,
     text: &str,
@@ -195,12 +248,11 @@ fn is_expected_verified_authority_event(
             || (contains_private_marker(raw_event_json, marker)
                 && !contains_private_marker(subscription_id, marker))
     });
-    let raw_matches_typed = serde_json::from_str::<Value>(raw_event_json)
-        .ok()
-        .zip(serde_json::to_value(event.as_ref()).ok())
-        .is_some_and(|(raw, typed)| raw == typed);
+    let exact_event_envelope = has_exact_event_envelope(text, subscription_id, raw_event_json);
+    let raw_matches_typed = strict_raw_event_matches_typed(raw_event_json, event);
 
     reflected_markers_stay_inside_event
+        && exact_event_envelope
         && raw_matches_typed
         && event.id == *expected_event_id
         && event.verify_id()
@@ -748,6 +800,38 @@ mod tests {
         assert!(is_expected_verified_authority_event(
             &parsed,
             &frame,
+            Some(&event.id),
+            &authority_markers,
+        ));
+
+        let extra_envelope_value = format!(
+            r#"["EVENT","exact",{},{}]"#,
+            raw_event_json,
+            serde_json::to_string(&authority_markers[0]).unwrap()
+        );
+        let parsed = parse_relay_message(&extra_envelope_value);
+        assert!(matches!(parsed, Ok(RelayMessage::Event { .. })));
+        assert!(!is_expected_verified_authority_event(
+            &parsed,
+            &extra_envelope_value,
+            Some(&event.id),
+            &authority_markers,
+        ));
+
+        let duplicate_content_raw = format!(
+            r#"{},"content":{}}}"#,
+            raw_event_json.strip_suffix('}').unwrap(),
+            serde_json::to_string(&event.content).unwrap()
+        );
+        let duplicate_content_frame = format!(r#"["EVENT","exact",{duplicate_content_raw}]"#);
+        let parsed = parse_relay_message(&duplicate_content_frame);
+        assert!(!strict_raw_event_matches_typed(
+            &duplicate_content_raw,
+            &event,
+        ));
+        assert!(!is_expected_verified_authority_event(
+            &parsed,
+            &duplicate_content_frame,
             Some(&event.id),
             &authority_markers,
         ));
