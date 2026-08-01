@@ -388,10 +388,14 @@ async fn collect_exact_event_inner(
             .map_err(transport_error)?;
 
         loop {
-            match connection
-                .next_event(FETCH_TIMEOUT)
-                .await
-                .map_err(|error| receive_error(error, event_id, authenticated))?
+            let next_message = if authenticated {
+                connection
+                    .next_event_for_exact_id(FETCH_TIMEOUT, event_id)
+                    .await
+            } else {
+                connection.next_event(FETCH_TIMEOUT).await
+            };
+            match next_message.map_err(|error| receive_error(error, event_id, authenticated))?
             {
                 RelayMessage::Event {
                     subscription_id: received,

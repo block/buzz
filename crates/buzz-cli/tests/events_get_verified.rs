@@ -567,6 +567,108 @@ async fn nip42_buffers_challenge_and_auth_required_closure_in_either_order() {
     }
 }
 
+#[tokio::test]
+async fn authenticated_exact_event_may_carry_the_connections_nip_oa_authority() {
+    let agent_keys = Keys::generate();
+    let private_key = agent_keys.secret_key().to_secret_hex();
+    let owner_keys = Keys::generate();
+    let auth_tag_json =
+        buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=1")
+            .unwrap();
+    let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag_json).unwrap();
+    let event = EventBuilder::new(Kind::TextNote, "delegated exact event")
+        .tags([auth_tag.clone()])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+    let event_id = event.id;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let relay = format!("ws://{address}");
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        websocket
+            .send(Message::Text(
+                json!(["AUTH", "production-shape-challenge"])
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        let first_request = websocket.next().await.unwrap().unwrap();
+        let first_request: Value = serde_json::from_str(first_request.to_text().unwrap()).unwrap();
+        let first_subscription = first_request[1].clone();
+        websocket
+            .send(Message::Text(
+                json!(["NOTICE", "auth-required: authenticate before subscribing"])
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        websocket
+            .send(Message::Text(
+                json!([
+                    "CLOSED",
+                    first_subscription,
+                    "auth-required: not authenticated"
+                ])
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let auth_message = websocket.next().await.unwrap().unwrap();
+        let auth: Value = serde_json::from_str(auth_message.to_text().unwrap()).unwrap();
+        let auth_event: Event = serde_json::from_value(auth[1].clone()).unwrap();
+        assert!(auth_event.tags.iter().any(|tag| tag == &auth_tag));
+        websocket
+            .send(Message::Text(
+                json!(["OK", auth_event.id.to_hex(), true, ""])
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        let second_request = websocket.next().await.unwrap().unwrap();
+        let second_request: Value =
+            serde_json::from_str(second_request.to_text().unwrap()).unwrap();
+        assert_eq!(second_request[1], "buzz-get-verified-1");
+        websocket
+            .send(Message::Text(
+                json!(["EVENT", second_request[1], event])
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        websocket
+            .send(Message::Text(
+                json!(["EOSE", second_request[1]]).to_string().into(),
+            ))
+            .await
+            .unwrap();
+    });
+
+    let output = run_buzz_with_identity(
+        &relay,
+        &event_id.to_hex(),
+        &private_key,
+        Some(&auth_tag_json),
+    )
+    .await;
+    server.await.unwrap();
+
+    assert!(output.status.success(), "{}", error_category(&output));
+    assert!(output.stderr.is_empty());
+    let emitted: Event = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(emitted.id, event_id);
+}
+
 async fn auth_sequence_relay(
     sequence: Vec<Value>,
 ) -> (String, tokio::task::JoinHandle<Vec<Value>>) {

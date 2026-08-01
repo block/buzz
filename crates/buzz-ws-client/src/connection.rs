@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, Keys, Tag};
+use nostr::{Event, EventId, Keys, Tag};
 use serde_json::{json, Value};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
@@ -151,11 +151,8 @@ fn is_auth_message(value: &Value) -> bool {
         == Some("AUTH")
 }
 
-fn contains_private_auth_marker(text: &str, markers: &[String]) -> bool {
-    if markers.is_empty() {
-        return false;
-    }
-    if markers.iter().any(|marker| text.contains(marker)) {
+fn contains_private_marker(text: &str, marker: &str) -> bool {
+    if text.contains(marker) {
         return true;
     }
 
@@ -165,7 +162,49 @@ fn contains_private_auth_marker(text: &str, markers: &[String]) -> bool {
     serde_json::from_str::<Value>(text)
         .ok()
         .map(|value| value.to_string())
-        .is_some_and(|normalized| markers.iter().any(|marker| normalized.contains(marker)))
+        .is_some_and(|normalized| normalized.contains(marker))
+}
+
+#[cfg(test)]
+fn contains_private_auth_marker(text: &str, markers: &[String]) -> bool {
+    markers
+        .iter()
+        .any(|marker| contains_private_marker(text, marker))
+}
+
+fn is_expected_verified_authority_event(
+    parsed: &Result<RelayMessage, WsClientError>,
+    text: &str,
+    expected_event_id: Option<&EventId>,
+    authority_markers: &[String],
+) -> bool {
+    let (
+        Ok(RelayMessage::Event {
+            subscription_id,
+            event,
+            raw_event_json,
+        }),
+        Some(expected_event_id),
+    ) = (parsed, expected_event_id)
+    else {
+        return false;
+    };
+
+    let reflected_markers_stay_inside_event = authority_markers.iter().all(|marker| {
+        !contains_private_marker(text, marker)
+            || (contains_private_marker(raw_event_json, marker)
+                && !contains_private_marker(subscription_id, marker))
+    });
+    let raw_matches_typed = serde_json::from_str::<Value>(raw_event_json)
+        .ok()
+        .zip(serde_json::to_value(event.as_ref()).ok())
+        .is_some_and(|(raw, typed)| raw == typed);
+
+    reflected_markers_stay_inside_event
+        && raw_matches_typed
+        && event.id == *expected_event_id
+        && event.verify_id()
+        && event.verify_signature()
 }
 
 /// Seconds to wait for the relay to send the NIP-42 AUTH challenge after connecting.
@@ -313,7 +352,28 @@ impl NostrWsConnection {
             // records an AUTH challenge before storing it.
             return Ok(msg);
         }
-        self.recv_one(timeout_dur).await
+        self.recv_one(timeout_dur, None).await
+    }
+
+    /// Receives the next relay message for an exact-event lookup.
+    ///
+    /// A stored event signed by a delegated agent legitimately carries the
+    /// same reusable NIP-OA authority tag used during connection AUTH. This
+    /// method permits that authority signature only inside an `EVENT` whose
+    /// raw object is semantically identical to its locally ID-and-signature-
+    /// verified typed form and matches `expected_event_id`. The one-time AUTH
+    /// event signature remains forbidden in every frame, and all other
+    /// authority reflections fail closed.
+    pub async fn next_event_for_exact_id(
+        &mut self,
+        timeout_dur: Duration,
+        expected_event_id: &EventId,
+    ) -> Result<RelayMessage, WsClientError> {
+        self.ensure_auth_transport_ready()?;
+        if let Some(msg) = self.buffer.pop_front() {
+            return Ok(msg);
+        }
+        self.recv_one(timeout_dur, Some(expected_event_id)).await
     }
 
     /// Closes the WebSocket connection gracefully.
@@ -374,12 +434,34 @@ impl NostrWsConnection {
         &self,
         text: &str,
         authenticating: bool,
+        expected_private_event_id: Option<&EventId>,
     ) -> Result<RelayMessage, WsClientError> {
-        if contains_private_auth_marker(text, &self.private_auth_markers) {
+        let auth_event_signature_reflected = self
+            .private_auth_markers
+            .first()
+            .is_some_and(|marker| contains_private_marker(text, marker));
+        let authority_signature_reflected = self
+            .private_auth_markers
+            .iter()
+            .skip(1)
+            .any(|marker| contains_private_marker(text, marker));
+        let parsed = parse_relay_message(text);
+
+        if auth_event_signature_reflected {
+            return Err(WsClientError::ReflectedAuthMaterial);
+        }
+        if authority_signature_reflected
+            && !is_expected_verified_authority_event(
+                &parsed,
+                text,
+                expected_private_event_id,
+                &self.private_auth_markers[1..],
+            )
+        {
             return Err(WsClientError::ReflectedAuthMaterial);
         }
 
-        match parse_relay_message(text) {
+        match parsed {
             Ok(message) => Ok(message),
             Err(WsClientError::AuthChallengeTooLarge { .. }) if authenticating => {
                 Err(WsClientError::AmbiguousAuthChallenge)
@@ -434,7 +516,11 @@ impl NostrWsConnection {
         Ok(message)
     }
 
-    async fn recv_one(&mut self, timeout_dur: Duration) -> Result<RelayMessage, WsClientError> {
+    async fn recv_one(
+        &mut self,
+        timeout_dur: Duration,
+        expected_private_event_id: Option<&EventId>,
+    ) -> Result<RelayMessage, WsClientError> {
         if let Some(msg) = self.buffer.pop_front() {
             return Ok(msg);
         }
@@ -448,7 +534,8 @@ impl NostrWsConnection {
 
             match raw {
                 Message::Text(text) => {
-                    let msg = self.parse_inbound_message(&text, false)?;
+                    let msg =
+                        self.parse_inbound_message(&text, false, expected_private_event_id)?;
                     return self.deliver_message(msg);
                 }
                 Message::Ping(data) => {
@@ -487,7 +574,7 @@ impl NostrWsConnection {
 
             match raw {
                 Message::Text(text) => {
-                    let msg = self.parse_inbound_message(&text, false)?;
+                    let msg = self.parse_inbound_message(&text, false, None)?;
                     match msg {
                         RelayMessage::Auth { challenge } => {
                             self.observe_auth_challenge(&challenge)?;
@@ -559,7 +646,7 @@ impl NostrWsConnection {
 
             match raw {
                 Message::Text(text) => {
-                    let msg = self.parse_inbound_message(&text, authenticating)?;
+                    let msg = self.parse_inbound_message(&text, authenticating, None)?;
                     match msg {
                         RelayMessage::Ok(ok) if ok.event_id == event_id => return Ok(ok),
                         other => self.buffer_message(other)?,
@@ -606,6 +693,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
+    use nostr::{EventBuilder, Kind};
+
     use super::*;
 
     #[test]
@@ -635,6 +724,59 @@ mod tests {
 
         assert!(!escaped.contains(&markers[0]));
         assert!(contains_private_auth_marker(escaped, &markers));
+    }
+
+    #[test]
+    fn delegated_authority_is_allowed_only_inside_the_exact_signed_event() {
+        let authority_signature = "a".repeat(128);
+        let authority_markers = vec![authority_signature.clone()];
+        let auth_tag = Tag::parse([
+            "auth",
+            &"b".repeat(64),
+            "kind=1",
+            authority_signature.as_str(),
+        ])
+        .unwrap();
+        let event = EventBuilder::new(Kind::TextNote, "delegated")
+            .tags([auth_tag])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let raw_event_json = serde_json::to_string(&event).unwrap();
+        let frame = serde_json::json!(["EVENT", "exact", event]).to_string();
+        let parsed = parse_relay_message(&frame);
+
+        assert!(is_expected_verified_authority_event(
+            &parsed,
+            &frame,
+            Some(&event.id),
+            &authority_markers,
+        ));
+
+        let reflected_subscription = serde_json::json!([
+            "EVENT",
+            authority_signature,
+            serde_json::from_str::<Value>(&raw_event_json).unwrap()
+        ])
+        .to_string();
+        let parsed = parse_relay_message(&reflected_subscription);
+        assert!(!is_expected_verified_authority_event(
+            &parsed,
+            &reflected_subscription,
+            Some(&event.id),
+            &authority_markers,
+        ));
+
+        let mut raw_with_unknown_field = serde_json::from_str::<Value>(&raw_event_json).unwrap();
+        raw_with_unknown_field["relay-controlled"] = Value::String(authority_markers[0].clone());
+        let reflected_unknown_field =
+            serde_json::json!(["EVENT", "exact", raw_with_unknown_field]).to_string();
+        let parsed = parse_relay_message(&reflected_unknown_field);
+        assert!(!is_expected_verified_authority_event(
+            &parsed,
+            &reflected_unknown_field,
+            Some(&event.id),
+            &authority_markers,
+        ));
     }
 
     fn assert_masked_text_frame_at_boundary(size: usize, length_marker: u8, header_len: usize) {
