@@ -461,9 +461,9 @@ fn shell_escape(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
+        adapter_terminal_argv, append_inherited_path, auth_method_route,
         run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        windows_terminal_args, AcpAuthMethod, AuthMethodRoute,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_subscription_methods_run_without_a_visible_terminal() {
+    fn claude_subscription_methods_route_to_visible_terminal() {
         for id in ["claude-login", "claude-ai-login"] {
             let method = AcpAuthMethod {
                 id: id.into(),
@@ -609,8 +609,10 @@ mod tests {
                 command: vec![],
                 meta: None,
             };
-            assert!(is_claude_subscription_login("claude", &method));
-            assert!(!is_claude_subscription_login("codex", &method));
+            assert_eq!(
+                auth_method_route(&method).unwrap(),
+                AuthMethodRoute::VisibleTerminal
+            );
         }
     }
 
