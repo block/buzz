@@ -2822,6 +2822,50 @@ mod tests {
         assert!(!super::model_in_catalog(&[], None, "anything"));
     }
 
+    // ── Issue #4004: bracket-modifier miss pins the exact-match boundary ─────
+    //
+    // The cursor-agent ACP catalog advertises `composer-2.5[fast=true]` as its
+    // only Composer 2.5 model id. When the desktop persisted
+    // `composer-2.5[fast=false]` (a variant the harness never reported), the
+    // exact-match below must miss so the pool's fallback arm
+    // (`pool.rs:955-977`) fires and the desktop learns the pick is
+    // unsupported, instead of silently applying the agent default and billing
+    // the user against `fast=true`.
+
+    #[test]
+    fn resolve_model_switch_method_misses_unadvertised_bracket_variant() {
+        // Cursor-agent-shaped session/new: exactly one model, `fast=true` only.
+        let session_new = serde_json::json!({
+            "stable": { "configOptions": [] },
+            "models": {
+                "currentModelId": "composer-2.5[fast=true]",
+                "availableModels": [
+                    { "modelId": "composer-2.5[fast=true]", "name": "Composer 2.5 Fast" }
+                ]
+            }
+        });
+        assert_eq!(
+            super::resolve_model_switch_method(&session_new, "composer-2.5[fast=false]"),
+            None,
+            "exact-match must miss a variant the harness never advertised"
+        );
+    }
+
+    #[test]
+    fn model_in_catalog_misses_unadvertised_bracket_variant() {
+        let available = serde_json::json!({
+            "currentModelId": "composer-2.5[fast=true]",
+            "availableModels": [
+                { "modelId": "composer-2.5[fast=true]", "name": "Composer 2.5 Fast" }
+            ]
+        });
+        assert!(!super::model_in_catalog(
+            &[],
+            Some(&available),
+            "composer-2.5[fast=false]"
+        ));
+    }
+
     // ── Error variant display ─────────────────────────────────────────────
 
     #[test]
