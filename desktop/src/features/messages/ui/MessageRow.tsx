@@ -41,6 +41,7 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
+import { AgentMessageSourceReceipt } from "./AgentRoomOutcome";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
@@ -589,6 +590,7 @@ export const MessageRow = React.memo(
     const messageBodyNode = (
       <>
         {renderBody()}
+        <AgentMessageSourceReceipt message={message} />
         {continuationMetadataNode}
         <MessageReactions
           messageId={message.id}

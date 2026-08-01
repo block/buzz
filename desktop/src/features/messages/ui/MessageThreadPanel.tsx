@@ -27,6 +27,7 @@ import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
@@ -41,6 +42,8 @@ import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
+import type { AgentRoomAudienceAgent } from "./MessageComposer.types";
+import { ThreadDoneToMemoryButton } from "./AgentRoomOutcome";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -51,6 +54,7 @@ import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
 type MessageThreadPanelProps = ThreadPanelLayoutProps & {
+  agentAudience?: readonly AgentRoomAudienceAgent[];
   channel: Channel | null;
   channelId: string | null;
   channelName: string;
@@ -182,6 +186,7 @@ function getActiveContinuationDepths({
 }
 
 export function MessageThreadPanel({
+  agentAudience = [],
   channel,
   channelId,
   channelName,
@@ -854,6 +859,7 @@ export function MessageThreadPanel({
           >
             <ComposerDockBackdrop gutterClassName="inset-x-5" />
             <MessageComposer
+              agentAudience={agentAudience}
               audienceContext={{
                 type: "thread",
                 threadRootId: threadHead.id,
@@ -930,6 +936,19 @@ export function MessageThreadPanel({
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
+      {channelId ? (
+        <AuxiliaryPanelHeaderActions>
+          <ThreadDoneToMemoryButton
+            agents={agentAudience}
+            channelId={channelId}
+            channelName={channelName}
+            initialAgentPubkeys={initialAgentPubkeys}
+            key={threadMessages.at(-1)?.id ?? threadHead.id}
+            threadHead={threadHead}
+            threadMessages={threadMessages}
+          />
+        </AuxiliaryPanelHeaderActions>
+      ) : null}
     </>
   );
 

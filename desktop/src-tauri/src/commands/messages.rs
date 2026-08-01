@@ -727,7 +727,7 @@ fn legacy_managed_agent_auth_tag(
         .map_err(|error| format!("failed to compute managed agent auth tag: {error}"))
 }
 
-fn managed_agent_submission_auth_tag(
+pub(crate) fn managed_agent_submission_auth_tag(
     record: &ManagedAgentRecord,
     state: &AppState,
     agent_pubkey: &PublicKey,

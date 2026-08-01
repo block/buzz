@@ -55,10 +55,11 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
-
+import { AgentRoomAudience } from "./AgentRoomAudience";
 import type { MessageComposerProps } from "./MessageComposer.types";
 
 function MessageComposerImpl({
+  agentAudience = [],
   audienceContext = null,
   channelId = null,
   channelName,
@@ -142,15 +143,13 @@ function MessageComposerImpl({
     typingRootEventId,
   );
 
-  // We pass a custom setter that both updates React state AND inserts
-  // markdown into the Tiptap editor when media upload completes.
+  // Media inserts markdown into the Tiptap editor when upload completes.
   const internalMedia = useMediaUpload();
   const media = mediaController ?? internalMedia;
   const ownsDropZone = mediaController === undefined;
 
-  // Draft-persist lifecycle: restore/clear content + imeta + spoilered urls on
-  // key change, and persist the outgoing draft in the cleanup. The StrictMode
-  // fix lives inside this hook — see useDraftPersistSnapshot.ts.
+  // Restores drafts on key change and persists them during cleanup; the
+  // StrictMode fix lives in useDraftPersistSnapshot.ts.
   useDraftPersistLifecycle({
     effectiveDraftKey,
     channelId,
@@ -907,18 +906,19 @@ function MessageComposerImpl({
             onDragEnter={ownsDropZone ? media.handleDragEnter : undefined}
             onDragLeave={ownsDropZone ? media.handleDragLeave : undefined}
             onDragOver={ownsDropZone ? media.handleDragOver : undefined}
-            onDrop={
-              ownsDropZone
-                ? (e) => {
-                    void media.handleDrop(e);
-                  }
-                : undefined
-            }
-            onSubmit={(event) => {
-              handleSubmit(event);
-            }}
+            onDrop={ownsDropZone ? media.handleDrop : undefined}
+            onSubmit={handleSubmit}
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
+            {editTarget == null ? (
+              <AgentRoomAudience
+                agents={agentAudience}
+                disabled={disabled}
+                mentions={mentions}
+                profiles={profiles}
+                richText={richText}
+              />
+            ) : null}
             <EmojiAutocomplete
               onSelect={applyEmojiInsert}
               selectedIndex={emojiAutocomplete.emojiSelectedIndex}

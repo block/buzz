@@ -75,7 +75,6 @@ use tray_menu::show_main_window;
 
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
-
 fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
     if let Err(error) = window.show() {
         eprintln!("buzz-desktop: failed to reveal main window: {error}");
@@ -919,6 +918,7 @@ pub fn run() {
             fetch_join_policy,
             set_prevent_sleep_active,
             get_agent_memory,
+            save_thread_outcome_memory,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,
             observer_archive_default_enabled,

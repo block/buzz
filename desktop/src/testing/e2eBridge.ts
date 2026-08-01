@@ -11393,6 +11393,12 @@ export function maybeInstallE2eTauriMocks() {
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},
           activeConfig,
         );
+      case "save_thread_outcome_memory":
+        return {
+          eventId: "f".repeat(64),
+          accepted: true,
+          message: "stored",
+        };
       case "create_managed_agent":
         return handleCreateManagedAgent(
           payload as Parameters<typeof handleCreateManagedAgent>[0],

@@ -1,6 +1,6 @@
-//! Owner-gated engram (NIP-AE memory) reader for the desktop.
+//! Owner-gated engram (NIP-AE memory) access for the desktop.
 //!
-//! IXI-7 phase 1: read-only memory surface inside the agent profile panel.
+//! IXI-7 phase 1: memory listing plus owner-approved thread-outcome capture.
 //! One Tauri call per panel open returns the entire decrypted listing —
 //! `core` (if present), every non-tombstoned `mem/...` entry, and the
 //! outgoing `[[slug]]` refs extracted from each body. The UI computes
@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use nostr::PublicKey;
+use nostr::{Keys, PublicKey};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -29,7 +29,15 @@ use buzz_core_pkg::engram::{self, extract_refs, select_head, validate_and_decryp
 use buzz_core_pkg::kind::KIND_AGENT_ENGRAM;
 
 use crate::commands::identity_archive::{extract_oa_owner, fetch_kind0};
-use crate::{app_state::AppState, managed_agents::load_managed_agents, relay::query_relay};
+use crate::commands::messages::managed_agent_submission_auth_tag;
+use crate::{
+    app_state::AppState,
+    managed_agents::{find_managed_agent_mut, load_managed_agents},
+    relay::{
+        query_relay, query_relay_at_with_keys, relay_api_base_url_with_override,
+        submit_signed_event_with_keys, SubmitEventResponse,
+    },
+};
 
 /// Hard cap on engrams returned per (agent, owner) pair. Matches the CLI
 /// `mem ls` reference. If the relay returns this many we set
@@ -69,6 +77,15 @@ pub struct AgentMemoryListing {
     /// Unix seconds when the response was assembled. UI uses this for
     /// "last loaded" copy on the refetch affordance.
     pub fetched_at: u64,
+}
+
+fn thread_memory_slug(thread_root_id: &str) -> Result<String, String> {
+    let root = thread_root_id.trim().to_ascii_lowercase();
+    if root.len() != 64 || !root.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err("thread root must be a 64-hex event id".to_string());
+    }
+    engram::normalize_slug(&format!("threads/{root}"))
+        .map_err(|error| format!("invalid thread memory slug: {error}"))
 }
 
 /// Does `kind0` cryptographically declare `viewer_pubkey` as the NIP-OA owner
@@ -274,6 +291,96 @@ pub async fn get_agent_memory(
     })
 }
 
+/// Save an owner-reviewed thread outcome to one locally managed agent.
+///
+/// The command deliberately owns the slug shape so the UI cannot overwrite
+/// `core` or an unrelated memory. Remote-owned agents remain read-only here:
+/// without their signing key this desktop cannot author an engram as them.
+#[tauri::command]
+pub async fn save_thread_outcome_memory(
+    agent_pubkey: String,
+    thread_root_id: String,
+    body: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SubmitEventResponse, String> {
+    if body.trim().is_empty() {
+        return Err("thread outcome is required".to_string());
+    }
+    let slug = thread_memory_slug(&thread_root_id)?;
+    let requested_pubkey = agent_pubkey.trim().to_ascii_lowercase();
+    let record = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        find_managed_agent_mut(&mut records, &requested_pubkey)?.clone()
+    };
+    let agent_keys = Keys::parse(record.private_key_nsec.trim())
+        .map_err(|error| format!("failed to parse managed agent key: {error}"))?;
+    if agent_keys.public_key().to_hex() != requested_pubkey {
+        return Err("managed agent key does not match the requested agent".to_string());
+    }
+
+    let owner_pubkey = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .public_key();
+    let auth_tag = managed_agent_submission_auth_tag(&record, &state, &agent_keys.public_key())?;
+    let conversation_key = engram::conversation_key(agent_keys.secret_key(), &owner_pubkey);
+    let d_tag = engram::d_tag(&conversation_key, &slug);
+    let relay_base = relay_api_base_url_with_override(&state);
+    let events = query_relay_at_with_keys(
+        &state,
+        &relay_base,
+        &[serde_json::json!({
+            "kinds": [KIND_AGENT_ENGRAM],
+            "authors": [requested_pubkey],
+            "#d": [d_tag],
+            "#p": [owner_pubkey.to_hex()],
+            "limit": 16,
+        })],
+        &agent_keys,
+        auth_tag.as_deref(),
+    )
+    .await?;
+    let valid_events = events.into_iter().filter(|event| {
+        event.verify().is_ok()
+            && validate_and_decrypt(
+                event,
+                &agent_keys.public_key(),
+                &owner_pubkey,
+                agent_keys.secret_key(),
+                &owner_pubkey,
+            )
+            .is_ok()
+    });
+    let prior_created_at = select_head(valid_events).map(|event| event.created_at.as_secs());
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_secs();
+    let created_at = engram::monotonic_created_at(now, prior_created_at);
+    let event = engram::build_event(
+        &agent_keys,
+        &owner_pubkey,
+        &Body::Memory {
+            slug,
+            value: Some(body),
+        },
+        created_at,
+    )
+    .map_err(|error| format!("failed to build thread memory: {error}"))?;
+    let response =
+        submit_signed_event_with_keys(&event, &state, &agent_keys, auth_tag.as_deref()).await?;
+    if response.message == "duplicate" || response.message.starts_with("duplicate:") {
+        return Err("a newer thread outcome is already stored".to_string());
+    }
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +475,15 @@ mod tests {
             None,
             &viewer.public_key().to_hex(),
         ));
+    }
+
+    #[test]
+    fn thread_outcomes_use_a_scoped_memory_slug() {
+        let root = "ab".repeat(32);
+        assert_eq!(
+            thread_memory_slug(&root).unwrap(),
+            format!("mem/threads/{root}")
+        );
+        assert!(thread_memory_slug("not-an-event").is_err());
     }
 }

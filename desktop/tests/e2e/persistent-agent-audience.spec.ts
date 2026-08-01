@@ -44,23 +44,26 @@ async function emitRootMessage(
   page: Page,
   content: string,
   mentionPubkeys: string[],
+  id?: string,
 ) {
   const event = await page.evaluate(
-    ({ message, pubkeys }) =>
+    ({ eventId, message, pubkeys }) =>
       (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            id?: string;
             mentionPubkeys: string[];
           }) => { id: string };
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: message,
+        id: eventId,
         mentionPubkeys: pubkeys,
       }),
-    { message: content, pubkeys: mentionPubkeys },
+    { eventId: id, message: content, pubkeys: mentionPubkeys },
   );
   if (!event) throw new Error("Mock message emitter is not installed");
   return event;
@@ -258,6 +261,47 @@ test("persistent agents restore through the native inline mention UI", async ({
   await expect(input).toContainText("@Morgarita");
   await expect(input).not.toContainText("@Vogue");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+});
+
+test("agent room addresses the team and saves a cited outcome to memory", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const channelOverlay = channelComposer(page);
+  await channelOverlay.getByTestId("agent-room-ask-all").click();
+  await expect(channelOverlay.getByTestId("message-input")).toContainText(
+    "@Morgarita @Vogue",
+  );
+
+  const root = await emitRootMessage(
+    page,
+    "Protect the launch plan",
+    [AGENT_A],
+    "d".repeat(64),
+  );
+  await page.evaluate(
+    ({ agentPubkey, rootId }) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content:
+          "Ship behind owner approval. See [launch brief](/workspace/LAUNCH.md) and https://example.com/checklist.",
+        id: "c".repeat(64),
+        parentEventId: rootId,
+        pubkey: agentPubkey,
+      }),
+    { agentPubkey: AGENT_A, rootId: root.id },
+  );
+  await openThread(page, root.id);
+
+  const panel = page.getByTestId("message-thread-panel");
+  await expect(panel.getByTestId("agent-source-receipt")).toContainText(
+    "Context used · 2 sources",
+  );
+  await panel.getByTestId("thread-done-to-memory").click();
+  await expect(panel.getByTestId("thread-done-to-memory")).toHaveText("Saved");
+  await expect(page.getByText(/Saved this outcome.*Morgarita/)).toBeVisible();
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {

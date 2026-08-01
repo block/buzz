@@ -5,7 +5,15 @@ import type { MediaUploadController } from "@/features/messages/lib/useMediaUplo
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 
+export type AgentRoomAudienceAgent = {
+  pubkey: string;
+  name: string;
+  status: "running" | "stopped" | "deployed" | "not_deployed";
+  agentSource?: "managed" | "member-bot" | "relay";
+};
+
 export type MessageComposerProps = {
+  agentAudience?: readonly AgentRoomAudienceAgent[];
   audienceContext?: {
     type: "thread";
     threadRootId: string;

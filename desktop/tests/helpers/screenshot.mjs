@@ -275,7 +275,12 @@ try {
   // Radix components animate in via CSS — without this, screenshots
   // are taken mid-transition and appear greyed-out or partially rendered.
   await page.evaluate(() =>
-    Promise.all(document.getAnimations().map((a) => a.finished)),
+    Promise.race([
+      Promise.all(
+        document.getAnimations().map((a) => a.finished.catch(() => undefined)),
+      ),
+      new Promise((resolve) => setTimeout(resolve, 1000)),
+    ]),
   );
 
   const filepath = join(outdir, `${args.name}.png`);

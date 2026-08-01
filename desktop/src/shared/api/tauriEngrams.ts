@@ -52,3 +52,16 @@ export async function getAgentMemory(
     agentPubkey,
   });
 }
+
+/** Save one owner-reviewed thread outcome to a locally managed agent. */
+export async function saveThreadOutcomeMemory(
+  agentPubkey: string,
+  threadRootId: string,
+  body: string,
+): Promise<{ eventId: string; accepted: boolean; message: string }> {
+  return invokeTauri("save_thread_outcome_memory", {
+    agentPubkey,
+    threadRootId,
+    body,
+  });
+}

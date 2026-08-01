@@ -754,6 +754,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 ) : null}
                 <ComposerDockBackdrop gutterClassName="inset-x-5" />
                 <MessageComposer
+                  agentAudience={activityAgents}
                   channelId={activeChannel?.id ?? null}
                   channelName={activeChannel?.name ?? "channel"}
                   channelType={activeChannel?.channelType ?? null}
@@ -845,6 +846,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           (() => {
             const panel = (
               <MessageThreadPanel
+                agentAudience={activityAgents}
                 channel={activeChannel}
                 channelId={activeChannel?.id ?? null}
                 channelName={activeChannel?.name ?? "channel"}

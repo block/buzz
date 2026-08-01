@@ -1,5 +1,4 @@
 import type * as React from "react";
-import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -15,7 +14,7 @@ import type {
 import type { Channel } from "@/shared/api/types";
 export type ChannelPaneProps = {
   activeChannel: Channel | null;
-  activityAgents?: BotActivityAgent[];
+  activityAgents?: ChannelAgentSessionAgent[];
   agentPubkeys?: ReadonlySet<string>;
   agentPubkeysPending?: boolean;
   agentSessionAgents: ChannelAgentSessionAgent[];
