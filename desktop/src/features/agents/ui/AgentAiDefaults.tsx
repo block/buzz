@@ -28,6 +28,7 @@ export function formatAiDefaultsSummary({
 export function AgentAiDefaultsNotice({
   isConfigured = true,
   onEditDefaults,
+  onEditDefinition,
   triggerRef,
   explicitModel,
   explicitProvider,
@@ -37,6 +38,12 @@ export function AgentAiDefaultsNotice({
 }: {
   isConfigured?: boolean;
   onEditDefaults: () => void;
+  /**
+   * Set only when a linked definition owns these values, which is also when
+   * the surface's own model/provider controls are read-only. Without it the
+   * summary would name the values and offer no way to reach them.
+   */
+  onEditDefinition?: () => void;
   triggerRef?: React.Ref<HTMLButtonElement>;
   explicitModel: string;
   explicitProvider: string;
@@ -91,17 +98,36 @@ export function AgentAiDefaultsNotice({
           {model || "Not configured"}
         </dd>
       </dl>
-      <Button
-        className="h-auto px-0 py-1"
-        data-testid="edit-ai-defaults"
-        onClick={onEditDefaults}
-        ref={triggerRef}
-        size="xs"
-        type="button"
-        variant="link"
-      >
-        Edit global defaults
-      </Button>
+      {onEditDefinition ? (
+        <p className="text-xs text-muted-foreground">
+          Set on the agent definition and shared by every agent created from it.
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button
+          className="h-auto px-0 py-1"
+          data-testid="edit-ai-defaults"
+          onClick={onEditDefaults}
+          ref={triggerRef}
+          size="xs"
+          type="button"
+          variant="link"
+        >
+          Edit global defaults
+        </Button>
+        {onEditDefinition ? (
+          <Button
+            className="h-auto px-0 py-1"
+            data-testid="edit-agent-definition"
+            onClick={onEditDefinition}
+            size="xs"
+            type="button"
+            variant="link"
+          >
+            Edit agent definition
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }

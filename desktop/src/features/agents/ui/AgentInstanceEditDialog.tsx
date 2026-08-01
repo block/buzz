@@ -25,6 +25,7 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
+import { EditAgentModelField } from "./EditAgentModelField";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
@@ -49,6 +50,7 @@ import {
 } from "./relayMeshModelPicker";
 import {
   computeEditAgentFormValidity,
+  definitionOwnsAiConfig,
   envVarsEqual,
   isEditAgentProviderSaveValid,
   resolveAgentCommandUpdate,
@@ -152,6 +154,12 @@ export function AgentInstanceEditDialog({
         : null,
     [agent.personaId, personasQuery.data],
   );
+  const aiConfigIsDefinitionOwned = definitionOwnsAiConfig(linkedPersona);
+  // Model and LLM provider stay visible when the definition owns them — the
+  // value is the answer to "what does this agent run on" — but read-only, and
+  // the summary below routes the edit to the definition dialog.
+  const aiFieldsDisabled =
+    updateMutation.isPending || aiConfigIsDefinitionOwned;
   const inheritedEnvVars = linkedPersona?.envVars ?? {};
   const [respondTo, setRespondTo] = React.useState<RespondToMode>(
     agent.respondTo,
@@ -589,13 +597,27 @@ export function AgentInstanceEditDialog({
     onOpenChange(next);
   }
 
-  const providerValid = isEditAgentProviderSaveValid({
-    llmProviderFieldVisible,
-    currentProvider: provider,
-    originalProvider: agent.provider,
-    globalProvider: inheritedProviderDefault.value,
-    originalRuntimeSupportsProvider,
-  });
+  // Definition-owned fields are edited in the definition dialog, which the
+  // caller opens; this form closes first so the two are never both mounted.
+  const handleEditLinkedPersona = onEditLinkedPersona
+    ? () => {
+        handleOpenChange(false);
+        onEditLinkedPersona();
+      }
+    : undefined;
+
+  // A field this form never sends cannot make it invalid. Switching harness
+  // can blank the provider draft, which would otherwise block Save on a
+  // read-only field the user has no way to repair.
+  const providerValid =
+    aiConfigIsDefinitionOwned ||
+    isEditAgentProviderSaveValid({
+      llmProviderFieldVisible,
+      currentProvider: provider,
+      originalProvider: agent.provider,
+      globalProvider: inheritedProviderDefault.value,
+      originalRuntimeSupportsProvider,
+    });
 
   const canSubmit =
     computeEditAgentFormValidity({
@@ -679,35 +701,34 @@ export function AgentInstanceEditDialog({
             ? parsedParallelism
             : undefined,
         // Linked instances defer model/provider/systemPrompt to the definition.
-        systemPrompt:
-          linkedPersona != null
-            ? undefined
-            : (systemPrompt.trim() || null) !== agent.systemPrompt
-              ? systemPrompt.trim() || null
-              : undefined,
-        model:
-          linkedPersona != null
-            ? undefined
-            : normalizedModel !== (agent.model ?? null)
-              ? normalizedModel
-              : undefined,
+        // Same predicate the controls above read, so a field can never be
+        // editable here and dropped on the wire.
+        systemPrompt: aiConfigIsDefinitionOwned
+          ? undefined
+          : (systemPrompt.trim() || null) !== agent.systemPrompt
+            ? systemPrompt.trim() || null
+            : undefined,
+        model: aiConfigIsDefinitionOwned
+          ? undefined
+          : normalizedModel !== (agent.model ?? null)
+            ? normalizedModel
+            : undefined,
         // Tri-state provider persistence keyed on providerRuntimeCapability:
         //   "capable"  → persist: value if changed, omit if unchanged.
         //   "locked"   → clear: send null if provider was set, else omit.
         //   "unknown"  → omit always (never send null for a transient state).
         // llmProviderFieldVisible is for UX visibility only; not used here.
-        provider:
-          linkedPersona != null
-            ? undefined
-            : providerRuntimeCapability === "capable"
-              ? normalizedSubmitProvider !== (agent.provider ?? null)
-                ? normalizedSubmitProvider
+        provider: aiConfigIsDefinitionOwned
+          ? undefined
+          : providerRuntimeCapability === "capable"
+            ? normalizedSubmitProvider !== (agent.provider ?? null)
+              ? normalizedSubmitProvider
+              : undefined
+            : providerRuntimeCapability === "locked"
+              ? (agent.provider ?? null) !== null
+                ? null
                 : undefined
-              : providerRuntimeCapability === "locked"
-                ? (agent.provider ?? null) !== null
-                  ? null
-                  : undefined
-                : undefined, // "unknown" → omit always
+              : undefined, // "unknown" → omit always
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
@@ -887,13 +908,10 @@ export function AgentInstanceEditDialog({
               onUploadPendingChange={setIsAvatarUploadPending}
               onSelectAvatar={setAvatarUrl}
             />
-            {onEditLinkedPersona ? (
+            {handleEditLinkedPersona ? (
               <Button
                 className="w-full"
-                onClick={() => {
-                  handleOpenChange(false);
-                  onEditLinkedPersona();
-                }}
+                onClick={handleEditLinkedPersona}
                 size="sm"
                 type="button"
                 variant="outline"
@@ -1026,7 +1044,7 @@ export function AgentInstanceEditDialog({
                   )}
                 </label>
                 <PersonaDropdownField
-                  disabled={updateMutation.isPending}
+                  disabled={aiFieldsDisabled}
                   id="edit-agent-llm-provider"
                   onValueChange={handleProviderDropdownChange}
                   options={providerDropdownOptions}
@@ -1047,7 +1065,7 @@ export function AgentInstanceEditDialog({
                         "h-8 px-0 py-0 leading-6",
                         PERSONA_FIELD_CONTROL_CLASS,
                       )}
-                      disabled={updateMutation.isPending}
+                      disabled={aiFieldsDisabled}
                       id="edit-agent-custom-provider"
                       onChange={(event) => setProvider(event.target.value)}
                       placeholder="Custom provider ID"
@@ -1080,59 +1098,24 @@ export function AgentInstanceEditDialog({
             ) : null}
 
             {/* Model */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-model"
-              >
-                Model
-                {modelRequired ? (
-                  <span className="ml-1 text-destructive" aria-hidden="true">
-                    *
-                  </span>
-                ) : (
-                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-                )}
-              </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
-                id="edit-agent-model"
-                onValueChange={handleModelDropdownChange}
-                options={modelDropdownOptions}
-                placeholder="Default model"
-                value={modelSelectValue}
-              />
-              {showCustomModelInput ? (
-                <div
-                  className={cn(
-                    "mt-2 flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    aria-label="Custom model ID"
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
-                    disabled={updateMutation.isPending}
-                    id="edit-agent-custom-model"
-                    onChange={(event) => setModel(event.target.value)}
-                    placeholder="Custom model ID"
-                    value={model}
-                  />
-                </div>
-              ) : null}
-              {modelStatusMessage ? (
-                <p className="text-xs text-muted-foreground">
-                  {modelStatusMessage}
-                </p>
-              ) : null}
-            </div>
+            <EditAgentModelField
+              disabled={aiFieldsDisabled}
+              discoveryLoading={modelDiscoveryLoading}
+              isRequired={modelRequired}
+              model={model}
+              onCustomModelChange={setModel}
+              onModelValueChange={handleModelDropdownChange}
+              options={modelDropdownOptions}
+              selectValue={modelSelectValue}
+              showCustomModelInput={showCustomModelInput}
+              statusMessage={modelStatusMessage}
+            />
 
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}
+              onEditDefinition={
+                aiConfigIsDefinitionOwned ? handleEditLinkedPersona : undefined
+              }
               triggerRef={aiDefaultsTriggerRef}
               explicitModel={inheritedSubmission.model ?? ""}
               explicitProvider={inheritedSubmission.provider ?? ""}
