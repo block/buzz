@@ -36,8 +36,15 @@ pub enum PeerCtrl {
     Close,
 }
 
-/// Audio channel capacity per peer: 8 frames = 160ms at 20ms/frame.
-const AUDIO_CHANNEL_CAPACITY: usize = 8;
+/// Audio channel capacity per peer: 16 frames = 320ms at 20ms/frame.
+///
+/// Widened from 8 (160ms) after measuring jitter spikes of 150-152ms on an
+/// ordinary residential-ISP path to the relay — right at the old ceiling, so
+/// brief jitter was enough to make `try_send` drop frames outright (heard as
+/// audio grain, not lag). This raises the drop threshold; it does not change
+/// per-peer memory bounds materially (still a handful of Opus frames, each
+/// well under 1 KB).
+const AUDIO_CHANNEL_CAPACITY: usize = 16;
 /// Control channel capacity per peer: 32 slots — must never drop joined/left
 /// messages, which are state-bearing (they maintain the client's peer_index →
 /// pubkey map). Sized generously: even 30 simultaneous join/leave events fit.
