@@ -2265,14 +2265,18 @@ pub fn model_in_catalog(
 /// a publish **candidate** — delivery is confirmed separately from the call's
 /// terminal outcome by [`publish_outcome_confirms_delivery`].
 ///
-/// The publish path is the dev-mcp `shell` tool running `buzz messages send`
-/// (or `buzz social publish`), so the tool name alone is not enough — inspect
-/// `rawInput` (the command/args) for the CLI publish signature. The haystack is
-/// normalized (quotes/commas/brackets → spaces, whitespace collapsed) so both
-/// shell strings (`buzz messages send --channel …`) and argv forms
+/// The publish path is either:
+/// - the dev-mcp `shell` tool running `buzz messages send` / `buzz social publish`
+/// - a first-class MCP tool whose id ends in / is `buzz_messages_send`
+///   (goose prefixes extension names: `buzz_publish__buzz_messages_send`,
+///   `buzz-dev-mcp__buzz_messages_send`)
+///
+/// Inspect title + `rawInput` for those signatures. The haystack is normalized
+/// (quotes/commas/brackets → spaces, whitespace collapsed) so both shell strings
+/// (`buzz messages send --channel …`) and argv forms
 /// (`['buzz','messages','send',…]`, e.g. Python `subprocess.run`) match.
 /// Conservative: only matches an actual send subcommand, not reads like
-/// `buzz messages get`.
+/// `buzz messages get` or `buzz_messages_get`.
 fn tool_call_is_message_publish(update: &serde_json::Value) -> bool {
     // Flatten title + rawInput into one lowercase haystack. rawInput is
     // arbitrary JSON (shell command string, or structured args), so serialize
@@ -2300,7 +2304,13 @@ fn tool_call_is_message_publish(update: &serde_json::Value) -> bool {
     // against read subcommands (get/thread/search/list) sharing the "messages"
     // prefix by requiring the send/publish verb. ("messages send-diff"
     // contains "messages send", so it is covered.)
-    h.contains("messages send") || h.contains("social publish")
+    //
+    // MCP tool ids use underscores (and optional goose `ext__` prefixes), so
+    // also match the token `buzz_messages_send` — JSON rawInput alone has no
+    // "messages send" substring.
+    h.contains("messages send")
+        || h.contains("social publish")
+        || h.contains("buzz_messages_send")
 }
 
 /// Classify the terminal outcome of a publish tool call.
@@ -2542,6 +2552,36 @@ mod tests {
             "rawInput": { "path": "/tmp/foo" }
         });
         assert!(!tool_call_is_message_publish(&other));
+    }
+
+    #[test]
+    fn tool_call_mcp_buzz_messages_send_detected() {
+        // Goose-prefixed MCP publish tool: title carries buzz_messages_send;
+        // rawInput is structured JSON without the words "messages send".
+        let update = serde_json::json!({
+            "title": "buzz_publish__buzz_messages_send",
+            "rawInput": { "channel": "aa83e87b-f7da-4014-83ed-824a6ff3a4d0", "content": "hi" }
+        });
+        assert!(tool_call_is_message_publish(&update));
+
+        let bare = serde_json::json!({
+            "title": "buzz_messages_send",
+            "rawInput": { "channel": "x", "content": "y" }
+        });
+        assert!(tool_call_is_message_publish(&bare));
+
+        let alt_prefix = serde_json::json!({
+            "title": "buzz-dev-mcp__buzz_messages_send",
+            "rawInput": { "channel": "x", "content": "y", "reply_to": "abc" }
+        });
+        assert!(tool_call_is_message_publish(&alt_prefix));
+
+        // Read MCP tool sharing the buzz_messages_ prefix → NOT a publish.
+        let read_only = serde_json::json!({
+            "title": "buzz_publish__buzz_messages_get",
+            "rawInput": { "channel": "x" }
+        });
+        assert!(!tool_call_is_message_publish(&read_only));
     }
 
     #[test]
