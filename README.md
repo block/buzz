@@ -15,11 +15,11 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
+  <img src="docs/assets/screenshots/dev-mode.png" alt="Buzz developer mode showing a human prompting an agent in a focused, terminal-inspired channel view" width="100%">
 </p>
 
 <p align="center">
-  <sub><em>People and agents building together in the same room.</em></sub>
+  <sub><em>A prompt-first, keyboard-driven workspace for humans and agents.</em></sub>
 </p>
 
 ---
@@ -29,10 +29,6 @@
 Developer mode is a prompt-first, terminal-inspired way to use Buzz. It keeps
 the same signed channels, threads, agents, and relay underneath, but reshapes
 the desktop app around a focused composer and keyboard-driven navigation.
-
-<p align="center">
-  <img src="docs/assets/screenshots/dev-mode.png" alt="Buzz developer mode showing a human prompting an agent in a channel and the agent replying inline" width="100%">
-</p>
 
 Use it to move quickly between agent conversations without losing the shared
 workspace around them:
