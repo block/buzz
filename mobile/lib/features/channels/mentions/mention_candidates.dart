@@ -51,13 +51,20 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, UserProfile> userCache,
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
+  Set<String> archivedPubkeys = const {},
   String? currentPubkey,
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
 
+  final self = currentPubkey?.toLowerCase();
   for (final member in members) {
     final pk = member.pubkey.toLowerCase();
+    // Fold relay-archived identities (#3840) out of
+    // autocomplete; the current user is exempt (NIP-IA §Self
+    // Requests anti-shadowban), matching desktop's
+    // `useIsArchivedPredicate`.
+    if (archivedPubkeys.contains(pk) && pk != self) continue;
     if (!seen.add(pk)) continue;
     final profile = userCache[pk];
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
