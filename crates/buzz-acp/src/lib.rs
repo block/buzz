@@ -3651,6 +3651,15 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_requires_origin_channel_commit_trailer() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("Every commit created for channel-scoped Buzz work MUST include"));
+        assert!(prompt.contains("`Buzz-Channel: <channel-uuid>` trailer"));
+        assert!(prompt.contains("channel UUID from the current `[Context]`"));
+        assert!(prompt.contains("in addition to any repository-required trailers"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {

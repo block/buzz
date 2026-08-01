@@ -1242,6 +1242,10 @@ fn format_context_hints(
         Some(ci) => format!("{} (#{channel_id})", ci.name),
         None => channel_id.to_string(),
     };
+    let commit_provenance = format!(
+        "Commit provenance: Every git commit created for this work MUST include the trailer \
+         `Buzz-Channel: {channel_id}`."
+    );
 
     // DM check comes first — a DM reply has both thread tags AND is_dm=true,
     // and the scope should be "dm" (not "thread") because the agent is in a DM.
@@ -1262,6 +1266,7 @@ fn format_context_hints(
             "[Context]\n\
              Scope: dm\n\
              Channel: {channel_display}\n\
+             {commit_provenance}\n\
              {ctx_hint}"
         );
         // If this is a DM reply, include thread structural info as supplementary.
@@ -1287,6 +1292,7 @@ fn format_context_hints(
             "[Context]\n\
              Scope: thread\n\
              Channel: {channel_display}\n\
+             {commit_provenance}\n\
              Thread root: {root}"
         );
         if let Some(ref parent) = thread_tags.parent_event_id {
@@ -1304,6 +1310,7 @@ fn format_context_hints(
             "[Context]\n\
              Scope: channel\n\
              Channel: {channel_display}\n\
+             {commit_provenance}\n\
              Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
         );
         if let Some(event_id) = reply_anchor {
@@ -1686,6 +1693,13 @@ mod tests {
 
     fn any_in_flight(q: &EventQueue) -> bool {
         !q.in_flight_channels.is_empty()
+    }
+
+    fn assert_buzz_channel_commit_trailer(prompt: &str, channel_id: Uuid) {
+        assert!(prompt.contains(&format!(
+            "Every git commit created for this work MUST include the trailer \
+             `Buzz-Channel: {channel_id}`."
+        )));
     }
 
     #[test]
@@ -2988,6 +3002,7 @@ mod tests {
         .join("\n\n");
         assert!(prompt.contains("engineering (#"));
         assert!(prompt.contains("Scope: channel"));
+        assert_buzz_channel_commit_trailer(&prompt, ch);
     }
 
     #[test]
@@ -3018,6 +3033,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(prompt.contains("Scope: dm"));
+        assert_buzz_channel_commit_trailer(&prompt, ch);
     }
 
     #[test]
@@ -3046,6 +3062,7 @@ mod tests {
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(prompt.contains("Scope: thread"));
         assert!(prompt.contains("Thread root: root123"));
+        assert_buzz_channel_commit_trailer(&prompt, ch);
     }
 
     #[test]
