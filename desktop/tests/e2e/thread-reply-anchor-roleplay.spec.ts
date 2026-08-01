@@ -263,13 +263,13 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     await screenshotThreadPanel(page, `${SHOTS}/02-patched-flat-l1.png`);
   });
 
-  test("03-patched-top-level-human-starts-thread-at-human-root", async ({
+  test("03-patched-top-level-human-gets-channel-level-agent-reply", async ({
     page,
   }) => {
     await setupRoleplayChannel(page);
 
     const now = Math.floor(Date.now() / 1000);
-    const humanRoot = await emitMockMessage(
+    await emitMockMessage(
       page,
       CHANNEL,
       "Wes: @Pinky start the inventory audit.",
@@ -282,42 +282,42 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     await emitMockMessage(
       page,
       CHANNEL,
-      "Pinky: Starting the audit and I’ll report back here. Poit!",
+      "Pinky: Starting the audit and I’ll report back in the channel. Poit!",
       {
-        parentEventId: humanRoot.id,
         pubkey: TEST_IDENTITIES.alice.pubkey,
         mentionPubkeys: [TEST_IDENTITIES.bob.pubkey],
         createdAt: now + 1,
       },
     );
 
-    await openThread(page);
+    await expect(page.getByTestId("message-timeline")).toContainText(
+      "start the inventory audit.",
+    );
     await expect(page.getByText("Pinky: Starting the audit")).toBeVisible();
-    await expect(
-      page.getByTestId("message-thread-replies").getByTestId("message-row"),
-    ).toHaveCount(1);
+    await expect(page.getByTestId("message-thread-summary")).toHaveCount(0);
 
-    await screenshotThreadPanel(page, `${SHOTS}/03-top-level-human-root.png`);
+    await page.screenshot({ path: `${SHOTS}/03-top-level-channel-reply.png` });
   });
 
-  test("04-agent-only-branch-keeps-deeper-nesting", async ({ page }) => {
+  test("04-agent-only-threaded-branch-keeps-deeper-nesting", async ({
+    page,
+  }) => {
     await setupRoleplayChannel(page);
 
     const now = Math.floor(Date.now() / 1000);
     const root = await emitMockMessage(
       page,
       CHANNEL,
-      "Pinky: @Brain I found a failing visual case.",
+      "Pinky: I found a failing visual case.",
       {
         pubkey: TEST_IDENTITIES.alice.pubkey,
-        mentionPubkeys: [TEST_IDENTITIES.charlie.pubkey],
         createdAt: now,
       },
     );
     const brainReply = await emitMockMessage(
       page,
       CHANNEL,
-      "Brain: Check the anchor emitted by queue.rs.",
+      "Brain: @Pinky check the anchor emitted by queue.rs.",
       {
         parentEventId: root.id,
         pubkey: TEST_IDENTITIES.charlie.pubkey,
@@ -339,7 +339,9 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
 
     await openThread(page);
     await expandReply(page, brainReply.id);
-    await expect(page.getByText("Brain: Check the anchor")).toBeVisible();
+    await expect(page.getByTestId("message-thread-replies")).toContainText(
+      "check the anchor emitted by queue.rs.",
+    );
     await expect(page.getByText("Pinky: Good catch")).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
