@@ -20,6 +20,7 @@ import {
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
 import { useShellFocusGuards } from "@/features/dev-mode/lib/useShellFocusGuards";
 import { useUnreadRouting } from "@/features/dev-mode/lib/useUnreadRouting";
+import { useDevWorkingChannelIds } from "@/features/dev-mode/lib/useDevWorkingChannelIds";
 import {
   devComposerModeLabel,
   useDevComposerModes,
@@ -44,6 +45,7 @@ import { DevShortcutsOverlay } from "@/features/dev-mode/ui/DevShortcutsOverlay"
 import { DevSplitPane } from "@/features/dev-mode/ui/DevSplitPane";
 import { DevThreadPanel } from "@/features/dev-mode/ui/DevThreadPanel";
 import { DevTranscript } from "@/features/dev-mode/ui/DevTranscript";
+import { DevWorkingChannelName } from "@/features/dev-mode/ui/DevWorkingChannelName";
 import { useChannelMessagesQuery } from "@/features/messages/hooks";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -191,6 +193,9 @@ export function DevModeShell({
     () => aggregateUnreadMains(subIndex, unreadChannelIds),
     [subIndex, unreadChannelIds],
   );
+
+  const [workingChannelIds, navigatorWorkingIds] =
+    useDevWorkingChannelIds(subIndex);
 
   const pinnedIds = usePinnedChannels();
   // Pinned chats on top, everything else below — each newest-first; `flat`
@@ -832,7 +837,15 @@ export function DevModeShell({
               )}
               data-testid="dev-mode-topbar-channel"
             >
-              {topBarChannel ? <># {topBarChannel.name}</> : null}
+              {topBarChannel ? (
+                <>
+                  #{" "}
+                  <DevWorkingChannelName
+                    name={topBarChannel.name}
+                    working={workingChannelIds.has(topBarChannel.id)}
+                  />
+                </>
+              ) : null}
             </span>
             {topBarChannel ? (
               <span
@@ -857,6 +870,7 @@ export function DevModeShell({
             highlightedId={view === "fresh" ? null : navigatorId}
             onOpen={openChannelAtUnread}
             unreadChannelIds={navigatorUnreadIds}
+            workingChannelIds={navigatorWorkingIds}
             widthControls={navigatorWidthControls}
           />
 
@@ -869,6 +883,7 @@ export function DevModeShell({
                 onSelect={openChannel}
                 subs={activeSubChannels}
                 unreadChannelIds={unreadChannelIds}
+                workingChannelIds={workingChannelIds}
               />
             ) : null}
             {view === "navigator" && previewChannel ? (

@@ -102,6 +102,28 @@ export function aggregateUnreadMains(
 }
 
 /**
+ * Working mains for the left list: a main waves when work is active in the
+ * main itself or in any sub hidden behind its tab strip.
+ */
+export function aggregateWorkingMains(
+  index: SubChannelIndex,
+  workingChannelIds: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const working = new Set<string>();
+  for (const main of index.mains) {
+    if (workingChannelIds.has(main.id)) {
+      working.add(main.id);
+      continue;
+    }
+    const subs = index.subsByParentId.get(main.id);
+    if (subs?.some((sub) => workingChannelIds.has(sub.id))) {
+      working.add(main.id);
+    }
+  }
+  return working;
+}
+
+/**
  * Last-activity overrides for list ordering: a main's activity is the max
  * of its own and all its subs', so working sub-channels float their parent.
  */

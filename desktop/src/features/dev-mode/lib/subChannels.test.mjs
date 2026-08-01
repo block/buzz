@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   aggregateLastActivity,
   aggregateUnreadMains,
+  aggregateWorkingMains,
   appendSubChannelToParentCanvas,
   applySubChannelRenames,
   indexSubChannels,
@@ -115,6 +116,16 @@ test("aggregateUnreadMains_bubblesSubUnreadToParent", () => {
   ]);
   const unread = aggregateUnreadMains(index, new Set(["c1"]));
   assert.deepEqual([...unread], ["p1"]);
+});
+
+test("aggregateWorkingMains_bubblesSubWorkToParent", () => {
+  const index = indexSubChannels([
+    channel("p1", "work"),
+    channel("c1", "work--api"),
+    channel("p2", "general"),
+  ]);
+  const working = aggregateWorkingMains(index, new Set(["c1", "p2"]));
+  assert.deepEqual([...working], ["p1", "p2"]);
 });
 
 test("aggregateLastActivity_usesLatestSubTimestamp", () => {

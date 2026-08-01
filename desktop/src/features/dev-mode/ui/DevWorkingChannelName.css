@@ -1,0 +1,32 @@
+.dev-working-channel-name {
+  display: inline-block;
+  white-space: nowrap;
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    hsl(var(--muted-foreground)) 18%,
+    hsl(var(--foreground)) 42%,
+    hsl(var(--muted-foreground)) 66%
+  );
+  background-position: 100% 50%;
+  background-size: 240% 100%;
+  background-clip: text;
+  animation: dev-working-channel-spotlight 1.8s linear infinite;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+@keyframes dev-working-channel-spotlight {
+  to {
+    background-position: -140% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dev-working-channel-name {
+    color: inherit;
+    background: none;
+    animation: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}

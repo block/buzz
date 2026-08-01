@@ -6,6 +6,7 @@ import {
   toggleChannelPinned,
 } from "@/features/dev-mode/lib/pinnedChannels";
 import type { NavigatorWidthControls } from "@/features/dev-mode/lib/useNavigatorWidth";
+import { DevWorkingChannelName } from "@/features/dev-mode/ui/DevWorkingChannelName";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -26,12 +27,14 @@ function ChannelRow({
   isHighlighted,
   isPinned,
   isUnread,
+  isWorking,
   onOpen,
 }: {
   channel: Channel;
   isHighlighted: boolean;
   isPinned: boolean;
   isUnread: boolean;
+  isWorking: boolean;
   onOpen: (channelId: string) => void;
 }) {
   const scrollHighlightedIntoView = React.useCallback(
@@ -91,7 +94,7 @@ function ChannelRow({
             isUnread ? "font-semibold" : "font-medium",
           )}
         >
-          # {channel.name}
+          # <DevWorkingChannelName name={channel.name} working={isWorking} />
         </span>
         {isUnread ? (
           <span
@@ -122,6 +125,7 @@ function ChannelRow({
 export function DevChannelNavigator({
   groups,
   unreadChannelIds,
+  workingChannelIds,
   highlightedId,
   dimmed,
   widthControls,
@@ -130,6 +134,7 @@ export function DevChannelNavigator({
   /** Render-ordered groups; within each, most recent activity renders first. */
   groups: ChannelGroup[];
   unreadChannelIds: ReadonlySet<string>;
+  workingChannelIds: ReadonlySet<string>;
   highlightedId: string | null;
   /** True while a channel is focused — the list stays visible but recedes. */
   dimmed: boolean;
@@ -171,6 +176,7 @@ export function DevChannelNavigator({
                   isHighlighted={channel.id === highlightedId}
                   isPinned={group.pinned}
                   isUnread={unreadChannelIds.has(channel.id)}
+                  isWorking={workingChannelIds.has(channel.id)}
                   onOpen={onOpen}
                 />
               ))}

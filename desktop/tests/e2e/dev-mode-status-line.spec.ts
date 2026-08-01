@@ -50,6 +50,13 @@ test("status line tracks an agent turn from start to completion", async ({
 
   // Idle channel — no status line reserved.
   await expect(page.getByTestId("dev-mode-agent-status")).toHaveCount(0);
+  await expect(page.getByTestId("dev-mode-working-channel-name")).toHaveCount(
+    0,
+  );
+  const idleTopbarBounds = await page
+    .getByTestId("dev-mode-topbar-channel")
+    .boundingBox();
+  expect(idleTopbarBounds).not.toBeNull();
 
   await seedTurnEvent(page, "turn_started");
 
@@ -59,6 +66,48 @@ test("status line tracks an agent turn from start to completion", async ({
   await expect(row).toContainText("alice");
   // No observer transcript signal yet — quiet fallback.
   await expect(row).toContainText("working…");
+
+  // Every visible developer-mode name for this channel gets the same moving
+  // color spotlight: navigator row, main tab, and top bar. The text itself
+  // remains one stationary run of glyphs.
+  const workingNames = page.getByTestId("dev-mode-working-channel-name");
+  await expect(workingNames).toHaveCount(3);
+  await expect(workingNames.nth(0)).toHaveAttribute(
+    "data-channel-name",
+    "general",
+  );
+  await expect(workingNames.nth(0)).toHaveCSS(
+    "animation-name",
+    "dev-working-channel-spotlight",
+  );
+  await expect(workingNames.nth(0)).toHaveCSS("transform", "none");
+  await expect(workingNames.nth(0).locator("span")).toHaveCount(0);
+  const spotlightPositionBefore = await workingNames
+    .nth(0)
+    .evaluate((node) =>
+      getComputedStyle(node).getPropertyValue("background-position"),
+    );
+  await page.waitForTimeout(120);
+  const spotlightPositionAfter = await workingNames
+    .nth(0)
+    .evaluate((node) =>
+      getComputedStyle(node).getPropertyValue("background-position"),
+    );
+  expect(spotlightPositionAfter).not.toBe(spotlightPositionBefore);
+  const workingTopbarBounds = await page
+    .getByTestId("dev-mode-topbar-channel")
+    .boundingBox();
+  expect(workingTopbarBounds).not.toBeNull();
+  expect(workingTopbarBounds?.x).toBeCloseTo(idleTopbarBounds?.x ?? 0, 2);
+  expect(workingTopbarBounds?.y).toBeCloseTo(idleTopbarBounds?.y ?? 0, 2);
+  expect(workingTopbarBounds?.width).toBeCloseTo(
+    idleTopbarBounds?.width ?? 0,
+    2,
+  );
+  expect(workingTopbarBounds?.height).toBeCloseTo(
+    idleTopbarBounds?.height ?? 0,
+    2,
+  );
 
   // A thought frame upgrades the fallback to a real headline.
   await page.evaluate(
@@ -95,4 +144,5 @@ test("status line tracks an agent turn from start to completion", async ({
 
   await seedTurnEvent(page, "turn_completed");
   await expect(page.getByTestId("dev-mode-agent-status")).toHaveCount(0);
+  await expect(workingNames).toHaveCount(0);
 });

@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { parseSubChannelName } from "@/features/dev-mode/lib/subChannels";
+import { DevWorkingChannelName } from "@/features/dev-mode/ui/DevWorkingChannelName";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -15,6 +16,7 @@ export function DevChannelTabs({
   subs,
   activeId,
   unreadChannelIds,
+  workingChannelIds,
   onSelect,
   onNewSubChannel,
 }: {
@@ -22,6 +24,7 @@ export function DevChannelTabs({
   subs: Channel[];
   activeId: string;
   unreadChannelIds: ReadonlySet<string>;
+  workingChannelIds: ReadonlySet<string>;
   onSelect: (channelId: string) => void;
   onNewSubChannel: () => void;
 }) {
@@ -53,7 +56,10 @@ export function DevChannelTabs({
         type="button"
       >
         <span className={cn("whitespace-nowrap", isUnread && "font-semibold")}>
-          {label}
+          <DevWorkingChannelName
+            name={label}
+            working={workingChannelIds.has(channel.id)}
+          />
         </span>
         {isUnread ? (
           <span
