@@ -81,5 +81,5 @@ bundle, then install the rebuilt application without changing live data.
   starts `buzz-acp` successfully without the prior not-found error.
 - [x] Confirm the relay is healthy and existing live record counts remain
   unchanged.
-- [ ] Record exact evidence, commit, and push the repair to the existing draft
+- [x] Record exact evidence, commit, and push the repair to the existing draft
   upstream-sync PR.

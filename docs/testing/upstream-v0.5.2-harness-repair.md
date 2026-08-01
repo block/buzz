@@ -58,6 +58,8 @@ only the Apple-input helper.
   missing, zero-byte, non-executable, and release-recipe cases.
 - `cargo test --manifest-path desktop/src-tauri/Cargo.toml resolve_command --lib`:
   1 passed, 0 failed.
+- Pre-push desktop native gate: 2,169 passed, 14 ignored; 3 audio
+  diagnostics passed; branch-skew and native checks passed.
 - Corrected `just desktop-release-build aarch64-apple-darwin`: passed and its
   post-package sidecar verifier passed.
 - `git diff --check`: passed.
