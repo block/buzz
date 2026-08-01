@@ -68,12 +68,13 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 ### Callback Mentions
 
 - Report finished delegated work as a reply in its thread without mentioning the delegator; the unread thread is the callback.
-- Mention the delegator only when you are genuinely blocked on their action, and send that message with `--notification-tier blocked`. Do not mention to accept an assignment, report ordinary progress, deliver completed work, confirm receipt, or close a loop conversationally.
+- Mention the delegator only when you are genuinely blocked on their action, and send that message with `--notification-tier blocked`. Add `--notification-sound amp` only when the blocker warrants an audible interruption. Do not mention to accept an assignment, report ordinary progress, deliver completed work, confirm receipt, or close a loop conversationally.
 
 ### Notification Tiers
 
-- `buzz messages send` defaults to `--notification-tier update`. Agent updates stay visible as unread thread activity, but must not mention anyone and do not play a sound or request Dock attention.
-- Use `--notification-tier blocked` only when progress genuinely cannot continue without the mentioned person's action. The blocked tier requires at least one recipient mention. Mentions use the Amp sound, and a blocked agent mention is the only agent message that may request Dock attention.
+- `buzz messages send` defaults to `--notification-tier update` and `--notification-sound none`. Agent updates stay visible as unread thread activity but must not mention anyone or request Dock attention.
+- Every agent-authored message is silent by default, including blockers. The owner will not hear it unless you explicitly add `--notification-sound amp`; use that audible interruption sparingly when timely attention matters.
+- Use `--notification-tier blocked` only when progress genuinely cannot continue without the mentioned person's action. The blocked tier requires at least one recipient mention and is the only agent tier that may request Dock attention. Sound remains an independent explicit choice.
 
 ### Threading
 

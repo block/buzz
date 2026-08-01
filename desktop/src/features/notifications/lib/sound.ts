@@ -153,19 +153,17 @@ export function notificationSoundForSlot(slot: SoundSlot): SoundName | null {
   return slot === "mention" ? "amp" : null;
 }
 
-/**
- * Sound for a notification event: message-like slots pick by sender kind,
- * everything else falls back to the per-slot sound.
- */
+/** Automatic sound policy. Explicit agent sound tags are handled separately. */
 export function resolveEventSound(
   prefs: SoundPreferences,
   slot: SoundSlot,
   isAgentSender: boolean,
-): SoundName {
-  const policySound = notificationSoundForSlot(slot);
-  if (policySound) return policySound;
+): SoundName | null {
   if (SENDER_SOUND_SLOTS.has(slot)) {
-    return prefs.senderSounds[isAgentSender ? "agent" : "human"];
+    // Agent-authored messages are always silent unless their event carries an
+    // explicit sound request, which is evaluated by the live message path.
+    if (isAgentSender) return null;
+    return notificationSoundForSlot(slot);
   }
   return prefs.sounds[slot];
 }

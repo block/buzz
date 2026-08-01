@@ -6,6 +6,7 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const MESSAGE_NOTIFICATION_TAG = "buzz-notification";
+export const MESSAGE_NOTIFICATION_SOUND_TAG = "buzz-notification-sound";
 
 export type MessageNotificationTier = "update" | "blocked";
 
@@ -14,6 +15,15 @@ export function messageNotificationTier(
 ): MessageNotificationTier | null {
   const value = tags.find((tag) => tag[0] === MESSAGE_NOTIFICATION_TAG)?.[1];
   return value === "update" || value === "blocked" ? value : null;
+}
+
+export function messageNotificationSound(
+  tags: readonly (readonly string[])[],
+): "amp" | null {
+  const value = tags.find(
+    (tag) => tag[0] === MESSAGE_NOTIFICATION_SOUND_TAG,
+  )?.[1];
+  return value === "amp" ? value : null;
 }
 
 export function isBlockedNotificationForUser(

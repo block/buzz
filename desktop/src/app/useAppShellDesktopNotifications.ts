@@ -4,6 +4,7 @@ import { toSearchHit } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import {
   hasMentionForEvent,
+  messageNotificationSound,
   messageNotificationTier,
 } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
@@ -17,10 +18,7 @@ import {
   formatNotificationTitle,
   truncateNotificationBody,
 } from "@/features/notifications/lib/notificationFormat";
-import {
-  notificationSoundForSlot,
-  playNotificationSound,
-} from "@/features/notifications/lib/sound";
+import { playNotificationSound } from "@/features/notifications/lib/sound";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -51,19 +49,27 @@ export function useAppShellDesktopNotifications({
 
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
-      if (
-        !isAgentSender(event.pubkey) ||
-        messageNotificationTier(event.tags) !== "blocked"
-      ) {
-        return;
-      }
+      if (!isAgentSender(event.pubkey)) return;
       if (!notificationSettings.desktopEnabled) return;
-      void requestDockBounce();
+      if (messageNotificationSound(event.tags) === "amp") {
+        playNotificationSound("amp");
+      }
+      if (messageNotificationTier(event.tags) === "blocked") {
+        void requestDockBounce();
+      }
     },
   );
 
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
+      const isAgent = isAgentSender(event.pubkey);
+      if (
+        isAgent &&
+        notificationSettings.desktopEnabled &&
+        messageNotificationSound(event.tags) === "amp"
+      ) {
+        playNotificationSound("amp");
+      }
       if (isQuietAgentEvent(event)) return;
       if (
         !notificationSettings.desktopEnabled ||
@@ -94,8 +100,6 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend || !isBlockedAgent) return;
-        const sound = notificationSoundForSlot("mention");
-        if (sound) playNotificationSound(sound);
         void requestDockBounce();
       });
     },

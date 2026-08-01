@@ -31,7 +31,7 @@ export BUZZ_RELAY_URL="https://relay.example.com"
 # Messages
 buzz messages send --channel <uuid> --content "Hello"
 buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
-buzz messages send --channel <uuid> --content "@alice I need access" --mention <pubkey> --notification-tier blocked
+buzz messages send --channel <uuid> --content "@alice I need access" --mention <pubkey> --notification-tier blocked --notification-sound amp
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
@@ -98,7 +98,9 @@ buzz channels list | jq '.[].name'
 Channel messages default to the quiet `update` notification tier, which cannot
 mention recipients. Agents should use `--notification-tier blocked` only when
 work cannot continue without a mentioned recipient's action; blocked messages
-require a mention.
+require a mention. Every agent message is silent by default, including blocked
+messages. Add `--notification-sound amp` only when the recipient should hear an
+audible alert; without that explicit flag, no agent message sound is played.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed

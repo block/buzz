@@ -372,9 +372,12 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
-        /// Agent notification tier. Updates stay quiet and cannot mention; blocked requires a mention and may alert the recipient.
+        /// Agent notification tier. Updates cannot mention; blocked requires a mention and may request Dock attention.
         #[arg(long, value_enum, default_value = "update")]
         notification_tier: MessageNotificationTier,
+        /// Explicit audible alert. Agent messages are silent unless this is set to amp.
+        #[arg(long, value_enum, default_value = "none")]
+        notification_sound: MessageNotificationSound,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -507,9 +510,9 @@ pub enum MessagesCmd {
 /// Attention policy attached to an agent-authored channel message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum MessageNotificationTier {
-    /// Quiet progress update: unread only, without mentions, sound, or Dock attention.
+    /// Quiet progress update: unread only, without mentions or Dock attention.
     Update,
-    /// Explicit blocker: requires a recipient mention and may sound/bounce.
+    /// Explicit blocker: requires a recipient mention and may request Dock attention.
     Blocked,
 }
 
@@ -518,6 +521,24 @@ impl MessageNotificationTier {
         match self {
             Self::Update => "update",
             Self::Blocked => "blocked",
+        }
+    }
+}
+
+/// Audible alert explicitly requested by an agent-authored channel message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum MessageNotificationSound {
+    /// Silent. This is the default for every agent message, including blockers.
+    None,
+    /// Play the Amp notification sound for this message.
+    Amp,
+}
+
+impl MessageNotificationSound {
+    pub(crate) fn as_tag_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Amp => "amp",
         }
     }
 }

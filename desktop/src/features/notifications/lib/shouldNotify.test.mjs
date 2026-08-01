@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   isBlockedNotificationForUser,
   isHighPriorityEventForUser,
+  messageNotificationSound,
   messageNotificationTier,
   shouldNotifyForEvent,
 } from "./shouldNotify.ts";
@@ -34,6 +35,7 @@ const replyTag = (id) => ["e", id, "", "reply"];
 const pTag = (pubkey) => ["p", pubkey];
 const broadcastTag = () => ["broadcast", "1"];
 const notificationTag = (tier) => ["buzz-notification", tier];
+const notificationSoundTag = (sound) => ["buzz-notification-sound", sound];
 
 const opts = (overrides = {}) => ({
   participatedRootIds: EMPTY,
@@ -53,6 +55,15 @@ test("parses structured agent notification tiers", () => {
     "blocked",
   );
   assert.equal(messageNotificationTier([notificationTag("urgent")]), null);
+});
+
+test("parses only the supported explicit agent sound request", () => {
+  assert.equal(messageNotificationSound([notificationSoundTag("amp")]), "amp");
+  assert.equal(
+    messageNotificationSound([notificationSoundTag("flutter")]),
+    null,
+  );
+  assert.equal(messageNotificationSound([]), null);
 });
 
 test("blocked notification is recipient-specific", () => {

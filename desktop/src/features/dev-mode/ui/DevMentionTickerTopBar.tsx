@@ -77,8 +77,7 @@ export function DevMentionTickerTopBar({
       >
         {channel ? (
           <>
-            #{" "}
-            <DevWorkingChannelName name={channel.name} working={working} />
+            # <DevWorkingChannelName name={channel.name} working={working} />
           </>
         ) : null}
       </span>

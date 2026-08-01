@@ -7,11 +7,7 @@ import type {
 } from "@/features/notifications/hooks";
 import {
   COMING_SOON_SLOTS,
-  DEFAULT_SENDER_SOUNDS,
   RECOMMENDED_SOUND_BY_SLOT,
-  SENDER_DESCRIPTIONS,
-  SENDER_KINDS,
-  SENDER_LABELS,
   SENDER_SOUND_SLOTS,
   SLOT_DESCRIPTIONS,
   SLOT_LABELS,
@@ -38,7 +34,6 @@ export function NotificationSettingsCard({
   onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
   onSetSoundForSlot,
-  onSetSenderSound,
 }: {
   isUpdatingDesktopNotifications: boolean;
   notificationErrorMessage: string | null;
@@ -153,8 +148,9 @@ export function NotificationSettingsCard({
                     Event alerts
                   </label>
                   <p className="text-sm font-normal text-muted-foreground">
-                    Show a notification and play a sound for the events below.
-                    Turning this off silences all of them.
+                    Show notifications for the events below. Human mentions and
+                    explicit agent requests use Amp; other message activity is
+                    silent.
                   </p>
                 </div>
                 <Switch
@@ -171,23 +167,31 @@ export function NotificationSettingsCard({
             {anyAlertsOn ? (
               <>
                 <SettingsOptionGroup>
-                  {SENDER_KINDS.map((kind) => (
-                    <SettingsOptionRow key={kind}>
-                      <div className="min-w-0">
-                        <span className="text-sm font-medium">
-                          {SENDER_LABELS[kind]}
-                        </span>
-                        <p className="text-sm font-normal text-muted-foreground">
-                          {SENDER_DESCRIPTIONS[kind]}
-                        </p>
-                      </div>
-                      <SoundPicker
-                        onChange={(next) => onSetSenderSound(kind, next)}
-                        recommended={DEFAULT_SENDER_SOUNDS[kind]}
-                        value={notificationSettings.senderSounds[kind]}
-                      />
-                    </SettingsOptionRow>
-                  ))}
+                  <SettingsOptionRow>
+                    <div className="min-w-0">
+                      <span className="text-sm font-medium">
+                        Human mentions
+                      </span>
+                      <p className="text-sm font-normal text-muted-foreground">
+                        Mentions from people use Amp.
+                      </p>
+                    </div>
+                    <span className="text-sm text-muted-foreground">Amp</span>
+                  </SettingsOptionRow>
+                  <SettingsOptionRow>
+                    <div className="min-w-0">
+                      <span className="text-sm font-medium">
+                        Agent messages
+                      </span>
+                      <p className="text-sm font-normal text-muted-foreground">
+                        Silent unless the agent explicitly requests Amp for that
+                        message.
+                      </p>
+                    </div>
+                    <span className="text-sm text-muted-foreground">
+                      Per message
+                    </span>
+                  </SettingsOptionRow>
                 </SettingsOptionGroup>
 
                 <SettingsOptionGroup>

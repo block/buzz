@@ -570,13 +570,28 @@ pub struct SendMessageParams {
     pub files: Vec<String>,
     pub mentions: Vec<String>,
     pub notification_tier: crate::MessageNotificationTier,
+    pub notification_sound: crate::MessageNotificationSound,
 }
 
 const MESSAGE_NOTIFICATION_TAG: &str = "buzz-notification";
+const MESSAGE_NOTIFICATION_SOUND_TAG: &str = "buzz-notification-sound";
 
 fn message_notification_tag(tier: crate::MessageNotificationTier) -> Result<Tag, CliError> {
     Tag::parse([MESSAGE_NOTIFICATION_TAG, tier.as_tag_value()])
         .map_err(|error| CliError::Other(format!("invalid message notification tag: {error}")))
+}
+
+fn message_notification_sound_tag(
+    sound: crate::MessageNotificationSound,
+) -> Result<Option<Tag>, CliError> {
+    if sound == crate::MessageNotificationSound::None {
+        return Ok(None);
+    }
+    Tag::parse([MESSAGE_NOTIFICATION_SOUND_TAG, sound.as_tag_value()])
+        .map(Some)
+        .map_err(|error| {
+            CliError::Other(format!("invalid message notification sound tag: {error}"))
+        })
 }
 
 fn validate_message_notification(
@@ -668,7 +683,7 @@ pub async fn cmd_send_message(
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
-    let builder = match p.kind {
+    let mut builder = match p.kind {
         Some(45001) => {
             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
@@ -702,6 +717,9 @@ pub async fn cmd_send_message(
         }
     }
     .tag(message_notification_tag(p.notification_tier)?);
+    if let Some(sound_tag) = message_notification_sound_tag(p.notification_sound)? {
+        builder = builder.tag(sound_tag);
+    }
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
@@ -716,6 +734,10 @@ pub async fn cmd_send_message(
         object.insert(
             "notification_tier".into(),
             serde_json::json!(p.notification_tier.as_tag_value()),
+        );
+        object.insert(
+            "notification_sound".into(),
+            serde_json::json!(p.notification_sound.as_tag_value()),
         );
     }
     println!("{output}");
@@ -911,6 +933,7 @@ pub async fn dispatch(
             files,
             mentions,
             notification_tier,
+            notification_sound,
         } => {
             cmd_send_message(
                 client,
@@ -923,6 +946,7 @@ pub async fn dispatch(
                     files,
                     mentions,
                     notification_tier,
+                    notification_sound,
                 },
             )
             .await
@@ -1026,8 +1050,9 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        message_notification_tag, missing_members, normalize_explicit_mentions,
-        parse_member_pubkeys, resolve_names_to_pubkeys, validate_message_notification,
+        message_notification_sound_tag, message_notification_tag, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
+        validate_message_notification,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1049,6 +1074,11 @@ mod tests {
         let event = nostr::EventBuilder::text_note("update")
             .tag(message_notification_tag(crate::MessageNotificationTier::Update).unwrap())
             .tag(message_notification_tag(crate::MessageNotificationTier::Blocked).unwrap())
+            .tag(
+                message_notification_sound_tag(crate::MessageNotificationSound::Amp)
+                    .unwrap()
+                    .unwrap(),
+            )
             .sign_with_keys(&nostr::Keys::generate())
             .unwrap();
         let tags = event
@@ -1064,6 +1094,15 @@ mod tests {
             tag.first().map(String::as_str) == Some("buzz-notification")
                 && tag.get(1).map(String::as_str) == Some("blocked")
         }));
+        assert!(tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("buzz-notification-sound")
+                && tag.get(1).map(String::as_str) == Some("amp")
+        }));
+        assert!(
+            message_notification_sound_tag(crate::MessageNotificationSound::None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -16,13 +16,18 @@ const prefs = {
   senderSounds: { human: "flutter", agent: "amp" },
 };
 
-test("mentions use amp while other message slots resolve by sender kind", () => {
+test("human mentions use amp while other human message slots stay silent", () => {
   for (const slot of SENDER_SOUND_SLOTS) {
     assert.equal(
       resolveEventSound(prefs, slot, false),
-      slot === "mention" ? "amp" : "flutter",
+      slot === "mention" ? "amp" : null,
     );
-    assert.equal(resolveEventSound(prefs, slot, true), "amp");
+  }
+});
+
+test("agent message slots never resolve an automatic sound", () => {
+  for (const slot of SENDER_SOUND_SLOTS) {
+    assert.equal(resolveEventSound(prefs, slot, true), null);
   }
 });
 

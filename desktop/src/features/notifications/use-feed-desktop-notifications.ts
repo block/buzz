@@ -136,7 +136,12 @@ export function useFeedDesktopNotifications(
 
       if (didSend) {
         const slot = slotForFeedKind(item.kind, item.category);
-        const sound = notificationSoundForSlot(slot);
+        const isAgent = notificationAgentPubkeys.has(
+          normalizePubkey(item.pubkey),
+        );
+        // Agent sound requests are handled by the live channel/DM path so a
+        // mentioned blocker cannot sound twice through the feed subscription.
+        const sound = isAgent ? null : notificationSoundForSlot(slot);
         if (sound) playNotificationSound(sound);
       }
     },

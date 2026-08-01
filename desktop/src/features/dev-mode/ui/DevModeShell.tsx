@@ -14,13 +14,13 @@ import { copySelectionWithLinkUrls } from "@/features/dev-mode/lib/copyLinkUrls"
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
 import {
   aggregateLastActivity,
-  aggregateUnreadMains,
   indexSubChannels,
 } from "@/features/dev-mode/lib/subChannels";
 import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
 import { useShellFocusGuards } from "@/features/dev-mode/lib/useShellFocusGuards";
 import { useUnreadRouting } from "@/features/dev-mode/lib/useUnreadRouting";
 import { useDevWorkingChannelIds } from "@/features/dev-mode/lib/useDevWorkingChannelIds";
+import { useDevUnreadNavigatorIds } from "@/features/dev-mode/lib/useDevUnreadNavigatorIds";
 import {
   devComposerModeLabel,
   useDevComposerModes,
@@ -94,7 +94,6 @@ export function DevModeShell({
   const modes = useDevComposerModes();
   const { createSessionChannel, createSubChannel, sendToSession } =
     useDevSessionActions(identityQuery.data);
-
   // Toggling display styles retains the open conversation: the shell seeds
   // from the URL the standard layout left behind and syncs back below.
   const routeSeed = useDevRouteSeed();
@@ -183,7 +182,6 @@ export function DevModeShell({
   // `parent--sub` channels pair with their parents: only mains render in
   // the left list; subs surface as tabs inside their parent.
   const subIndex = React.useMemo(() => indexSubChannels(sessions), [sessions]);
-
   // The left list orders mains by their whole family's latest activity, so
   // a busy sub-channel floats its parent.
   const listChannels = React.useMemo(() => {
@@ -196,23 +194,15 @@ export function DevModeShell({
         : channel;
     });
   }, [subIndex]);
-
-  const navigatorUnreadIds = React.useMemo(
-    () => aggregateUnreadMains(subIndex, unreadChannelIds),
-    [subIndex, unreadChannelIds],
-  );
-  const navigatorHighPriorityIds = React.useMemo(
-    () => aggregateUnreadMains(subIndex, highPriorityUnreadChannelIds),
-    [subIndex, highPriorityUnreadChannelIds],
-  );
-  const navigatorBlockedIds = React.useMemo(
-    () => aggregateUnreadMains(subIndex, blockedUnreadChannelIds),
-    [subIndex, blockedUnreadChannelIds],
-  );
-
+  const { navigatorBlockedIds, navigatorHighPriorityIds, navigatorUnreadIds } =
+    useDevUnreadNavigatorIds(
+      subIndex,
+      unreadChannelIds,
+      highPriorityUnreadChannelIds,
+      blockedUnreadChannelIds,
+    );
   const [workingChannelIds, navigatorWorkingIds] =
     useDevWorkingChannelIds(subIndex);
-
   const pinnedIds = usePinnedChannels();
   // Pinned chats on top, everything else below — each newest-first; `flat`
   // matches the navigator's render order so ↑/↓ walk what is on screen.
@@ -863,7 +853,8 @@ export function DevModeShell({
               onOpen={openMentionTicker}
               onShowMembers={() => openPalette("members")}
               working={
-                topBarChannel !== null && workingChannelIds.has(topBarChannel.id)
+                topBarChannel !== null &&
+                workingChannelIds.has(topBarChannel.id)
               }
             />
           </div>
