@@ -1156,6 +1156,14 @@ struct RespawnResult {
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    /// Turn identity of the in-flight task that received the steer, captured
+    /// at steer-send time. The ack arm uses it to reject stale fallbacks:
+    /// if the channel now hosts a NEWER turn (the original turn completed and
+    /// was dispatched before this ack was processed — `select!` is biased,
+    /// `result_rx` first), a fallback signal must not cancel the healthy
+    /// newer turn; the released event reaches the agent via normal dispatch
+    /// once it completes.
+    turn_id: Option<String>,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -2432,6 +2440,7 @@ async fn tokio_main() -> Result<()> {
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                turn_id,
                 ack,
             })) => {
                 // Mid-turn steer attempt resolved (either transport:
@@ -2553,12 +2562,29 @@ async fn tokio_main() -> Result<()> {
                     queue.release_native_steer(channel_id, &event_id);
                 }
                 if signal_fallback {
-                    // Universal cancel+merge fallback. Note: the
-                    // queued event has already been released to the
-                    // front of `queues[channel_id]`, so the cancel
-                    // will pick it up as part of the merged batch and
-                    // re-prompt the agent.
-                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                    if steer_fallback_targets_current_turn(&pool, channel_id, &turn_id) {
+                        // Universal cancel+merge fallback. Note: the
+                        // queued event has already been released to the
+                        // front of `queues[channel_id]`, so the cancel
+                        // will pick it up as part of the merged batch and
+                        // re-prompt the agent.
+                        signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                    } else {
+                        // Stale ack: the turn that received the steer has
+                        // completed and a newer turn runs on this channel
+                        // (or the channel is idle). `select!` is biased —
+                        // `result_rx` is polled before `steer_ack_rx`, so
+                        // the Result arm can dispatch a new turn before
+                        // this ack is processed. Cancelling now would kill
+                        // the healthy newer turn. The released event is
+                        // already in the newer turn's batch or queued for
+                        // normal dispatch once it completes.
+                        tracing::warn!(
+                            channel = %channel_id,
+                            steer_turn_id = ?turn_id,
+                            "stale steer ack fallback skipped — in-flight task is a newer turn (or gone)"
+                        );
+                    }
                 }
                 // After releasing a withheld event, give dispatch a chance
                 // to re-flush. If the prompt is still in flight, the
@@ -2814,6 +2840,30 @@ fn signal_in_flight_task(
     false
 }
 
+/// Decide whether a non-cancelling steer ack's cancel+merge fallback may
+/// fire for `channel_id`.
+///
+/// Returns `false` when the ack's target turn is no longer the channel's
+/// in-flight task — the original turn completed and a NEWER turn is running
+/// (or the channel is idle). Firing the fallback then would cancel a healthy
+/// turn that never received this steer; the released event already reached
+/// the agent via the newer turn's batch or is queued for normal dispatch, so
+/// skipping is safe. A missing turn identity (defensive) is conservative and
+/// fires.
+fn steer_fallback_targets_current_turn(
+    pool: &AgentPool,
+    channel_id: uuid::Uuid,
+    steer_turn_id: &Option<String>,
+) -> bool {
+    match steer_turn_id {
+        Some(turn_id) => pool
+            .task_map()
+            .values()
+            .any(|m| m.channel_id == Some(channel_id) && &m.turn_id == turn_id),
+        None => true,
+    }
+}
+
 /// Outcome of the non-cancelling (ACP) steer attempt for a freshly-queued
 /// event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2900,6 +2950,16 @@ fn try_native_steer(
         ack_tx,
     };
 
+    // Capture the turn identity of the task we're about to steer so a stale
+    // ack (processed after a newer turn started on this channel) can be
+    // recognized and its fallback skipped. Read-only; there is no `.await`
+    // between here and `send_steer`, so the value cannot go stale.
+    let steer_turn_id = pool
+        .task_map()
+        .values()
+        .find(|m| m.channel_id == Some(channel_id))
+        .map(|m| m.turn_id.clone());
+
     match pool.send_steer(channel_id, request) {
         Ok(()) => {
             // Withhold the queued event synchronously BEFORE spawning
@@ -2925,11 +2985,13 @@ fn try_native_steer(
             }
             let ack_tx_clone = steer_ack_tx.clone();
             let event_id_for_watcher = event_id_hex.clone();
+            let steer_turn_id_for_watcher = steer_turn_id.clone();
             tokio::spawn(async move {
                 let ack = ack_rx.await;
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    turn_id: steer_turn_id_for_watcher,
                     ack,
                 });
             });
@@ -4444,6 +4506,68 @@ mod owner_control_command_tests {
             channel_id,
             ControlSignal::Rotate
         ));
+    }
+
+    #[tokio::test]
+    async fn steer_fallback_skipped_when_turn_replaced() {
+        // A stale ack (its target turn already completed) must not fire the
+        // cancel+merge fallback against a NEWER turn running on the channel.
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (control_tx, mut control_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "turn-2".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+            },
+        );
+
+        let fired = steer_fallback_targets_current_turn(
+            &pool,
+            channel_id,
+            &Some("turn-1".to_string()),
+        );
+        assert!(!fired, "stale ack must not target the newer turn");
+        assert!(
+            control_rx.try_recv().is_err(),
+            "stale ack must not consume the newer turn's control_tx"
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_fallback_targets_matching_or_unknown_turn() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "turn-1".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+            },
+        );
+
+        assert!(steer_fallback_targets_current_turn(
+            &pool,
+            channel_id,
+            &Some("turn-1".to_string())
+        ));
+        assert!(
+            steer_fallback_targets_current_turn(&pool, channel_id, &None),
+            "missing turn identity falls back conservatively (fires)"
+        );
+        let _ = control_rx;
     }
 }
 
