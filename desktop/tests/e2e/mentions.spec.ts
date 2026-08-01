@@ -272,9 +272,6 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   const aliceIndex = suggestionText.findIndex((text) => text.includes("alice"));
   const fizzIndex = suggestionText.findIndex((text) => text.includes("Fizz"));
   const bobIndex = suggestionText.findIndex((text) => text.includes("bob"));
-  const aliceIndex = suggestionText.findIndex((text) =>
-    text.includes("alice"),
-  );
   const charlieIndex = suggestionText.findIndex((text) =>
     text.includes("charlie"),
   );
@@ -284,10 +281,8 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   expect(aliceIndex).toBeGreaterThanOrEqual(0);
   expect(fizzIndex).toBeGreaterThanOrEqual(0);
   expect(bobIndex).toBeGreaterThanOrEqual(0);
-  expect(aliceIndex).toBeGreaterThanOrEqual(0);
   expect(charlieIndex).toBeGreaterThanOrEqual(0);
   expect(outsiderIndex).toEqual(-1);
-  expect(aliceIndex).toBeLessThan(fizzIndex);
   expect(bobIndex).toBeLessThan(fizzIndex);
   // alice is a channel member, so she sorts in the member tier ahead of
   // personas and non-member managed agents.
