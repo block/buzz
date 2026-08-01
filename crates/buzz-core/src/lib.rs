@@ -23,6 +23,7 @@ pub mod git_perms;
 /// Shared invite-link contract constants.
 pub mod invite;
 /// Buzz kind number registry — custom event type constants.
+pub mod kanban;
 pub mod kind;
 /// Network utilities — SSRF-safe IP classification.
 pub mod network;
