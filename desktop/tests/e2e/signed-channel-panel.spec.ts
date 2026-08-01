@@ -48,7 +48,7 @@ test("opens the signed channel panel and preserves its empty state", async ({
   await expect(page.getByTestId("signed-channel-panel")).toBeVisible();
   await expect(page.getByTestId("signed-channel-panel-empty")).toBeVisible();
   await expect(page.getByTestId("signed-channel-panel-empty")).toContainText(
-    "no signed panel projection",
+    "No signed job activity has been published in this channel yet.",
   );
   await expect(page).toHaveURL(/panel=%221%22/);
 
