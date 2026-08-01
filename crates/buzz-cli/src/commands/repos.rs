@@ -759,6 +759,145 @@ mod tests {
             .any(|tag| tag.as_slice() == ["buzz-channel", channel.as_str()]));
     }
 
+    /// Regression: a bind must leave EXACTLY ONE `d` tag.
+    ///
+    /// The `d` tag is what makes kind:30617 parameterized-replaceable, and the
+    /// relay's git read gate resolves the announcement by
+    /// `(community, owner, d = repo name)`. `build_repo_announcement_with_tags`
+    /// retains-then-reinserts `d`, so a second copy surviving a bind would make
+    /// the announcement resolve ambiguously — or supersede nothing and leave the
+    /// old, unbound announcement live, which reads as "the bind silently did
+    /// nothing" rather than as an error.
+    ///
+    /// The existing bind tests all start from a single `d`; this one starts from
+    /// a duplicated `d` so the dedup is actually exercised.
+    #[test]
+    fn bind_channel_leaves_exactly_one_d_tag() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["name", "Demo"]),
+                // A duplicate `d` a non-conforming client could have published.
+                tag(&["d", "demo"]),
+            ],
+            "",
+            10,
+        );
+
+        let updated =
+            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
+                .expect("build bind update")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign bind update");
+
+        let d_tags: Vec<_> = updated
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+            .collect();
+        assert_eq!(
+            d_tags.len(),
+            1,
+            "a bind must leave exactly one d tag or replaceability breaks"
+        );
+        assert_eq!(d_tags[0].as_slice(), ["d", "demo"]);
+    }
+
+    /// Regression: binding must carry forward `clone` and `relays`.
+    ///
+    /// These are the two tags a client needs in order to *reach* the repo at
+    /// all, and binding is precisely the operation that makes the repo
+    /// reachable. Dropping them during a bind would produce the worst failure
+    /// shape available: the ACL opens, but the announcement no longer says where
+    /// to clone from, so the repo looks broken exactly when it starts working.
+    ///
+    /// The other bind tests cover `name` / `buzz-protect` / unknown tags but
+    /// never these two, so the path is untested today.
+    #[test]
+    fn bind_channel_preserves_clone_and_relay_metadata() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let clone_url = "https://relay.example/git/owner/demo";
+        let relay_url = "wss://relay.example";
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["clone", clone_url]),
+                tag(&["relays", relay_url]),
+            ],
+            "",
+            10,
+        );
+
+        let updated =
+            build_updated_repo_announcement(&existing, RepoChange::BindChannel(channel.clone()))
+                .expect("build bind update")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign bind update");
+
+        assert!(
+            updated
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["clone", clone_url]),
+            "clone URL must survive a bind — it is how clients reach the repo"
+        );
+        assert!(
+            updated
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["relays", relay_url]),
+            "relay hint must survive a bind"
+        );
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-channel", channel.as_str()]));
+    }
+
+    /// Regression: `repos create --channel` must accept every UUID form
+    /// `uuid::Uuid::parse_str` does, since that is exactly what the relay's
+    /// `repo_bound_channel_id` uses to read the tag back.
+    ///
+    /// A stricter CLI-side check (e.g. lowercase-hyphenated only) would reject
+    /// bindings the relay would have honoured, and the failure would surface far
+    /// away from the cause. Braced and uppercase forms are the realistic ones —
+    /// they are what a UUID pasted out of another tool tends to look like.
+    #[test]
+    fn create_accepts_every_uuid_form_the_relay_parses() {
+        let canonical = uuid::Uuid::new_v4();
+        for candidate in [
+            canonical.to_string(),
+            canonical.to_string().to_uppercase(),
+            format!("{{{canonical}}}"),
+            canonical.simple().to_string(),
+        ] {
+            // Precondition: this is a form the relay's reader accepts.
+            assert!(
+                uuid::Uuid::parse_str(&candidate).is_ok(),
+                "test premise: {candidate} must parse as a UUID"
+            );
+
+            let event =
+                build_create_announcement("demo", None, None, &[], None, &[], Some(&candidate))
+                    .unwrap_or_else(|error| {
+                        panic!("CLI rejected a UUID the relay accepts ({candidate}): {error}")
+                    })
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign create announcement");
+
+            let bindings: Vec<_> = event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel"))
+                .collect();
+            assert_eq!(bindings.len(), 1, "exactly one binding for {candidate}");
+            // The tag carries the operator's spelling verbatim; the relay
+            // re-parses it, so round-tripping the exact input is correct.
+            assert_eq!(bindings[0].as_slice(), ["buzz-channel", candidate.as_str()]);
+        }
+    }
+
     #[test]
     fn bind_channel_rejects_malformed_uuid() {
         let existing = signed_repo(vec![tag(&["d", "demo"])], "", 10);
