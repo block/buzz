@@ -459,20 +459,36 @@ export function useSendMessageMutation(
         emojiTags,
         mentionTags,
       } = splitOutgoingTags(mediaTags);
+      const cachedChannelMessages = parentEventId
+        ? queryClient.getQueryData<RelayEvent[]>(
+            channelMessagesKey(effectiveChannel.id),
+          ) ?? []
+        : [];
+      const cachedThreadMessages = parentEventId
+        ? queryClient
+            .getQueriesData<RelayEvent[]>({
+              queryKey: ["thread-replies", effectiveChannel.id],
+            })
+            .flatMap(([, messages]) => messages ?? [])
+        : [];
+      const cachedMessages = [
+        ...cachedChannelMessages,
+        ...cachedThreadMessages,
+      ];
+      const parentAuthorPubkey = parentEventId
+        ? cachedMessages.find((event) => event.id === parentEventId)?.pubkey
+        : undefined;
       const recipientPubkeys = messageMentionPubkeys(
         effectiveChannel,
         identity.pubkey,
         mentionPubkeys,
+        parentAuthorPubkey,
       );
 
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,

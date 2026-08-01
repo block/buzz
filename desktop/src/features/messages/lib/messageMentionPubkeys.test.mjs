@@ -46,3 +46,15 @@ test("stream messages preserve explicit-mention semantics", () => {
     [],
   );
 });
+
+test("stream replies address the author of the parent message", () => {
+  assert.deepEqual(
+    messageMentionPubkeys(
+      channel({ channelType: "stream" }),
+      "owner",
+      [],
+      "agent",
+    ),
+    ["agent"],
+  );
+});
