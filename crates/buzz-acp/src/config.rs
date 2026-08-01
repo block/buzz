@@ -179,6 +179,11 @@ pub struct ModelsArgs {
     #[command(flatten)]
     pub agent: AuthAgentArgs,
 
+    /// Absolute existing directory used as the ACP session workspace.
+    /// Defaults to the harness process working directory.
+    #[arg(long, env = "BUZZ_ACP_WORKSPACE")]
+    pub workspace_root: Option<PathBuf>,
+
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
@@ -257,6 +262,11 @@ pub struct CliArgs {
         value_delimiter = ','
     )]
     pub agent_args: Vec<String>,
+
+    /// Absolute existing directory used as the ACP session workspace.
+    /// Defaults to the harness process working directory.
+    #[arg(long, env = "BUZZ_ACP_WORKSPACE")]
+    pub workspace_root: Option<PathBuf>,
 
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
@@ -494,6 +504,9 @@ pub struct Config {
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
+    /// Validated, canonical workspace passed to every ACP `session/new` request.
+    /// `None` only for setup-listener mode, which never starts an ACP session.
+    pub workspace_root: Option<String>,
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
@@ -594,6 +607,73 @@ fn sanitize_session_title(raw: &str) -> Option<String> {
     } else {
         Some(title)
     }
+}
+
+/// Resolve the configured ACP workspace without ever falling back to `/`.
+///
+/// The explicit path and inherited process working directory share the same
+/// contract: absolute, existing, a directory other than the filesystem root,
+/// and containing an `AGENTS.md` workspace guide. The canonical path is retained
+/// so startup diagnostics and ACP `session/new` always describe the same workspace.
+pub(crate) fn resolve_workspace_root(
+    configured: Option<PathBuf>,
+    current_dir: std::io::Result<PathBuf>,
+) -> Result<String, ConfigError> {
+    let workspace = match configured {
+        Some(path) => path,
+        None => current_dir.map_err(|error| {
+            ConfigError::ConfigFile(format!(
+                "cannot resolve current working directory for ACP workspace: {error}; \
+                 set --workspace-root / BUZZ_ACP_WORKSPACE"
+            ))
+        })?,
+    };
+
+    if !workspace.is_absolute() {
+        return Err(ConfigError::ConfigFile(format!(
+            "ACP workspace must be an absolute path, got {}",
+            workspace.display()
+        )));
+    }
+    if !workspace.exists() {
+        return Err(ConfigError::ConfigFile(format!(
+            "ACP workspace does not exist: {}",
+            workspace.display()
+        )));
+    }
+    if !workspace.is_dir() {
+        return Err(ConfigError::ConfigFile(format!(
+            "ACP workspace is not a directory: {}",
+            workspace.display()
+        )));
+    }
+
+    let workspace = std::fs::canonicalize(&workspace).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "failed to canonicalize ACP workspace {}: {error}",
+            workspace.display()
+        ))
+    })?;
+    if workspace.parent().is_none() {
+        return Err(ConfigError::ConfigFile(format!(
+            "ACP workspace must not be the filesystem root: {}",
+            workspace.display()
+        )));
+    }
+    let agent_guide = workspace.join("AGENTS.md");
+    if !agent_guide.is_file() {
+        return Err(ConfigError::ConfigFile(format!(
+            "ACP workspace must contain an AGENTS.md file: {}",
+            workspace.display()
+        )));
+    }
+
+    workspace.into_os_string().into_string().map_err(|path| {
+        ConfigError::ConfigFile(format!(
+            "ACP workspace is not valid UTF-8 and cannot be sent to session/new: {}",
+            PathBuf::from(path).display()
+        ))
+    })
 }
 
 /// Separator between the agent name and the channel in a composed title.
@@ -821,18 +901,26 @@ pub fn propagate_legacy_env_vars() {
 }
 
 impl Config {
-    pub fn from_cli() -> Result<Self, ConfigError> {
+    pub fn from_cli(workspace_required: bool) -> Result<Self, ConfigError> {
         // Legacy env-var propagation is intentionally NOT done here.
         // Call `propagate_legacy_env_vars()` before the tokio runtime starts
         // (in the sync `fn main()` wrapper) — see Rust 2024 edition safety.
         let args = CliArgs::parse();
-        Self::from_args(args)
+        Self::from_args_with_workspace_requirement(args, workspace_required)
     }
 
     /// Build a `Config` from already-parsed `CliArgs`. Separated from `from_cli()` so
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
-    pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
+    #[cfg(test)]
+    pub fn from_args(args: CliArgs) -> Result<Self, ConfigError> {
+        Self::from_args_with_workspace_requirement(args, true)
+    }
+
+    fn from_args_with_workspace_requirement(
+        mut args: CliArgs,
+        workspace_required: bool,
+    ) -> Result<Self, ConfigError> {
         let keys = Keys::parse(&args.private_key)?;
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
@@ -906,6 +994,9 @@ impl Config {
         }
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let workspace_root = workspace_required
+            .then(|| resolve_workspace_root(args.workspace_root, std::env::current_dir()))
+            .transpose()?;
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1058,6 +1149,7 @@ impl Config {
             relay_url: args.relay_url,
             agent_command,
             agent_args,
+            workspace_root,
             mcp_command: args.mcp_command,
             idle_timeout_secs,
             max_turn_duration_secs,
@@ -1123,11 +1215,12 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} workspace={} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
+            self.workspace_root.as_deref().unwrap_or("<setup-mode>"),
             self.mcp_command,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
@@ -1429,6 +1522,163 @@ mod tests {
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
 
+    #[test]
+    fn workspace_root_accepts_existing_absolute_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-acp-workspace-valid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), b"# Test workspace\n").unwrap();
+
+        let resolved = resolve_workspace_root(Some(dir.clone()), Ok(PathBuf::from("/ignored")))
+            .expect("existing absolute workspace should resolve");
+
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&dir)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_cli_flows_into_config_and_summary() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-acp-workspace-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), b"# Test workspace\n").unwrap();
+        let dir_arg = dir.to_string_lossy().into_owned();
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--workspace-root",
+            dir_arg.as_str(),
+        ])
+        .expect("workspace flag should parse");
+
+        let config = Config::from_args(args).expect("workspace flag should validate");
+        let canonical = std::fs::canonicalize(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(config.workspace_root.as_deref(), Some(canonical.as_str()));
+        assert!(
+            config.summary().contains(&format!("workspace={canonical}")),
+            "startup summary must expose the exact ACP workspace"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_rejects_relative_path() {
+        let err = resolve_workspace_root(
+            Some(PathBuf::from("relative/workspace")),
+            Ok(PathBuf::from("/ignored")),
+        )
+        .expect_err("relative workspace must fail closed");
+
+        assert!(
+            err.to_string().contains("absolute"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_root_rejects_missing_path() {
+        let missing =
+            std::env::temp_dir().join(format!("buzz-acp-workspace-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let err = resolve_workspace_root(Some(missing), Ok(PathBuf::from("/ignored")))
+            .expect_err("missing workspace must fail closed");
+
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_root_rejects_file() {
+        let file =
+            std::env::temp_dir().join(format!("buzz-acp-workspace-file-{}", std::process::id()));
+        std::fs::write(&file, b"not a directory").unwrap();
+
+        let err = resolve_workspace_root(Some(file.clone()), Ok(PathBuf::from("/ignored")))
+            .expect_err("workspace file must fail closed");
+
+        assert!(
+            err.to_string().contains("not a directory"),
+            "unexpected error: {err}"
+        );
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_rejects_directory_without_agent_guide() {
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-workspace-no-agent-guide-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = resolve_workspace_root(Some(dir.clone()), Ok(PathBuf::from("/ignored")))
+            .expect_err("workspace without AGENTS.md must fail closed");
+
+        assert!(
+            err.to_string().contains("AGENTS.md"),
+            "unexpected error: {err}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_rejects_filesystem_root() {
+        let err = resolve_workspace_root(Some(PathBuf::from("/")), Ok(PathBuf::from("/ignored")))
+            .expect_err("filesystem root must not be accepted as an agent workspace");
+
+        assert!(
+            err.to_string().contains("filesystem root"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_root_current_dir_failure_does_not_fallback_to_root() {
+        let err = resolve_workspace_root(
+            None,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "cwd disappeared",
+            )),
+        )
+        .expect_err("unreadable current directory must fail closed");
+
+        assert!(
+            err.to_string().contains("current working directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn setup_mode_does_not_require_an_acp_workspace() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--workspace-root",
+            "/",
+        ])
+        .expect("clap should parse args");
+
+        let config = Config::from_args_with_workspace_requirement(args, false)
+            .expect("setup-listener mode must not validate an unused ACP workspace");
+
+        assert_eq!(config.workspace_root, None);
+    }
+
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
@@ -1436,6 +1686,12 @@ mod tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
+            workspace_root: Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
@@ -2730,7 +2986,10 @@ channels = "ALL"
             "owner-only,allowlist",
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args(CliArgs {
+            workspace_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            ..args
+        });
 
         assert!(
             result.is_err(),
@@ -2760,7 +3019,10 @@ channels = "ALL"
             "owner-only,allowlist",
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args(CliArgs {
+            workspace_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            ..args
+        });
 
         assert!(
             result.is_ok(),
@@ -2779,7 +3041,10 @@ channels = "ALL"
             "anyone",
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args(CliArgs {
+            workspace_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            ..args
+        });
 
         assert!(
             result.is_ok(),
@@ -2799,7 +3064,10 @@ channels = "ALL"
             &MAX_TURN_DURATION_CEILING_SECS.to_string(),
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args(CliArgs {
+            workspace_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            ..args
+        });
 
         assert!(
             result.is_ok(),
@@ -2818,7 +3086,10 @@ channels = "ALL"
             &over.to_string(),
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args(CliArgs {
+            workspace_root: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            ..args
+        });
 
         assert!(
             result.is_err(),

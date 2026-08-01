@@ -1278,19 +1278,25 @@ async fn tokio_main() -> Result<()> {
         .compact()
         .init();
 
-    let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
-
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
     // When the desktop determines an agent is not ready (missing credentials,
     // model, or provider), it spawns buzz-acp with BUZZ_ACP_SETUP_PAYLOAD set.
-    // We enter the minimal setup-listener path and never start the agent pool.
-    if let Some(payload) = setup_mode::SetupPayload::from_env()
-        .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
-    {
+    // We enter the minimal setup-listener path and never require an ACP workspace
+    // or start the agent pool.
+    let setup_payload = setup_mode::SetupPayload::from_env()
+        .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?;
+    let mut config = Config::from_cli(setup_payload.is_none())
+        .map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    if let Some(payload) = setup_payload {
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
     }
+
+    let workspace_root = config.workspace_root.clone().ok_or_else(|| {
+        anyhow::anyhow!("internal error: normal ACP startup has no validated workspace")
+    })?;
+    tracing::info!(workspace = %workspace_root, "ACP workspace resolved");
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
@@ -1543,10 +1549,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
+        cwd: workspace_root,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -4044,10 +4047,13 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        .to_string_lossy()
-        .to_string();
+    let cwd = match config::resolve_workspace_root(args.workspace_root, std::env::current_dir()) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            eprintln!("error: invalid ACP workspace: {error}");
+            std::process::exit(1);
+        }
+    };
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
@@ -4999,6 +5005,12 @@ mod build_mcp_servers_tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
+            workspace_root: Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
@@ -5220,6 +5232,12 @@ mod error_outcome_emission_tests {
             // feed emission under test.
             agent_command: "true".into(),
             agent_args: vec![],
+            workspace_root: Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,

@@ -6,10 +6,9 @@
 //! early-branch path:
 //!
 //! ```text
-//! Config::from_cli()
-//!   └─ SetupPayload::from_env()?
-//!        ├─ Some(payload) → run_setup_listener(config, payload)  [this module]
-//!        └─ None          → normal pool path (unchanged)
+//! SetupPayload::from_env()?
+//!   ├─ Some(payload) → Config::from_cli(false) → run_setup_listener(config, payload)
+//!   └─ None          → Config::from_cli(true) → validated workspace + normal pool
 //! ```
 //!
 //! # Contract (NON-NEGOTIABLE)

@@ -1207,8 +1207,8 @@ pub(crate) fn prepend_canvas_for_legacy(
 /// absolute root, so without this anchor a model fills the gap by searching
 /// `$HOME` (triggering macOS TCC prompts) or by inventing its own workspace
 /// directory. The line is emitted only when a real base prompt is present and
-/// `cwd` is an absolute path other than the `/` fallback — naming `/` as the
-/// workspace would itself invite a `$HOME`-wide scan.
+/// `cwd` is an absolute non-root path. Harness startup validates this invariant;
+/// this renderer remains defensive for direct unit-test callers.
 fn framed_system_prompt(
     cwd: &str,
     base_prompt: Option<&str>,
@@ -1234,9 +1234,8 @@ fn framed_system_prompt(
 
 /// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
 ///
-/// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
-/// to `/` on failure): a `/`-rooted workspace line would actively encourage the
-/// `$HOME`-wide scan this section exists to prevent.
+/// Skips relative paths and `/`: a root workspace line would actively encourage
+/// the `$HOME`-wide scan this section exists to prevent.
 fn workspace_section(cwd: &str) -> Option<String> {
     if cwd != "/" && cwd.starts_with('/') {
         Some(format!(
