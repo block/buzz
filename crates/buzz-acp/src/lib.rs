@@ -2829,28 +2829,18 @@ fn try_native_steer(
     prompt_tag: String,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
-    // Build the steer body: framing strings come from
-    // `queue::native_steer_framing()` (Eva's drift-proof requirement —
-    // native and cancel+merge fallback share these so the agent gets the
-    // same orientation regardless of transport). The single event block
-    // is rendered by `queue::format_event_block`, the same function
-    // `queue::format_prompt` uses internally for `[Buzz event: …]`
-    // sections, so the rendering also cannot drift.
+    // Build the steer body through queue's native-steer formatter. It shares
+    // steer framing, event rendering, and human-facing reply anchoring with
+    // the normal cancel+merge fallback so non-cancelling delivery cannot
+    // become a private ACP-text-only path.
     //
     // Passing `None` for `channel_info` / `profile_lookup` is intentional:
     // native steer is a *delta* into a live turn — the agent already saw
     // channel context and the actor's profile in the original prompt,
     // duplicating it here would defeat the point of non-cancelling
     // steering (which is to inject only what's new).
-    let (header, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
-    let be = queue::BatchEvent {
-        event,
-        prompt_tag: prompt_tag.clone(),
-        received_at: std::time::Instant::now(),
-    };
-    let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+    let body = queue::format_native_steer_prompt(channel_id, event, prompt_tag, None, None);
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {

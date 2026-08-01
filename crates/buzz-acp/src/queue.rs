@@ -1625,6 +1625,64 @@ pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
     (framing.new_header_single, framing.closing_note)
 }
 
+/// Format the single-event body delivered by the goose-native steer path.
+///
+/// Native steer is still a delta into an in-flight turn, but it must preserve
+/// the normal human-facing reply contract: if the steered event is a human
+/// mention or room message, the agent is reminded to publish an ordinary Buzz
+/// reply anchored to the triggering event/thread instead of only streaming
+/// private ACP text.
+pub(crate) fn format_native_steer_prompt(
+    channel_id: Uuid,
+    event: Event,
+    prompt_tag: String,
+    channel_info: Option<&PromptChannelInfo>,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> String {
+    let thread_tags = parse_thread_tags(&event);
+    let is_dm = channel_info
+        .map(|ci| ci.channel_type == "dm")
+        .unwrap_or(false);
+    let sender_pubkey = event.pubkey.to_hex();
+    let triggering_event_id = event.id.to_hex();
+    let reply_anchor = if is_dm {
+        thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| triggering_event_id.clone())
+    } else {
+        resolve_reply_anchor(
+            &sender_pubkey,
+            &thread_tags,
+            &triggering_event_id,
+            profile_lookup,
+        )
+    };
+
+    let be = BatchEvent {
+        event,
+        prompt_tag: prompt_tag.clone(),
+        received_at: Instant::now(),
+    };
+    let (header, closing) = native_steer_framing();
+    [
+        format_context_hints(
+            channel_id,
+            channel_info,
+            &thread_tags,
+            is_dm,
+            false,
+            reply_anchor.as_deref(),
+        ),
+        format!(
+            "{header}\n\n[Buzz event: {prompt_tag}]\n{}",
+            format_event_block(channel_id, channel_info, &be, profile_lookup)
+        ),
+        closing.to_string(),
+    ]
+    .join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1934,6 +1992,62 @@ mod tests {
         // Both the original and new content must survive the merge.
         assert!(prompt.contains("the original task"));
         assert!(prompt.contains("the new message"));
+    }
+
+    #[test]
+    fn test_native_steer_framing_includes_top_level_human_reply_instruction() {
+        let ch = Uuid::new_v4();
+        let event = make_event("@agent can you see this?");
+        let event_id = event.id.to_hex();
+
+        let prompt = format_native_steer_prompt(ch, event, "@mention".into(), None, None);
+
+        assert!(
+            prompt.contains("[Context]"),
+            "native steer should keep the normal context section"
+        );
+        assert!(
+            prompt.contains("arrived while you were working"),
+            "native steer should keep steer merge framing"
+        );
+        assert!(
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "top-level human steer should tell the agent to publish a public reply anchored to the triggering event"
+        );
+        assert!(
+            prompt.contains("new top-level message"),
+            "top-level native steer should use the new-thread reply instruction"
+        );
+    }
+
+    #[test]
+    fn test_native_steer_framing_anchors_thread_reply_to_root() {
+        let ch = Uuid::new_v4();
+        let root_id = "a".repeat(64);
+        let parent_id = "b".repeat(64);
+        let event = make_event_with_tags(
+            "@agent please answer in this thread",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent_id.clone(), "".into(), "reply".into()],
+            ],
+        );
+        let event_id = event.id.to_hex();
+
+        let prompt = format_native_steer_prompt(ch, event, "@mention".into(), None, None);
+
+        assert!(
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "threaded human steer should anchor the public reply to the root"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {parent_id}")),
+            "threaded native steer should not deepen the reply chain"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "threaded native steer should not anchor to the triggering nested event"
+        );
     }
 
     #[test]

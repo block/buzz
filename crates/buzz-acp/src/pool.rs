@@ -32,6 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    TurnOutputObservations,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -290,7 +291,7 @@ pub enum ControlSignal {
 /// The read loop owns the `AcpClient`'s reader/writer for the duration of the
 /// turn, so we cannot drive a steer write from the main thread directly. The
 /// main loop carries the steer prompt body (already framed by
-/// `queue::native_steer_framing()` + `queue::format_event_block`); the read
+/// `queue::format_native_steer_prompt`); the read
 /// loop completes `sessionId` (lexical) and `expectedRunId`
 /// (`AcpClient::active_run_id` at write time) when it actually emits the
 /// JSON-RPC request. The main loop awaits a `SteerAck` on the `ack_tx`
@@ -323,7 +324,7 @@ pub enum ControlSignal {
 pub struct SteerRequest {
     /// Prompt body text blocks. Each entry becomes one `text` content
     /// block in `params.prompt`. Built by the main loop via
-    /// `queue::native_steer_framing()` + `queue::format_event_block` so
+    /// `queue::format_native_steer_prompt` so
     /// the wording cannot drift from the cancel+merge fallback path.
     pub prompt_blocks: Vec<String>,
     /// Oneshot for the read loop to report the outcome.
@@ -2055,6 +2056,15 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        let output_observations = agent.acp.take_turn_output_observations();
+                        log_no_public_send_observation(
+                            &source,
+                            &StopReason::EndTurn,
+                            &output_observations,
+                            observer_channel_id,
+                            &session_id,
+                            &turn_id,
+                        );
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2117,6 +2127,15 @@ pub async fn run_prompt_task(
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
+            let output_observations = agent.acp.take_turn_output_observations();
+            log_no_public_send_observation(
+                &source,
+                &stop_reason,
+                &output_observations,
+                observer_channel_id,
+                &session_id,
+                &turn_id,
+            );
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -3360,6 +3379,35 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     }
 }
 
+fn should_warn_no_public_send_observation(
+    source: &PromptSource,
+    stop_reason: &StopReason,
+    output: &TurnOutputObservations,
+) -> bool {
+    matches!(source, PromptSource::Channel(_))
+        && matches!(stop_reason, StopReason::EndTurn)
+        && output.text_without_public_send()
+}
+
+fn log_no_public_send_observation(
+    source: &PromptSource,
+    stop_reason: &StopReason,
+    output: &TurnOutputObservations,
+    channel_id: Option<Uuid>,
+    session_id: &str,
+    turn_id: &str,
+) {
+    if should_warn_no_public_send_observation(source, stop_reason, output) {
+        tracing::warn!(
+            target: "pool::prompt",
+            ?channel_id,
+            %session_id,
+            %turn_id,
+            "human-facing turn streamed ACP text but did not call send_message; no public Buzz reply was published"
+        );
+    }
+}
+
 //
 // Two-phase lifecycle visible to users:
 //   👀  "seen"    — event was queued and an agent will handle it
@@ -3994,6 +4042,45 @@ mod tests {
         // message is left untouched even when a base_prompt is present.
         let composed = prepend_base_for_legacy(2, Some("you are a helpful agent"), "hello channel");
         assert_eq!(composed, "hello channel");
+    }
+
+    #[test]
+    fn no_public_send_observation_warns_for_channel_end_turn_text_only() {
+        let source = PromptSource::Channel(Uuid::new_v4());
+        let observations = TurnOutputObservations {
+            agent_message_chunk: true,
+            public_send_tool_call: false,
+        };
+
+        assert!(should_warn_no_public_send_observation(
+            &source,
+            &StopReason::EndTurn,
+            &observations
+        ));
+    }
+
+    #[test]
+    fn no_public_send_observation_ignores_heartbeat_and_send_tool_turns() {
+        let text_only = TurnOutputObservations {
+            agent_message_chunk: true,
+            public_send_tool_call: false,
+        };
+        let sent_publicly = TurnOutputObservations {
+            agent_message_chunk: true,
+            public_send_tool_call: true,
+        };
+        let channel = PromptSource::Channel(Uuid::new_v4());
+
+        assert!(!should_warn_no_public_send_observation(
+            &PromptSource::Heartbeat,
+            &StopReason::EndTurn,
+            &text_only
+        ));
+        assert!(!should_warn_no_public_send_observation(
+            &channel,
+            &StopReason::EndTurn,
+            &sent_publicly
+        ));
     }
 
     #[test]

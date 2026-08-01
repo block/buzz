@@ -46,3 +46,17 @@ test("stream messages preserve explicit-mention semantics", () => {
     [],
   );
 });
+
+test("stream messages p-tag selected agent mentions", () => {
+  const agentPubkey =
+    "e3066c9a6081fcd4d0945c8f14f52bbc71a87c74b34a6594fe540f73e41acf09";
+
+  assert.deepEqual(
+    messageMentionPubkeys(
+      channel({ channelType: "stream", memberPubkeys: ["owner", agentPubkey] }),
+      "owner",
+      [agentPubkey.toUpperCase()],
+    ),
+    [agentPubkey],
+  );
+});

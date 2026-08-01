@@ -74,6 +74,20 @@ impl StopReason {
     }
 }
 
+/// Per-turn observations about whether the agent produced private ACP text and
+/// whether it attempted a public Buzz room send.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TurnOutputObservations {
+    pub agent_message_chunk: bool,
+    pub public_send_tool_call: bool,
+}
+
+impl TurnOutputObservations {
+    pub(crate) fn text_without_public_send(self) -> bool {
+        self.agent_message_chunk && !self.public_send_tool_call
+    }
+}
+
 /// Errors that can occur in the ACP client.
 #[derive(Debug, thiserror::Error)]
 pub enum AcpError {
@@ -211,6 +225,9 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Best-effort per-turn observations used to detect private ACP text that
+    /// never became a public Buzz room reply.
+    turn_output_observations: TurnOutputObservations,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +567,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_output_observations: TurnOutputObservations::default(),
         })
     }
 
@@ -754,6 +772,7 @@ impl AcpClient {
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
+        self.reset_turn_output_observations();
 
         // Mark the usage tracker as in-flight for this turn BEFORE sending the
         // prompt so that any setup notifications recorded earlier are not
@@ -862,6 +881,14 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    pub(crate) fn reset_turn_output_observations(&mut self) {
+        self.turn_output_observations = TurnOutputObservations::default();
+    }
+
+    pub(crate) fn take_turn_output_observations(&mut self) -> TurnOutputObservations {
+        std::mem::take(&mut self.turn_output_observations)
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1713,6 +1740,7 @@ impl AcpClient {
 
         match update_type {
             "agent_message_chunk" => {
+                self.turn_output_observations.agent_message_chunk = true;
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
                 }
@@ -1727,6 +1755,9 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+                if is_public_send_tool_call(title, kind) {
+                    self.turn_output_observations.public_send_tool_call = true;
+                }
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
                 true
             }
@@ -2161,6 +2192,16 @@ pub fn model_in_catalog(
                 .iter()
                 .any(|model| model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model))
         })
+}
+
+fn is_public_send_tool_call(title: &str, kind: &str) -> bool {
+    [title, kind].iter().any(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower == "send_message"
+            || lower.ends_with(".send_message")
+            || lower.ends_with("::send_message")
+            || lower.ends_with("__send_message")
+    })
 }
 
 // ─── Drop: kill child process ─────────────────────────────────────────────────
@@ -3252,6 +3293,64 @@ mod tests {
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout after silence, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn no_public_send_observation_records_agent_text_without_send_tool() {
+        let mut client = spawn_inert_client().await;
+        client.reset_turn_output_observations();
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": "draft reply visible only on ACP stdout"}
+                }
+            }
+        });
+
+        let _ = client.handle_session_update(&msg);
+
+        let observations = client.take_turn_output_observations();
+        assert!(observations.agent_message_chunk);
+        assert!(!observations.public_send_tool_call);
+        assert!(observations.text_without_public_send());
+    }
+
+    #[tokio::test]
+    async fn no_public_send_observation_is_suppressed_by_send_message_tool_call() {
+        let mut client = spawn_inert_client().await;
+        client.reset_turn_output_observations();
+        let stream_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": "I will reply publicly."}
+                }
+            }
+        });
+        let tool_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": "send_message",
+                    "kind": "mcp"
+                }
+            }
+        });
+
+        let _ = client.handle_session_update(&stream_msg);
+        let _ = client.handle_session_update(&tool_msg);
+
+        let observations = client.take_turn_output_observations();
+        assert!(observations.agent_message_chunk);
+        assert!(observations.public_send_tool_call);
+        assert!(!observations.text_without_public_send());
     }
 
     #[tokio::test]
