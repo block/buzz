@@ -71,6 +71,8 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and RECOMMENDED as d
 
 `kind:13535` is replaceable per NIP-01 (`10000 <= n < 20000`). Clients use the latest valid `kind:13535` signed by the relay identity as current state. The snapshot is relay-scoped: it is signed by the relay identity advertised in NIP-11 `self`, mirroring NIP-43's relay-membership snapshot shape. Relays without a stable NIP-11 `self` pubkey MUST NOT publish NIP-IA relay-signed state, because clients would have no stable key against which to verify it.
 
+To preserve strict replacement order when several archive changes occur within one wall-clock second, a relay MAY timestamp a `kind:13535` snapshot slightly in the future. Relays SHOULD bound that lead; this implementation allows at most 60 seconds, retries briefly while the wall clock catches up, then fails publication rather than occupying an ingest handler indefinitely. Clients MUST accept otherwise-valid relay-signed `kind:13535` snapshots within 60 seconds of their local clock and SHOULD reject snapshots further in the future.
+
 ## Event Formats
 
 ### `kind:9035` Archive Request
