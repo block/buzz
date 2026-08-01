@@ -124,6 +124,42 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
+fn contains_serialized_json_key(text: &str, key: &str) -> bool {
+    text.match_indices(key).any(|(start, _)| {
+        let bytes = text.as_bytes();
+        if start == 0 || bytes[start - 1] != b'"' {
+            return false;
+        }
+
+        let mut cursor = start + key.len();
+        while bytes.get(cursor) == Some(&b'\\') {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'"') {
+            return false;
+        }
+        cursor += 1;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        bytes.get(cursor) == Some(&b':')
+    })
+}
+
+fn redact_wire_text(text: &str) -> &str {
+    let looks_like_serialized_mcp_config = contains_serialized_json_key(text, "mcpServers")
+        && contains_serialized_json_key(text, "env")
+        && contains_serialized_json_key(text, "value");
+    if looks_like_serialized_mcp_config {
+        REDACTED_ENV_VALUE
+    } else {
+        text
+    }
+}
+
 /// Return a logging-safe copy of an ACP wire value.
 ///
 /// MCP environment values are needed by the adapter on the real wire, but
@@ -155,6 +191,12 @@ fn redact_wire_value(value: &serde_json::Value) -> serde_json::Value {
                         }
                     }
                     redact_in_place(value);
+                }
+            }
+            serde_json::Value::String(text) => {
+                let observed = redact_wire_text(text);
+                if observed != text.as_str() {
+                    *text = observed.to_string();
                 }
             }
             _ => {}
@@ -621,6 +663,14 @@ impl AcpClient {
 
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
+        if self.observer.is_none() {
+            return;
+        }
+        self.emit_observer(kind, redact_wire_value(&payload));
+    }
+
+    /// Emit an event whose payload is already a logging-safe copy.
+    fn emit_observer(&self, kind: impl Into<String>, payload: serde_json::Value) {
         if let Some(observer) = &self.observer {
             observer.emit(
                 kind,
@@ -1103,7 +1153,7 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", observed_value);
+        self.emit_observer("acp_write", observed_value);
         Ok(())
     }
 
@@ -1116,7 +1166,7 @@ impl AcpClient {
             Ok(msg) => {
                 let observed_value = redact_wire_value(&msg);
                 tracing::debug!(target: "acp::wire", "← {observed_value}");
-                self.observe("acp_read", observed_value);
+                self.emit_observer("acp_read", observed_value);
                 Some(msg)
             }
             Err(error) => {
@@ -1769,6 +1819,7 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    let text = redact_wire_text(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -1782,6 +1833,8 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+                let title = redact_wire_text(title);
+                let kind = redact_wire_text(kind);
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
                 true
             }
@@ -1791,6 +1844,8 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                let tool_id = redact_wire_text(tool_id);
+                let status = redact_wire_text(status);
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
                 false
             }
@@ -1800,6 +1855,7 @@ impl AcpClient {
             }
             "agent_thought_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    let text = redact_wire_text(text);
                     tracing::debug!(target: "acp::thought", "{text}");
                 }
                 false
@@ -1809,7 +1865,12 @@ impl AcpClient {
                 // Logged for observability; UI surfacing is a follow-up.
                 let names: Vec<&str> = update["availableCommands"]
                     .as_array()
-                    .map(|cmds| cmds.iter().filter_map(|c| c["name"].as_str()).collect())
+                    .map(|cmds| {
+                        cmds.iter()
+                            .filter_map(|c| c["name"].as_str())
+                            .map(redact_wire_text)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 tracing::info!(
                     target: "acp::update",
@@ -1836,9 +1897,10 @@ impl AcpClient {
                 if let Some(goose_meta) = meta {
                     match goose_meta.get("activeRunId") {
                         Some(serde_json::Value::String(run_id)) => {
+                            let observed_run_id = redact_wire_text(run_id);
                             tracing::debug!(
                                 target: "acp::update",
-                                "session_info_update: activeRunId={run_id}"
+                                "session_info_update: activeRunId={observed_run_id}"
                             );
                             self.active_run_id = Some(run_id.clone());
                         }
@@ -1857,6 +1919,7 @@ impl AcpClient {
             }
             "keepalive" => false,
             other => {
+                let other = redact_wire_text(other);
                 tracing::debug!(target: "acp::update", "session/update: {other}");
                 false
             }
@@ -1884,9 +1947,10 @@ impl AcpClient {
         match serde_json::from_value::<GooseSessionUpdateNotification>(params.clone()) {
             Ok(notif) => {
                 if let GooseSessionUpdateVariant::UsageUpdate(payload) = &notif.update {
+                    let observed_session_id = redact_wire_text(&notif.session_id);
                     tracing::debug!(
                         target: "acp::usage",
-                        session_id = %notif.session_id,
+                        session_id = %observed_session_id,
                         input = payload.accumulated_input_tokens,
                         output = payload.accumulated_output_tokens,
                         // A subset of `input`, logged so downstream accounting can
@@ -1900,9 +1964,11 @@ impl AcpClient {
                 }
             }
             Err(e) => {
+                let error = e.to_string();
+                let observed_error = redact_wire_text(&error);
                 tracing::debug!(
                     target: "acp::usage",
-                    "_goose/unstable/session/update: deserialization error: {e}"
+                    "_goose/unstable/session/update: deserialization error: {observed_error}"
                 );
             }
         }
@@ -2537,6 +2603,58 @@ mod tests {
         assert_eq!(
             redacted["params"]["ordinary"]["value"], "keep-me",
             "value fields outside env arrays must remain visible"
+        );
+    }
+
+    #[test]
+    fn wire_redaction_suppresses_serialized_mcp_configs_without_broad_string_matching() {
+        let secret = "quote\" slash\\ newline\n snowman \u{2603}";
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "mcpServers": [{
+                    "name": "analytics",
+                    "command": "analytics-mcp",
+                    "args": [],
+                    "env": [{"name": "ANALYTICS_TOKEN", "value": secret}]
+                }]
+            }
+        })
+        .to_string();
+        let mut serialized_levels = vec![request];
+        for _ in 0..3 {
+            let next = serde_json::to_string(
+                serialized_levels
+                    .last()
+                    .expect("at least one serialized request"),
+            )
+            .expect("serialize request again");
+            serialized_levels.push(next);
+        }
+        let source = serde_json::json!({
+            "echoes": serialized_levels
+                .iter()
+                .map(|request| format!("adapter rejected {request}; check configuration"))
+                .collect::<Vec<_>>(),
+            "ordinary": r#"invalid {"environment":"prod","value":"x"}"#,
+            "nearMiss": r#"invalid {"mcpServers":[],"envValue":"prod","value":"x"}"#,
+            "unrelated": "ordinary adapter error"
+        });
+        let original_source = source.clone();
+
+        let redacted = redact_wire_value(&source);
+
+        for echo in redacted["echoes"].as_array().expect("redacted echoes") {
+            assert_eq!(echo, REDACTED_ENV_VALUE);
+        }
+        assert_eq!(redacted["ordinary"], source["ordinary"]);
+        assert_eq!(redacted["nearMiss"], source["nearMiss"]);
+        assert_eq!(redacted["unrelated"], source["unrelated"]);
+        assert_eq!(
+            source, original_source,
+            "the protocol value must stay unchanged"
         );
     }
 
@@ -3541,6 +3659,181 @@ mod tests {
             !serialized_events.contains(secret),
             "no observer frame may contain the real MCP environment value"
         );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_new_error_cannot_echo_serialized_mcp_config() {
+        let secret = "adapter-echo-secret";
+        let embedded_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "mcpServers": [{
+                    "name": "analytics",
+                    "command": "analytics-mcp",
+                    "args": [],
+                    "env": [{"name": "ANALYTICS_TOKEN", "value": secret}]
+                }]
+            }
+        })
+        .to_string();
+        let error_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32055,
+                "message": format!("adapter rejected {embedded_request}")
+            }
+        })
+        .to_string();
+        let script = format!(
+            "read -t 2 _init\n\
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":2,\"agentCapabilities\":{{}}}}}}'\n\
+             read -t 2 _session\n\
+             printf '%s\\n' '{error_response}'\n\
+             sleep 1"
+        );
+        let mut client = spawn_script(&script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let result = client
+            .session_new_full(
+                "/tmp",
+                vec![McpServer {
+                    name: "analytics".into(),
+                    command: "analytics-mcp".into(),
+                    args: vec![],
+                    env: vec![EnvVar {
+                        name: "ANALYTICS_TOKEN".into(),
+                        value: secret.into(),
+                    }],
+                }],
+                None,
+                None,
+            )
+            .await;
+
+        match result {
+            Err(AcpError::AgentError { code, message }) => {
+                assert_eq!(code, -32055);
+                assert_eq!(message, REDACTED_ENV_VALUE);
+                assert!(!message.contains(secret));
+            }
+            Err(other) => panic!("expected redacted AgentError, got {other:?}"),
+            Ok(_) => panic!("expected session/new to return an error"),
+        }
+
+        client.observe(
+            "adapter_diagnostic",
+            serde_json::json!({"message": embedded_request}),
+        );
+        let serialized_events =
+            serde_json::to_string(&observer.snapshot()).expect("serialize observer snapshot");
+        assert!(!serialized_events.contains(secret));
+        assert!(serialized_events.contains(REDACTED_ENV_VALUE));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn semantic_traces_cannot_echo_serialized_mcp_config() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct TraceCapture(Arc<Mutex<Vec<u8>>>);
+
+        struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for TraceWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("trace buffer lock")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceCapture {
+            type Writer = TraceWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                TraceWriter(self.0.clone())
+            }
+        }
+
+        let secret = "semantic-trace-secret";
+        let embedded_request = serde_json::json!({
+            "method": "session/new",
+            "params": {
+                "mcpServers": [{
+                    "env": [{"name": "ANALYTICS_TOKEN", "value": secret}]
+                }]
+            }
+        })
+        .to_string();
+        let update = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": embedded_request}
+                }
+            }
+        });
+        let mut client = spawn_inert_client().await;
+        let trace = TraceCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(trace.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = client.handle_session_update(&update);
+            client.handle_goose_usage_update(&serde_json::json!({
+                "params": {
+                    "sessionId": embedded_request,
+                    "update": {
+                        "sessionUpdate": "usage_update",
+                        "accumulatedInputTokens": 10,
+                        "accumulatedOutputTokens": 5,
+                        "accumulatedCachedInputTokens": null,
+                        "accumulatedCost": null
+                    }
+                }
+            }));
+            client.handle_goose_usage_update(&serde_json::json!({
+                "params": {
+                    "sessionId": "ordinary-session",
+                    "update": {
+                        "sessionUpdate": "usage_update",
+                        "accumulatedInputTokens": embedded_request,
+                        "accumulatedOutputTokens": 5,
+                        "accumulatedCachedInputTokens": null,
+                        "accumulatedCost": null
+                    }
+                }
+            }));
+        });
+
+        let output = String::from_utf8(trace.0.lock().expect("trace buffer lock").clone())
+            .expect("trace output should be UTF-8");
+        assert!(!output.contains(secret));
+        assert!(output.contains(REDACTED_ENV_VALUE));
         client.shutdown().await;
     }
 
