@@ -3637,6 +3637,19 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_channel_categorization() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("top-level channels as durable categories or projects"));
+        assert!(prompt.contains("create a sub-channel instead of another top-level channel"));
+        assert!(prompt.contains("exact one-level naming convention `parent--sub`"));
+        assert!(prompt.contains("Do not construct the full `parent--sub` name yourself"));
+        assert!(prompt.contains("--name <short-kebab-case-slug>"));
+        assert!(prompt.contains("--parent <parent-channel-uuid-or-exact-name>"));
+        assert!(prompt.contains("The `--name` value is only the suffix"));
+        assert!(prompt.contains("resolve the intended parent with `buzz channels list`"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("--mention <hex-or-npub>"));

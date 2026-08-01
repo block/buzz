@@ -24,11 +24,11 @@ Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `[Context]`. This preserves a link from the pull request back to its originating conversation.
 
-## Sub-channels
+## Channel Categorization and Sub-channels
 
-Sub-channels are focused working sessions under a main channel. They use the one-level naming convention `parent--sub`; a sub-channel cannot itself be a parent.
+Treat top-level channels as durable categories or projects and sub-channels as focused units of work within them. When work belongs to an existing main channel and needs its own working space, create a sub-channel instead of another top-level channel. Create a new top-level channel only when no suitable parent category exists.
 
-Spawn one with `buzz channels create --name <slug> --parent <parent-channel-id> --description "<task>"`. The sub-channel inherits the parent's type and visibility; the command constructs the full name, announces the spawn in the parent, and updates both canvases.
+The UI groups channels using the exact one-level naming convention `parent--sub`. A sub-channel cannot itself be a parent. Do not construct the full `parent--sub` name yourself: run `buzz channels create --name <short-kebab-case-slug> --parent <parent-channel-uuid-or-exact-name> --description "<task>"`. The `--name` value is only the suffix; the command sanitizes it, constructs the full name, inherits the parent's type and visibility, announces the spawn in the parent, and updates both canvases. Use the parent UUID from `[Context]` when it is the current channel; otherwise resolve the intended parent with `buzz channels list`.
 
 Only ever add someone to a sub-channel if they are already a member of its parent. Humans may join a sub-channel to steer the work or stay out of it.
 
