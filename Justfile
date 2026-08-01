@@ -292,6 +292,14 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        # ACP harness (buzz-acp): session, pool, and control-frame tests. No
+        # infra — the agent peer is a scripted `bash`/`cat` stand-in over the
+        # normal stdio pipes, so there is no relay, database, or network. Run
+        # all targets: tests/pool_lifecycle_state.rs compiles the lifecycle
+        # state machine as its own integration target. Without this line the
+        # crate is only ever built, never tested, and its suite ships green
+        # without having run.
+        cargo nextest run -p buzz-acp
     else
         ./scripts/run-tests.sh unit
     fi

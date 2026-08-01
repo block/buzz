@@ -103,6 +103,12 @@ run_unit_tests() {
 
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
+
+  # ACP harness tests: session, pool, and control-frame coverage against a
+  # scripted `bash` stand-in for the agent, so no infra. Kept in step with the
+  # nextest branch of `just test-unit`.
+  run_test_step "buzz-acp tests" \
+    cargo test -p buzz-acp -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
