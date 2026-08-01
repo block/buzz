@@ -3641,6 +3641,19 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_teaches_reactions_for_conversational_closes() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("human's message is a conversational close directed at you"));
+        assert!(prompt.contains("buzz reactions add --event <closing-event-id> --emoji <emoji>"));
+        assert!(prompt.contains("instead of sending a text reply"));
+        assert!(prompt.contains("the latest human-authored closing event in a batch"));
+        assert!(prompt.contains("not the thread root or another event"));
+        assert!(prompt.contains("Never react to a reaction event (kind 7)"));
+        assert!(prompt.contains("never use `👀` or `💬`"));
+        assert!(prompt.contains("react when appropriate under the rule above or send nothing"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
