@@ -2177,10 +2177,26 @@ channels = "ALL"
         assert!(err.to_string().contains("turn liveness interval must be 0"));
     }
 
+    /// Asserts the *declared* default rather than parsing. `lazy_pool` is bound
+    /// to `BUZZ_ACP_LAZY_POOL`, so a parse here would read the ambient
+    /// environment — and every buzz-acp agent exports that variable to its
+    /// children, so the old parse-based form failed for anyone running the
+    /// suite from inside a Buzz agent session.
     #[test]
     fn lazy_pool_defaults_off() {
-        let key = "0".repeat(64);
-        assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
+        use clap::CommandFactory;
+
+        let cmd = CliArgs::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|arg| arg.get_id() == "lazy_pool")
+            .expect("--lazy-pool is declared");
+        let defaults: Vec<String> = arg
+            .get_default_values()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(defaults, ["false"]);
     }
 
     #[test]
