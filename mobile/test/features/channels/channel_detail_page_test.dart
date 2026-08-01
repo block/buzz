@@ -848,6 +848,27 @@ void main() {
       expect(find.text('Message #general'), findsOneWidget);
     });
 
+    testWidgets('detail-header manage leave closes the detail page', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Leave channel').last);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Channel actions'), findsNothing);
+    });
+
     testWidgets('keeps manage sheet dismissible with a long canvas', (
       tester,
     ) async {

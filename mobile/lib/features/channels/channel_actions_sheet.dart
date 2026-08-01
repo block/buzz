@@ -162,23 +162,18 @@ class ChannelActionsSheet extends ConsumerWidget {
                 leading: const Icon(LucideIcons.settings),
                 title: const Text('Manage channel'),
                 onTap: () async {
-                  final pageContext = Navigator.of(
-                    context,
-                    rootNavigator: true,
-                  ).context;
-                  close();
                   final shouldClose = await showModalBottomSheet<bool>(
-                    context: pageContext,
+                    context: context,
                     isScrollControlled: true,
                     showDragHandle: true,
                     constraints: BoxConstraints(
                       maxWidth: 640,
-                      maxHeight: MediaQuery.sizeOf(pageContext).height * 0.9,
+                      maxHeight: MediaQuery.sizeOf(context).height * 0.9,
                     ),
                     builder: (_) => ManageChannelSheet(channel: channel),
                   );
-                  if (shouldClose == true && pageContext.mounted) {
-                    Navigator.of(pageContext).pop(true);
+                  if (shouldClose == true && context.mounted) {
+                    Navigator.of(context).pop(true);
                   }
                 },
               ),
