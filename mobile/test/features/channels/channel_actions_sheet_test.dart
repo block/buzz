@@ -151,7 +151,9 @@ void main() {
     expect(find.text('Channel actions unavailable'), findsOneWidget);
   });
 
-  testWidgets('DM keeps unread, then mute and copy rows', (tester) async {
+  testWidgets('DM omits quick actions, then shows mute and copy rows', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       _app(
         channel: _channel(type: 'dm'),
@@ -161,7 +163,6 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final label in [
-      'Mark Unread',
       'Mute channel',
       'Copy channel name',
       'Copy channel ID',
@@ -171,6 +172,8 @@ void main() {
     for (final label in [
       'Star',
       'Unstar',
+      'Mark Unread',
+      'Mark Read',
       'Move to section…',
       'Manage channel',
       'Leave channel',

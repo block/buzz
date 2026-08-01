@@ -86,45 +86,48 @@ class ChannelActionsSheet extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _ChannelQuickActionsRow(
-              showStarAction: !channel.isDm,
-              isStarred: isStarred,
-              isUnread: isUnread,
-              onToggleStar: () {
-                close();
-                final notifier = ref.read(channelStarsProvider.notifier);
-                isStarred
-                    ? notifier.unstarChannel(channel.id)
-                    : notifier.starChannel(channel.id);
-              },
-              onToggleRead: () {
-                close();
-                final timestamp = dateTimeToUnixSeconds(channel.lastMessageAt);
-                if (isUnread) {
-                  onMarkRead?.call();
-                  if (timestamp != null) {
+            if (!channel.isDm) ...[
+              _ChannelQuickActionsRow(
+                isStarred: isStarred,
+                isUnread: isUnread,
+                onToggleStar: () {
+                  close();
+                  final notifier = ref.read(channelStarsProvider.notifier);
+                  isStarred
+                      ? notifier.unstarChannel(channel.id)
+                      : notifier.starChannel(channel.id);
+                },
+                onToggleRead: () {
+                  close();
+                  final timestamp = dateTimeToUnixSeconds(
+                    channel.lastMessageAt,
+                  );
+                  if (isUnread) {
+                    onMarkRead?.call();
+                    if (timestamp != null) {
+                      ref
+                          .read(readStateProvider.notifier)
+                          .markContextRead(
+                            channel.id,
+                            timestamp,
+                            clearForcedMessages: true,
+                          );
+                      ref
+                          .read(channelsProvider.notifier)
+                          .clearObservedUnreadCoveredByRead(
+                            channel.id,
+                            timestamp,
+                          );
+                    }
+                  } else {
                     ref
                         .read(readStateProvider.notifier)
-                        .markContextRead(
-                          channel.id,
-                          timestamp,
-                          clearForcedMessages: true,
-                        );
-                    ref
-                        .read(channelsProvider.notifier)
-                        .clearObservedUnreadCoveredByRead(
-                          channel.id,
-                          timestamp,
-                        );
+                        .markContextUnread(channel.id, channelId: channel.id);
                   }
-                } else {
-                  ref
-                      .read(readStateProvider.notifier)
-                      .markContextUnread(channel.id, channelId: channel.id);
-                }
-              },
-            ),
-            const SizedBox(height: Grid.xs),
+                },
+              ),
+              const SizedBox(height: Grid.xs),
+            ],
             if (!channel.isDm)
               ListTile(
                 leading: const Icon(LucideIcons.folderInput),
@@ -280,14 +283,12 @@ class ChannelActionsSheet extends ConsumerWidget {
 
 class _ChannelQuickActionsRow extends StatelessWidget {
   const _ChannelQuickActionsRow({
-    required this.showStarAction,
     required this.isStarred,
     required this.isUnread,
     required this.onToggleStar,
     required this.onToggleRead,
   });
 
-  final bool showStarAction;
   final bool isStarred;
   final bool isUnread;
   final VoidCallback onToggleStar;
@@ -297,12 +298,11 @@ class _ChannelQuickActionsRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
     children: [
-      if (showStarAction)
-        _ChannelQuickAction(
-          icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
-          label: isStarred ? 'Unstar' : 'Star',
-          onTap: onToggleStar,
-        ),
+      _ChannelQuickAction(
+        icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
+        label: isStarred ? 'Unstar' : 'Star',
+        onTap: onToggleStar,
+      ),
       _ChannelQuickAction(
         icon: isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
         label: isUnread ? 'Mark Read' : 'Mark Unread',
