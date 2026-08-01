@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
@@ -27,6 +27,8 @@ const NUMBAT_INSTALL_TIMEOUT: Duration = Duration::from_secs(10);
 const RETENTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 static NUMBAT_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static NUMBAT_RETENTION_WORKERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static NUMBAT_VERIFICATION_BASELINES: OnceLock<Mutex<HashMap<String, (u64, u64)>>> =
+    OnceLock::new();
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +71,34 @@ fn active_health() -> NumbatGuardianHealth {
     }
 }
 
+fn record_verification_baseline(agent_pubkey: &str, generation: u64, offset: u64) {
+    let baselines = NUMBAT_VERIFICATION_BASELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut baselines) = baselines.lock() {
+        baselines.insert(agent_pubkey.to_string(), (generation, offset));
+    }
+}
+
+fn is_post_configuration_finding(
+    agent_pubkey: &str,
+    generation: u64,
+    next_offset: u64,
+    active_findings_observed: bool,
+) -> bool {
+    let baselines = NUMBAT_VERIFICATION_BASELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut baselines) = baselines.lock() else {
+        return false;
+    };
+    let Some((baseline_generation, baseline_offset)) = baselines.get(agent_pubkey).copied() else {
+        baselines.insert(agent_pubkey.to_string(), (generation, next_offset));
+        return false;
+    };
+    if baseline_generation != generation {
+        baselines.insert(agent_pubkey.to_string(), (generation, next_offset));
+        return false;
+    }
+    active_findings_observed && next_offset > baseline_offset
+}
+
 #[derive(Debug, Deserialize)]
 struct NumbatFindingRecord {
     schema_version: String,
@@ -95,6 +125,10 @@ fn numbat_findings_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, 
 
 fn numbat_findings_template(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(numbat_dir(app)?.join("${BUZZ_MANAGED_AGENT_PUBKEY}.ndjson"))
+}
+
+fn previous_findings_path(path: &Path) -> PathBuf {
+    path.with_extension("previous.ndjson")
 }
 
 fn health_path(app: &AppHandle, agent_pubkey: &str) -> Result<PathBuf, String> {
@@ -427,9 +461,34 @@ fn enforce_continuous_retention(path: &Path) -> Result<bool, String> {
         .and_then(|()| target.sync_all())
         .map_err(|error| format!("failed to persist retained Guardian storage: {error}"))?;
     set_private_permissions(&temporary, 0o600)?;
+    let previous = previous_findings_path(path);
+    if previous.exists() {
+        std::fs::remove_file(&previous)
+            .map_err(|error| format!("failed to expire prior Guardian storage: {error}"))?;
+    }
+    std::fs::rename(path, &previous)
+        .map_err(|error| format!("failed to preserve prior Guardian storage: {error}"))?;
     std::fs::rename(&temporary, path)
         .map_err(|error| format!("failed to replace Guardian storage after retention: {error}"))?;
     Ok(true)
+}
+
+fn read_previous_findings_tail(
+    path: &Path,
+    expected_context: Option<(&str, &str, &str, &str)>,
+    health: NumbatGuardianHealth,
+) -> Result<Vec<NumbatFindingProjection>, String> {
+    let previous = previous_findings_path(path);
+    let file_len = match previous.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("failed to inspect prior Guardian storage: {error}")),
+    };
+    let mut file = File::open(&previous)
+        .map_err(|error| format!("failed to open prior Guardian storage: {error}"))?;
+    let offset = align_to_next_record(&mut file, file_len.saturating_sub(MAX_BATCH_BYTES))?;
+    read_numbat_findings_from_path(&previous, offset, expected_context, health)
+        .map(|batch| batch.findings)
 }
 
 fn start_retention_worker(app: AppHandle, agent_pubkey: String) {
@@ -568,6 +627,11 @@ fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str)
     };
     write_health(app, agent_pubkey, &health);
     if health.state == "configured" {
+        if let Ok(path) = numbat_findings_path(app, agent_pubkey) {
+            let generation = findings_generation(&path).unwrap_or(0);
+            let offset = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            record_verification_baseline(agent_pubkey, generation, offset);
+        }
         start_retention_worker(app.clone(), agent_pubkey.to_string());
     }
 }
@@ -606,14 +670,34 @@ pub fn read_numbat_findings(
         expected_context,
         read_health(&app, &agent_pubkey),
     )?;
+    let active_findings_observed = !batch.findings.is_empty();
+    for finding in read_previous_findings_tail(&path, expected_context, batch.health.clone())? {
+        if !batch
+            .findings
+            .iter()
+            .any(|current| current.finding_id == finding.finding_id)
+        {
+            batch.findings.push(finding);
+        }
+    }
+    let physical_next_offset = batch.next_offset;
     batch.reset |= generation_reset;
-    batch.next_offset = encode_cursor(generation, batch.next_offset)?;
-    if !batch.findings.is_empty() && batch.health.state != "active" {
+    batch.next_offset = encode_cursor(generation, physical_next_offset)?;
+    if is_post_configuration_finding(
+        &agent_pubkey,
+        generation,
+        physical_next_offset,
+        active_findings_observed,
+    ) && batch.health.state != "active"
+    {
         batch.health = active_health();
         write_health(&app, &agent_pubkey, &batch.health);
     }
     Ok(batch)
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
@@ -833,8 +917,10 @@ mod tests {
 
         assert!(enforce_continuous_retention(&path).expect("retain"));
         let retained = std::fs::read(&path).expect("read retained");
+        let previous = std::fs::read(previous_findings_path(&path)).expect("read prior");
         assert!(retained.len() as u64 <= MAX_BACKLOG_BYTES + MAX_LINE_BYTES as u64);
         assert!(retained.ends_with(format!("{newest}\n").as_bytes()));
+        assert!(previous.ends_with(format!("{newest}\n").as_bytes()));
         assert!(!retained.starts_with(b"x"));
         assert!(!enforce_continuous_retention(&path).expect("already bounded"));
     }
