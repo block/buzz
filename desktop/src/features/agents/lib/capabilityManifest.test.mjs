@@ -98,14 +98,14 @@ function runtimeStatus(overrides = {}) {
   };
 }
 
-function observerEvent(seq, timestamp, kind, payload) {
+function observerEvent(seq, timestamp, kind, payload, sessionId = null) {
   return {
     seq,
     timestamp,
     kind,
     agentIndex: 0,
     channelId: null,
-    sessionId: null,
+    sessionId,
     turnId: null,
     payload,
   };
@@ -164,6 +164,10 @@ function manifest(overrides = {}) {
               secret: "config-canary",
             },
             capabilityManifest: {
+              modelApplication: {
+                requested: "observed-model",
+                applied: true,
+              },
               toolSources: [
                 { name: "github", kind: "mcp" },
                 { name: "/private/mcp", kind: "mcp" },
@@ -209,7 +213,9 @@ test("builds a ready manifest from separately sourced live evidence", () => {
   assert.equal(result.protocolVersion, "2");
   assert.deepEqual(result.model, {
     value: "observed-model",
-    source: "observed",
+    source: "applied",
+    requested: "observed-model",
+    matchesRequested: true,
   });
   assert.deepEqual(result.provider, {
     value: "configured-provider",
@@ -499,6 +505,8 @@ test("a new initialize invalidates session evidence from the previous process", 
   assert.deepEqual(result.model, {
     value: "configured-model",
     source: "configured",
+    requested: "configured-model",
+    matchesRequested: true,
   });
   assert.deepEqual(result.toolSources, []);
   assert.equal(result.toolSourcesState, "unknown");
@@ -532,6 +540,149 @@ test("runtime matching uses catalog facts without runtime-id render checks", () 
     [runtime()],
   );
   assert.equal(match?.id, "codex");
+});
+
+test("failed model application reports the runtime model and requested mismatch", () => {
+  const result = manifest({
+    observer: {
+      connectionState: "open",
+      events: [
+        observerEvent(1, "2026-07-26T01:01:00.000Z", "agent_initialized", {
+          initializeResult: {
+            protocolVersion: 2,
+            agentInfo: { name: "Codex ACP", version: "1.2.3" },
+            agentCapabilities: {},
+          },
+        }),
+        observerEvent(
+          2,
+          "2026-07-26T01:02:00.000Z",
+          "session_config_captured",
+          {
+            models: { currentModelId: "runtime-default" },
+            capabilityManifest: {
+              modelApplication: {
+                requested: "configured-model",
+                applied: false,
+              },
+            },
+          },
+        ),
+      ],
+    },
+  });
+
+  assert.deepEqual(result.model, {
+    value: "runtime-default",
+    source: "reported",
+    requested: "configured-model",
+    matchesRequested: false,
+  });
+});
+
+test("a new session config invalidates commands from the prior session", () => {
+  const result = manifest({
+    observer: {
+      connectionState: "open",
+      events: [
+        observerEvent(1, "2026-07-26T01:00:00.000Z", "agent_initialized", {
+          initializeResult: { agentCapabilities: {} },
+        }),
+        observerEvent(
+          2,
+          "2026-07-26T01:01:00.000Z",
+          "session_config_captured",
+          { capabilityManifest: {} },
+          "session-1",
+        ),
+        observerEvent(
+          3,
+          "2026-07-26T02:01:00.000Z",
+          "acp_read",
+          {
+            params: {
+              update: {
+                sessionUpdate: "available_commands_update",
+                availableCommands: [{ name: "prior_session_command" }],
+              },
+            },
+          },
+          "session-1",
+        ),
+        observerEvent(
+          4,
+          "2026-07-26T02:00:00.000Z",
+          "session_config_captured",
+          { capabilityManifest: {} },
+          "session-2",
+        ),
+      ],
+    },
+  });
+
+  assert.deepEqual(result.commands, []);
+  assert.equal(result.commandsState, "unknown");
+});
+
+test("observer reduction retains capability evidence after raw events are trimmed", () => {
+  resetAgentObserverStore();
+  injectObserverEventsForE2E(AGENT_PUBKEY, [
+    observerEvent(1, "2026-07-26T01:01:00.000Z", "agent_initialized", {
+      initializeResult: {
+        protocolVersion: 2,
+        agentInfo: { name: "Codex ACP", version: "1.0.0" },
+        agentCapabilities: { promptCapabilities: { image: true } },
+      },
+    }),
+    observerEvent(
+      2,
+      "2026-07-26T01:02:00.000Z",
+      "session_config_captured",
+      {
+        capabilityManifest: {
+          toolSources: [{ name: "github", kind: "mcp" }],
+        },
+      },
+    ),
+    observerEvent(3, "2026-07-26T01:03:00.000Z", "acp_read", {
+      params: {
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [{ name: "create_plan" }],
+        },
+      },
+    }),
+  ]);
+  injectObserverEventsForE2E(
+    AGENT_PUBKEY,
+    Array.from({ length: 3_001 }, (_, index) =>
+      observerEvent(
+        index + 4,
+        new Date(
+          Date.parse("2026-07-26T01:04:00.000Z") + index * 1_000,
+        ).toISOString(),
+        "agent_message_chunk",
+        { text: `irrelevant-${index}` },
+      ),
+    ),
+  );
+
+  const snapshot = getAgentObserverSnapshot(AGENT_PUBKEY, true);
+  assert.equal(snapshot.events.length, 3_000);
+  assert.equal(
+    snapshot.events.some((event) => event.kind === "agent_initialized"),
+    false,
+  );
+  const result = buildAgentCapabilityManifest({
+    agent: agent(),
+    runtime: runtime(),
+    runtimeStatus: runtimeStatus(),
+    presenceStatus: "online",
+    observer: snapshot,
+  });
+  assert.equal(result.runtime.version, "1.0.0");
+  assert.deepEqual(result.commands, ["create_plan"]);
+  assert.deepEqual(result.toolSources, ["github"]);
 });
 
 test("observer reset clears live manifest evidence for a community switch", () => {

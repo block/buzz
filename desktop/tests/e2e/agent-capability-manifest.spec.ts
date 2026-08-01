@@ -71,6 +71,10 @@ async function seedCapabilityEvidence(page: import("@playwright/test").Page) {
             payload: {
               models: { currentModelId: "claude-opus-4-5" },
               capabilityManifest: {
+                modelApplication: {
+                  requested: "claude-opus-4-5",
+                  applied: true,
+                },
                 toolSources: [
                   { name: "github", kind: "mcp" },
                   { name: "buzz-dev-mcp", kind: "mcp" },
@@ -176,7 +180,13 @@ test("renders owner-only readiness from catalog, lifecycle, and observer evidenc
   const manifest = await openRuntimeManifest(page);
   await expect(
     manifest.getByTestId("agent-capability-overall-status"),
-  ).toHaveText("Ready");
+  ).toHaveText("Ready locally");
+  await expect(manifest).toContainText(
+    "Local evidence for this owner and machine",
+  );
+  await expect(manifest).toContainText(
+    "not a public safety or reputation claim",
+  );
   await expect(
     manifest.getByTestId("agent-readiness-community"),
   ).toHaveAttribute("data-status", "ready");
@@ -186,6 +196,9 @@ test("renders owner-only readiness from catalog, lifecycle, and observer evidenc
   await expect(
     manifest.getByTestId("agent-capability-permission-mode"),
   ).toContainText("perToolAutoDecision");
+  await expect(
+    manifest.getByTestId("agent-capability-permission-mode"),
+  ).toContainText("Source: Buzz harness");
   await expect(manifest).toContainText("run_command");
   await expect(manifest).toContainText("buzz-dev-mcp");
   await waitForAnimations(page);
