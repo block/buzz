@@ -40,7 +40,9 @@ type ChannelScreenHeaderProps = {
   onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
+  onOpenChannelPanel: () => void;
   onToggleMembers: () => void;
+  channelPanelOpen?: boolean;
 };
 
 export function ChannelScreenHeader({
@@ -60,7 +62,9 @@ export function ChannelScreenHeader({
   transparentChrome = false,
   onJoinChannel,
   onManageChannel,
+  onOpenChannelPanel,
   onToggleMembers,
+  channelPanelOpen = false,
 }: ChannelScreenHeaderProps) {
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
@@ -90,7 +94,9 @@ export function ChannelScreenHeader({
         isAddBotOpen={isAddBotOpen}
         onAddBotOpenChange={onAddBotOpenChange}
         onManageChannel={onManageChannel}
+        onOpenChannelPanel={onOpenChannelPanel}
         onToggleMembers={onToggleMembers}
+        channelPanelOpen={channelPanelOpen}
         variant={actionsVariant}
       />
     )

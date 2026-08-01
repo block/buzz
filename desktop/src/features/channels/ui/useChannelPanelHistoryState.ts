@@ -26,7 +26,8 @@ export type { ChannelSearchKey } from "./channelSearchKeys";
  * tab), `agentSession` (agent session panel pubkey), `agentSessionChannel`
  * (optional channel scope for the agent session panel), `channelManagement`
  * (presence flag for the channel-management panel — open/closed only, so it
- * carries a sentinel `"1"` rather than an id), `autoSend` (draft auto-submit
+ * carries a sentinel `"1"` rather than an id), `panel` (presence flag for the
+ * signed channel-panel surface), `autoSend` (draft auto-submit
  * trigger — cleared surgically after the auto-submit fires so `thread` and
  * all other panel state are preserved).
  */
@@ -39,6 +40,7 @@ export type PanelValueSetter = (
 ) => void;
 
 const CHANNEL_MANAGEMENT_OPEN_VALUE = "1";
+const CHANNEL_PANEL_OPEN_VALUE = "1";
 
 export function useChannelPanelHistoryState() {
   const { applyPatch, values } = useHistorySearchState(CHANNEL_SEARCH_KEYS);
@@ -94,6 +96,12 @@ export function useChannelPanelHistoryState() {
     [applyPatch],
   );
 
+  const setChannelPanelOpen = React.useCallback(
+    (open: boolean, options?: PanelSetterOptions) =>
+      applyPatch({ panel: open ? CHANNEL_PANEL_OPEN_VALUE : null }, options),
+    [applyPatch],
+  );
+
   const clearMessageRouteTarget = React.useCallback(
     (options?: PanelSetterOptions) =>
       applyPatch({ messageId: null, threadRootId: null }, options),
@@ -112,6 +120,7 @@ export function useChannelPanelHistoryState() {
 
   return {
     channelManagementOpen: values.channelManagement != null,
+    channelPanelOpen: values.panel != null,
     clearAutoSend,
     clearMessageRouteTarget,
     openAgentSessionChannelId: values.agentSessionChannel,
@@ -121,6 +130,7 @@ export function useChannelPanelHistoryState() {
     profilePanelTab: profilePanelTabFromSearch(values.profileTab),
     profilePanelView: profilePanelViewFromSearch(values.profileView),
     setChannelManagementOpen,
+    setChannelPanelOpen,
     setOpenAgentSessionChannelId,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,

@@ -78,6 +78,7 @@ import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
+import { useChannelPanelActions } from "./useChannelPanelActions";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
@@ -98,6 +99,7 @@ export function ChannelScreen({
 }: ChannelScreenProps) {
   const { goHome } = useAppNavigation();
   const { activeCommunity } = useCommunities();
+  const panelHistory = useChannelPanelHistoryState();
   const {
     markChannelRead,
     markChannelUnread,
@@ -117,6 +119,7 @@ export function ChannelScreen({
   } = useAppShell();
   const {
     channelManagementOpen,
+    channelPanelOpen,
     clearAutoSend,
     clearMessageRouteTarget,
     openAgentSessionChannelId,
@@ -126,13 +129,14 @@ export function ChannelScreen({
     profilePanelTab,
     profilePanelView,
     setChannelManagementOpen,
+    setChannelPanelOpen,
     setOpenAgentSessionChannelId,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
     setProfilePanelTab,
     setProfilePanelPubkey,
     setProfilePanelView,
-  } = useChannelPanelHistoryState();
+  } = panelHistory;
   const {
     canReset: canResetThreadPanelWidth,
     onResetWidth: handleThreadPanelWidthReset,
@@ -262,7 +266,6 @@ export function ChannelScreen({
     resolvedMessages,
     threadReplyEvents,
   );
-
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -614,6 +617,26 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
+  const {
+    handleManageChannel,
+    handleOpenAgentSessionWithPanelClosed,
+    handleOpenChannelPanel,
+    handleOpenProfilePanelWithPanelClosed,
+    handleOpenThreadWithPanelClosed,
+  } = useChannelPanelActions({
+    activeChannelType: activeChannel?.channelType,
+    channelManagementOpen,
+    channelPanelOpen,
+    handleCloseAgentSession,
+    handleOpenAgentSession,
+    handleOpenProfilePanel,
+    handleOpenThreadAndCloseAgentSession,
+    history: panelHistory,
+    openGlobalChannelManagement,
+    setExpandedThreadReplyIds,
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
+  });
   const settledChannelIdRef = React.useRef<string | null>(null);
   const hasSettledThisChannel =
     activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
@@ -688,12 +711,12 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
-      channelManagementOpen,
+      channelManagementOpen ||
+      channelPanelOpen,
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
@@ -722,39 +745,10 @@ export function ChannelScreen({
     resetKey: activeChannelId,
     enabled: !isSinglePanelView,
   });
-
-  const handleManageChannel = React.useCallback(() => {
-    if (activeChannel?.channelType === "forum") {
-      openGlobalChannelManagement();
-      return;
-    }
-
-    if (channelManagementOpen) {
-      setChannelManagementOpen(false);
-      return;
-    }
-
-    setOpenThreadHeadId(null);
-    setExpandedThreadReplyIds(new Set());
-    setThreadScrollTargetId(null);
-    setThreadReplyTargetId(null);
-    handleCloseAgentSession();
-    setProfilePanelPubkey(null);
-    setChannelManagementOpen(true);
-  }, [
-    activeChannel?.channelType,
-    channelManagementOpen,
-    openGlobalChannelManagement,
-    setChannelManagementOpen,
-    setOpenThreadHeadId,
-    handleCloseAgentSession,
-    setProfilePanelPubkey,
-  ]);
   const handleToggleMembers = React.useCallback(
     () => setIsMembersSidebarOpen((prev) => !prev),
     [],
   );
-
   const channelHeader = React.useMemo(
     () => (
       <ChannelScreenHeader
@@ -772,7 +766,9 @@ export function ChannelScreen({
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
+        onOpenChannelPanel={handleOpenChannelPanel}
         onToggleMembers={handleToggleMembers}
+        channelPanelOpen={channelPanelOpen}
         showHeaderContent={!isSinglePanelView}
         transparentChrome={activeChannel?.channelType !== "forum"}
       />
@@ -792,6 +788,8 @@ export function ChannelScreen({
       joinChannelMutation.mutateAsync,
       handleManageChannel,
       handleToggleMembers,
+      channelPanelOpen,
+      handleOpenChannelPanel,
       isSinglePanelView,
     ],
   );
@@ -862,6 +860,7 @@ export function ChannelScreen({
                   botTypingEntries={botTypingEntries}
                   channelFind={channelFind}
                   channelManagementOpen={channelManagementOpen}
+                  channelPanelOpen={channelPanelOpen}
                   currentPubkey={currentPubkey}
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
@@ -921,6 +920,7 @@ export function ChannelScreen({
                       : undefined
                   }
                   onCloseChannelManagement={handleCloseChannelManagement}
+                  onCloseChannelPanel={() => setChannelPanelOpen(false)}
                   onCloseThread={handleCloseThread}
                   onDelete={
                     activeChannel?.archivedAt ? undefined : handleDelete
@@ -932,12 +932,12 @@ export function ChannelScreen({
                   onMarkUnread={handleMessageMarkUnread}
                   onMarkRead={handleMessageMarkRead}
                   onExpandThreadReplies={handleExpandThreadReplies}
-                  onOpenAgentSession={handleOpenAgentSession}
+                  onOpenAgentSession={handleOpenAgentSessionWithPanelClosed}
                   onOpenDm={handleOpenDm}
-                  onOpenProfilePanel={handleOpenProfilePanel}
+                  onOpenProfilePanel={handleOpenProfilePanelWithPanelClosed}
                   onResetThreadPanelWidth={handleThreadPanelWidthReset}
                   onCloseProfilePanel={handleCloseProfilePanel}
-                  onOpenThread={handleOpenThreadAndCloseAgentSession}
+                  onOpenThread={handleOpenThreadWithPanelClosed}
                   onSelectThreadReplyTarget={handleSelectThreadReplyTarget}
                   onSendMessage={handleSendMessage}
                   onSendVideoReviewComment={effectiveSendVideoReviewComment}

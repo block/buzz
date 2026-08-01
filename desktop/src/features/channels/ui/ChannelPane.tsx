@@ -27,6 +27,7 @@ import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
+import { SignedChannelPanelAuxiliaryPanel } from "@/features/channels/ui/SignedChannelPanelAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
@@ -64,6 +65,7 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+const EMPTY_SIGNED_CHANNEL_PANEL_STATE = { kind: "empty" as const };
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
@@ -75,6 +77,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   botTypingEntries,
   channelFind,
   channelManagementOpen = false,
+  channelPanelOpen = false,
   currentPubkey,
   editTarget = null,
   fetchOlder,
@@ -104,6 +107,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onBackFromAgentSession,
   onCloseAgentSession,
   onCloseChannelManagement,
+  onCloseChannelPanel,
   onChannelManagementDeleted,
   onCloseProfilePanel,
   onAddAgent,
@@ -536,6 +540,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
     (channelManagementOpen ||
+      channelPanelOpen ||
       Boolean(threadHeadMessage) ||
       shouldShowThreadSkeleton ||
       Boolean(activeChannel && selectedAgent) ||
@@ -811,16 +816,21 @@ export const ChannelPane = React.memo(function ChannelPane({
         </section>
       ) : null}
 
-      {/*
-       * `AnimatePresence` keeps the focus thread drawer mounted through its exit
-       * animation — without it the drawer's own existence condition
-       * (`useFocusThreadDrawer`, which is derived from `threadHeadMessage`) goes
-       * false on the same frame as the close, and there is nothing left to
-       * animate. It can hold the real thread through the exit rather than a
-       * frozen snapshot because the panel is fully prop-driven.
-       */}
+      {/* Keep the focus thread drawer mounted through its exit animation. */}
       <AnimatePresence onExitComplete={markExitComplete}>
-        {channelManagementOpen && activeChannel ? (
+        {channelPanelOpen && activeChannel ? (
+          <SignedChannelPanelAuxiliaryPanel
+            canResetPanelWidth={canResetThreadPanelWidth}
+            channelName={activeChannel.name}
+            isSinglePanelView={isSinglePanelView}
+            onClose={onCloseChannelPanel ?? (() => undefined)}
+            onResetPanelWidth={onResetThreadPanelWidth}
+            onPanelResizeStart={onThreadPanelResizeStart}
+            panelWidthPx={threadPanelWidthPx}
+            state={EMPTY_SIGNED_CHANNEL_PANEL_STATE}
+            useSplitAuxiliaryPane={useSplitAuxiliaryPane}
+          />
+        ) : channelManagementOpen && activeChannel ? (
           <ChannelManagementAuxiliaryPanel
             activeChannel={activeChannel}
             canResetThreadPanelWidth={canResetThreadPanelWidth}

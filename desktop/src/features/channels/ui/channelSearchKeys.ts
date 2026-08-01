@@ -11,6 +11,7 @@ export const CHANNEL_SEARCH_KEYS = [
   "autoSend",
   "channelManagement",
   "messageId",
+  "panel",
   "profile",
   "profileTab",
   "profileView",

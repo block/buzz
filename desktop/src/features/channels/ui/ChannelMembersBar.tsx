@@ -1,4 +1,4 @@
-import { EllipsisVertical, Settings2, Users } from "lucide-react";
+import { EllipsisVertical, PanelRight, Settings2, Users } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -32,7 +32,9 @@ type ChannelMembersBarProps = {
   isAddBotOpen?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
+  onOpenChannelPanel?: () => void;
   onToggleMembers: () => void;
+  channelPanelOpen?: boolean;
   variant?: "inline" | "compact";
 };
 
@@ -42,7 +44,9 @@ export function ChannelMembersBar({
   isAddBotOpen: isAddBotOpenProp,
   onAddBotOpenChange,
   onManageChannel,
+  onOpenChannelPanel,
   onToggleMembers,
+  channelPanelOpen = false,
   variant = "inline",
 }: ChannelMembersBarProps) {
   const [uncontrolledAddBotOpen, setUncontrolledAddBotOpen] =
@@ -170,6 +174,15 @@ export function ChannelMembersBar({
             <Settings2 />
             <span>Manage channel</span>
           </DropdownMenuItem>
+          {channel.channelType !== "forum" && onOpenChannelPanel ? (
+            <DropdownMenuItem
+              data-testid="channel-panel-trigger"
+              onSelect={onOpenChannelPanel}
+            >
+              <PanelRight />
+              <span>{channelPanelOpen ? "Close panel" : "Open panel"}</span>
+            </DropdownMenuItem>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
     ) : (
@@ -210,6 +223,30 @@ export function ChannelMembersBar({
           </TooltipTrigger>
           <TooltipContent>Channel settings</TooltipContent>
         </Tooltip>
+
+        {channel.channelType !== "forum" && onOpenChannelPanel ? (
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={
+                  channelPanelOpen
+                    ? "Close channel panel"
+                    : "Open channel panel"
+                }
+                className="h-8 px-2.5"
+                data-testid="channel-panel-trigger"
+                onClick={onOpenChannelPanel}
+                type="button"
+                variant={channelPanelOpen ? "secondary" : "outline"}
+              >
+                <PanelRight />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {channelPanelOpen ? "Close channel panel" : "Open channel panel"}
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
       </div>
     );
 
