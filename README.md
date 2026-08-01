@@ -167,6 +167,24 @@ Want a single-node / VPS relay instead of the local-dev stack? Use the productio
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
+### I want to use Goose with buzz-acp
+
+Buzz's ACP harness supports Goose out of the box. A minimal local setup looks like this:
+
+```bash
+goose configure
+# or edit ~/.config/goose/config.yaml directly
+```
+
+Point Goose at the provider and model you want, then verify the runtime before wiring it to Buzz:
+
+```bash
+goose info -v
+goose run --no-session -q -t 'Reply with exactly: goose-openrouter-ok'
+```
+
+If you keep your API key in macOS Keychain or another secret store, that works too; Goose only needs the key available when it starts. Once Goose is configured, point `buzz-acp` at it the same way you would any other ACP runtime and use your local Buzz relay URL for the workspace.
+
 ---
 
 ## Windows prerequisites
