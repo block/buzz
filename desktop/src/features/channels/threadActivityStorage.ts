@@ -1,3 +1,4 @@
+import { KIND_STREAM_MESSAGE_EDIT } from "@/shared/constants/kinds";
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 
 export type ThreadActivityItem = {
@@ -94,6 +95,18 @@ export function writeActivityToStorage(
   }
 }
 
+/** The `e` tag an edit addresses, if it has one. */
+function editTargetId(item: ThreadActivityItem): string | null {
+  if (item.kind !== KIND_STREAM_MESSAGE_EDIT) {
+    return null;
+  }
+  return (
+    item.tags.find(
+      (tag) => tag[0] === "e" && typeof tag[1] === "string",
+    )?.[1] ?? null
+  );
+}
+
 export function addThreadActivityItems(
   existing: ThreadActivityItem[],
   items: ThreadActivityItem[],
@@ -102,13 +115,35 @@ export function addThreadActivityItems(
     return { didAdd: false, items: existing };
   }
 
-  const existingIds = new Set(existing.map((item) => item.id));
-  const newItems = items.filter((item) => !existingIds.has(item.id));
-  if (newItems.length === 0) {
-    return { didAdd: false, items: existing };
+  // An edit is not a new activity row — it replaces the content of the row it
+  // targets. Activity rows otherwise keep the content they were created with,
+  // so a card updated after it landed in Home would show its original
+  // fallbackText forever while the detail view showed the current spec.
+  let overlaid = existing;
+  let didOverlay = false;
+  for (const item of items) {
+    const targetId = editTargetId(item);
+    if (!targetId) {
+      continue;
+    }
+    const index = overlaid.findIndex((row) => row.id === targetId);
+    if (index === -1 || overlaid[index].content === item.content) {
+      continue;
+    }
+    overlaid = [...overlaid];
+    overlaid[index] = { ...overlaid[index], content: item.content };
+    didOverlay = true;
   }
 
-  const merged = [...existing, ...newItems].sort(
+  const existingIds = new Set(overlaid.map((item) => item.id));
+  const newItems = items.filter(
+    (item) => !existingIds.has(item.id) && editTargetId(item) === null,
+  );
+  if (newItems.length === 0) {
+    return { didAdd: didOverlay, items: overlaid };
+  }
+
+  const merged = [...overlaid, ...newItems].sort(
     (left, right) => left.createdAt - right.createdAt,
   );
   const capped =

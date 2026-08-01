@@ -1,3 +1,4 @@
+import { KIND_SURFACE } from "@/shared/constants/kinds";
 import { Bell, Clock, Ellipsis, ExternalLink, MailOpen } from "lucide-react";
 import * as React from "react";
 
@@ -407,12 +408,22 @@ export function InboxListPane({
                     : "font-semibold text-foreground",
                 )}
               >
-                <Markdown
-                  className="inbox-preview-markdown text-inherit leading-5"
-                  content={item.preview}
-                  interactive={false}
-                  mentionNames={item.mentionNames}
-                />
+                {item.item.kind === KIND_SURFACE ? (
+                  // A surface preview is the spec's plain fallbackText. Routing
+                  // it through markdown would let an author reclaim
+                  // presentation control (**bold**, headings, images) from
+                  // inside a data-only payload — see docs/nips/NIP-SC.md.
+                  <span className="line-clamp-2 whitespace-pre-wrap break-words">
+                    {item.preview}
+                  </span>
+                ) : (
+                  <Markdown
+                    className="inbox-preview-markdown text-inherit leading-5"
+                    content={item.preview}
+                    interactive={false}
+                    mentionNames={item.mentionNames}
+                  />
+                )}
               </div>
             </div>
           </div>

@@ -1,9 +1,6 @@
 import type { StoredProjectsAgentConversation } from "@/features/projects/lib/projectAgentConversationStorage";
 import type { Channel } from "@/shared/api/types";
-import {
-  KIND_STREAM_MESSAGE,
-  KIND_STREAM_MESSAGE_V2,
-} from "@/shared/constants/kinds";
+import { CHANNEL_MESSAGE_CONVERSATIONAL_KINDS } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 /**
@@ -48,8 +45,10 @@ export function visibleConversationMessages<
   return events
     .filter(
       (event) =>
-        (event.kind === KIND_STREAM_MESSAGE ||
-          event.kind === KIND_STREAM_MESSAGE_V2) &&
+        // Conversational kinds, so an agent answering with a surface card is
+        // not silently dropped from the inline thread. Mirrors Rust's
+        // CONVERSATIONAL_KINDS.
+        CHANNEL_MESSAGE_CONVERSATIONAL_KINDS.has(event.kind) &&
         event.created_at >= visibleAfter,
     )
     .sort((left, right) => left.created_at - right.created_at);

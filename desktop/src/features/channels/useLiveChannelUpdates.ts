@@ -11,6 +11,7 @@ import {
 import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  KIND_STREAM_MESSAGE_EDIT,
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
 } from "@/shared/constants/kinds";
@@ -272,6 +273,13 @@ export function useLiveChannelUpdates(
         event.id,
         SEEN_NOTIFICATION_EVENT_LIMIT,
       );
+    // An edit is not an unread trigger, so it never reaches the notification
+    // path below — but Home activity rows must still show current content, and
+    // the activity merge treats an edit as an overlay on the row it targets.
+    if (event.kind === KIND_STREAM_MESSAGE_EDIT) {
+      options.onThreadReplyNotification?.(channelId, event);
+    }
+
     const isThreadedReply = isThreadReply(event.tags);
 
     // DM alerts and every other notification side effect share this delivery

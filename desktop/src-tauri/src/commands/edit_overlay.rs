@@ -25,9 +25,15 @@ use crate::app_state::AppState;
 use crate::models::FeedItemInfo;
 use crate::relay::query_relay;
 
-/// Relay filters cap how many values a tag filter may carry; chunk the id list
-/// so a large page still resolves in a bounded number of queries.
-const EDIT_LOOKUP_CHUNK: usize = 100;
+/// Filters sent per query. One filter per target keeps a heavily-edited event
+/// from crowding out other targets — a single OR-ed `#e` filter shares one
+/// row budget (the relay caps a filter at 1000 rows), so one noisy card could
+/// hide every other card's edit.
+const EDIT_FILTERS_PER_QUERY: usize = 25;
+
+/// Rows per target. Only the newest edit is applied, but a couple of extra
+/// rows let the `(created_at, id)` tie-break see same-second edits.
+const EDIT_ROWS_PER_TARGET: usize = 4;
 
 /// Fetch the latest edit content for exactly `target_ids`.
 ///
@@ -40,15 +46,22 @@ pub(crate) async fn fetch_latest_edits(
     channel_id: Option<&str>,
 ) -> HashMap<String, String> {
     let mut overlay: HashMap<String, String> = HashMap::new();
-    for chunk in target_ids.chunks(EDIT_LOOKUP_CHUNK) {
-        let mut filter = serde_json::json!({
-            "kinds": [KIND_STREAM_MESSAGE_EDIT],
-            "#e": chunk,
-        });
-        if let Some(channel_id) = channel_id {
-            filter["#h"] = serde_json::json!([channel_id]);
-        }
-        match query_relay(state, &[filter]).await {
+    for chunk in target_ids.chunks(EDIT_FILTERS_PER_QUERY) {
+        let filters: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|id| {
+                let mut filter = serde_json::json!({
+                    "kinds": [KIND_STREAM_MESSAGE_EDIT],
+                    "#e": [id],
+                    "limit": EDIT_ROWS_PER_TARGET,
+                });
+                if let Some(channel_id) = channel_id {
+                    filter["#h"] = serde_json::json!([channel_id]);
+                }
+                filter
+            })
+            .collect();
+        match query_relay(state, &filters).await {
             Ok(events) => overlay.extend(latest_edit_by_target(&events)),
             Err(error) => {
                 tracing::warn!(

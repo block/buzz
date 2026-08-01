@@ -365,8 +365,14 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
 /// Best-effort: a failed lookup leaves original content rather than failing
 /// the read. Edit events already present in `events` are left in place — this
 /// only rewrites the content of their targets.
-async fn overlay_latest_edits(client: &BuzzClient, events: &mut [serde_json::Value]) {
+pub(crate) async fn overlay_latest_edits(client: &BuzzClient, events: &mut Vec<serde_json::Value>) {
     const EDIT_KIND: u64 = 40003;
+    // One filter per target: a single OR-ed `#e` filter shares one row budget
+    // (the relay caps a filter at 1000 rows), so one heavily-edited event could
+    // hide every other target's edit. A few rows each leaves room for the
+    // `(created_at, id)` tie-break to see same-second edits.
+    const FILTERS_PER_QUERY: usize = 25;
+    const ROWS_PER_TARGET: usize = 4;
 
     let target_ids: Vec<String> = events
         .iter()
@@ -377,11 +383,23 @@ async fn overlay_latest_edits(client: &BuzzClient, events: &mut [serde_json::Val
         return;
     }
 
-    let filter = serde_json::json!({ "kinds": [EDIT_KIND], "#e": target_ids });
-    let Ok(raw) = client.query(&filter).await else {
-        return;
-    };
-    let edits: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    let mut edits: Vec<serde_json::Value> = Vec::new();
+    for chunk in target_ids.chunks(FILTERS_PER_QUERY) {
+        let filters: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "kinds": [EDIT_KIND],
+                    "#e": [id],
+                    "limit": ROWS_PER_TARGET,
+                })
+            })
+            .collect();
+        let Ok(raw) = client.query_multi(&filters).await else {
+            continue;
+        };
+        edits.extend(serde_json::from_str::<Vec<serde_json::Value>>(&raw).unwrap_or_default());
+    }
 
     // target id -> (created_at, edit id, content)
     let mut latest: std::collections::HashMap<String, (u64, String, String)> =
@@ -420,6 +438,7 @@ async fn overlay_latest_edits(client: &BuzzClient, events: &mut [serde_json::Val
         }
     }
 
+    let mut applied: std::collections::HashSet<String> = std::collections::HashSet::new();
     for event in events.iter_mut() {
         if event.get("kind").and_then(|v| v.as_u64()) == Some(EDIT_KIND) {
             continue;
@@ -431,8 +450,31 @@ async fn overlay_latest_edits(client: &BuzzClient, events: &mut [serde_json::Val
             if let Some(obj) = event.as_object_mut() {
                 obj.insert("content".into(), serde_json::json!(content));
             }
+            applied.insert(id);
         }
     }
+
+    // An edit whose target is in this page has been folded into that message,
+    // so the raw row would just duplicate it. An edit whose target is NOT here
+    // (an older message updated after this window) is kept: it is the only
+    // signal a polling reader gets that something outside the page changed.
+    events.retain(|event| {
+        if event.get("kind").and_then(|v| v.as_u64()) != Some(EDIT_KIND) {
+            return true;
+        }
+        event
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .and_then(|tags| {
+                tags.iter().find_map(|tag| {
+                    let parts = tag.as_array()?;
+                    (parts.first()?.as_str()? == "e")
+                        .then(|| parts.get(1)?.as_str().map(str::to_string))
+                        .flatten()
+                })
+            })
+            .is_none_or(|target| !applied.contains(&target))
+    });
 }
 
 pub async fn cmd_get_messages(
@@ -447,8 +489,13 @@ pub async fn cmd_get_messages(
     validate_uuid(channel_id)?;
     let limit = limit.unwrap_or(50).min(200);
 
+    // Edits are part of the window on purpose: a card published before `since`
+    // and updated after it produces only a kind:40003 event, so a polling
+    // reader that asked for content kinds alone would never learn it changed.
+    // `overlay_latest_edits` folds an edit into its target when that target is
+    // also in the page, and leaves it as its own row when it is not.
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40008, 40110, 45001, 45003],
+        "kinds": [9, 40002, 40003, 40008, 40110, 45001, 45003],
         "#h": [channel_id],
         "limit": limit
     });

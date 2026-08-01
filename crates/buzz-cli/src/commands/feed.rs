@@ -40,6 +40,10 @@ pub async fn cmd_get_feed(
 
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    // An edit carries no `p` tag, so a mentioned card would otherwise stay on
+    // the spec it was first published with — including on startup recovery,
+    // which is exactly when an agent needs current state.
+    crate::commands::messages::overlay_latest_edits(client, &mut events).await;
     events.sort_by_key(|e| Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0)));
     let normalized = normalize_events(&events);
     let output = match format {

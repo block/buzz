@@ -86,6 +86,13 @@ export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_FORUM_COMMENT,
 ] as const;
 
+// Kinds that are a human-visible message someone wrote — the conversational
+// set. Mirrors `CONVERSATIONAL_KINDS` in crates/buzz-core/src/kind.rs (parity
+// asserted in kinds.test.mjs). Use this wherever a reader asks "is this a
+// message?", so a new content kind lands everywhere at once.
+export const CHANNEL_MESSAGE_CONVERSATIONAL_KINDS: ReadonlySet<number> =
+  new Set([KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_SURFACE]);
+
 // Keep this in sync with the Home-feed mention query in buzz-db.
 export const HOME_MENTION_EVENT_KINDS = [...CHANNEL_MESSAGE_EVENT_KINDS];
 
