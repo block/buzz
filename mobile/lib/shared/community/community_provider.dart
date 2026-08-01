@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth_provider.dart';
 import '../push/push_bridge.dart';
+import '../push/push_subscription.dart';
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -40,6 +41,9 @@ class _CommunitySnapshotSync {
             community.relayUrl,
             community.pubkey,
             community.nsec,
+            buzzPushSubscriptionStateFingerprint(
+              community.pushSubscriptionState,
+            ),
           ].join('\u0000'),
         )
         .join('\u0001');
@@ -139,6 +143,33 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     state = AsyncData([...state.value ?? []]);
     // Invalidate auth so AuthState.community reflects the new active community.
     ref.invalidate(authProvider);
+  }
+
+  Future<void> updateDesiredPushSubscriptions(
+    String id,
+    List<BuzzPushSubscription> desired,
+  ) async {
+    final storage = ref.read(communityStorageProvider);
+    final current = state.value ?? await storage.loadAll();
+    final index = current.indexWhere((community) => community.id == id);
+    if (index < 0) return;
+
+    final community = current[index];
+    if (buzzPushSubscriptionsFingerprint(
+          community.pushSubscriptionState.desired,
+        ) ==
+        buzzPushSubscriptionsFingerprint(desired)) {
+      return;
+    }
+    final updated = community.copyWith(
+      pushSubscriptionState: community.pushSubscriptionState.withDesired(
+        desired,
+      ),
+    );
+    await storage.save(updated);
+    final updatedList = [...current]..[index] = updated;
+    state = AsyncData(updatedList);
+    await syncCommunitySnapshot(ref, updatedList);
   }
 
   Future<void> renameCommunity(String id, String name) async {

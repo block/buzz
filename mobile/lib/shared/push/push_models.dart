@@ -1,4 +1,5 @@
 import '../relay/nostr_models.dart';
+import 'push_subscription.dart';
 
 const buzzPushFallbackBody = 'Reconnect to your relay now';
 
@@ -7,12 +8,14 @@ class BuzzPushCommunitySnapshot {
   final String name;
   final String relayUrl;
   final String? pubkey;
+  final BuzzPushLeaseSubscriptionState pushSubscriptionState;
 
   const BuzzPushCommunitySnapshot({
     required this.id,
     required this.name,
     required this.relayUrl,
     this.pubkey,
+    required this.pushSubscriptionState,
   });
 
   Map<String, dynamic> toJson() => {
@@ -20,6 +23,7 @@ class BuzzPushCommunitySnapshot {
     'name': name,
     'relayUrl': relayUrl,
     if (pubkey != null) 'pubkey': pubkey,
+    'pushSubscriptionState': pushSubscriptionState.toJson(),
   };
 
   factory BuzzPushCommunitySnapshot.fromJson(Map<String, dynamic> json) {
@@ -28,6 +32,9 @@ class BuzzPushCommunitySnapshot {
       name: json['name'] as String,
       relayUrl: json['relayUrl'] as String,
       pubkey: json['pubkey'] as String?,
+      pushSubscriptionState: BuzzPushLeaseSubscriptionState.fromJson(
+        Map<String, dynamic>.from(json['pushSubscriptionState'] as Map),
+      ),
     );
   }
 }

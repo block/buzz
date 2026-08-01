@@ -1,5 +1,7 @@
 import 'package:uuid/uuid.dart';
 
+import '../push/push_subscription.dart';
+
 const _uuid = Uuid();
 const _sentinel = Object();
 
@@ -9,6 +11,7 @@ class Community {
   final String relayUrl;
   final String? pubkey;
   final String? nsec;
+  final BuzzPushLeaseSubscriptionState pushSubscriptionState;
   final DateTime addedAt;
 
   const Community({
@@ -17,6 +20,7 @@ class Community {
     required this.relayUrl,
     this.pubkey,
     this.nsec,
+    this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     required this.addedAt,
   });
 
@@ -41,6 +45,7 @@ class Community {
     String? relayUrl,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
+    BuzzPushLeaseSubscriptionState? pushSubscriptionState,
   }) {
     return Community(
       id: id,
@@ -48,6 +53,8 @@ class Community {
       relayUrl: relayUrl ?? this.relayUrl,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
+      pushSubscriptionState:
+          pushSubscriptionState ?? this.pushSubscriptionState,
       addedAt: addedAt,
     );
   }
@@ -58,6 +65,7 @@ class Community {
     'relayUrl': relayUrl,
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
+    'pushSubscriptionState': pushSubscriptionState.toJson(),
     'addedAt': addedAt.toIso8601String(),
   };
 
@@ -67,6 +75,11 @@ class Community {
     relayUrl: json['relayUrl'] as String,
     pubkey: json['pubkey'] as String?,
     nsec: json['nsec'] as String?,
+    pushSubscriptionState: json['pushSubscriptionState'] == null
+        ? const BuzzPushLeaseSubscriptionState.desired()
+        : BuzzPushLeaseSubscriptionState.fromJson(
+            Map<String, dynamic>.from(json['pushSubscriptionState'] as Map),
+          ),
     addedAt: DateTime.parse(json['addedAt'] as String),
   );
 
