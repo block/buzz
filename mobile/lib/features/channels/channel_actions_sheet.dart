@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/sheet_divider.dart';
@@ -64,13 +65,28 @@ class ChannelActionsSheet extends ConsumerWidget {
     final membersAsync = channel.isDm
         ? const AsyncValue<List<ChannelMember>>.data([])
         : ref.watch(channelMembersProvider(channel.id));
+    final agentOwnersAsync = channel.isDm
+        ? const AsyncValue<Map<String, String>>.data({})
+        : ref.watch(agentOwnersProvider);
     final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
     final currentMember = membersAsync.value?.cast<ChannelMember?>().firstWhere(
       (member) => member?.pubkey.toLowerCase() == currentPubkey,
       orElse: () => null,
     );
-    final canArchive = currentMember?.isElevated == true && !channel.isArchived;
-    final canDelete = currentMember?.isOwner == true;
+    final ownsOwnerAgent = membersAsync.value?.any(
+      (member) =>
+          member.isOwner &&
+          agentOwnersAsync.value?[member.pubkey.toLowerCase()]?.toLowerCase() ==
+              currentPubkey,
+    );
+    final canArchive =
+        !channel.isArchived &&
+        (currentMember?.isElevated == true || ownsOwnerAgent == true);
+    final canDelete = currentMember?.isOwner == true || ownsOwnerAgent == true;
+    final lifecycleCapabilitiesLoading =
+        membersAsync.isLoading || agentOwnersAsync.isLoading;
+    final lifecycleCapabilitiesUnavailable =
+        membersAsync.hasError || agentOwnersAsync.hasError;
 
     void close() => Navigator.of(context).pop();
 
@@ -219,7 +235,7 @@ class ChannelActionsSheet extends ConsumerWidget {
                         .leaveChannel(channel.id),
                   ),
                 ),
-              if (membersAsync.isLoading)
+              if (lifecycleCapabilitiesLoading)
                 const ListTile(
                   enabled: false,
                   leading: BuzzLoadingIndicator(
@@ -228,7 +244,7 @@ class ChannelActionsSheet extends ConsumerWidget {
                   ),
                   title: Text('Loading channel actions…'),
                 )
-              else if (membersAsync.hasError)
+              else if (lifecycleCapabilitiesUnavailable)
                 const ListTile(
                   enabled: false,
                   leading: Icon(LucideIcons.triangleAlert),

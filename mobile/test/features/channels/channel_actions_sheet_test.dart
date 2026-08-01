@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
@@ -27,11 +28,15 @@ Widget _app({
   required Channel channel,
   required Future<List<ChannelMember>> Function() loadMembers,
   bool isUnread = false,
+  AsyncValue<Map<String, String>> agentOwners = const AsyncValue.data(
+    <String, String>{},
+  ),
   ChannelActions Function(Ref ref)? createChannelActions,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
     channelMembersProvider(channel.id).overrideWith((ref) => loadMembers()),
+    agentOwnersProvider.overrideWithValue(agentOwners),
     if (createChannelActions != null)
       channelActionsProvider.overrideWith(createChannelActions),
   ],
@@ -144,6 +149,67 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Archive channel'), findsOneWidget);
+    expect(find.text('Delete channel'), findsNothing);
+  });
+
+  testWidgets('verified owner agent grants archive and delete', (tester) async {
+    const agentPubkey = 'agent';
+    await tester.pumpWidget(
+      _app(
+        channel: _channel(),
+        agentOwners: const AsyncValue.data({agentPubkey: _currentPubkey}),
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: agentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Archive channel'), findsOneWidget);
+    expect(find.text('Delete channel'), findsOneWidget);
+  });
+
+  testWidgets('owned non-owner agent grants no lifecycle actions', (
+    tester,
+  ) async {
+    const agentPubkey = 'agent';
+    await tester.pumpWidget(
+      _app(
+        channel: _channel(),
+        agentOwners: const AsyncValue.data({agentPubkey: _currentPubkey}),
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: agentPubkey,
+            role: 'bot',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Archive channel'), findsNothing);
+    expect(find.text('Delete channel'), findsNothing);
+  });
+
+  testWidgets('agent ownership loading keeps lifecycle actions pending', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        channel: _channel(),
+        agentOwners: const AsyncValue.loading(),
+        loadMembers: () async => const [],
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Loading channel actions…'), findsOneWidget);
+    expect(find.text('Archive channel'), findsNothing);
     expect(find.text('Delete channel'), findsNothing);
   });
 
