@@ -101,9 +101,9 @@ versions in the table above.
 #### Linux: Tauri system libraries
 
 Hermit pins language toolchains, not system libraries. On Linux, the desktop
-app's Rust crates link against GTK and WebKitGTK, so `just ci` (and any
-`just desktop-tauri-*` recipe) needs these installed system-wide first. On
-Debian/Ubuntu:
+app's Rust crates link against GTK and WebKitGTK, so `just dev`, `just ci`
+(and any `just desktop-tauri-*` recipe) needs these installed system-wide
+first. On Debian/Ubuntu:
 
 ```bash
 sudo apt-get install -y --no-install-recommends \
@@ -118,8 +118,9 @@ under different package names — see the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for the
 equivalents.
 
-Without them, `just ci` fails partway through `just check` with a pkg-config
-error such as:
+`just dev` checks for these libraries up front and fails fast with the
+install line above. Without the check, the missing libraries surface partway
+through a cargo build as a pkg-config error such as:
 
 ```
 The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
