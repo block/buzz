@@ -76,3 +76,53 @@ Offen (gehört zu buzz#3, dessen Vorflug „Dispatcher antwortet im Kanal" noch 
 | `@adas_agency_bot` („Adas Agency", id 8809159404) | `~/.secrets/adas-agency-bot.token` | `https://n8n.adas.jetzt/webhook/0aa56987-…/webhook` (message, callback_query) | n8n-Flows (u. a. ADA-20-Approval-Gateway) + Uptime-Kuma-Alerts (kuma.db notification id=2, gleicher Token) — **Webhook + getUpdates tabu** |
 
 Chat-ID `5504083685` = Munir privat, in beiden Configs identisch, zustell-bewiesen (message_ids in buzz#5).
+
+## CRM-Anbindung (buzz#6 — lesen + append-only Touchpoint)
+
+**Entschieden: Weg (a) — eigener Mini-MCP `espo-mcp` (stdio, Espo-REST)** statt (b) n8n-Bridge-Webhooks oder (c) curl + dokumentierte Prompts.
+
+Begründung:
+- (b) n8n-Bridge: n8n ist geteiltes Live-System mit Ein-Agent-Regel; ein Query-Pfad ist keine mechanische Automatisierung und gehört nach Doktrin 3 nicht dorthin. Zweiter Hop, zweiter Credential-Unterhalt, kein Gewinn.
+- (c) curl: kein begrenzbarer Schreibpfad — ein Agent mit Shell und Key kann jeden Endpunkt aufrufen. Das Ticket verlangt „Schreibpfad klar begrenzbar".
+- (a) erfüllt beides: **das Tool-Set IST der Guardrail** (dasselbe Muster wie das fehlende Send-Tool bei Gmail). Es existiert kein Update-, Delete- oder Create-Record-Tool — nur Lesen und Anhängen.
+
+- Repo: `munirad7s/espo-mcp` (`C:/Users/rescue/mcp-servers/espo-mcp`), Stack wie google-mcp/telegram-mcp (tsx + MCP-SDK + zod).
+- Tools: `espo_search`, `espo_get`, `espo_timeline` (Touchpoints + Stream), `espo_log_touchpoint` (CTouchpoint an existierenden Lead), `espo_log_note` (Stream-Post), `espo_permissions` (eigene ACL).
+- Secrets: `~/.secrets/espo-buzz.env` (`ESPO_BUZZ_API_BASE`, `ESPO_BUZZ_API_KEY`), env-Override möglich — nichts in `.mcp.json`/Repo.
+- Wiring: `~/.buzz/.mcp.json` + Zwei-Quellen-Doktrin in `~/.buzz/AGENTS.md`.
+
+### Rechte-Minimalismus (zwei Schichten, gemessen)
+
+API-User `buzz-agent` (type `api`) mit eigener Rolle „buzz-agent (read + touchpoint)":
+
+| Scope | Recht |
+|---|---|
+| Lead, Contact, Account, Opportunity | `read: all`, `stream: all` — **create/edit/delete: no** |
+| CTouchpoint | `read: all`, `create: yes` — edit/delete: no |
+| Note | `create: yes`, `read: own` (abgeleitet, nicht rollen-konfigurierbar) |
+| alles Übrige | kein Eintrag in der ACL-Tabelle = kein Zugriff (Email, Campaign, Case, Meeting, Task, Document, User, Team, Webhook, Import, TargetList, KnowledgeBase, Currency, Template) |
+
+Rest-Zugriffe sind Espo-Systemscopes, die jeder User besitzt (Preferences, Notification, Attachment, EmailFolder/-Filter — alle `own`, keine Geschäftsdaten). Der bestehende n8n-User `claude-mcp-admin` hat dagegen `delete: all` auf Lead/Contact/Account/Opportunity/Email — genau deshalb wurde er NICHT wiederverwendet.
+
+### Zwei-Quellen-Regel
+
+Espo = Pipeline-Wahrheit (Status, Score, `cNextAction`, Touchpoint-Historie). Vault `04 Areas/clients/<kunde>/` = Zusagen-Kanon (`angebot.md` Preis, `scope.md` Leistung, `kommunikation.md` Versprechen). Bei Kundenkontakt immer beides; Preisfragen nie aus Espo, Statusfragen nie aus dem Vault.
+
+### Espo-Fallen (gemessen 2026-08-01, nicht geraten)
+
+- Nur Scopes mit `acl: true` in der Metadata sind rollen-konfigurierbar (33 Stück). `Note`, `Stream`, `Notification` sind abgeleitet — stehen sie in den Rollendaten, antwortet Espo `403 code 1010`.
+- **Ein Scope, den keine Rolle erwähnt, fällt auf VOLLZUGRIFF zurück**, nicht auf „kein Zugriff". Jeder ungenutzte Scope muss explizit abgeschaltet werden — sonst ist der „minimale" User faktisch Admin.
+- Espo löscht soft: nach dem DELETE sieht der Admin weiter einen Grabstein mit `deleted: true`, jeder normale Lesepfad liefert 404.
+- `crm.adas.jetzt` steht hinter Cloudflare: dessen Browser Integrity Check beantwortet Default-Library-User-Agents (z. B. `Python-urllib/*`) mit `error code: 1010` — sieht aus wie ein Espo-Rechtefehler, ist aber Cloudflare. Jeder Client schickt deshalb einen expliziten `User-Agent`.
+
+### Beweisstand (E2E, headless über stdio — `test/e2e.mjs`, 14/14)
+
+| Schritt | Beweis |
+|---|---|
+| MCP-Handshake + Tool-Surface | Server `espo` v1.0.0, 6 Tools, kein update/delete/edit-Tool |
+| Suchen/Lesen | Test-Lead über `espo_search` gefunden, `espo_get` liefert Status |
+| Touchpoint schreiben | `CTouchpoint` angelegt, in `espo_timeline` zurückgelesen |
+| Stream-Notiz | Note angelegt, im Timeline-Stream sichtbar |
+| **Detektor kann rot werden** | Agent-Key auf `PUT Lead` → 403, `DELETE Lead` → 403, `POST Lead` → 403, `GET Email` → 403; Lead-Status danach unverändert |
+| Cleanup | Touchpoint + Note + Test-Lead gelöscht: Agent-GET 404, `deleted: true`, Suche 0 Treffer |
+| Koexistenz n8n | Nach der Umstellung gemessen: n8n-User `claude-mcp-admin` unverändert (`delete: all`), liest weiter 284 Leads; `[ADA-22] lead-enrich` zuletzt grün (Execution 140686). Der Nachtlauf-Beweis für die kommende Nacht steht noch aus. |
