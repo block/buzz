@@ -7,20 +7,13 @@ import {
 } from "@/features/reminders/hooks";
 import { dueSince } from "@/features/reminders/lib/reminderFilters";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
-import {
-  requestDockBounce,
-  sendDesktopNotification,
-} from "@/features/notifications/lib/desktop";
+import { sendDesktopNotification } from "@/features/notifications/lib/desktop";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
   formatNotificationTitle,
   resolveNotificationChannelLabel,
   truncateNotificationBody,
 } from "@/features/notifications/lib/notificationFormat";
-import {
-  playNotificationSound,
-  resolveSlotSound,
-} from "@/features/notifications/lib/sound";
 
 const WATERMARK_STORAGE_PREFIX = "buzz:lastReminderCheck:";
 const POLL_INTERVAL_MS = 30_000;
@@ -108,10 +101,6 @@ export function useReminderNotifications(
     void sendDesktopNotification({
       title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
       body,
-    }).then((didSend) => {
-      if (!didSend) return;
-      playNotificationSound(resolveSlotSound(current, "needs_action"));
-      void requestDockBounce();
     });
   });
 

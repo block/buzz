@@ -1,5 +1,7 @@
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { UploadingAttachmentPreview } from "@/features/messages/lib/useMediaUpload";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
 
 /**
  * Pending and in-flight attachments for a dev-mode composer: compact,
@@ -17,6 +19,10 @@ export function DevComposerAttachments({
   errorMessage: string | null;
   onRemove: (url: string) => void;
 }) {
+  // Re-render after the async proxy-port lookup so first-paint
+  // buzz-media:// fallbacks become authenticated loopback URLs.
+  useMediaProxyPort();
+
   if (
     pendingImeta.length === 0 &&
     uploadingPreviews.length === 0 &&
@@ -39,7 +45,7 @@ export function DevComposerAttachments({
             <img
               alt={media.filename ?? "attachment"}
               className="h-8 w-8 object-cover"
-              src={media.url}
+              src={rewriteRelayUrl(media.url)}
             />
           ) : null}
           <span className="max-w-40 truncate">

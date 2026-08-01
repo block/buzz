@@ -89,6 +89,10 @@ test("pasted image attaches, is removable, and renders interactively", async ({
   const chip = page.getByTestId("dev-mode-attachment-chip");
   await expect(chip).toBeVisible();
   await expect(chip).toContainText("screenshot.png");
+  await expect(chip.locator("img")).toHaveAttribute(
+    "src",
+    new RegExp(`^http://127\\.0\\.0\\.1:54321/media/${IMAGE_SHA}\\.png$`),
+  );
 
   // Remove → chip disappears; nothing is sent.
   await chip.getByRole("button", { name: "remove attachment" }).click();

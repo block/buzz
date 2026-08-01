@@ -1,5 +1,5 @@
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
-use nostr::PublicKey;
+use nostr::{PublicKey, Tag};
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
@@ -569,6 +569,29 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+    pub notification_tier: crate::MessageNotificationTier,
+}
+
+const MESSAGE_NOTIFICATION_TAG: &str = "buzz-notification";
+
+fn message_notification_tag(tier: crate::MessageNotificationTier) -> Result<Tag, CliError> {
+    Tag::parse([MESSAGE_NOTIFICATION_TAG, tier.as_tag_value()])
+        .map_err(|error| CliError::Other(format!("invalid message notification tag: {error}")))
+}
+
+fn validate_message_notification(
+    tier: crate::MessageNotificationTier,
+    has_mentions: bool,
+) -> Result<(), CliError> {
+    match (tier, has_mentions) {
+        (crate::MessageNotificationTier::Update, true) => Err(CliError::Usage(
+            "--notification-tier update cannot mention recipients; use blocked for messages that require attention".into(),
+        )),
+        (crate::MessageNotificationTier::Blocked, false) => Err(CliError::Usage(
+            "--notification-tier blocked requires at least one recipient mention".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub async fn cmd_send_message(
@@ -597,6 +620,8 @@ pub async fn cmd_send_message(
     let (member_pubkeys, auto_resolved) =
         resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
     let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
+
+    validate_message_notification(p.notification_tier, !mention_pubkeys.is_empty())?;
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
     if !missing.is_empty() {
@@ -675,7 +700,8 @@ pub async fn cmd_send_message(
                 "--kind {k} is not supported (use 9, 45001, or 45003)"
             )))
         }
-    };
+    }
+    .tag(message_notification_tag(p.notification_tier)?);
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
@@ -686,6 +712,10 @@ pub async fn cmd_send_message(
         object.insert(
             "mention_pubkeys".into(),
             serde_json::json!(emitted_mentions),
+        );
+        object.insert(
+            "notification_tier".into(),
+            serde_json::json!(p.notification_tier.as_tag_value()),
         );
     }
     println!("{output}");
@@ -880,6 +910,7 @@ pub async fn dispatch(
             broadcast,
             files,
             mentions,
+            notification_tier,
         } => {
             cmd_send_message(
                 client,
@@ -891,6 +922,7 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
+                    notification_tier,
                 },
             )
             .await
@@ -994,8 +1026,8 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        message_notification_tag, missing_members, normalize_explicit_mentions,
+        parse_member_pubkeys, resolve_names_to_pubkeys, validate_message_notification,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1011,6 +1043,38 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn message_notification_tiers_emit_structured_tags() {
+        let event = nostr::EventBuilder::text_note("update")
+            .tag(message_notification_tag(crate::MessageNotificationTier::Update).unwrap())
+            .tag(message_notification_tag(crate::MessageNotificationTier::Blocked).unwrap())
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let tags = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .collect::<Vec<_>>();
+        assert!(tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("buzz-notification")
+                && tag.get(1).map(String::as_str) == Some("update")
+        }));
+        assert!(tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("buzz-notification")
+                && tag.get(1).map(String::as_str) == Some("blocked")
+        }));
+    }
+
+    #[test]
+    fn message_notification_tiers_enforce_attention_policy() {
+        use crate::MessageNotificationTier::{Blocked, Update};
+
+        assert!(validate_message_notification(Update, false).is_ok());
+        assert!(validate_message_notification(Blocked, true).is_ok());
+        assert!(validate_message_notification(Update, true).is_err());
+        assert!(validate_message_notification(Blocked, false).is_err());
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {

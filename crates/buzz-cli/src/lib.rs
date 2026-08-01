@@ -372,6 +372,9 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// Agent notification tier. Updates stay quiet and cannot mention; blocked requires a mention and may alert the recipient.
+        #[arg(long, value_enum, default_value = "update")]
+        notification_tier: MessageNotificationTier,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -499,6 +502,24 @@ pub enum MessagesCmd {
         #[arg(long)]
         direction: String,
     },
+}
+
+/// Attention policy attached to an agent-authored channel message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum MessageNotificationTier {
+    /// Quiet progress update: unread only, without mentions, sound, or Dock attention.
+    Update,
+    /// Explicit blocker: requires a recipient mention and may sound/bounce.
+    Blocked,
+}
+
+impl MessageNotificationTier {
+    pub(crate) fn as_tag_value(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Blocked => "blocked",
+        }
+    }
 }
 
 #[derive(Subcommand)]

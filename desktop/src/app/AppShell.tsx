@@ -83,6 +83,7 @@ import {
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { useDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
+import { useDevMentionTicker } from "@/features/dev-mode/lib/useDevMentionTicker";
 import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
@@ -220,14 +221,20 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
+  const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
+    void homeFeedQuery.refetch();
+  });
+  const { dismissMentionTicker, handleMention, mentionTicker } =
+    useDevMentionTicker({
+      channels,
+      currentPubkey: identityQuery.data?.pubkey?.trim().toLowerCase() ?? "",
+      onMention: refetchHomeFeedFromLiveSignal,
+    });
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,
     channels,
   );
-  const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
-    void homeFeedQuery.refetch();
-  });
   useLiveHomeFeedActions(
     identityQuery.data?.pubkey,
     refetchHomeFeedFromLiveSignal,
@@ -340,6 +347,7 @@ export function AppShell() {
     topLevelUnreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
+    blockedUnreadChannelIds,
     unreadChannelNotificationCount,
     getEffectiveTimestamp: getChannelReadAt,
     getOwnTimestamp: getOwnReadAt,
@@ -361,7 +369,7 @@ export function AppShell() {
     notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
     onChannelMessage: handleChannelNotification,
     onDmMessage: handleDmNotification,
-    onLiveMention: refetchHomeFeedFromLiveSignal,
+    onLiveMention: handleMention,
     onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
     followedRootIds,
   });
@@ -797,7 +805,13 @@ export function AppShell() {
                         <div className="flex min-h-0 flex-1 overflow-hidden">
                           <React.Suspense fallback={null}>
                             <LazyDevModeShell
+                              blockedUnreadChannelIds={blockedUnreadChannelIds}
                               hasCommunityRail={hasCommunityRail}
+                              highPriorityUnreadChannelIds={
+                                highPriorityUnreadChannelIds
+                              }
+                              mentionTicker={mentionTicker}
+                              onDismissMentionTicker={dismissMentionTicker}
                               topLevelUnreadChannelIds={
                                 topLevelUnreadChannelIds
                               }

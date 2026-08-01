@@ -1,11 +1,11 @@
 import * as React from "react";
 
-import {
-  shouldBounceForChannelNotification,
-  toSearchHit,
-} from "@/app/AppShell.helpers";
+import { toSearchHit } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
-import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
+import {
+  hasMentionForEvent,
+  messageNotificationTier,
+} from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
   listenForDesktopNotificationActions,
@@ -18,8 +18,8 @@ import {
   truncateNotificationBody,
 } from "@/features/notifications/lib/notificationFormat";
 import {
+  notificationSoundForSlot,
   playNotificationSound,
-  resolveEventSound,
 } from "@/features/notifications/lib/sound";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -45,10 +45,18 @@ export function useAppShellDesktopNotifications({
   const knownAgentPubkeys = useKnownAgentPubkeys();
   const isAgentSender = (senderPubkey: string) =>
     knownAgentPubkeys.has(normalizePubkey(senderPubkey));
+  const isQuietAgentEvent = (event: RelayEvent) =>
+    isAgentSender(event.pubkey) &&
+    messageNotificationTier(event.tags) !== "blocked";
 
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
-      if (!shouldBounceForChannelNotification(event.tags)) return;
+      if (
+        !isAgentSender(event.pubkey) ||
+        messageNotificationTier(event.tags) !== "blocked"
+      ) {
+        return;
+      }
       if (!notificationSettings.desktopEnabled) return;
       void requestDockBounce();
     },
@@ -56,6 +64,7 @@ export function useAppShellDesktopNotifications({
 
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
+      if (isQuietAgentEvent(event)) return;
       if (
         !notificationSettings.desktopEnabled ||
         !notificationSettings.slotAlertsEnabled.dm
@@ -67,6 +76,9 @@ export function useAppShellDesktopNotifications({
       const body = truncateNotificationBody(event.content, "New message");
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
+      const isBlockedAgent =
+        isAgentSender(event.pubkey) &&
+        messageNotificationTier(event.tags) === "blocked";
       void sendDesktopNotification({
         title: channelName,
         body,
@@ -81,14 +93,9 @@ export function useAppShellDesktopNotifications({
           threadRootId,
         },
       }).then((didSend) => {
-        if (!didSend) return;
-        playNotificationSound(
-          resolveEventSound(
-            notificationSettings,
-            "dm",
-            isAgentSender(event.pubkey),
-          ),
-        );
+        if (!didSend || !isBlockedAgent) return;
+        const sound = notificationSoundForSlot("mention");
+        if (sound) playNotificationSound(sound);
         void requestDockBounce();
       });
     },
@@ -96,6 +103,7 @@ export function useAppShellDesktopNotifications({
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
+      if (isQuietAgentEvent(event)) return;
       if (
         !notificationSettings.desktopEnabled ||
         !notificationSettings.slotAlertsEnabled.thread_reply
@@ -131,16 +139,6 @@ export function useAppShellDesktopNotifications({
           pubkey: event.pubkey,
           threadRootId,
         },
-      }).then((didSend) => {
-        if (!didSend) return;
-        playNotificationSound(
-          resolveEventSound(
-            notificationSettings,
-            "thread_reply",
-            isAgentSender(event.pubkey),
-          ),
-        );
-        void requestDockBounce();
       });
     },
   );

@@ -148,6 +148,11 @@ export function resolveSlotSound(
   return prefs.sounds[slot];
 }
 
+/** Audible message policy: real mentions use Amp; unread-only slots are silent. */
+export function notificationSoundForSlot(slot: SoundSlot): SoundName | null {
+  return slot === "mention" ? "amp" : null;
+}
+
 /**
  * Sound for a notification event: message-like slots pick by sender kind,
  * everything else falls back to the per-slot sound.
@@ -157,6 +162,8 @@ export function resolveEventSound(
   slot: SoundSlot,
   isAgentSender: boolean,
 ): SoundName {
+  const policySound = notificationSoundForSlot(slot);
+  if (policySound) return policySound;
   if (SENDER_SOUND_SLOTS.has(slot)) {
     return prefs.senderSounds[isAgentSender ? "agent" : "human"];
   }

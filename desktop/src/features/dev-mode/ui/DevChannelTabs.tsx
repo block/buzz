@@ -17,6 +17,8 @@ export function DevChannelTabs({
   activeId,
   unreadChannelIds,
   workingChannelIds,
+  highPriorityChannelIds,
+  blockedChannelIds,
   onSelect,
   onNewSubChannel,
 }: {
@@ -25,6 +27,8 @@ export function DevChannelTabs({
   activeId: string;
   unreadChannelIds: ReadonlySet<string>;
   workingChannelIds: ReadonlySet<string>;
+  highPriorityChannelIds: ReadonlySet<string>;
+  blockedChannelIds: ReadonlySet<string>;
   onSelect: (channelId: string) => void;
   onNewSubChannel: () => void;
 }) {
@@ -40,6 +44,8 @@ export function DevChannelTabs({
     // An active tab keeps its dot while an unread thread remains inside it —
     // viewing the tab clears top-level posts, not collapsed thread replies.
     const isUnread = unreadChannelIds.has(channel.id);
+    const isHighPriority = highPriorityChannelIds.has(channel.id);
+    const isBlocked = blockedChannelIds.has(channel.id);
     return (
       <button
         key={channel.id}
@@ -63,8 +69,17 @@ export function DevChannelTabs({
         </span>
         {isUnread ? (
           <span
-            aria-label="unread"
-            className="text-3xs leading-none text-primary"
+            aria-label={
+              isBlocked ? "blocked" : isHighPriority ? "mentioned" : "unread"
+            }
+            className={cn(
+              "text-3xs leading-none",
+              isBlocked
+                ? "text-destructive"
+                : isHighPriority
+                  ? "text-primary"
+                  : "text-muted-foreground/60",
+            )}
             role="img"
           >
             ●

@@ -3,6 +3,30 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+
+export const MESSAGE_NOTIFICATION_TAG = "buzz-notification";
+
+export type MessageNotificationTier = "update" | "blocked";
+
+export function messageNotificationTier(
+  tags: readonly (readonly string[])[],
+): MessageNotificationTier | null {
+  const value = tags.find((tag) => tag[0] === MESSAGE_NOTIFICATION_TAG)?.[1];
+  return value === "update" || value === "blocked" ? value : null;
+}
+
+export function isBlockedNotificationForUser(
+  event: RelayEvent,
+  currentPubkey: string,
+  knownAgentPubkeys: ReadonlySet<string>,
+): boolean {
+  return (
+    knownAgentPubkeys.has(normalizePubkey(event.pubkey)) &&
+    messageNotificationTier(event.tags) === "blocked" &&
+    hasMentionForEvent(event, currentPubkey)
+  );
+}
 
 export function hasMentionForEvent(
   event: RelayEvent,

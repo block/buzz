@@ -3,6 +3,8 @@ import {
   formatNotificationTitle,
   truncateNotificationBody,
 } from "@/features/notifications/lib/notificationFormat";
+import { messageNotificationTier } from "@/features/notifications/lib/shouldNotify";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type NotificationChannel = Pick<Channel, "id" | "name" | "channelType">;
 
@@ -77,7 +79,11 @@ export function collectHomeAlertItems(feed: HomeFeedResponse) {
 
 export function eligibleFeedNotificationItems(
   feed: HomeFeedResponse,
-  options: { mentions: boolean; needsAction: boolean },
+  options: {
+    mentions: boolean;
+    needsAction: boolean;
+    agentPubkeys?: ReadonlySet<string>;
+  },
   channels: readonly NotificationChannel[] = [],
 ) {
   const items: FeedItem[] = [];
@@ -90,7 +96,15 @@ export function eligibleFeedNotificationItems(
     items.push(
       ...feed.feed.mentions
         .map((item) => enrichFeedItemChannel(item, channels))
-        .filter((item) => item.channelType !== "dm"),
+        .filter((item) => item.channelType !== "dm")
+        // Agent-authored updates remain visible in the feed, unread state, and
+        // ticker. Only an explicit blocked tier can become a system alert.
+        // The sender check keeps human-authored messages on normal semantics.
+        .filter(
+          (item) =>
+            !options.agentPubkeys?.has(normalizePubkey(item.pubkey)) ||
+            messageNotificationTier(item.tags) === "blocked",
+        ),
     );
   }
 

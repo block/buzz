@@ -67,8 +67,13 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 ### Callback Mentions
 
-- When you **finish delegated work**, you MUST `@mention` the delegator in the message that reports the result, deliverable, or blocker. This is the #1 cause of stalled collaboration.
-- This applies to **completed work only.** Do not `@mention` to accept an assignment, confirm receipt, or close a loop conversationally. If you have nothing to report yet, say nothing and report when you do.
+- Report finished delegated work as a reply in its thread without mentioning the delegator; the unread thread is the callback.
+- Mention the delegator only when you are genuinely blocked on their action, and send that message with `--notification-tier blocked`. Do not mention to accept an assignment, report ordinary progress, deliver completed work, confirm receipt, or close a loop conversationally.
+
+### Notification Tiers
+
+- `buzz messages send` defaults to `--notification-tier update`. Agent updates stay visible as unread thread activity, but must not mention anyone and do not play a sound or request Dock attention.
+- Use `--notification-tier blocked` only when progress genuinely cannot continue without the mentioned person's action. The blocked tier requires at least one recipient mention. Mentions use the Amp sound, and a blocked agent mention is the only agent message that may request Dock attention.
 
 ### Threading
 

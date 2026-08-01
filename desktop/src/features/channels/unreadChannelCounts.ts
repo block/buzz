@@ -5,6 +5,7 @@ export type ObservedUnreadEvent = {
   createdAt: number;
   rootId: string | null;
   highPriority: boolean;
+  blocked: boolean;
   countsTowardBadge: boolean;
   countsTowardAppBadge: boolean;
 };
@@ -14,6 +15,7 @@ export function makeObservedUnreadEvent(input: {
   createdAt: number;
   rootId: string | null;
   highPriority: boolean;
+  blocked?: boolean;
   channelType: string | undefined;
   isThreadedReply: boolean;
 }): ObservedUnreadEvent {
@@ -23,10 +25,25 @@ export function makeObservedUnreadEvent(input: {
     createdAt: input.createdAt,
     rootId: input.rootId,
     highPriority: input.highPriority,
+    blocked: input.blocked ?? false,
     countsTowardBadge: isDm || input.isThreadedReply || input.highPriority,
     countsTowardAppBadge:
       isDm || (!input.isThreadedReply && input.highPriority),
   };
+}
+
+export function countUnreadBlockedObservedEvents(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): number {
+  if (!eventsById) return 0;
+  let count = 0;
+  for (const event of eventsById.values()) {
+    if (!event.blocked) continue;
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) count += 1;
+  }
+  return count;
 }
 
 export function mapsEqual(

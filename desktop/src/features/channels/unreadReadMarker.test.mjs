@@ -5,6 +5,7 @@ import { computeChannelUnreadMarker } from "../messages/lib/unreadMarker.ts";
 import {
   countUnreadAppBadgeObservedEvents,
   countUnreadBadgeObservedEvents,
+  countUnreadBlockedObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
   countUnreadTopLevelObservedEvents,
@@ -523,6 +524,30 @@ test("highPriorityObservedEvents_countOnlyUnreadHighPriorityItems", () => {
 
   assert.equal(countUnreadObservedEvents(events, getReadAt), 2);
   assert.equal(countUnreadHighPriorityObservedEvents(events, getReadAt), 1);
+});
+
+test("blockedObservedEvents_countOnlyUnreadBlockedItems", () => {
+  const events = new Map([
+    [
+      "blocked-read",
+      { ...observed("blocked-read", 500, "root-read", true), blocked: true },
+    ],
+    [
+      "blocked-unread",
+      { ...observed("blocked-unread", 700, "root-hot", true), blocked: true },
+    ],
+    ["mention-unread", observed("mention-unread", 800, "root-mention", true)],
+  ]);
+  const getReadAt = readAtFor(
+    300,
+    new Map([
+      ["root-read", 500],
+      ["root-hot", 300],
+      ["root-mention", 300],
+    ]),
+  );
+
+  assert.equal(countUnreadBlockedObservedEvents(events, getReadAt), 1);
 });
 
 test("addThreadActivityItems keeps newest items when input is newest-first", () => {

@@ -31,7 +31,7 @@ export type UseLiveChannelUpdatesOptions = {
    */
   notifyForActiveChannel?: boolean;
   onDmMessage?: (event: RelayEvent, channel: Channel) => void;
-  onLiveMention?: () => void;
+  onLiveMention?: (event: RelayEvent) => void;
   /**
    * Fired for live "new content" events in a member channel authored by
    * someone other than the current user. Thread replies also fire
@@ -374,7 +374,7 @@ export function useLiveChannelUpdates(
     }
 
     handleIncomingMessage(event);
-    options.onLiveMention?.();
+    options.onLiveMention?.(event);
   });
 
   React.useEffect(() => {

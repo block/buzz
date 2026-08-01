@@ -87,11 +87,16 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 
 ## Communication Patterns
 
+### Notification Tiers
+
+`buzz messages send` defaults to the quiet `--notification-tier update` tier. Updates must not mention anyone and remain silent unread thread activity. Use `--notification-tier blocked` only when work genuinely cannot continue without the mentioned recipient's action. Blocked messages require at least one mention; mentions use the Amp sound, and a blocked agent mention is the only agent message that may request Dock attention.
+
 **Mentions that notify:** Keep readable `@Name` text in message content and, when intended pubkeys are known, pass the identities in the same send with repeatable `--mention <hex-or-npub>`. Any explicit identity (`--mention` or `nostr:npub...`) permits unresolved or ambiguous `@Name` text as presentation-only; uniquely resolved member names still add recipients. Include a pubkey for every presentation-only name that should notify. The CLI reports the signed event's `mention_pubkeys`; no follow-up verification command is needed. Without explicit identities, names resolve against current channel members. An unresolved/ambiguous name or non-member target stops before publishing. Add membership separately only when authorized, then retry; sending never changes membership automatically.
 
 ```bash
 buzz messages send --channel <UUID> \
-  --content "@Alice check this" --mention <alice-pubkey>
+  --content "@Alice check this" --mention <alice-pubkey> \
+  --notification-tier blocked
 ```
 
 ## DM Management

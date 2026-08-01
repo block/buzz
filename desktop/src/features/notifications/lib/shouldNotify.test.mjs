@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isBlockedNotificationForUser,
   isHighPriorityEventForUser,
+  messageNotificationTier,
   shouldNotifyForEvent,
 } from "./shouldNotify.ts";
 
@@ -31,6 +33,7 @@ const rootTag = (id) => ["e", id, "", "root"];
 const replyTag = (id) => ["e", id, "", "reply"];
 const pTag = (pubkey) => ["p", pubkey];
 const broadcastTag = () => ["broadcast", "1"];
+const notificationTag = (tier) => ["buzz-notification", tier];
 
 const opts = (overrides = {}) => ({
   participatedRootIds: EMPTY,
@@ -41,6 +44,40 @@ const opts = (overrides = {}) => ({
 
 test("top-level message (no e-tags) notifies", () => {
   assert.equal(shouldNotifyForEvent(makeEvent([]), PUBKEY, opts()), true);
+});
+
+test("parses structured agent notification tiers", () => {
+  assert.equal(messageNotificationTier([notificationTag("update")]), "update");
+  assert.equal(
+    messageNotificationTier([notificationTag("blocked")]),
+    "blocked",
+  );
+  assert.equal(messageNotificationTier([notificationTag("urgent")]), null);
+});
+
+test("blocked notification is recipient-specific", () => {
+  const blockedMention = makeEvent([pTag(PUBKEY), notificationTag("blocked")]);
+  const agents = new Set([blockedMention.pubkey]);
+  assert.equal(
+    isBlockedNotificationForUser(blockedMention, PUBKEY, agents),
+    true,
+  );
+  assert.equal(
+    isBlockedNotificationForUser(blockedMention, OTHER_PUBKEY, agents),
+    false,
+  );
+  assert.equal(
+    isBlockedNotificationForUser(
+      makeEvent([pTag(PUBKEY), notificationTag("update")]),
+      PUBKEY,
+      agents,
+    ),
+    false,
+  );
+  assert.equal(
+    isBlockedNotificationForUser(blockedMention, PUBKEY, new Set()),
+    false,
+  );
 });
 
 test("top-level message with unrelated p-tag notifies", () => {

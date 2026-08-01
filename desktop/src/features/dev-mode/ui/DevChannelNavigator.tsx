@@ -28,6 +28,8 @@ function ChannelRow({
   isPinned,
   isUnread,
   isWorking,
+  isHighPriority,
+  isBlocked,
   onOpen,
 }: {
   channel: Channel;
@@ -35,6 +37,8 @@ function ChannelRow({
   isPinned: boolean;
   isUnread: boolean;
   isWorking: boolean;
+  isHighPriority: boolean;
+  isBlocked: boolean;
   onOpen: (channelId: string) => void;
 }) {
   const scrollHighlightedIntoView = React.useCallback(
@@ -85,6 +89,7 @@ function ChannelRow({
       </button>
       <button
         className="flex min-w-0 flex-1 cursor-pointer items-baseline gap-2 rounded-none py-0.5 pl-2 pr-2 text-left text-sm"
+        data-testid={`dev-mode-channel-${channel.name}`}
         onClick={() => onOpen(channel.id)}
         type="button"
       >
@@ -98,10 +103,19 @@ function ChannelRow({
         </span>
         {isUnread ? (
           <span
-            className="shrink-0 self-center text-3xs leading-none text-primary"
             data-testid="dev-mode-unread-dot"
             role="img"
-            aria-label="unread"
+            aria-label={
+              isBlocked ? "blocked" : isHighPriority ? "mentioned" : "unread"
+            }
+            className={cn(
+              "shrink-0 self-center text-3xs leading-none",
+              isBlocked
+                ? "text-destructive"
+                : isHighPriority
+                  ? "text-primary"
+                  : "text-muted-foreground/60",
+            )}
           >
             ●
           </span>
@@ -126,6 +140,8 @@ export function DevChannelNavigator({
   groups,
   unreadChannelIds,
   workingChannelIds,
+  highPriorityChannelIds,
+  blockedChannelIds,
   highlightedId,
   dimmed,
   widthControls,
@@ -135,6 +151,8 @@ export function DevChannelNavigator({
   groups: ChannelGroup[];
   unreadChannelIds: ReadonlySet<string>;
   workingChannelIds: ReadonlySet<string>;
+  highPriorityChannelIds: ReadonlySet<string>;
+  blockedChannelIds: ReadonlySet<string>;
   highlightedId: string | null;
   /** True while a channel is focused — the list stays visible but recedes. */
   dimmed: boolean;
@@ -177,6 +195,8 @@ export function DevChannelNavigator({
                   isPinned={group.pinned}
                   isUnread={unreadChannelIds.has(channel.id)}
                   isWorking={workingChannelIds.has(channel.id)}
+                  isHighPriority={highPriorityChannelIds.has(channel.id)}
+                  isBlocked={blockedChannelIds.has(channel.id)}
                   onOpen={onOpen}
                 />
               ))}

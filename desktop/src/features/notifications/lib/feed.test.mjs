@@ -120,3 +120,45 @@ test("resolves and excludes a DM whose feed item has a name but no type", () => 
 
   assert.equal(items.length, 0);
 });
+
+test("keeps agent updates in the feed but excludes them from desktop notifications", () => {
+  const update = feedItem({
+    category: "mention",
+    tags: [
+      ["h", "channel-id"],
+      ["buzz-notification", "update"],
+    ],
+  });
+  const blocked = feedItem({
+    id: "blocked-event",
+    category: "mention",
+    tags: [
+      ["h", "channel-id"],
+      ["buzz-notification", "blocked"],
+    ],
+  });
+  const untaggedAgent = feedItem({
+    id: "untagged-agent-event",
+    category: "mention",
+  });
+  const humanUpdate = feedItem({
+    id: "human-update-event",
+    pubkey: "human",
+    category: "mention",
+    tags: [
+      ["h", "channel-id"],
+      ["buzz-notification", "update"],
+    ],
+  });
+
+  const items = eligibleFeedNotificationItems(
+    feedResponse([update, blocked, untaggedAgent, humanUpdate]),
+    { ...allSlots, agentPubkeys: new Set(["author"]) },
+    channels,
+  );
+
+  assert.deepEqual(
+    items.map((item) => item.id),
+    ["blocked-event", "human-update-event"],
+  );
+});

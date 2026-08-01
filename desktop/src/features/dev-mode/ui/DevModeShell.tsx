@@ -34,10 +34,11 @@ import { useDevSessionActions } from "@/features/dev-mode/lib/useDevSessionActio
 import { useCardSelectionShortcuts } from "@/features/dev-mode/lib/useCardSelectionShortcuts";
 import { useDevModeShortcuts } from "@/features/dev-mode/lib/useDevModeShortcuts";
 import { useMessageEditing } from "@/features/dev-mode/lib/useMessageEditing";
+import { useMentionTickerNavigation } from "@/features/dev-mode/lib/useMentionTickerNavigation";
 import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
-import { DevChannelMembers } from "@/features/dev-mode/ui/DevChannelMembers";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
 import { DevChannelTabs } from "@/features/dev-mode/ui/DevChannelTabs";
+import { DevMentionTickerTopBar } from "@/features/dev-mode/ui/DevMentionTickerTopBar";
 import { DevCommandPalette } from "@/features/dev-mode/ui/DevCommandPalette";
 import { DevAgentStatusLine } from "@/features/dev-mode/ui/DevAgentStatusLine";
 import { DevPromptComposer } from "@/features/dev-mode/ui/DevPromptComposer";
@@ -45,13 +46,13 @@ import { DevShortcutsOverlay } from "@/features/dev-mode/ui/DevShortcutsOverlay"
 import { DevSplitPane } from "@/features/dev-mode/ui/DevSplitPane";
 import { DevThreadPanel } from "@/features/dev-mode/ui/DevThreadPanel";
 import { DevTranscript } from "@/features/dev-mode/ui/DevTranscript";
-import { DevWorkingChannelName } from "@/features/dev-mode/ui/DevWorkingChannelName";
 import { useChannelMessagesQuery } from "@/features/messages/hooks";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
+import type { DevMentionTickerItem } from "@/features/dev-mode/lib/mentionTicker";
 
 /**
  * Keyboard model:
@@ -71,12 +72,19 @@ type ShellView = "fresh" | "navigator" | "channel";
 export function DevModeShell({
   unreadChannelIds,
   topLevelUnreadChannelIds,
+  highPriorityUnreadChannelIds,
+  blockedUnreadChannelIds,
+  mentionTicker,
+  onDismissMentionTicker,
   hasCommunityRail = false,
 }: {
-  /** Channels with anything unread, including relevant thread replies. */
   unreadChannelIds: ReadonlySet<string>;
   /** Channels with unread channel-level posts only. */
   topLevelUnreadChannelIds: ReadonlySet<string>;
+  highPriorityUnreadChannelIds: ReadonlySet<string>;
+  blockedUnreadChannelIds: ReadonlySet<string>;
+  mentionTicker: DevMentionTickerItem | null;
+  onDismissMentionTicker: () => void;
   /** The community rail sits under the macOS traffic lights when present. */
   hasCommunityRail?: boolean;
 }) {
@@ -193,6 +201,14 @@ export function DevModeShell({
     () => aggregateUnreadMains(subIndex, unreadChannelIds),
     [subIndex, unreadChannelIds],
   );
+  const navigatorHighPriorityIds = React.useMemo(
+    () => aggregateUnreadMains(subIndex, highPriorityUnreadChannelIds),
+    [subIndex, highPriorityUnreadChannelIds],
+  );
+  const navigatorBlockedIds = React.useMemo(
+    () => aggregateUnreadMains(subIndex, blockedUnreadChannelIds),
+    [subIndex, blockedUnreadChannelIds],
+  );
 
   const [workingChannelIds, navigatorWorkingIds] =
     useDevWorkingChannelIds(subIndex);
@@ -258,16 +274,6 @@ export function DevModeShell({
 
   useDevReadMarking(activeChannel, roots);
 
-  // Card selection and the side chat belong to one channel's transcript.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — selection resets only on channel switch
-  React.useEffect(() => {
-    setSelectedRootId(null);
-    setThreadOpen(false);
-    setActivePane("main");
-    setSubDraftParentId(null);
-    stopEditing();
-  }, [effectiveSessionId]);
-
   // `e` on a selected card: edit your own prompt in the composer.
   const startEditingSelected = React.useCallback(() => {
     if (startEditing(selectedRoot, input)) {
@@ -324,6 +330,26 @@ export function DevModeShell({
     setThreadOpen(true);
     setActivePane("thread");
   }, []);
+
+  const { consumePendingRoot, openMention: openMentionTicker } =
+    useMentionTickerNavigation({
+      activeChannelId: effectiveSessionId,
+      item: mentionTicker,
+      onDismiss: onDismissMentionTicker,
+      onOpenChannel: openChannel,
+      onOpenThread: handleOpenThread,
+    });
+
+  // Card selection and the side chat belong to one channel's transcript.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — selection resets only on channel switch
+  React.useEffect(() => {
+    const pendingRootId = consumePendingRoot(effectiveSessionId);
+    setSelectedRootId(pendingRootId);
+    setThreadOpen(pendingRootId !== null);
+    setActivePane(pendingRootId === null ? "main" : "thread");
+    setSubDraftParentId(null);
+    stopEditing();
+  }, [effectiveSessionId]);
 
   const openChannelAtUnread = useUnreadRouting({
     subIndex,
@@ -830,44 +856,26 @@ export function DevModeShell({
             className="flex h-full min-w-0 flex-1 items-center justify-between gap-3 pr-4 pl-4"
             data-tauri-drag-region
           >
-            <span
-              className={cn(
-                "pointer-events-none min-w-0 truncate whitespace-nowrap text-foreground",
-                macChrome && "translate-y-[3px]",
-              )}
-              data-testid="dev-mode-topbar-channel"
-            >
-              {topBarChannel ? (
-                <>
-                  #{" "}
-                  <DevWorkingChannelName
-                    name={topBarChannel.name}
-                    working={workingChannelIds.has(topBarChannel.id)}
-                  />
-                </>
-              ) : null}
-            </span>
-            {topBarChannel ? (
-              <span
-                className={cn(
-                  "flex min-w-0 shrink-0 items-baseline",
-                  macChrome && "translate-y-[3px]",
-                )}
-              >
-                <DevChannelMembers
-                  channel={topBarChannel}
-                  onShowMembers={() => openPalette("members")}
-                />
-              </span>
-            ) : null}
+            <DevMentionTickerTopBar
+              channel={topBarChannel}
+              item={mentionTicker}
+              macChrome={macChrome}
+              onOpen={openMentionTicker}
+              onShowMembers={() => openPalette("members")}
+              working={
+                topBarChannel !== null && workingChannelIds.has(topBarChannel.id)
+              }
+            />
           </div>
         </div>
 
         <div className="flex min-h-0 min-w-0 flex-1">
           <DevChannelNavigator
+            blockedChannelIds={navigatorBlockedIds}
             dimmed={view === "channel"}
             groups={channelGroups}
             highlightedId={view === "fresh" ? null : navigatorId}
+            highPriorityChannelIds={navigatorHighPriorityIds}
             onOpen={openChannelAtUnread}
             unreadChannelIds={navigatorUnreadIds}
             workingChannelIds={navigatorWorkingIds}
@@ -878,6 +886,8 @@ export function DevModeShell({
             {view === "channel" && activeChannel && activeMainChannel ? (
               <DevChannelTabs
                 activeId={activeChannel.id}
+                blockedChannelIds={blockedUnreadChannelIds}
+                highPriorityChannelIds={highPriorityUnreadChannelIds}
                 main={activeMainChannel}
                 onNewSubChannel={startSubChannelDraft}
                 onSelect={openChannel}

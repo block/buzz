@@ -21,8 +21,8 @@ import {
   sendDesktopNotification,
 } from "./lib/desktop";
 import {
+  notificationSoundForSlot,
   playNotificationSound,
-  resolveEventSound,
   slotForFeedKind,
 } from "./lib/sound";
 import type { NotificationSettings } from "./hooks";
@@ -80,6 +80,13 @@ export function useFeedDesktopNotifications(
 ) {
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const knownAgentPubkeys = useKnownAgentPubkeys();
+  const notificationAgentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(knownAgentPubkeys);
+    for (const [profilePubkey, profile] of Object.entries(profiles ?? {})) {
+      if (profile.isAgent) pubkeys.add(normalizePubkey(profilePubkey));
+    }
+    return pubkeys;
+  }, [knownAgentPubkeys, profiles]);
   const seenItemIdsRef = React.useRef<Set<string>>(
     new Set(readStoredSeenFeedIds(normalizedPubkey)),
   );
@@ -129,11 +136,8 @@ export function useFeedDesktopNotifications(
 
       if (didSend) {
         const slot = slotForFeedKind(item.kind, item.category);
-        const senderPubkey = normalizePubkey(item.pubkey);
-        const isAgentSender =
-          knownAgentPubkeys.has(senderPubkey) ||
-          profiles?.[senderPubkey]?.isAgent === true;
-        playNotificationSound(resolveEventSound(settings, slot, isAgentSender));
+        const sound = notificationSoundForSlot(slot);
+        if (sound) playNotificationSound(sound);
       }
     },
   );
@@ -170,6 +174,7 @@ export function useFeedDesktopNotifications(
           {
             mentions: settings.slotAlertsEnabled.mention,
             needsAction: settings.slotAlertsEnabled.needs_action,
+            agentPubkeys: notificationAgentPubkeys,
           },
           channels,
         )
@@ -224,6 +229,7 @@ export function useFeedDesktopNotifications(
     channels,
     mutedChannelIds,
     normalizedPubkey,
+    notificationAgentPubkeys,
     profiles,
     settings.desktopEnabled,
     settings.slotAlertsEnabled.mention,
