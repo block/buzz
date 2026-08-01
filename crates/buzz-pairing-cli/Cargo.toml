@@ -16,6 +16,7 @@ buzz-core = { workspace = true }
 nostr = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 futures-util = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
