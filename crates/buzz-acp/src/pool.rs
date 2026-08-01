@@ -396,6 +396,11 @@ pub enum SteerAck {
     /// The main loop must drop the withheld event (`remove_event`) — it
     /// has been delivered via the non-cancelling path.
     Success,
+    /// The adapter found no running turn and, because Buzz opted into the
+    /// host-owned idle fallback, did not consume the steer content. The main
+    /// loop must release the withheld event for normal `session/prompt`
+    /// dispatch without signalling cancel+merge against the settled turn.
+    PromptRequired,
     /// The steer was attempted but failed. Delivery state for the
     /// underlying message is unknown after prompt completion; the main
     /// loop must release the withheld event and fall back to the

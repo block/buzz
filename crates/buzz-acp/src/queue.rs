@@ -693,10 +693,10 @@ impl EventQueue {
     /// Release a single withheld event back to the front of
     /// `queues[channel_id]`, preserving its original `received_at`.
     ///
-    /// Called on `SteerAck::Err(_)` and `SteerAck::PromptCompletedNeutral`
-    /// (delivery unknown after prompt completion; restoring queued event
-    /// for normal dispatch). Idempotent: a no-op if the event was already
-    /// removed or never withheld.
+    /// Called on `SteerAck::Err(_)`, `SteerAck::PromptRequired`, and
+    /// `SteerAck::PromptCompletedNeutral` (content not delivered through the
+    /// native steer path; restoring the queued event for normal dispatch).
+    /// Idempotent: a no-op if the event was already removed or never withheld.
     ///
     /// Push-to-front matches the discipline of `requeue_preserve_timestamps`
     /// at line 453, preserving fairness across channels.

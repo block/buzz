@@ -2437,6 +2437,13 @@ async fn tokio_main() -> Result<()> {
                 //     the agent really is running more work, so the
                 //     channel's in-flight budget should reflect it.
                 //
+                //   PromptRequired
+                //     The adapter found no running turn and left the content
+                //     untouched under Buzz's host-owned idle fallback opt-in.
+                //     Release the withheld event for normal `session/prompt`
+                //     dispatch. Do NOT signal cancel+merge: the prior turn is
+                //     already settled.
+                //
                 //   Err(_) where the write never landed (Transport /
                 //   ExpectedRunIdMissing):
                 //     Delivery state of the underlying message is "never
@@ -2494,6 +2501,7 @@ async fn tokio_main() -> Result<()> {
                 //     the withheld event in `withheld_native_steer`.
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
                     Ok(pool::SteerAck::Success) => (false, true, false),
+                    Ok(pool::SteerAck::PromptRequired) => (true, false, false),
                     // -32601 = method_not_found: agent does not implement the
                     // steer extension. Fire cancel+merge so the message still
                     // reaches the agent.

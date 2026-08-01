@@ -362,8 +362,10 @@ const GOOSE_STEER_METHOD: &str = "_goose/unstable/session/steer";
 
 /// The cross-adapter mid-turn steer method, shipped by claude-agent-acp
 /// (`src/acp-agent.ts:200`) and codex-acp (`src/AcpExtensions.ts:11`).
-/// Params are `{sessionId, prompt}` — no run id — and the result is
-/// `{outcome}`. Gated on [`AcpClient::steering_supported`].
+/// Params are `{sessionId, prompt, _meta}` — no run id — and the result is
+/// `{outcome}`. The request opts into host-owned idle fallback so an adapter
+/// can return `promptRequired` without detaching a new turn. Gated on
+/// [`AcpClient::steering_supported`].
 const ACP_STEER_METHOD: &str = "_session/steering";
 
 /// `outcome` value meaning the steer was applied to the turn Buzz is waiting
@@ -375,6 +377,15 @@ const STEER_OUTCOME_INJECTED: &str = "injected";
 /// success, but the awaited turn is over — see the steer-response arm for why
 /// this must not renew the hard deadline.
 const STEER_OUTCOME_STARTED_NEW_TURN: &str = "startedNewTurn";
+
+/// `outcome` value meaning the adapter found no running turn and deliberately
+/// left the steer content untouched for Buzz to resubmit through
+/// `session/prompt`.
+const STEER_OUTCOME_PROMPT_REQUIRED: &str = "promptRequired";
+
+/// Required companion reason for [`STEER_OUTCOME_PROMPT_REQUIRED`]. Unknown
+/// reasons are rejected rather than treated as safe-to-retry delivery states.
+const STEER_REASON_NO_RUNNING_TURN: &str = "noRunningTurn";
 
 /// Which wire method carried an in-flight steer request, recorded so the
 /// response arm decodes the shape that method actually returns.
@@ -1573,9 +1584,51 @@ impl AcpClient {
                                                 .filter(|o| {
                                                     *o == STEER_OUTCOME_INJECTED
                                                         || *o == STEER_OUTCOME_STARTED_NEW_TURN
+                                                        || *o == STEER_OUTCOME_PROMPT_REQUIRED
                                                 }),
                                         };
                                         match outcome {
+                                            Some(STEER_OUTCOME_PROMPT_REQUIRED)
+                                                if msg
+                                                    .pointer("/result/reason")
+                                                    .and_then(|v| v.as_str())
+                                                    == Some(STEER_REASON_NO_RUNNING_TURN) =>
+                                            {
+                                                // The adapter did not consume
+                                                // the content. Release the
+                                                // withheld event so normal
+                                                // dispatch submits it through
+                                                // session/prompt after the
+                                                // just-settled prompt response
+                                                // reaches this read loop.
+                                                tracing::info!(
+                                                    "steer requires host prompt: no running turn — \
+                                                     releasing withheld event for session/prompt"
+                                                );
+                                                crate::pool::SteerAck::PromptRequired
+                                            }
+                                            Some(STEER_OUTCOME_PROMPT_REQUIRED) => {
+                                                let reported_reason =
+                                                    msg.pointer("/result/reason").map_or_else(
+                                                        || "<absent>".to_string(),
+                                                        |reason| match reason {
+                                                            serde_json::Value::String(s) => {
+                                                                s.clone()
+                                                            }
+                                                            other => other.to_string(),
+                                                        },
+                                                    );
+                                                tracing::warn!(
+                                                    "steer rejected: {STEER_OUTCOME_PROMPT_REQUIRED} \
+                                                     returned unrecognized reason {reported_reason}"
+                                                );
+                                                crate::pool::SteerAck::Err(
+                                                    crate::pool::SteerError::OutcomeRejected {
+                                                        outcome: STEER_OUTCOME_PROMPT_REQUIRED
+                                                            .to_string(),
+                                                    },
+                                                )
+                                            }
                                             Some(STEER_OUTCOME_STARTED_NEW_TURN) => {
                                                 // Delivered, but into a NEW
                                                 // turn: the one this read loop
@@ -1989,7 +2042,11 @@ fn build_goose_steer_params(
 ///
 /// Wire shape:
 /// ```json
-/// { "sessionId": "...", "prompt": [{"type":"text","text":"..."}, ...] }
+/// {
+///   "sessionId": "...",
+///   "prompt": [{"type":"text","text":"..."}, ...],
+///   "_meta": {"steering":{"idleBehavior":"promptRequired"}}
+/// }
 /// ```
 ///
 /// Deliberately carries **no** `expectedRunId`: the cross-adapter method
@@ -1999,6 +2056,11 @@ fn build_acp_steer_params(session_id: &str, prompt_blocks: &[&str]) -> serde_jso
     serde_json::json!({
         "sessionId": session_id,
         "prompt": steer_prompt_blocks(prompt_blocks),
+        "_meta": {
+            "steering": {
+                "idleBehavior": STEER_OUTCOME_PROMPT_REQUIRED,
+            }
+        },
     })
 }
 
@@ -3877,9 +3939,10 @@ mod tests {
     }
 
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the
-    /// wire are an `_session/steering` request carrying `sessionId` and
-    /// `prompt`, and carrying **no** `expectedRunId` (the adapters reject
-    /// unknown required fields, and there is no run id to report anyway).
+    /// wire are an `_session/steering` request carrying `sessionId`, `prompt`,
+    /// and the host-owned idle fallback opt-in, while carrying **no**
+    /// `expectedRunId` (the adapters reject unknown required fields, and there
+    /// is no run id to report anyway).
     #[tokio::test]
     async fn acp_steer_request_omits_expected_run_id_and_carries_session_and_prompt() {
         let capture = capture_path("acp_shape");
@@ -3910,6 +3973,11 @@ mod tests {
             Some("steer body"),
             "prompt must carry the steer body as a text block"
         );
+        assert_eq!(
+            msg["params"]["_meta"]["steering"]["idleBehavior"].as_str(),
+            Some(STEER_OUTCOME_PROMPT_REQUIRED),
+            "Buzz must retain ownership when the adapter finds no running turn"
+        );
         assert!(
             msg["params"].get("expectedRunId").is_none(),
             "_session/steering must not carry expectedRunId; wrote: {written}"
@@ -3918,6 +3986,51 @@ mod tests {
             matches!(ack, crate::pool::SteerAck::Success),
             "injected outcome must ack Success, got {ack:?}"
         );
+    }
+
+    /// Claude ACP 0.64+ can report that the turn settled before the steer
+    /// landed. The adapter leaves the content untouched, so Buzz must release
+    /// the withheld event for a normal `session/prompt` instead of treating it
+    /// as delivered or firing cancel+merge against a turn that no longer runs.
+    #[tokio::test]
+    async fn acp_steer_prompt_required_releases_for_host_prompt() {
+        let capture = capture_path("prompt_required");
+        let mut client = spawn_steer_capture_script(
+            &capture,
+            r#"{"jsonrpc":"2.0","id":0,"result":{"outcome":"promptRequired","reason":"noRunningTurn"}}"#,
+        )
+        .await;
+        set_steering_supported(&mut client);
+
+        let (_written, ack) = run_one_steer(&mut client, &capture).await;
+
+        assert!(
+            matches!(ack, crate::pool::SteerAck::PromptRequired),
+            "promptRequired/noRunningTurn must return content to host dispatch, got {ack:?}"
+        );
+    }
+
+    /// A future or malformed `promptRequired` response must not enter the
+    /// no-cancel retry path unless it carries the one reason whose ownership
+    /// contract Buzz understands.
+    #[tokio::test]
+    async fn acp_steer_prompt_required_with_unknown_reason_is_rejected() {
+        let capture = capture_path("prompt_required_unknown_reason");
+        let mut client = spawn_steer_capture_script(
+            &capture,
+            r#"{"jsonrpc":"2.0","id":0,"result":{"outcome":"promptRequired","reason":"unknown"}}"#,
+        )
+        .await;
+        set_steering_supported(&mut client);
+
+        let (_written, ack) = run_one_steer(&mut client, &capture).await;
+
+        match ack {
+            crate::pool::SteerAck::Err(crate::pool::SteerError::OutcomeRejected { outcome }) => {
+                assert_eq!(outcome, STEER_OUTCOME_PROMPT_REQUIRED);
+            }
+            other => panic!("expected Err(OutcomeRejected), got {other:?}"),
+        }
     }
 
     /// Test 3: goose keeps priority. With both an `active_run_id` and the
