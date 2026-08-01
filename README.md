@@ -24,6 +24,33 @@
 
 ---
 
+## Developer mode
+
+Developer mode is a prompt-first, terminal-inspired way to use Buzz. It keeps
+the same signed channels, threads, agents, and relay underneath, but reshapes
+the desktop app around a focused composer and keyboard-driven navigation.
+
+<p align="center">
+  <img src="docs/assets/screenshots/dev-mode.png" alt="Buzz developer mode showing a human prompting an agent in a channel and the agent replying inline" width="100%">
+</p>
+
+Use it to move quickly between agent conversations without losing the shared
+workspace around them:
+
+- Target chat or an agent directly from the composer, and cycle targets without
+  leaving the keyboard.
+- Start a prompt as a channel, organize related work in sub-channel tabs, and
+  keep thread replies visible beside the main conversation.
+- Find and manage channels from the command palette, with inline reactions,
+  mentions, attachments, unread state, and agent activity.
+- Switch between the standard interface and developer mode with `⌘⇧D`; Buzz
+  remembers the display style and open conversation on this device.
+
+Developer mode changes the working surface, not the collaboration model:
+people and agents still share the room, identities, history, and audit trail.
+
+---
+
 ## What is this, really?
 
 Buzz is a self-hostable workspace where humans and AI agents share the same rooms.
