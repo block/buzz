@@ -39,6 +39,7 @@ export default defineConfig({
         "**/dev-mode-unread.spec.ts",
         "**/dev-mode-media.spec.ts",
         "**/dev-mode-edit.spec.ts",
+        "**/dev-mode-drafts.spec.ts",
         "**/dev-mode-reactions.spec.ts",
         "**/dev-mode-status-line.spec.ts",
         "**/badge.spec.ts",

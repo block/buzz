@@ -9,6 +9,8 @@ import {
   groupSessionChannels,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
+import { consumeComposerDraft } from "@/features/dev-mode/lib/composerDrafts";
+import { useComposerDrafts } from "@/features/dev-mode/lib/useComposerDrafts";
 import { useComposerModeSelection } from "@/features/dev-mode/lib/useComposerModeSelection";
 import { copySelectionWithLinkUrls } from "@/features/dev-mode/lib/copyLinkUrls";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
@@ -241,15 +243,16 @@ export function DevModeShell({
   const selectedRoot = roots.find((root) => root.id === selectedRootId) ?? null;
 
   // `e` on a selected own prompt card edits that message in the composer.
+  const messageEditing = useMessageEditing({
+    channel: activeChannel,
+    roots,
+    myPubkey: identityQuery.data?.pubkey ?? null,
+    setInput,
+    setBusy,
+    setError,
+  });
   const { editingRootId, startEditing, stopEditing, submitEdit } =
-    useMessageEditing({
-      channel: activeChannel,
-      roots,
-      myPubkey: identityQuery.data?.pubkey ?? null,
-      setInput,
-      setBusy,
-      setError,
-    });
+    messageEditing;
 
   useDevReadMarking(activeChannel, roots);
 
@@ -262,6 +265,16 @@ export function DevModeShell({
     setSubDraftParentId(null);
     stopEditing();
   }, [effectiveSessionId]);
+
+  // Per-channel composer drafts. Called after the reset effect above so the
+  // draft restore wins over stopEditing's pre-edit put-back.
+  const { draftKey, restoreFailedPrompt } = useComposerDrafts({
+    view,
+    channelId: effectiveSessionId,
+    input,
+    setInput,
+    peekPreEditInput: messageEditing.peekPreEditInput,
+  });
 
   // `e` on a selected card: edit your own prompt in the composer.
   const startEditingSelected = React.useCallback(() => {
@@ -594,6 +607,7 @@ export function DevModeShell({
       setBusy(true);
       setError(null);
       setInput("");
+      consumeComposerDraft(draftKey);
       void (async () => {
         try {
           let channel = activeChannel;
@@ -625,8 +639,8 @@ export function DevModeShell({
               ? submitError.message
               : "Failed to send prompt.",
           );
-          // Restore the failed prompt unless the user already typed on.
-          setInput((current) => (current === "" ? prompt : current));
+          // Restore the failed prompt to the channel it was sent from.
+          restoreFailedPrompt(draftKey, prompt);
         } finally {
           setBusy(false);
         }
@@ -638,6 +652,7 @@ export function DevModeShell({
       busy,
       createSessionChannel,
       createSubChannel,
+      draftKey,
       editingRootId,
       handleOpenThread,
       input,
@@ -645,6 +660,7 @@ export function DevModeShell({
       navigatorId,
       openChannelAtUnread,
       rememberMode,
+      restoreFailedPrompt,
       selectedRootId,
       sendToSession,
       subDraftActive,
