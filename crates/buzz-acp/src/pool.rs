@@ -31,7 +31,8 @@ use uuid::Uuid;
 
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod,
+    PublicationCloseOutcome, PublicationTurnGuard, StopReason,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -817,6 +818,46 @@ const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`classify_control_cancel_failure`].
 const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// Maximum time a terminal transition waits for an in-flight publication.
+/// On expiry, the ACP process group is killed and reaped before a final retry.
+const PUBLICATION_LEASE_DRAIN_GRACE: Duration = Duration::from_secs(1);
+
+async fn begin_publication_turn_bounded(
+    agent: &mut OwnedAgent,
+    scope: buzz_publication_fence::PublicationScope,
+) -> Result<PublicationTurnGuard, AcpError> {
+    match agent
+        .acp
+        .begin_publication_turn(scope, PUBLICATION_LEASE_DRAIN_GRACE)
+        .await
+    {
+        Ok(guard) => Ok(guard),
+        Err(
+            error @ AcpError::PublicationFence(buzz_publication_fence::FenceError::LockTimeout(_)),
+        ) => {
+            agent.acp.shutdown().await;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn settle_publication_turn_bounded(
+    agent: &mut OwnedAgent,
+    guard: &mut PublicationTurnGuard,
+) -> Result<(), AcpError> {
+    match agent
+        .acp
+        .settle_publication_turn(guard, PUBLICATION_LEASE_DRAIN_GRACE)
+        .await?
+    {
+        PublicationCloseOutcome::Closed => Ok(()),
+        PublicationCloseOutcome::AgentKilled => Err(AcpError::PublicationFence(
+            buzz_publication_fence::FenceError::LockTimeout(PUBLICATION_LEASE_DRAIN_GRACE),
+        )),
+    }
+}
+
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -863,6 +904,30 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel)
 }
 
+fn inject_managed_publication_env(
+    servers: &mut [McpServer],
+    fence_path: &std::path::Path,
+    managed_path: Option<&str>,
+) {
+    let fence_value = fence_path.to_string_lossy().into_owned();
+    for server in servers {
+        server.env.retain(|entry| {
+            entry.name != buzz_publication_fence::PUBLICATION_FENCE_ENV
+                && (managed_path.is_none() || entry.name != "PATH")
+        });
+        server.env.push(crate::acp::EnvVar {
+            name: buzz_publication_fence::PUBLICATION_FENCE_ENV.to_string(),
+            value: fence_value.clone(),
+        });
+        if let Some(value) = managed_path {
+            server.env.push(crate::acp::EnvVar {
+                name: "PATH".to_string(),
+                value: value.to_string(),
+            });
+        }
+    }
+}
+
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
 ///
@@ -899,11 +964,18 @@ async fn create_session_and_apply_model(
         .as_deref()
         .map(|agent_name| compose_session_title(agent_name, channel_name));
 
+    let mut mcp_servers = ctx.mcp_servers.clone();
+    inject_managed_publication_env(
+        &mut mcp_servers,
+        agent.acp.publication_fence_path(),
+        agent.acp.managed_cli_path_env(),
+    );
+
     let resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
-            ctx.mcp_servers.clone(),
+            mcp_servers,
             session_new_system_prompt(
                 is_goose,
                 agent.protocol_version,
@@ -1658,6 +1730,54 @@ pub async fn run_prompt_task(
         }),
     );
 
+    // Open the managed publication generation before any initial-message or
+    // turn prompt can launch a descendant `buzz messages send`. The ordinary
+    // reply anchor is refined after channel/profile context is resolved below.
+    let mut publication_guard = match begin_publication_turn_bounded(
+        &mut agent,
+        buzz_publication_fence::PublicationScope {
+            turn_id: turn_id.clone(),
+            channel_id: match &source {
+                PromptSource::Channel(channel_id) => Some(*channel_id),
+                PromptSource::Heartbeat => None,
+            },
+            reply_to: None,
+        },
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(error) => {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(error),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        }
+    };
+
+    macro_rules! settle_publication_or_return_error {
+        () => {
+            if let Err(error) =
+                settle_publication_turn_bounded(&mut agent, &mut publication_guard).await
+            {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    requeue_batch_if_queue(&ctx, batch),
+                );
+                return;
+            }
+        };
+    }
+
     if is_new_session {
         if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
         {
@@ -1701,12 +1821,14 @@ pub async fn run_prompt_task(
 
             match init_result {
                 Ok(stop_reason) => {
+                    settle_publication_or_return_error!();
                     tracing::info!(
                         target: "pool::session",
                         "initial_message complete for channel {cid}: {stop_reason:?}"
                     );
                 }
                 Err(AcpError::AgentExited) => {
+                    settle_publication_or_return_error!();
                     agent.state.invalidate_all();
                     send_prompt_result(
                         &result_tx,
@@ -1719,6 +1841,7 @@ pub async fn run_prompt_task(
                     return;
                 }
                 Err(AcpError::IdleTimeout(_)) => {
+                    settle_publication_or_return_error!();
                     tracing::warn!(
                         target: "pool::session",
                         "initial_message idle timeout ({}s) for channel {cid} — cancelling",
@@ -1763,6 +1886,7 @@ pub async fn run_prompt_task(
                     return;
                 }
                 Err(AcpError::HardTimeout { silence }) => {
+                    settle_publication_or_return_error!();
                     let recently_active = silence < RECENT_ACTIVITY_WINDOW;
                     tracing::error!(
                         target: "pool::session",
@@ -1781,6 +1905,7 @@ pub async fn run_prompt_task(
                     return;
                 }
                 Err(e) => {
+                    settle_publication_or_return_error!();
                     tracing::error!(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
@@ -1833,6 +1958,48 @@ pub async fn run_prompt_task(
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
 
+        let reply_anchor = crate::queue::publication_reply_anchor(
+            b,
+            channel_info.as_ref(),
+            profile_lookup.as_ref(),
+        );
+        if let Err(error) =
+            settle_publication_turn_bounded(&mut agent, &mut publication_guard).await
+        {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(error),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        }
+        publication_guard = match begin_publication_turn_bounded(
+            &mut agent,
+            buzz_publication_fence::PublicationScope {
+                turn_id: turn_id.clone(),
+                channel_id: Some(b.channel_id),
+                reply_to: reply_anchor,
+            },
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    requeue_batch_if_queue(&ctx, batch),
+                );
+                return;
+            }
+        };
+
         let known_names: Vec<&str> = profile_lookup
             .iter()
             .flat_map(|lookup| lookup.values())
@@ -1866,6 +2033,7 @@ pub async fn run_prompt_task(
     } else {
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
+        settle_publication_or_return_error!();
         tracing::error!("run_prompt_task: no batch and no prompt_text — returning agent");
         send_prompt_result(
             &result_tx,
@@ -1942,12 +2110,63 @@ pub async fn run_prompt_task(
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
                     // Land the model switch before any cancel/requeue work: setting
-                    // `desired_model` here means the fresh session created by the
-                    // requeued turn (busy) or the next turn (already-completed)
-                    // applies the new model. Runtime-only — never persisted.
+                    // `desired_model` here means a replacement process preserves the
+                    // requested runtime-only switch too.
                     if let ControlSignal::SwitchModel(ref model_id) = control_signal {
                         agent.desired_model = Some(model_id.clone());
                         agent.model_overridden = true;
+                    }
+                    // Terminalize publication before asking ACP to cancel. Lock
+                    // waiting runs off executor workers and is bounded. If a
+                    // descendant submit stalls, kill/reap the process group, retry
+                    // terminalization, and classify the turn as poisoned.
+                    match agent
+                        .acp
+                        .settle_publication_turn(
+                            &mut publication_guard,
+                            PUBLICATION_LEASE_DRAIN_GRACE,
+                        )
+                        .await
+                    {
+                        Ok(PublicationCloseOutcome::Closed) => {}
+                        Ok(PublicationCloseOutcome::AgentKilled) => {
+                            agent.state.invalidate_all();
+                            let retry_batch =
+                                requeue_cancelled_batch(&ctx, control_signal, batch);
+                            let usage = agent.acp.take_turn_usage();
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                observer_channel_id,
+                                &session_id,
+                                &turn_id,
+                                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                            )
+                            .await;
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::CancelDrainTimeout(
+                                    PUBLICATION_LEASE_DRAIN_GRACE,
+                                ),
+                                retry_batch,
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            agent.acp.shutdown().await;
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(error),
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
                     }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
@@ -2079,6 +2298,10 @@ pub async fn run_prompt_task(
             }
         }
     };
+
+    // Normal completion and timeout paths cross the same terminal boundary
+    // before metrics, retries, respawn, or pool return can advance the slot.
+    settle_publication_or_return_error!();
 
     match prompt_result {
         Ok(stop_reason) => {
@@ -3974,6 +4197,51 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn mcp_servers_receive_exact_fence_and_managed_path_without_override() {
+        let mut servers = vec![McpServer {
+            name: "tools".into(),
+            command: "tools".into(),
+            args: vec![],
+            env: vec![
+                crate::acp::EnvVar {
+                    name: "KEEP".into(),
+                    value: "yes".into(),
+                },
+                crate::acp::EnvVar {
+                    name: buzz_publication_fence::PUBLICATION_FENCE_ENV.into(),
+                    value: "/attacker/old-fence".into(),
+                },
+                crate::acp::EnvVar {
+                    name: "PATH".into(),
+                    value: "/attacker/bin".into(),
+                },
+            ],
+        }];
+        let expected = std::path::Path::new("/private/fence/state.json");
+
+        inject_managed_publication_env(&mut servers, expected, Some("/co-versioned/bin:/usr/bin"));
+
+        assert!(servers[0]
+            .env
+            .iter()
+            .any(|entry| entry.name == "KEEP" && entry.value == "yes"));
+        let fence_entries: Vec<_> = servers[0]
+            .env
+            .iter()
+            .filter(|entry| entry.name == buzz_publication_fence::PUBLICATION_FENCE_ENV)
+            .collect();
+        assert_eq!(fence_entries.len(), 1);
+        assert_eq!(fence_entries[0].value, expected.to_string_lossy());
+        let path_entries: Vec<_> = servers[0]
+            .env
+            .iter()
+            .filter(|entry| entry.name == "PATH")
+            .collect();
+        assert_eq!(path_entries.len(), 1);
+        assert_eq!(path_entries[0].value, "/co-versioned/bin:/usr/bin");
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user

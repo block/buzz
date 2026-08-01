@@ -1,0 +1,18 @@
+[package]
+name = "buzz-publication-fence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-process publication fence for managed Buzz agent turns"
+
+[dependencies]
+fs2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

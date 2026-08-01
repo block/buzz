@@ -2736,6 +2736,30 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
+fn control_command_content_matches(content: &str, command: &str) -> bool {
+    let content = content.trim();
+    if content == command {
+        return true;
+    }
+
+    // The desktop composer keeps a selected mention in visible content so it
+    // can derive the event's `p` tag. When the toolbar inserts that mention at
+    // the end of an already-authored command, it serializes as
+    // `<command> @<display name>`. Accept only that single-line suffix form;
+    // author and exact-agent `p`-tag checks remain separate hard gates.
+    let Some(mention) = content
+        .strip_prefix(command)
+        .and_then(|suffix| suffix.strip_prefix(' '))
+    else {
+        return false;
+    };
+
+    mention.starts_with('@')
+        && mention.len() > 1
+        && !mention[1..].contains('@')
+        && !mention.contains(['\r', '\n'])
+}
+
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -2743,7 +2767,7 @@ fn is_owner_control_command(
     agent_pubkey_hex: &str,
 ) -> bool {
     kind_u32 == KIND_STREAM_MESSAGE
-        && event.content.trim() == command
+        && control_command_content_matches(&event.content, command)
         && event_mentions_agent(event, agent_pubkey_hex)
 }
 
@@ -3371,6 +3395,7 @@ fn handle_prompt_result(
                     | acp::AcpError::WriteTimeout(_)
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
+                    | acp::AcpError::PublicationFence(_)
             );
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
@@ -3783,7 +3808,7 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
-        let spawn_result = AcpClient::spawn(
+        let spawn_result = AcpClient::spawn_managed(
             &startup.command,
             &startup.args,
             &startup.extra_env,
@@ -3891,7 +3916,7 @@ async fn spawn_and_init(
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
+    let mut acp = AcpClient::spawn_managed(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
@@ -4310,6 +4335,59 @@ mod owner_control_command_tests {
             &no_mention,
             KIND_STREAM_MESSAGE,
             "!rotate",
+            &agent
+        ));
+    }
+
+    #[test]
+    fn owner_control_command_accepts_ui_suffix_mention() {
+        let agent = "ab".repeat(32);
+        let event = make_event(
+            KIND_STREAM_MESSAGE,
+            "!cancel @Unitus SEO OS Representative",
+            Some(&agent),
+        );
+
+        assert!(is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
+            &agent
+        ));
+    }
+
+    #[test]
+    fn owner_control_command_rejects_non_ui_content_shapes() {
+        let agent = "ab".repeat(32);
+        for content in [
+            "please !cancel @Agent",
+            "!cancel please @Agent",
+            "@Agent !cancel",
+            "!cancel  @Agent",
+            "!cancel @Agent @Other",
+            "!cancel @Agent\nmore",
+        ] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, Some(&agent));
+            assert!(
+                !is_owner_control_command(&event, KIND_STREAM_MESSAGE, "!cancel", &agent),
+                "unexpected match for {content:?}"
+            );
+        }
+
+        let no_mention_tag = make_event(KIND_STREAM_MESSAGE, "!cancel @Agent", None);
+        assert!(!is_owner_control_command(
+            &no_mention_tag,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
+            &agent
+        ));
+
+        let other_agent = "cd".repeat(32);
+        let wrong_agent_tag = make_event(KIND_STREAM_MESSAGE, "!cancel @Agent", Some(&other_agent));
+        assert!(!is_owner_control_command(
+            &wrong_agent_tag,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
             &agent
         ));
     }

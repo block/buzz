@@ -5,8 +5,8 @@
 #   sprig            implementation binary
 #   buzz-acp       link to sprig (ACP harness)
 #   buzz-agent     link to sprig (ACP-compliant agent)
-#   buzz-dev-mcp   link to sprig (developer MCP server; also dispatches
-#                    rg/tree/buzz/git-credential-nostr/git-sign-nostr)
+#   buzz-dev-mcp   link to sprig (developer MCP server)
+#   buzz           link to sprig (fence-capable CLI used by managed turns)
 #
 # Usage:
 #   ./scripts/build-sprig.sh [version] [target]
@@ -25,6 +25,7 @@
 #                     across builds (e.g. `sprig-<target>`). Defaults to
 #                     `sprig-<version>-<target>`.
 #   DIST_DIR          output directory (default: dist)
+#   SPRIG_BIN         prebuilt source binary override (package tests only)
 #
 # Output:
 #   ${DIST_DIR}/${ARCHIVE_BASENAME}.tar.gz
@@ -35,6 +36,7 @@
 #   buzz-acp
 #   buzz-agent
 #   buzz-dev-mcp
+#   buzz
 #   README.md
 #   sprig.json        { version, git_sha, target, binaries: [{name, sha256, size}] }
 
@@ -59,7 +61,7 @@ else
 fi
 
 BUNDLE_BIN="sprig"
-COMMANDS=(buzz-acp buzz-agent buzz-dev-mcp)
+COMMANDS=(buzz-acp buzz-agent buzz-dev-mcp buzz)
 
 echo "==> Building Sprig v${VERSION} for ${TARGET}"
 echo "    git_sha=${GIT_SHA}"
@@ -85,8 +87,9 @@ else
     "${BUILDER[@]}" -p "$BUNDLE_BIN"
 fi
 
-if [[ ! -f "${BIN_DIR}/${BUNDLE_BIN}" ]]; then
-    echo "error: ${BIN_DIR}/${BUNDLE_BIN} not found after build" >&2
+SOURCE_BIN="${SPRIG_BIN:-${BIN_DIR}/${BUNDLE_BIN}}"
+if [[ ! -f "${SOURCE_BIN}" ]]; then
+    echo "error: ${SOURCE_BIN} not found after build" >&2
     exit 1
 fi
 
@@ -102,7 +105,7 @@ sha256_of() {
     fi
 }
 
-cp "${BIN_DIR}/${BUNDLE_BIN}" "${STAGING}/${BUNDLE_BIN}"
+cp "${SOURCE_BIN}" "${STAGING}/${BUNDLE_BIN}"
 chmod 0755 "${STAGING}/${BUNDLE_BIN}"
 if command -v strip >/dev/null 2>&1; then
     strip "${STAGING}/${BUNDLE_BIN}" 2>/dev/null || true
@@ -143,9 +146,9 @@ Commands:
 - `buzz-acp` — ACP harness that bridges Buzz channel events to an
   ACP-compliant agent over stdio.
 - `buzz-agent` — ACP-compliant agent (spawns MCP servers, calls LLMs).
-- `buzz-dev-mcp` — Developer MCP server (shell, str_replace, todo) and
-  multicall entrypoint for `rg`, `tree`, `buzz`, `git-credential-nostr`,
-  `git-sign-nostr`.
+- `buzz-dev-mcp` — Developer MCP server (shell, str_replace, todo).
+- `buzz` — co-versioned CLI used by managed turns. The harness verifies its
+  publication-fence capability before starting an agent pool.
 
 See `sprig.json` for SHA-256s, sizes, target, and source git SHA.
 

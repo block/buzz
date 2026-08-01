@@ -8,6 +8,10 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
+use buzz_publication_fence::{
+    FenceError, PublicationFence, PublicationScope, PUBLICATION_FENCE_CAPABILITY_ARG,
+    PUBLICATION_FENCE_CAPABILITY_RESPONSE, PUBLICATION_FENCE_ENV,
+};
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -106,6 +110,9 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    #[error("Publication fence error: {0}")]
+    PublicationFence(#[from] FenceError),
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
@@ -211,6 +218,70 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Cross-process publication fence inherited by CLI and MCP descendants.
+    publication_fence: PublicationFence,
+    /// Private, process-owned directory containing the fence file.
+    publication_fence_dir: std::path::PathBuf,
+    /// Verified PATH value inherited by the ACP child and forced into MCP servers.
+    managed_cli_path_env: Option<String>,
+}
+
+/// Active managed-turn publication generation.
+///
+/// Dropping or explicitly closing the guard marks only its own generation
+/// terminal. A stale guard cannot close a newer turn.
+pub struct PublicationTurnGuard {
+    fence: PublicationFence,
+    generation: Option<u64>,
+}
+
+impl PublicationTurnGuard {
+    /// Mark this turn generation terminal without blocking a Tokio worker.
+    pub async fn close_with_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, FenceError> {
+        let Some(generation) = self.generation else {
+            return Ok(true);
+        };
+        let fence = self.fence.clone();
+        let terminated =
+            tokio::task::spawn_blocking(move || fence.terminate_with_timeout(generation, timeout))
+                .await
+                .map_err(|error| {
+                    FenceError::Io(std::io::Error::other(format!(
+                        "publication fence worker failed: {error}"
+                    )))
+                })??;
+        self.generation = None;
+        Ok(terminated)
+    }
+}
+
+impl Drop for PublicationTurnGuard {
+    fn drop(&mut self) {
+        let Some(generation) = self.generation.take() else {
+            return;
+        };
+        let fence = self.fence.clone();
+        // Panic/task-abort fallback only. Ordinary lifecycle paths await
+        // `settle_publication_turn`, which can kill and reap a lease holder.
+        // A detached OS thread keeps this blocking fallback off Tokio workers.
+        let _ = std::thread::Builder::new()
+            .name("buzz-publication-fence-close".into())
+            .spawn(move || {
+                let _ = fence.terminate_with_timeout(generation, std::time::Duration::from_secs(5));
+            });
+    }
+}
+
+/// Result of draining and terminalizing a managed turn's publication fence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationCloseOutcome {
+    /// Existing publication leases drained inside the grace window.
+    Closed,
+    /// A lease stalled, so the ACP process group was killed and reaped first.
+    AgentKilled,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -440,21 +511,61 @@ impl AcpClient {
         }
     }
 
+    /// Spawn a managed agent after verifying the co-versioned sibling Buzz CLI.
+    ///
+    /// The verified sibling directory is prepended to the child's `PATH`, so
+    /// ordinary `buzz` tool execution cannot resolve an older installation.
+    pub async fn spawn_managed(
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
+    ) -> Result<Self, AcpError> {
+        let managed_cli = verify_sibling_buzz_cli().await?;
+        Self::spawn_inner(
+            command,
+            args,
+            extra_env,
+            has_generated_codex_config,
+            Some(&managed_cli),
+        )
+        .await
+    }
+
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
     ///
-    /// `has_generated_codex_config` must be true when `codex_network_env()` successfully
-    /// injected a `CODEX_CONFIG` entry into `extra_env`.  The spawn path uses it to
-    /// trigger the recursive merge + forced `network_access=true` in
-    /// `build_codex_config_env`.  Pass `false` for test spawns and non-Codex agents.
-    ///
-    /// After spawning, call [`initialize`](Self::initialize) before any other method.
+    /// This unfenced constructor is retained for auth probes and tests that do
+    /// not execute managed turns. Runtime pools must use [`Self::spawn_managed`].
     pub async fn spawn(
         command: &str,
         args: &[String],
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
+        Self::spawn_inner(command, args, extra_env, has_generated_codex_config, None).await
+    }
+
+    async fn spawn_inner(
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
+        managed_cli: Option<&std::path::Path>,
+    ) -> Result<Self, AcpError> {
         use std::process::Stdio;
+
+        scavenge_stale_fence_dirs();
+        let fence_dir = create_private_fence_dir()?;
+        let fence_path = fence_dir.join("state.json");
+        let publication_fence = match PublicationFence::create(&fence_path) {
+            Ok(fence) => fence,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&fence_dir);
+                return Err(error.into());
+            }
+        };
+        let mut spawn_artifacts =
+            SpawnFenceArtifacts::new(publication_fence.clone(), fence_dir.clone());
 
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args)
@@ -464,7 +575,27 @@ impl AcpClient {
             .stderr(Stdio::inherit())
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            // Descendant `buzz messages send` processes consult this file before
+            // starting and immediately before submitting a managed reply.
+            .env(PUBLICATION_FENCE_ENV, publication_fence.path());
+
+        let mut managed_cli_path_env = None;
+        if let Some(managed_cli) = managed_cli {
+            let cli_dir = managed_cli.parent().ok_or_else(|| {
+                AcpError::Protocol("managed Buzz CLI has no parent directory".into())
+            })?;
+            let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+            let path = std::env::join_paths(
+                std::iter::once(cli_dir.to_path_buf())
+                    .chain(std::env::split_paths(&inherited_path)),
+            )
+            .map_err(|error| {
+                AcpError::Protocol(format!("failed to construct managed CLI PATH: {error}"))
+            })?;
+            managed_cli_path_env = Some(path.to_string_lossy().into_owned());
+            cmd.env("PATH", path);
+        }
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
@@ -513,6 +644,14 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // Publication fencing and managed CLI resolution are harness-owned
+        // invariants. Reapply them after all persona/runtime overlays so a
+        // reserved extra_env entry cannot replace either value.
+        cmd.env(PUBLICATION_FENCE_ENV, publication_fence.path());
+        if let Some(path) = managed_cli_path_env.as_deref() {
+            cmd.env("PATH", path);
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -525,15 +664,18 @@ impl AcpClient {
 
         let mut child = cmd.spawn()?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AcpError::Protocol("failed to open agent stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
+        let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => (stdin, stdout),
+            _ => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+                return Err(AcpError::Protocol(
+                    "failed to open agent stdio pipes".into(),
+                ));
+            }
+        };
 
+        spawn_artifacts.disarm();
         Ok(Self {
             child,
             stdin,
@@ -550,7 +692,65 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            publication_fence,
+            publication_fence_dir: fence_dir,
+            managed_cli_path_env,
         })
+    }
+
+    /// Return the fence path for per-session MCP environment injection.
+    pub fn publication_fence_path(&self) -> &std::path::Path {
+        self.publication_fence.path()
+    }
+
+    /// Return the verified managed PATH forced into MCP server environments.
+    pub fn managed_cli_path_env(&self) -> Option<&str> {
+        self.managed_cli_path_env.as_deref()
+    }
+
+    /// Open a publication generation for one managed turn without blocking a Tokio worker.
+    pub async fn begin_publication_turn(
+        &self,
+        scope: PublicationScope,
+        timeout: std::time::Duration,
+    ) -> Result<PublicationTurnGuard, AcpError> {
+        let fence = self.publication_fence.clone();
+        let generation =
+            tokio::task::spawn_blocking(move || fence.begin_with_timeout(scope, timeout))
+                .await
+                .map_err(|error| {
+                    AcpError::PublicationFence(FenceError::Io(std::io::Error::other(format!(
+                        "publication fence worker failed: {error}"
+                    ))))
+                })??;
+        Ok(PublicationTurnGuard {
+            fence: self.publication_fence.clone(),
+            generation: Some(generation),
+        })
+    }
+
+    /// Drain and terminalize a publication generation, killing the ACP process
+    /// group first when a descendant holds its lease past `timeout`.
+    pub async fn settle_publication_turn(
+        &mut self,
+        guard: &mut PublicationTurnGuard,
+        timeout: std::time::Duration,
+    ) -> Result<PublicationCloseOutcome, AcpError> {
+        match guard.close_with_timeout(timeout).await {
+            Ok(_) => Ok(PublicationCloseOutcome::Closed),
+            Err(FenceError::LockTimeout(_)) => {
+                tracing::warn!(
+                    timeout = ?timeout,
+                    "publication lease did not drain; killing ACP process group"
+                );
+                self.shutdown().await;
+                guard
+                    .close_with_timeout(std::time::Duration::from_secs(1))
+                    .await?;
+                Ok(PublicationCloseOutcome::AgentKilled)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -2163,11 +2363,211 @@ pub fn model_in_catalog(
         })
 }
 
+// ─── Fence filesystem lifecycle ───────────────────────────────────────────────
+
+const FENCE_DIR_PREFIX: &str = "buzz-acp-publication-fence-";
+
+struct SpawnFenceArtifacts {
+    fence: PublicationFence,
+    directory: std::path::PathBuf,
+    armed: bool,
+}
+
+impl SpawnFenceArtifacts {
+    fn new(fence: PublicationFence, directory: std::path::PathBuf) -> Self {
+        Self {
+            fence,
+            directory,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpawnFenceArtifacts {
+    fn drop(&mut self) {
+        if self.armed {
+            cleanup_fence_artifacts(&self.fence, &self.directory);
+        }
+    }
+}
+
+fn create_private_fence_dir() -> Result<std::path::PathBuf, std::io::Error> {
+    let prefix = format!("{FENCE_DIR_PREFIX}{}-", std::process::id());
+    let directory = tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempdir_in(std::env::temp_dir())?
+        .keep();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let metadata = std::fs::symlink_metadata(&directory)?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.mode() & 0o777 != 0o700
+            || metadata.uid() != nix::unistd::Uid::current().as_raw()
+        {
+            let _ = std::fs::remove_dir_all(&directory);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "publication fence directory is not private and process-owned",
+            ));
+        }
+    }
+    Ok(directory)
+}
+
+fn cleanup_fence_artifacts(fence: &PublicationFence, directory: &std::path::Path) {
+    let _ = fence.remove();
+    let _ = std::fs::remove_dir(directory);
+}
+
+#[cfg(unix)]
+fn cleanup_fence_after_process_exit(
+    fence: PublicationFence,
+    directory: std::path::PathBuf,
+    pid: u32,
+) {
+    let _ = std::thread::Builder::new()
+        .name("buzz-publication-fence-reap".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let process_is_gone = matches!(
+                    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None),
+                    Err(nix::errno::Errno::ESRCH)
+                );
+                if process_is_gone {
+                    cleanup_fence_artifacts(&fence, &directory);
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+}
+
+#[cfg(unix)]
+fn scavenge_stale_fence_dirs() {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let current_uid = nix::unistd::Uid::current().as_raw();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(FENCE_DIR_PREFIX) else {
+            continue;
+        };
+        let Some((pid_text, _random)) = rest.split_once('-') else {
+            continue;
+        };
+        let Ok(pid) = pid_text.parse::<i32>() else {
+            continue;
+        };
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != current_uid
+            || metadata.mode() & 0o777 != 0o700
+        {
+            continue;
+        }
+        let process_is_gone = matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        );
+        if process_is_gone {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn scavenge_stale_fence_dirs() {}
+
+// ─── Managed CLI capability ───────────────────────────────────────────────────
+
+fn sibling_buzz_cli_name(acp_executable: &std::path::Path) -> std::ffi::OsString {
+    let file_name = acp_executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let stem = file_name.strip_suffix(".exe").unwrap_or(file_name);
+    let suffix = stem.strip_prefix("buzz-acp-");
+    let name = match suffix {
+        Some(target) => format!("buzz-{target}"),
+        None => "buzz".to_string(),
+    };
+    if cfg!(windows) {
+        format!("{name}.exe").into()
+    } else {
+        name.into()
+    }
+}
+
+async fn verify_sibling_buzz_cli() -> Result<std::path::PathBuf, AcpError> {
+    let executable = std::env::current_exe()?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| AcpError::Protocol("ACP executable has no parent directory".into()))?;
+    let candidate = directory.join(sibling_buzz_cli_name(&executable));
+    verify_buzz_cli_candidate(&candidate).await?;
+    Ok(candidate)
+}
+
+async fn verify_buzz_cli_candidate(path: &std::path::Path) -> Result<(), AcpError> {
+    if !path.is_file() {
+        return Err(AcpError::Protocol(format!(
+            "co-versioned managed Buzz CLI is missing: {}",
+            path.display()
+        )));
+    }
+
+    let mut command = tokio::process::Command::new(path);
+    command
+        .arg(PUBLICATION_FENCE_CAPABILITY_ARG)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(2), command.output())
+        .await
+        .map_err(|_| {
+            AcpError::Protocol(format!(
+                "managed Buzz CLI capability probe timed out: {}",
+                path.display()
+            ))
+        })??;
+    let response = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success()
+        || response.trim_end_matches(['\r', '\n']) != PUBLICATION_FENCE_CAPABILITY_RESPONSE
+    {
+        return Err(AcpError::Protocol(format!(
+            "managed Buzz CLI lacks publication-fence capability: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 // ─── Drop: kill child process ─────────────────────────────────────────────────
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
         // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
+        let child_pid = self.child.id();
         // Kill the process group when possible so subprocesses don't leak.
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
         match self.child.id() {
@@ -2176,9 +2576,21 @@ impl Drop for AcpClient {
                 let _ = self.child.start_kill();
             }
         }
-        // Non-blocking reap attempt — prevents zombie accumulation in the
-        // common case where SIGKILL takes effect before Drop returns.
-        let _ = self.child.try_wait();
+        // Remove the fence path only after confirmed reap. If the child has
+        // not exited yet, a later harness startup scavenges this private,
+        // ownership-checked directory once its PID is gone.
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            cleanup_fence_artifacts(&self.publication_fence, &self.publication_fence_dir);
+        } else {
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                cleanup_fence_after_process_exit(
+                    self.publication_fence.clone(),
+                    self.publication_fence_dir.clone(),
+                    pid,
+                );
+            }
+        }
     }
 }
 
@@ -2199,9 +2611,25 @@ fn kill_process_group(pid: u32) -> bool {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
 }
 
-/// Fallback for non-Unix: process-group kill not available.
-/// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
+/// Kill the Windows process tree rooted at `pid`. `taskkill /T /F` is the
+/// safe equivalent of Unix process-group termination and is already used by
+/// the desktop managed-agent lifecycle. A failure returns false so callers
+/// kill the direct child and, critically, fence settlement still fails closed
+/// if a descendant retains the publication lease.
+#[cfg(windows)]
+fn kill_process_group(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Fallback for targets without Unix process groups or Windows `taskkill`.
+#[cfg(not(any(unix, windows)))]
 fn kill_process_group(_pid: u32) -> bool {
     false
 }
@@ -2246,6 +2674,340 @@ mod tests {
         assert_eq!(StopReason::from_str("unknown_value"), None);
         assert_eq!(StopReason::from_str(""), None);
         assert_eq!(StopReason::from_str("endturn"), None); // no camelCase — still unknown
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fence_directory_is_private_and_removed_after_confirmed_reap() {
+        use std::os::unix::fs::MetadataExt;
+
+        let mut client = spawn_inert_client().await;
+        let directory = client.publication_fence_dir.clone();
+        let metadata = std::fs::symlink_metadata(&directory).expect("fence directory metadata");
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert!(!metadata.file_type().is_symlink());
+
+        client.shutdown().await;
+        drop(client);
+        assert!(!directory.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scavenger_removes_only_private_owned_dead_pid_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::Builder::new()
+            .prefix(&format!("{FENCE_DIR_PREFIX}2000000000-"))
+            .tempdir_in(std::env::temp_dir())
+            .expect("stale tempdir")
+            .keep();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("private stale dir");
+        std::fs::write(directory.join("state.json"), b"stale").expect("stale state");
+
+        scavenge_stale_fence_dirs();
+        assert!(!directory.exists());
+    }
+
+    #[tokio::test]
+    async fn acp_child_inherits_publication_fence_path() {
+        let mut client = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".to_string(),
+                format!("printf '%s\\n' \"${}\"", PUBLICATION_FENCE_ENV),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn env probe");
+        let expected = client
+            .publication_fence_path()
+            .to_string_lossy()
+            .into_owned();
+        let observed = client
+            .reader
+            .next()
+            .await
+            .expect("probe line")
+            .expect("valid probe line");
+        assert_eq!(observed, expected);
+        client.shutdown().await;
+    }
+
+    #[test]
+    fn sibling_cli_name_supports_plain_and_tauri_sidecar_binaries() {
+        let extension = if cfg!(windows) { ".exe" } else { "" };
+        assert_eq!(
+            sibling_buzz_cli_name(std::path::Path::new(&format!("buzz-acp{extension}"))),
+            std::ffi::OsString::from(format!("buzz{extension}"))
+        );
+        assert_eq!(
+            sibling_buzz_cli_name(std::path::Path::new(&format!(
+                "buzz-acp-aarch64-apple-darwin{extension}"
+            ))),
+            std::ffi::OsString::from(format!("buzz-aarch64-apple-darwin{extension}"))
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_buzz_cli(path: &std::path::Path, response: &str, success: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let exit = if success { 0 } else { 1 };
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"{PUBLICATION_FENCE_CAPABILITY_ARG}\" ]; then printf '%s\\n' '{response}'; exit {exit}; fi\nexit 64\n"
+            ),
+        )
+        .expect("write fake buzz");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake buzz executable");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_cli_probe_rejects_older_binary_and_pins_child_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_dir = temp.path().join("old");
+        let current_dir = temp.path().join("current");
+        std::fs::create_dir_all(&old_dir).expect("old dir");
+        std::fs::create_dir_all(&current_dir).expect("current dir");
+        let old = old_dir.join("buzz");
+        let current = current_dir.join("buzz");
+        write_fake_buzz_cli(&old, "older-buzz", false);
+        write_fake_buzz_cli(&current, PUBLICATION_FENCE_CAPABILITY_RESPONSE, true);
+
+        assert!(matches!(
+            verify_buzz_cli_candidate(&old).await,
+            Err(AcpError::Protocol(message)) if message.contains("lacks publication-fence capability")
+        ));
+        verify_buzz_cli_candidate(&current)
+            .await
+            .expect("current CLI capability");
+
+        let mut client = AcpClient::spawn_inner(
+            "sh",
+            &["-c".into(), "command -v buzz".into()],
+            &[],
+            false,
+            Some(&current),
+        )
+        .await
+        .expect("spawn PATH probe");
+        let resolved = client
+            .reader
+            .next()
+            .await
+            .expect("PATH probe line")
+            .expect("valid PATH probe line");
+        assert_eq!(std::path::Path::new(&resolved), current);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn acp_turn_guard_terminalizes_descendant_publication_attempt() {
+        let mut client = spawn_inert_client().await;
+        let path = client.publication_fence_path().to_path_buf();
+        let channel_id = uuid::Uuid::new_v4();
+        let mut guard = client
+            .begin_publication_turn(
+                PublicationScope {
+                    turn_id: "turn-a".to_string(),
+                    channel_id: Some(channel_id),
+                    reply_to: Some("root-a".to_string()),
+                },
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("begin publication turn");
+        let attempt =
+            buzz_publication_fence::PublicationAttempt::capture(&path, channel_id, Some("root-a"))
+                .expect("capture active publication");
+
+        assert!(guard
+            .close_with_timeout(std::time::Duration::from_secs(1))
+            .await
+            .expect("close publication turn"));
+        assert!(matches!(
+            attempt.acquire(),
+            Err(buzz_publication_fence::FenceError::Terminal)
+        ));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn aborted_turn_task_terminalizes_generation_via_drop_fallback() {
+        let mut client = spawn_inert_client().await;
+        let path = client.publication_fence_path().to_path_buf();
+        let channel_id = uuid::Uuid::new_v4();
+        let guard = client
+            .begin_publication_turn(
+                PublicationScope {
+                    turn_id: "turn-abort".into(),
+                    channel_id: Some(channel_id),
+                    reply_to: Some("root-a".into()),
+                },
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("begin publication turn");
+        let attempt =
+            buzz_publication_fence::PublicationAttempt::capture(&path, channel_id, Some("root-a"))
+                .expect("capture active attempt");
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    buzz_publication_fence::PublicationAttempt::capture(
+                        &path,
+                        channel_id,
+                        Some("root-a"),
+                    ),
+                    Err(buzz_publication_fence::FenceError::Terminal)
+                ) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("drop fallback terminalizes boundedly");
+        assert!(matches!(
+            attempt.acquire(),
+            Err(buzz_publication_fence::FenceError::Terminal)
+        ));
+        client.shutdown().await;
+    }
+
+    #[test]
+    fn publication_lock_holder_child() {
+        const PARENT_ENV: &str = "BUZZ_TEST_HOLD_PUBLICATION_LEASE";
+        const GRANDCHILD_ENV: &str = "BUZZ_TEST_HOLD_PUBLICATION_LEASE_GRANDCHILD";
+        let is_parent = std::env::var_os(PARENT_ENV).is_some();
+        let is_grandchild = std::env::var_os(GRANDCHILD_ENV).is_some();
+        if !is_parent && !is_grandchild {
+            return;
+        }
+        use std::io::{BufRead, Write};
+
+        if is_parent && !is_grandchild {
+            let mut line = String::new();
+            std::io::BufReader::new(std::io::stdin())
+                .read_line(&mut line)
+                .expect("read parent signal");
+            let executable = std::env::current_exe().expect("test executable");
+            let mut grandchild = std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "acp::tests::publication_lock_holder_child",
+                    "--nocapture",
+                ])
+                .env(GRANDCHILD_ENV, "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .expect("spawn publication-lease grandchild");
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            let _ = grandchild.kill();
+            let _ = grandchild.wait();
+            return;
+        }
+
+        let channel_id = uuid::Uuid::parse_str(
+            &std::env::var("BUZZ_TEST_PUBLICATION_CHANNEL").expect("channel env"),
+        )
+        .expect("valid channel");
+        let _lease = buzz_publication_fence::PublicationAttempt::capture_from_env(
+            channel_id,
+            Some("root-a"),
+        )
+        .expect("capture publication")
+        .expect("managed fence")
+        .acquire()
+        .expect("hold publication lease");
+        println!("publication-lease-held");
+        std::io::stdout().flush().expect("flush ready line");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn stalled_descendant_lease_kills_process_and_terminalizes_boundedly() {
+        let channel_id = uuid::Uuid::new_v4();
+        let executable = std::env::current_exe().expect("test executable");
+        let mut client = AcpClient::spawn(
+            executable.to_str().expect("utf-8 test path"),
+            &[
+                "--exact".into(),
+                "acp::tests::publication_lock_holder_child".into(),
+                "--nocapture".into(),
+            ],
+            &[
+                ("BUZZ_TEST_HOLD_PUBLICATION_LEASE".into(), "1".into()),
+                (
+                    "BUZZ_TEST_PUBLICATION_CHANNEL".into(),
+                    channel_id.to_string(),
+                ),
+            ],
+            false,
+        )
+        .await
+        .expect("spawn lease holder");
+        let path = client.publication_fence_path().to_path_buf();
+        let mut guard = client
+            .begin_publication_turn(
+                PublicationScope {
+                    turn_id: "turn-a".into(),
+                    channel_id: Some(channel_id),
+                    reply_to: Some("root-a".into()),
+                },
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("begin publication turn");
+        let late_attempt =
+            buzz_publication_fence::PublicationAttempt::capture(&path, channel_id, Some("root-a"))
+                .expect("capture attempt before terminal transition");
+
+        client
+            .stdin
+            .write_all(b"hold\n")
+            .await
+            .expect("release child to lock");
+        loop {
+            let line = client
+                .reader
+                .next()
+                .await
+                .expect("child output")
+                .expect("valid child output");
+            if line == "publication-lease-held" {
+                break;
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let outcome = client
+            .settle_publication_turn(&mut guard, std::time::Duration::from_millis(50))
+            .await
+            .expect("kill and terminalize");
+
+        assert_eq!(outcome, PublicationCloseOutcome::AgentKilled);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(matches!(
+            late_attempt.acquire(),
+            Err(buzz_publication_fence::FenceError::Terminal)
+        ));
     }
 
     #[test]

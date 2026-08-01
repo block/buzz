@@ -571,20 +571,45 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+async fn submit_fenced_message(
+    client: &BuzzClient,
+    event: nostr::Event,
+    publication_attempt: Option<buzz_publication_fence::PublicationAttempt>,
+) -> Result<String, CliError> {
+    // Hold the shared lease through the relay submission. A terminal transition
+    // takes the exclusive lock, so once cancellation settles no later managed
+    // publication can cross this boundary.
+    let _publication_lease = publication_attempt
+        .map(|attempt| attempt.acquire())
+        .transpose()
+        .map_err(|error| CliError::Other(error.to_string()))?;
+    client.submit_event(event).await
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
 ) -> Result<(), CliError> {
+    if let Some(ref r) = p.reply_to {
+        validate_hex64(r)?;
+    }
+    let channel_uuid = parse_uuid(&p.channel_id)?;
+
+    // Managed ACP subprocesses capture their active publication generation
+    // before reading stdin, uploading files, or resolving context. Standalone
+    // CLI use has no fence env and remains unchanged.
+    let publication_attempt = buzz_publication_fence::PublicationAttempt::capture_from_env(
+        channel_uuid,
+        p.reply_to.as_deref(),
+    )
+    .map_err(|error| CliError::Other(error.to_string()))?;
+
     // Allow '-' to read content from stdin. This keeps callers from having to
     // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
-    if let Some(ref r) = p.reply_to {
-        validate_hex64(r)?;
-    }
-    let channel_uuid = parse_uuid(&p.channel_id)?;
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
     let stripped = strip_code_regions(&p.content);
@@ -679,7 +704,7 @@ pub async fn cmd_send_message(
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
-    let resp = client.submit_event(event).await?;
+    let resp = submit_fenced_message(client, event, publication_attempt).await?;
     let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
         .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
     if let Some(object) = output.as_object_mut() {
@@ -724,6 +749,24 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
 
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
+    // Match ordinary message publication: capture the managed generation before
+    // reading stdin or resolving thread context, then hold its lease across the
+    // final relay submission. Standalone CLI use has no fence env.
+    let publication_attempt = buzz_publication_fence::PublicationAttempt::capture_from_env(
+        channel_uuid,
+        p.reply_to.as_deref(),
+    )
+    .map_err(|error| CliError::Other(error.to_string()))?;
+
+    send_diff_message_with_attempt(client, p, channel_uuid, publication_attempt).await
+}
+
+async fn send_diff_message_with_attempt(
+    client: &BuzzClient,
+    p: SendDiffParams,
+    channel_uuid: uuid::Uuid,
+    publication_attempt: Option<buzz_publication_fence::PublicationAttempt>,
+) -> Result<(), CliError> {
     // Read diff from stdin if "--diff -"
     let diff_content = read_or_stdin(&p.diff)?;
 
@@ -775,7 +818,7 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
 
     let event = client.sign_event(builder)?;
 
-    let resp = client.submit_event(event).await?;
+    let resp = submit_fenced_message(client, event, publication_attempt).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
@@ -995,8 +1038,10 @@ mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        resolve_names_to_pubkeys, send_diff_message_with_attempt, submit_fenced_message,
+        SendDiffParams,
     };
+    use buzz_publication_fence::{PublicationAttempt, PublicationFence, PublicationScope};
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1011,6 +1056,130 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[tokio::test]
+    async fn terminal_fence_rejects_message_at_final_submit_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("publication-fence.json");
+        let fence = PublicationFence::create(&path).expect("create fence");
+        let channel_id = uuid::Uuid::new_v4();
+        let generation = fence
+            .begin(PublicationScope {
+                turn_id: "turn-a".to_string(),
+                channel_id: Some(channel_id),
+                reply_to: Some(ID_A.to_string()),
+            })
+            .expect("begin turn");
+        let attempt = PublicationAttempt::capture(&path, channel_id, Some(ID_A))
+            .expect("capture active attempt");
+        assert!(fence.terminate(generation).expect("terminate turn"));
+
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "late reply")
+            .sign_with_keys(&keys)
+            .expect("sign event");
+        let client =
+            crate::client::BuzzClient::new("http://127.0.0.1:1".to_string(), keys, None, None)
+                .expect("construct client");
+
+        let error = submit_fenced_message(&client, event, Some(attempt))
+            .await
+            .expect_err("terminal fence must reject before network submit");
+        assert!(matches!(
+            error,
+            crate::error::CliError::Other(ref message)
+                if message.contains("terminal") && message.contains("rejected")
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_matching_fence_reaches_network_submit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("publication-fence.json");
+        let fence = PublicationFence::create(&path).expect("create fence");
+        let channel_id = uuid::Uuid::new_v4();
+        fence
+            .begin(PublicationScope {
+                turn_id: "turn-a".into(),
+                channel_id: Some(channel_id),
+                reply_to: Some(ID_A.into()),
+            })
+            .expect("begin turn");
+        let attempt = PublicationAttempt::capture(&path, channel_id, Some(ID_A))
+            .expect("capture active attempt");
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "active reply")
+            .sign_with_keys(&keys)
+            .expect("sign event");
+        let client = crate::client::BuzzClient::new("http://127.0.0.1:1".into(), keys, None, None)
+            .expect("construct client");
+
+        let error = submit_fenced_message(&client, event, Some(attempt))
+            .await
+            .expect_err("unreachable relay proves submit was attempted");
+        assert!(!error.to_string().contains("publication rejected"));
+    }
+
+    #[tokio::test]
+    async fn standalone_send_without_fence_reaches_network_submit() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "standalone reply")
+            .sign_with_keys(&keys)
+            .expect("sign event");
+        let client = crate::client::BuzzClient::new("http://127.0.0.1:1".into(), keys, None, None)
+            .expect("construct client");
+
+        let error = submit_fenced_message(&client, event, None)
+            .await
+            .expect_err("unreachable relay proves submit was attempted");
+        assert!(!error.to_string().contains("publication rejected"));
+    }
+
+    #[tokio::test]
+    async fn terminal_fence_rejects_send_diff_at_final_submit_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("publication-fence.json");
+        let fence = PublicationFence::create(&path).expect("create fence");
+        let channel_id = uuid::Uuid::new_v4();
+        let generation = fence
+            .begin(PublicationScope {
+                turn_id: "turn-diff".to_string(),
+                channel_id: Some(channel_id),
+                reply_to: None,
+            })
+            .expect("begin turn");
+        let attempt = PublicationAttempt::capture(&path, channel_id, None)
+            .expect("capture active diff publication");
+        assert!(fence.terminate(generation).expect("terminate turn"));
+
+        let keys = nostr::Keys::generate();
+        let client =
+            crate::client::BuzzClient::new("http://127.0.0.1:1".to_string(), keys, None, None)
+                .expect("construct client");
+        let params = SendDiffParams {
+            channel_id: channel_id.to_string(),
+            diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            repo_url: "https://example.invalid/repo".to_string(),
+            commit_sha: ID_A.to_string(),
+            file_path: Some("src/lib.rs".to_string()),
+            parent_commit_sha: None,
+            source_branch: None,
+            target_branch: None,
+            pr_number: None,
+            language: Some("rust".to_string()),
+            description: Some("fenced diff".to_string()),
+            reply_to: None,
+        };
+
+        let error = send_diff_message_with_attempt(&client, params, channel_id, Some(attempt))
+            .await
+            .expect_err("terminal fence must reject diff before network submit");
+        assert!(matches!(
+            error,
+            crate::error::CliError::Other(ref message)
+                if message.contains("terminal") && message.contains("rejected")
+        ));
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
