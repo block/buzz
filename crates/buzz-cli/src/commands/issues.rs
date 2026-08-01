@@ -194,5 +194,15 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             )
             .await
         }
+        IssuesCmd::StatusGet { issue, repo_owner } => {
+            // NIP-34 root kind for an issue is 1621.
+            crate::commands::git_status::cmd_git_status_get(
+                client,
+                &issue,
+                1621,
+                repo_owner.as_deref(),
+            )
+            .await
+        }
     }
 }

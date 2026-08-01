@@ -323,6 +323,16 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
             )
             .await
         }
+        PrCmd::StatusGet { root, repo_owner } => {
+            // NIP-34 root kind for a pull request is 1618.
+            crate::commands::git_status::cmd_git_status_get(
+                client,
+                &root,
+                1618,
+                repo_owner.as_deref(),
+            )
+            .await
+        }
     }
 }
 
