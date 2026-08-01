@@ -1309,7 +1309,7 @@ mod tests {
             ("http://eu.api.openai.com/v1", true),
             ("http://localhost:11434/v1", false),
             ("https://openrouter.ai/api/v1", false),
-            ("https://api.novita.ai/v3/openai", false),
+            ("https://api.novita.ai/openai", false),
             ("https://gateway.block.example/v1", false),
             ("https://api.openai.com.evil.example/v1", false),
             ("not a url", false),
