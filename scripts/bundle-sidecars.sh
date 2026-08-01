@@ -46,6 +46,8 @@ for bin in "${SIDECARS[@]}"; do
     fi
 done
 
+"$PWD/scripts/verify-desktop-sidecars.sh" "$BINARIES_DIR" "$TARGET"
+
 if [[ "$TARGET" == *-apple-darwin ]]; then
     DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
         "$PWD/scripts/build-apple-inputs.sh" "$TARGET"
