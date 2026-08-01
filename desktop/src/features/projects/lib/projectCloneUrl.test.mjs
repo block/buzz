@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { deriveRelayCloneUrl, effectiveCloneUrls } from "./projectCloneUrl.ts";
+import {
+  deriveRelayCloneUrl,
+  effectiveCloneUrls,
+  isActiveRelayCloneUrl,
+} from "./projectCloneUrl.ts";
 
 const OWNER = "a".repeat(64);
 const ORIGIN = "https://relay.example";
@@ -59,4 +63,59 @@ test("effectiveCloneUrls derives a default when none is advertised", () => {
 
 test("effectiveCloneUrls returns empty when no default can be derived", () => {
   assert.deepEqual(effectiveCloneUrls([], null, OWNER, "repo"), []);
+});
+
+test("isActiveRelayCloneUrl accepts the active relay repository shape", () => {
+  assert.equal(
+    isActiveRelayCloneUrl(`${ORIGIN}/git/${OWNER}/repo`, ORIGIN, OWNER),
+    true,
+  );
+  assert.equal(
+    isActiveRelayCloneUrl(
+      `${ORIGIN}/prefix/git/${OWNER}/repo`,
+      `${ORIGIN}/prefix`,
+      OWNER,
+    ),
+    true,
+  );
+  assert.equal(
+    isActiveRelayCloneUrl(`${ORIGIN}/git/${"b".repeat(64)}/fork`, ORIGIN),
+    true,
+  );
+});
+
+test("isActiveRelayCloneUrl rejects external and mismatched repositories", () => {
+  assert.equal(
+    isActiveRelayCloneUrl(
+      "https://github.com/octocat/hello.git",
+      ORIGIN,
+      OWNER,
+    ),
+    false,
+  );
+  assert.equal(
+    isActiveRelayCloneUrl(
+      `https://other-relay.example/git/${OWNER}/repo`,
+      ORIGIN,
+      OWNER,
+    ),
+    false,
+  );
+  assert.equal(
+    isActiveRelayCloneUrl(
+      `${ORIGIN}/git/${"b".repeat(64)}/repo`,
+      ORIGIN,
+      OWNER,
+    ),
+    false,
+  );
+  assert.equal(
+    isActiveRelayCloneUrl(`${ORIGIN}/git/${OWNER}/repo/extra`, ORIGIN, OWNER),
+    false,
+  );
+  assert.equal(isActiveRelayCloneUrl("not a URL", ORIGIN, OWNER), false);
+  assert.equal(
+    isActiveRelayCloneUrl(`${ORIGIN}/git/${OWNER}/repo`, null, OWNER),
+    false,
+  );
 });

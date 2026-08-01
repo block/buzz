@@ -1118,6 +1118,10 @@ declare global {
     };
     /** Overrides the first mock repository owner for delegated-owner tests. */
     __BUZZ_E2E_PROJECT_OWNER_OVERRIDE__?: string;
+    /** Overrides the first mock repository clone URL for provider tests. */
+    __BUZZ_E2E_PROJECT_CLONE_URL_OVERRIDE__?: string;
+    /** Adds a web URL to the first mock repository for provider tests. */
+    __BUZZ_E2E_PROJECT_WEB_URL_OVERRIDE__?: string;
     /** Project history kinds rejected with CLOSED for aggregate-query tests. */
     __BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__?: number[];
     /** Captured aggregate project-history filters for request-count assertions. */
@@ -5135,6 +5139,15 @@ function buildMockProjectEvents(): RelayEvent[] {
       projectIndex === 0
         ? (window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? seed.owner)
         : seed.owner;
+    const relayCloneUrl = `${getRelayHttpUrl(getConfig())}/git/${owner}/${seed.dtag}`;
+    const cloneUrl =
+      projectIndex === 0
+        ? (window.__BUZZ_E2E_PROJECT_CLONE_URL_OVERRIDE__ ?? relayCloneUrl)
+        : relayCloneUrl;
+    const webUrl =
+      projectIndex === 0
+        ? window.__BUZZ_E2E_PROJECT_WEB_URL_OVERRIDE__
+        : undefined;
     const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${owner}:${seed.dtag}`;
     const authors = [seed.owner, ...seed.contributors];
     const random = mulberry32(projectIndex + 1);
@@ -5147,7 +5160,8 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
-          ["clone", `https://relay.example.com/git/${owner}/${seed.dtag}`],
+          ["clone", cloneUrl],
+          ...(webUrl ? [["web", webUrl]] : []),
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],
         owner,
@@ -5212,10 +5226,7 @@ function buildMockProjectEvents(): RelayEvent[] {
             ? [
                 ["h", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
                 ["branch-name", `feature/mock-${dayOffset}-${index}`],
-                [
-                  "clone",
-                  `https://relay.example.com/git/${owner}/${seed.dtag}`,
-                ],
+                ["clone", cloneUrl],
               ]
             : []),
         ];
