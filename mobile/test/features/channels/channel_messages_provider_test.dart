@@ -243,6 +243,46 @@ void main() {
     );
   });
 
+  test('reconnect hydration cannot retain a rolled-back local row', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'history', createdAt: 10), _bounds()],
+        [_event(id: 'history', createdAt: 10), _bounds()],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    notifier.addLocalMessage(_event(id: 'local', createdAt: 20));
+
+    relaySession.setConnected(false);
+    await _pumpEventQueue();
+    relaySession.setConnected(true);
+    await _pumpEventQueue();
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['history', 'local'],
+    );
+
+    notifier.removeLocalMessage('local');
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['history'],
+    );
+  });
+
   test('live non-broadcast reply updates its parent thread summary', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -315,46 +355,6 @@ void main() {
       );
     },
   );
-
-  test('reconnect hydration cannot retain a rolled-back local row', () async {
-    final relaySession = _RecordingRelaySessionNotifier(
-      queryResults: [
-        [_event(id: 'history', createdAt: 10), _bounds()],
-        [_event(id: 'history', createdAt: 10), _bounds()],
-      ],
-    );
-    final container = _buildContainer(relaySession);
-    addTearDown(container.dispose);
-
-    container.read(channelMessagesProvider(_channelId));
-    await relaySession.subscribed;
-    await _pumpEventQueue();
-    final notifier = container.read(
-      channelMessagesProvider(_channelId).notifier,
-    );
-    notifier.addLocalMessage(_event(id: 'local', createdAt: 20));
-
-    relaySession.setConnected(false);
-    await _pumpEventQueue();
-    relaySession.setConnected(true);
-    await _pumpEventQueue();
-    expect(
-      container
-          .read(channelMessagesProvider(_channelId))
-          .value
-          ?.map((event) => event.id),
-      ['history', 'local'],
-    );
-
-    notifier.removeLocalMessage('local');
-    expect(
-      container
-          .read(channelMessagesProvider(_channelId))
-          .value
-          ?.map((event) => event.id),
-      ['history'],
-    );
-  });
 
   test(
     'thread replies are inserted, deduped, and rolled back locally',
