@@ -3415,7 +3415,7 @@ mod tests {
     }
 
     #[test]
-    fn replaceable_snapshot_timestamp_does_not_regress_behind_wall_clock() {
+    fn wall_clock_catch_up_advances_snapshot_timestamp() {
         assert_eq!(
             next_replaceable_snapshot_timestamp(2_000, Some(1_000)),
             2_000
