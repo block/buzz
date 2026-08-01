@@ -1,5 +1,5 @@
 use nostr::{Keys, ToBech32};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     app_state::AppState,
