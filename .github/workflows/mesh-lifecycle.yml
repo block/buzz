@@ -1,6 +1,8 @@
 name: Mesh Lifecycle
 # Relay-driven mesh lifecycle smoke: membership → signed discovery notes →
-# relay-derived allowlist → join → CPU inference over QUIC → stranger denied.
+# relay-derived allowlist → join → CPU inference over QUIC → stranger denied
+# (relay membership rejection + no routed inference, with a differential
+# trusted-inference health proof so a dead serve node can't fake a denial).
 # Runs the full Buzz "shared compute" join story with three real mesh-llm
 # node processes on one runner, using the Buzz relay as the control plane
 # (no hand-carried invite tokens). Mirrors the shape mesh-llm's own CI uses
@@ -12,6 +14,10 @@ on:
     paths:
       - 'crates/buzz-relay/examples/mesh_*.rs'
       - 'crates/buzz-relay/Cargo.toml'
+      - 'crates/buzz-admin/**'
+      - 'crates/buzz-test-client/**'
+      - 'crates/buzz-ws-client/**'
+      - 'Cargo.lock'
       - 'desktop/src-tauri/src/mesh_llm/**'
       - 'scripts/ci-mesh-lifecycle-smoke.sh'
       - 'scripts/start-relay-for-tests.sh'
@@ -20,6 +26,10 @@ on:
     paths:
       - 'crates/buzz-relay/examples/mesh_*.rs'
       - 'crates/buzz-relay/Cargo.toml'
+      - 'crates/buzz-admin/**'
+      - 'crates/buzz-test-client/**'
+      - 'crates/buzz-ws-client/**'
+      - 'Cargo.lock'
       - 'desktop/src-tauri/src/mesh_llm/**'
       - 'scripts/ci-mesh-lifecycle-smoke.sh'
       - 'scripts/start-relay-for-tests.sh'
@@ -36,7 +46,7 @@ env:
 jobs:
   lifecycle-smoke:
     name: Relay-Driven Mesh Lifecycle Smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -51,8 +61,8 @@ jobs:
 
       # The mesh-llm SDK downloads a signed native runtime (llama.cpp CPU
       # build) on first init, and the serve node downloads the smoke model
-      # from HuggingFace on first run. Both are version/ref-stable — cache
-      # them so steady-state runs skip both downloads.
+      # from HuggingFace on first run. Key on the lockfile so a mesh pin bump
+      # rolls the runtime cache; the model ref is stable.
       - name: Restore mesh runtime + model caches
         id: mesh-caches
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -60,7 +70,9 @@ jobs:
           path: |
             ~/.cache/mesh-llm/native-runtimes
             ~/.cache/huggingface/hub
-          key: mesh-lifecycle-${{ runner.os }}-v0.74.0-smollm2-135m
+          key: mesh-lifecycle-${{ runner.os }}-smollm2-135m-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            mesh-lifecycle-${{ runner.os }}-smollm2-135m-
 
       - name: Start integration services
         run: |
@@ -77,7 +89,7 @@ jobs:
           done
 
       - name: Run relay-driven mesh lifecycle smoke
-        run: ./scripts/ci-mesh-lifecycle-smoke.sh
+        run: ./scripts/ci-mesh-lifecycle-smoke.sh 2>&1 | tee /tmp/mesh-lifecycle-harness.log
 
       - name: Save mesh runtime + model caches
         if: github.ref == 'refs/heads/main' && steps.mesh-caches.outputs.cache-hit != 'true'
@@ -86,12 +98,14 @@ jobs:
           path: |
             ~/.cache/mesh-llm/native-runtimes
             ~/.cache/huggingface/hub
-          key: mesh-lifecycle-${{ runner.os }}-v0.74.0-smollm2-135m
+          key: mesh-lifecycle-${{ runner.os }}-smollm2-135m-${{ hashFiles('Cargo.lock') }}
 
       - name: Upload relay + harness logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: mesh-lifecycle-logs
-          path: /tmp/buzz-relay.log
+          path: |
+            /tmp/buzz-relay.log
+            /tmp/mesh-lifecycle-harness.log
           if-no-files-found: ignore

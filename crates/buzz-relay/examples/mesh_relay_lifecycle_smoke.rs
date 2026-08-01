@@ -13,16 +13,30 @@
 //!      node, `serveTargets[].endpointAddr` covered by an endpoint binding
 //!      signature — the exact payload shape the desktop coordinator publishes.
 //!   3. TRUST — the serve node derives its admission allowlist from the relay:
-//!      status notes ∩ membership roster (`owner_ids_from_events` semantics),
-//!      then starts with `TrustPolicy::Allowlist`.
+//!      status notes ∩ membership roster, and requires the *exact* expected
+//!      owner set before starting with `TrustPolicy::Allowlist`.
 //!   4. JOIN — the client node discovers the serve target from the relay,
 //!      verifies both bindings and membership, and dials the advertised
 //!      endpoint. No token is ever handed over out-of-band.
 //!   5. INFER — a chat completion against the client's local OpenAI endpoint
 //!      routes over QUIC to the serve node's model.
-//!   6. DENY — the stranger gets zero kind:30003 events from the relay, and
-//!      even when handed the leaked endpoint address directly it is refused
-//!      admission (its owner id is not on the allowlist).
+//!   6. DENY — the stranger's NIP-42 auth must fail with the relay's
+//!      membership rejection, and even when handed the leaked endpoint
+//!      address directly it must not complete an inference — *while the
+//!      trusted client re-verifies inference immediately afterwards*, so a
+//!      sick serve node cannot masquerade as an admission denial.
+//!
+//! ## Scope: an independent protocol harness
+//!
+//! This harness speaks the same wire protocol as the desktop
+//! (`desktop/src-tauri/src/mesh_llm/{identity,discovery,coordinator}.rs`) but
+//! deliberately re-implements the binding/verification logic rather than
+//! linking desktop code (the desktop crate is outside this workspace). The
+//! payloads and canonical binding bytes are kept byte-identical — see the
+//! keep-in-sync comments below. A regression inside the desktop's own
+//! discovery filtering is covered by the desktop unit tests, not this smoke;
+//! what this smoke proves is that the relay + mesh-llm SDK + admission stack
+//! actually support the lifecycle end to end.
 //!
 //! One process per node is load-bearing: mesh-llm keeps process-global state
 //! (node endpoint key, ownership attestation under `~/.mesh-llm`), so each
@@ -39,8 +53,9 @@
 //!   cargo run --profile ci -p buzz-relay --example mesh_relay_lifecycle_smoke
 //! ```
 use std::collections::BTreeSet;
-use std::io::BufRead;
-use std::process::{Child, Command, Stdio};
+use std::io::{BufRead, Write};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use buzz_test_client::BuzzTestClient;
@@ -72,6 +87,10 @@ const STRANGER_CONSOLE_PORT: u16 = 13_333;
 /// the stranger's chance to (fail to) see it.
 const CLIENT_WINDOW_SECS: u64 = 180;
 const STRANGER_WINDOW_SECS: u64 = 60;
+
+/// Marker the orchestrator writes to the client child's stdin to request the
+/// post-attack inference re-verification.
+const VERIFY_AGAIN: &str = "VERIFY_AGAIN";
 
 fn main() -> anyhow::Result<()> {
     match std::env::var("MESH_ROLE").ok().as_deref() {
@@ -334,61 +353,68 @@ fn verified_serve_targets(event: &Event) -> Vec<(String, String)> {
 
 /// Owner ids of current members with valid owner bindings — the relay-derived
 /// admission roster (`owner_ids_from_events` semantics).
-fn member_owner_ids(events: &[Event]) -> Vec<String> {
+fn member_owner_ids(events: &[Event]) -> BTreeSet<String> {
     let Some(members) = membership_set(events) else {
-        return Vec::new();
+        return BTreeSet::new();
     };
-    let mut ids: Vec<String> = events
+    events
         .iter()
         .filter(|event| event.kind.as_u16() == KIND_MESH_STATUS)
         .filter(|event| members.contains(&event.pubkey.to_hex().to_ascii_lowercase()))
         .filter_map(verified_owner_id)
-        .collect();
-    ids.sort();
-    ids.dedup();
-    ids
+        .collect()
 }
 
 // ── Roles ────────────────────────────────────────────────────────────────────
 
 /// SERVE (member A): publish presence, derive the allowlist from the relay,
-/// start an allowlist serve node, publish the endpoint, park.
+/// require the exact expected owner set, start an allowlist serve node,
+/// publish the endpoint, park.
 async fn role_serve() -> anyhow::Result<()> {
     init_native_runtime().await?;
     let model = std::env::var("MESH_SMOKE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let keys = Keys::parse(&env("BUZZ_MEMBER_NSEC")?)?;
     let owner = load_keystore(std::path::Path::new(&env("MESH_OWNER_KEY")?), None)
         .map_err(|error| anyhow::anyhow!("loading serve owner keystore: {error}"))?;
-    let expected_owners: usize = env("MESH_EXPECTED_OWNERS")?.parse()?;
+    // The exact owner ids the orchestrator provisioned for members A and B.
+    // Waiting for this exact set (not a count) means the allowlist can only
+    // ever contain the intended identities.
+    let expected_owners: BTreeSet<String> = env("MESH_EXPECTED_OWNERS")?
+        .split(',')
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    anyhow::ensure!(
+        expected_owners.contains(&owner.owner_id()),
+        "serve owner id is not in MESH_EXPECTED_OWNERS"
+    );
 
     let mut relay = BuzzTestClient::connect(&relay_ws_url(), &keys)
         .await
         .map_err(|error| anyhow::anyhow!("serve member relay connect: {error}"))?;
     publish_status(&mut relay, &keys, &owner, &[]).await?;
     println!("STATUS_PUBLISHED");
-    // The upcoming serve::start() blocks through a possibly multi-minute model
-    // download; an idle relay socket gets closed under it. Reconnect after.
 
-    // TRUST: wait for every expected member owner to be visible via the relay
+    // TRUST: wait until every expected member owner is visible via the relay
     // (statuses ∩ roster), then admit exactly those owners.
     let deadline = Instant::now() + Duration::from_secs(120);
-    let allowlist = loop {
+    loop {
         let events = query_events(&mut relay, vec![status_filter(), membership_filter()]).await?;
-        let mut owners = member_owner_ids(&events);
-        if !owners.contains(&owner.owner_id()) {
-            owners.push(owner.owner_id());
-            owners.sort();
-        }
-        if owners.len() >= expected_owners {
-            break owners;
+        let mut visible = member_owner_ids(&events);
+        visible.insert(owner.owner_id());
+        if visible.is_superset(&expected_owners) {
+            break;
         }
         anyhow::ensure!(
             Instant::now() < deadline,
-            "timed out waiting for {expected_owners} member owners; saw {owners:?}"
+            "timed out waiting for expected owners {expected_owners:?}; saw {visible:?}"
         );
         tokio::time::sleep(Duration::from_secs(2)).await;
-    };
+    }
+    let allowlist: Vec<String> = expected_owners.iter().cloned().collect();
     println!("ALLOWLIST:{}", allowlist.join(","));
+    // The upcoming serve::start() blocks through a possibly multi-minute model
+    // download; an idle relay socket gets closed under it. Reconnect after.
     let _ = relay.disconnect().await;
 
     let cfg = serve::EmbeddedServeConfig::builder()
@@ -442,7 +468,9 @@ async fn role_serve() -> anyhow::Result<()> {
 }
 
 /// CLIENT (member B): publish presence, discover + verify the serve target
-/// from the relay, dial it, and prove inference routes over the mesh.
+/// from the relay, dial it, prove inference routes over the mesh — then wait
+/// for the orchestrator's `VERIFY_AGAIN` and re-prove inference after the
+/// stranger's admission attack, so denial is differential, not absence.
 async fn role_client() -> anyhow::Result<()> {
     init_native_runtime().await?;
     let keys = Keys::parse(&env("BUZZ_MEMBER_NSEC")?)?;
@@ -470,7 +498,8 @@ async fn role_client() -> anyhow::Result<()> {
             .flat_map(verified_serve_targets)
             .next();
         if let Some((_, endpoint)) = target {
-            break (endpoint, member_owner_ids(&events));
+            let owners: Vec<String> = member_owner_ids(&events).into_iter().collect();
+            break (endpoint, owners);
         }
         anyhow::ensure!(
             Instant::now() < deadline,
@@ -496,16 +525,17 @@ async fn role_client() -> anyhow::Result<()> {
     let node = client::start(cfg).await?;
     // The relay-discovered endpoint is the dial target — the same
     // `dial_endpoint_addr` step the desktop's join watcher performs. The
-    // watcher retries every 15s (first QUIC dials can time out while the
-    // serve node's endpoint is still warming up); mirror that here.
+    // desktop's watcher retries every 15s (a first QUIC dial can time out
+    // while the serve node's endpoint is still warming up). mesh-llm itself
+    // retries internally per attempt, so keep the outer budget small.
     let mut dial_result = Ok(());
-    for attempt in 1..=5u32 {
+    for attempt in 1..=3u32 {
         dial_result = node.join_token(&endpoint).await;
         match &dial_result {
             Ok(()) => break,
             Err(error) => {
-                eprintln!("[client] dial attempt {attempt}/5 failed: {error:#}");
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                eprintln!("[client] dial attempt {attempt}/3 failed: {error:#}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     }
@@ -513,46 +543,83 @@ async fn role_client() -> anyhow::Result<()> {
 
     let http = reqwest::Client::new();
     let base = node.api_base_url().to_string();
-    let seen = wait_for_model(&http, &base, Duration::from_secs(CLIENT_WINDOW_SECS)).await?;
-    match &seen {
-        Some(model) => {
-            println!("SEEN:{model}");
-            match try_completion(&http, &base, model).await {
-                Ok(content) => println!("INFER_OK:{content}"),
-                Err(error) => println!("INFER_FAIL:{error}"),
-            }
+    let Some(model) = wait_for_model(&http, &base, Duration::from_secs(CLIENT_WINDOW_SECS)).await?
+    else {
+        println!("NONE");
+        let _ = node.stop().await;
+        std::process::exit(0);
+    };
+    println!("SEEN:{model}");
+    match try_completion(&http, &base, &model).await {
+        Ok(content) => println!("INFER_OK:{content}"),
+        Err(error) => {
+            println!("INFER_FAIL:{error}");
+            let _ = node.stop().await;
+            std::process::exit(0);
         }
-        None => println!("NONE"),
+    }
+
+    // Post-attack health proof: hold the mesh session open until the
+    // orchestrator has run the stranger, then prove the serve node still
+    // routes trusted inference. This is what makes the stranger's failure an
+    // admission denial rather than a dead server.
+    let line = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map(|_| line)
+    })
+    .await??;
+    if line.trim() == VERIFY_AGAIN {
+        match try_completion(&http, &base, &model).await {
+            Ok(content) => println!("INFER_AGAIN_OK:{content}"),
+            Err(error) => println!("INFER_AGAIN_FAIL:{error}"),
+        }
     }
     let _ = node.stop().await;
     // Skip C++ static destructors (ggml aborts in global teardown).
     std::process::exit(0);
 }
 
-/// STRANGER (non-member C): must get nothing from the relay, and must be
-/// refused admission even with the leaked endpoint address.
+/// STRANGER (non-member C): NIP-42 auth must fail with the relay's membership
+/// rejection, and the mesh must not route inference for it even with the
+/// leaked endpoint address.
 async fn role_stranger() -> anyhow::Result<()> {
     let keys = Keys::parse(&env("BUZZ_MEMBER_NSEC")?)?;
     let leaked_endpoint = env("MESH_LEAKED_ENDPOINT")?;
 
-    // DENY (relay read): a membership-gated relay either refuses NIP-42 auth
-    // outright or returns zero mesh status notes.
+    // DENY (relay read): the membership-gated relay must reject the
+    // stranger's NIP-42 auth with its membership error specifically. Any
+    // other failure (relay down, timeout) is inconclusive and fails the
+    // test; a successful auth is a gating regression and also fails.
     match BuzzTestClient::connect(&relay_ws_url(), &keys).await {
-        Err(_) => println!("RELAY_DENIED"),
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("not a relay member") {
+                println!("RELAY_DENIED_MEMBERSHIP");
+            } else {
+                println!("RELAY_ERR:{message}");
+            }
+        }
         Ok(mut relay) => {
-            let events = query_events(&mut relay, vec![status_filter()]).await?;
-            let statuses = events
-                .iter()
-                .filter(|event| event.kind.as_u16() == KIND_MESH_STATUS)
-                .count();
-            println!("RELAY_STATUSES:{statuses}");
+            let statuses = query_events(&mut relay, vec![status_filter()])
+                .await
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter(|event| event.kind.as_u16() == KIND_MESH_STATUS)
+                        .count()
+                })
+                .unwrap_or(usize::MAX);
+            println!("RELAY_AUTH_OK:{statuses}");
             let _ = relay.disconnect().await;
         }
     }
 
     // DENY (admission): dial the serve node directly with the leaked endpoint.
     // The stranger's owner id is not on the allowlist, so the mesh must refuse
-    // to route anything to it.
+    // to route anything to it. Note the dial itself may locally "succeed" —
+    // mesh-llm applies the receiving node's owner policy after the handshake —
+    // so the decisive probe is routed inference, cross-checked against the
+    // trusted client's post-attack inference by the orchestrator.
     init_native_runtime().await?;
     let cfg = client::EmbeddedClientConfig::builder()
         .api_port(STRANGER_API_PORT)
@@ -570,11 +637,10 @@ async fn role_stranger() -> anyhow::Result<()> {
 
     let http = reqwest::Client::new();
     let base = node.api_base_url().to_string();
-    let seen = wait_for_model(&http, &base, Duration::from_secs(STRANGER_WINDOW_SECS)).await?;
-    match &seen {
+    match wait_for_model(&http, &base, Duration::from_secs(STRANGER_WINDOW_SECS)).await? {
         Some(model) => {
             println!("SEEN:{model}");
-            match try_completion(&http, &base, model).await {
+            match try_completion(&http, &base, &model).await {
                 Ok(content) => println!("INFER_OK:{content}"),
                 Err(error) => println!("INFER_FAIL:{error}"),
             }
@@ -605,17 +671,19 @@ fn orchestrate() -> anyhow::Result<()> {
     let member_b = Keys::generate();
     let stranger = Keys::generate();
 
-    // MeshLLM owner keystores, one per role.
-    let make_owner = |name: &str| -> anyhow::Result<String> {
+    // MeshLLM owner keystores, one per role. The orchestrator keeps the owner
+    // ids so the serve role can gate on the exact expected identity set.
+    let make_owner = |name: &str| -> anyhow::Result<(String, String)> {
         let keypair = OwnerKeypair::generate();
         let path = scratch.join(format!("{name}.keystore.json"));
         save_keystore(&path, &keypair, None, true)
             .map_err(|error| anyhow::anyhow!("saving {name} keystore: {error}"))?;
-        Ok(path.display().to_string())
+        Ok((path.display().to_string(), keypair.owner_id()))
     };
-    let serve_key = make_owner("serve")?;
-    let client_key = make_owner("client")?;
-    let stranger_key = make_owner("stranger")?;
+    let (serve_key, serve_owner_id) = make_owner("serve")?;
+    let (client_key, client_owner_id) = make_owner("client")?;
+    let (stranger_key, _stranger_owner_id) = make_owner("stranger")?;
+    let expected_owners = format!("{serve_owner_id},{client_owner_id}");
 
     // MEMBERSHIP: A and B become relay members via buzz-admin (publishes the
     // kind:13534 roster snapshot). C is deliberately not added.
@@ -654,66 +722,84 @@ fn orchestrate() -> anyhow::Result<()> {
         .env("MESH_SMOKE_MODEL", &model)
         .env("BUZZ_MEMBER_NSEC", secret_hex(&member_a))
         .env("MESH_OWNER_KEY", &serve_key)
-        .env("MESH_EXPECTED_OWNERS", "2")
+        .env("MESH_EXPECTED_OWNERS", &expected_owners)
         .env("HOME", role_home("serve")?)
         .env("MESH_LLM_NATIVE_RUNTIME_CACHE_DIR", &native_cache)
         .env("HF_HUB_CACHE", &hf_cache)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
+    let serve_lines = spawn_line_reader(
+        serve_child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no serve stdout"))?,
+    );
     let serve_guard = KillOnDrop(&mut serve_child);
-    let serve_stdout = serve_guard
-        .0
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("no serve stdout"))?;
-    let mut serve_lines = std::io::BufReader::new(serve_stdout).lines();
-    expect_line(
-        &mut serve_lines,
-        "STATUS_PUBLISHED",
-        Duration::from_secs(180),
-    )?;
+    expect_line(&serve_lines, "STATUS_PUBLISHED", Duration::from_secs(180))?;
     eprintln!("[lifecycle] serve member published its discovery note");
 
     // CLIENT child (member B) — started now so the serve node can see B's
-    // owner binding on the relay and admit it.
+    // owner binding on the relay and admit it. stdin stays piped for the
+    // post-attack VERIFY_AGAIN request.
     eprintln!("[lifecycle] starting CLIENT member (relay-driven join)...");
-    let client_child = Command::new(&exe)
+    let mut client_child = Command::new(&exe)
         .env("MESH_ROLE", "client")
         .env("BUZZ_MEMBER_NSEC", secret_hex(&member_b))
         .env("MESH_OWNER_KEY", &client_key)
         .env("HOME", role_home("client")?)
         .env("MESH_LLM_NATIVE_RUNTIME_CACHE_DIR", &native_cache)
         .env("HF_HUB_CACHE", &hf_cache)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
+    let client_lines = spawn_line_reader(
+        client_child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no client stdout"))?,
+    );
+    let mut client_stdin = client_child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("no client stdin"))?;
+    let client_guard = KillOnDrop(&mut client_child);
 
-    let allowlist = expect_line(&mut serve_lines, "ALLOWLIST:", Duration::from_secs(300))?;
-    eprintln!("[lifecycle] PASS 1/5: relay-derived allowlist resolved: {allowlist}");
-    let endpoint = expect_line(&mut serve_lines, "ENDPOINT:", Duration::from_secs(600))?;
-    eprintln!("[lifecycle] serve endpoint advertised (via relay status note)");
-    let served = expect_line(&mut serve_lines, "READY:", Duration::from_secs(900))?;
-    eprintln!("[lifecycle] PASS 2/5: serve member ready with model: {served}");
+    let allowlist = expect_line(&serve_lines, "ALLOWLIST:", Duration::from_secs(300))?;
+    anyhow::ensure!(
+        allowlist.split(',').map(str::trim).collect::<BTreeSet<_>>()
+            == BTreeSet::from([serve_owner_id.as_str(), client_owner_id.as_str()]),
+        "LIFECYCLE FAIL: serve allowlist {allowlist} is not exactly the expected member owners"
+    );
+    eprintln!("[lifecycle] PASS 1/6: relay-derived allowlist is exactly {{A, B}}: {allowlist}");
+    let endpoint = expect_line(&serve_lines, "ENDPOINT:", Duration::from_secs(600))?;
+    eprintln!("[lifecycle] serve endpoint acquired (relay advertisement lands with READY)");
+    let served = expect_line(&serve_lines, "READY:", Duration::from_secs(900))?;
+    eprintln!("[lifecycle] PASS 2/6: serve member ready + advertised model: {served}");
 
-    // Wait for the client's verdict.
-    let client_out = client_child.wait_with_output()?;
-    let client_verdict = parse_verdict(&String::from_utf8_lossy(&client_out.stdout))?;
-    let seen = client_verdict.seen.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("LIFECYCLE FAIL: client member never saw the model via relay-driven join")
-    })?;
-    eprintln!("[lifecycle] PASS 3/5: client member discovered + joined via relay, sees: {seen}");
-    let content = client_verdict.infer_ok.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "LIFECYCLE FAIL: client saw the model but inference did not route: {:?}",
-            client_verdict.infer_fail
-        )
-    })?;
-    eprintln!("[lifecycle] PASS 4/5: inference routed over the mesh: {content:?}");
+    // Client verdict: discovery + join + first inference.
+    let (which, seen) = expect_one_of(&client_lines, &["SEEN:", "NONE"], Duration::from_secs(900))?;
+    anyhow::ensure!(
+        which == "SEEN:",
+        "LIFECYCLE FAIL: client member never saw the model via relay-driven join"
+    );
+    eprintln!("[lifecycle] PASS 3/6: client member discovered + joined via relay, sees: {seen}");
+    let (which, detail) = expect_one_of(
+        &client_lines,
+        &["INFER_OK:", "INFER_FAIL:"],
+        Duration::from_secs(180),
+    )?;
+    anyhow::ensure!(
+        which == "INFER_OK:",
+        "LIFECYCLE FAIL: client saw the model but inference did not route: {detail}"
+    );
+    eprintln!("[lifecycle] PASS 4/6: inference routed over the mesh: {detail:?}");
 
-    // STRANGER child (C): zero relay visibility and refused admission.
+    // STRANGER child (C): must be denied by the relay's membership gate and
+    // must not route inference through the mesh.
     eprintln!("[lifecycle] starting STRANGER (non-member, leaked endpoint)...");
-    let stranger_out = Command::new(&exe)
+    let mut stranger_child = Command::new(&exe)
         .env("MESH_ROLE", "stranger")
         .env("BUZZ_MEMBER_NSEC", secret_hex(&stranger))
         .env("MESH_OWNER_KEY", &stranger_key)
@@ -721,107 +807,170 @@ fn orchestrate() -> anyhow::Result<()> {
         .env("HOME", role_home("stranger")?)
         .env("MESH_LLM_NATIVE_RUNTIME_CACHE_DIR", &native_cache)
         .env("HF_HUB_CACHE", &hf_cache)
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .output()?;
-    let stranger_stdout = String::from_utf8_lossy(&stranger_out.stdout).to_string();
-    assert_stranger_denied(&stranger_stdout)?;
-    eprintln!("[lifecycle] PASS 5/5: stranger denied by relay and by mesh admission");
+        .spawn()?;
+    let stranger_lines = spawn_line_reader(
+        stranger_child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no stranger stdout"))?,
+    );
+    let stranger_guard = KillOnDrop(&mut stranger_child);
+
+    // Relay leg: only the relay's own membership rejection counts as denied.
+    let (which, detail) = expect_one_of(
+        &stranger_lines,
+        &["RELAY_DENIED_MEMBERSHIP", "RELAY_AUTH_OK:", "RELAY_ERR:"],
+        Duration::from_secs(120),
+    )?;
+    match which {
+        "RELAY_DENIED_MEMBERSHIP" => {
+            eprintln!("[lifecycle] PASS 5/6: relay rejected the stranger's NIP-42 auth (membership gate)");
+        }
+        "RELAY_AUTH_OK:" => anyhow::bail!(
+            "LIFECYCLE FAIL: membership-gated relay authenticated a non-member (saw {detail} statuses)"
+        ),
+        _ => anyhow::bail!(
+            "LIFECYCLE INCONCLUSIVE: stranger relay connect failed for a non-membership reason: {detail}"
+        ),
+    }
+
+    // Mesh leg: the stranger must not complete an inference.
+    let (which, detail) = expect_one_of(
+        &stranger_lines,
+        &["SEEN:", "NONE"],
+        Duration::from_secs(STRANGER_WINDOW_SECS + 300),
+    )?;
+    let stranger_infer = if which == "SEEN:" {
+        let model = detail;
+        let (verdict, body) = expect_one_of(
+            &stranger_lines,
+            &["INFER_OK:", "INFER_FAIL:"],
+            Duration::from_secs(180),
+        )?;
+        anyhow::ensure!(
+            verdict != "INFER_OK:",
+            "LIFECYCLE FAIL: stranger reused the leaked endpoint and inferred through {model}: {body:?}"
+        );
+        format!("saw gossip for {model} but inference was rejected: {body}")
+    } else {
+        "saw no routed model".to_string()
+    };
+    // Defuse the kill-guard (the stranger exits on its own after its verdict);
+    // dropping it here would SIGKILL the child before we can read its status.
+    std::mem::forget(stranger_guard);
+    let stranger_status = wait_child(&mut stranger_child, Duration::from_secs(60), "stranger")?;
+    anyhow::ensure!(
+        stranger_status.success(),
+        "LIFECYCLE INCONCLUSIVE: stranger child exited with {stranger_status}"
+    );
+
+    // Differential health proof: the trusted client must still route
+    // inference *after* the stranger's attempt. Without this, a serve node
+    // that died mid-run would make the stranger's failure look like a denial.
+    client_stdin.write_all(format!("{VERIFY_AGAIN}\n").as_bytes())?;
+    client_stdin.flush()?;
+    let (which, detail) = expect_one_of(
+        &client_lines,
+        &["INFER_AGAIN_OK:", "INFER_AGAIN_FAIL:"],
+        Duration::from_secs(180),
+    )?;
+    anyhow::ensure!(
+        which == "INFER_AGAIN_OK:",
+        "LIFECYCLE FAIL: trusted client could not infer after the stranger's attempt \
+         (serve node unhealthy — stranger denial is inconclusive): {detail}"
+    );
+    eprintln!(
+        "[lifecycle] PASS 6/6: stranger denied ({stranger_infer}) while trusted inference \
+         still routes: {detail:?}"
+    );
 
     eprintln!("[lifecycle] PASS: full relay-driven mesh lifecycle verified");
+    drop(client_guard);
+    let _ = wait_child(&mut client_child, Duration::from_secs(60), "client");
     drop(serve_guard);
     let _ = serve_child.wait();
     let _ = std::fs::remove_dir_all(&scratch);
     Ok(())
 }
 
-/// The stranger passes only if the relay hid the mesh (`RELAY_DENIED` or zero
-/// statuses) AND admission refused it (no model, or visible-but-unroutable).
-fn assert_stranger_denied(stdout: &str) -> anyhow::Result<()> {
-    let relay_hidden = stdout
-        .lines()
-        .any(|line| line == "RELAY_DENIED" || line == "RELAY_STATUSES:0");
-    if !relay_hidden {
-        let leaked = stdout
-            .lines()
-            .find(|line| line.starts_with("RELAY_STATUSES:"))
-            .unwrap_or("<no relay verdict>");
-        anyhow::bail!("LIFECYCLE FAIL: relay leaked mesh statuses to a non-member ({leaked})");
-    }
-    let verdict = parse_verdict(stdout)?;
-    match (&verdict.seen, &verdict.infer_ok, &verdict.infer_fail) {
-        (None, None, _) => Ok(()),
-        (Some(model), None, Some(error)) => {
-            eprintln!(
-                "[lifecycle] stranger saw gossip for {model} but inference was rejected: {error}"
-            );
-            Ok(())
+// ── Child-process plumbing ───────────────────────────────────────────────────
+
+/// Lines from a child's stdout, pumped by a dedicated reader thread so waits
+/// can enforce hard deadlines (`BufRead::lines` alone blocks indefinitely).
+struct ChildLines {
+    rx: mpsc::Receiver<std::io::Result<String>>,
+}
+
+fn spawn_line_reader(stdout: ChildStdout) -> ChildLines {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            if tx.send(line).is_err() {
+                break;
+            }
         }
-        (Some(model), Some(content), _) => anyhow::bail!(
-            "LIFECYCLE FAIL: stranger joined with a leaked endpoint and inferred through {model}: {content:?}"
-        ),
-        (Some(model), None, None) => anyhow::bail!(
-            "LIFECYCLE INCONCLUSIVE: stranger saw {model} but produced no inference verdict"
-        ),
-        (None, Some(content), _) => anyhow::bail!(
-            "LIFECYCLE FAIL: stranger inferred without model visibility: {content:?}"
-        ),
-    }
+    });
+    ChildLines { rx }
 }
 
-// ── Child-process plumbing (shape shared with mesh_admission_smoke) ─────────
-
-/// What a client-shaped child reported on stdout.
-#[derive(Debug, Default)]
-struct Verdict {
-    seen: Option<String>,
-    infer_ok: Option<String>,
-    infer_fail: Option<String>,
+/// Wait (with a hard deadline) for a line starting with `prefix`; returns the
+/// suffix. Non-matching lines are skipped.
+fn expect_line(lines: &ChildLines, prefix: &str, timeout: Duration) -> anyhow::Result<String> {
+    expect_one_of(lines, &[prefix], timeout).map(|(_, rest)| rest)
 }
 
-fn parse_verdict(stdout: &str) -> anyhow::Result<Verdict> {
-    let mut verdict = Verdict::default();
-    let mut saw_any = false;
-    for line in stdout.lines() {
-        if let Some(model) = line.strip_prefix("SEEN:") {
-            verdict.seen = Some(model.to_string());
-            saw_any = true;
-        } else if line == "NONE" {
-            saw_any = true;
-        } else if let Some(content) = line.strip_prefix("INFER_OK:") {
-            verdict.infer_ok = Some(content.to_string());
-        } else if let Some(error) = line.strip_prefix("INFER_FAIL:") {
-            verdict.infer_fail = Some(error.to_string());
-        }
-    }
-    if !saw_any {
-        anyhow::bail!("child produced no SEEN/NONE verdict; stdout: {stdout}");
-    }
-    Ok(verdict)
-}
-
-/// Read child stdout until a line with the given prefix appears. Returns the
-/// full line's suffix; for bare marker lines the suffix is empty.
-fn expect_line(
-    lines: &mut std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
-    prefix: &str,
+/// Wait (with a hard deadline) for a line starting with any of `prefixes`;
+/// returns the matched prefix and the suffix.
+fn expect_one_of<'a>(
+    lines: &ChildLines,
+    prefixes: &[&'a str],
     timeout: Duration,
-) -> anyhow::Result<String> {
-    // BufReader::lines blocks; enforce the timeout coarsely via a deadline
-    // check between lines (the child prints continuously enough in practice).
+) -> anyhow::Result<(&'a str, String)> {
     let deadline = Instant::now() + timeout;
-    for line in lines.by_ref() {
-        let line = line?;
-        if let Some(rest) = line.strip_prefix(prefix) {
-            return Ok(rest.to_string());
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| anyhow::anyhow!("timed out waiting for one of {prefixes:?}"))?;
+        match lines.rx.recv_timeout(remaining) {
+            Ok(Ok(line)) => {
+                for prefix in prefixes {
+                    if let Some(rest) = line.strip_prefix(prefix) {
+                        return Ok((prefix, rest.to_string()));
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                anyhow::bail!("child stdout read error before {prefixes:?}: {error}")
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!("timed out waiting for one of {prefixes:?}")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("child exited before printing one of {prefixes:?}")
+            }
+        }
+    }
+}
+
+/// Wait for a child to exit, killing it if the deadline passes.
+fn wait_child(child: &mut Child, timeout: Duration, label: &str) -> anyhow::Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
         }
         if Instant::now() > deadline {
-            break;
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{label} child exceeded {timeout:?} and was killed");
         }
+        std::thread::sleep(Duration::from_millis(200));
     }
-    anyhow::bail!("child ended or timed out before printing {prefix}")
 }
 
-/// Kill the serve child on drop so a failed assertion never leaks a process.
+/// Kill the child on drop so a failed assertion never leaks a process.
 struct KillOnDrop<'a>(&'a mut Child);
 impl Drop for KillOnDrop<'_> {
     fn drop(&mut self) {
