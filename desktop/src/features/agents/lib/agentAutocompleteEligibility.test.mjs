@@ -22,6 +22,7 @@ const PUB_A = "1".repeat(64);
 const PUB_B = "2".repeat(64);
 const PUB_C = "3".repeat(64);
 const PUB_D = "4".repeat(64);
+const PUB_HEX = "ab".repeat(32);
 
 function coalesce(candidates, options = {}) {
   return coalesceAgentAutocompleteCandidates(candidates, {
@@ -258,8 +259,8 @@ test("isAgentIdentityInAllowedList: keeps people and only explicitly allowed age
 
 test("isAgentIdentityMentionable: keeps people, managed agents, and mentionable relay agents", () => {
   // Mirrors useMentions: the mentionable set from getMentionableAgentPubkeys
-  // is managed agents (PUB_A) plus shared relay agents (PUB_B).
-  const mentionableAgentPubkeys = new Set([PUB_A, PUB_B]);
+  // is managed agents (PUB_A, PUB_HEX) plus shared relay agents (PUB_B).
+  const mentionableAgentPubkeys = new Set([PUB_A, PUB_B, PUB_HEX]);
 
   assert.equal(
     isAgentIdentityMentionable(
@@ -270,7 +271,7 @@ test("isAgentIdentityMentionable: keeps people, managed agents, and mentionable 
   );
   assert.equal(
     isAgentIdentityMentionable(
-      { isAgent: true, pubkey: PUB_A.toUpperCase() },
+      { isAgent: true, pubkey: PUB_HEX.toUpperCase() },
       mentionableAgentPubkeys,
     ),
     true,
@@ -285,6 +286,17 @@ test("isAgentIdentityMentionable: keeps people, managed agents, and mentionable 
   assert.equal(
     isAgentIdentityMentionable(
       { isAgent: true, pubkey: PUB_C },
+      mentionableAgentPubkeys,
+    ),
+    false,
+  );
+  // Member agent with no usable directory record: isMember does not bypass
+  // the gate — an agent identity outside the mentionable set is filtered
+  // here, before shouldHideAgentFromMentions' member branch can run
+  // (pre-existing behavior, deliberately pinned).
+  assert.equal(
+    isAgentIdentityMentionable(
+      { isAgent: true, isMember: true, pubkey: PUB_D },
       mentionableAgentPubkeys,
     ),
     false,
@@ -343,6 +355,10 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
   );
 });
 
+// Note: in useMentions' addCandidate flow this member branch only runs for
+// candidates that already passed isAgentIdentityMentionable, which requires
+// mentionable-set membership — so this unit behavior is currently unreachable
+// end-to-end there (see the pinned member-agent case above).
 test("shouldHideAgentFromMentions: shows member agents with unknown invocability (not in directory)", () => {
   assert.equal(
     shouldHideAgentFromMentions({
