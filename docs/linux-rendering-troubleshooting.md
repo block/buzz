@@ -19,7 +19,24 @@ This guide covers the most common rendering failures on Linux and how to resolve
 
 **Symptom:** Buzz starts and its WebKit child process exits with `SIGILL` (illegal instruction), often at an AVX `vmovaps` instruction in JavaScriptCore.
 
-**Fix:** Buzz detects AVX-less x86_64 CPUs before WebKit starts and sets `JSC_useJIT=0` automatically. An explicitly provided `JSC_useJIT` value is always preserved. For an older Buzz build, launch with `JSC_useJIT=0 buzz-desktop` (or prefix the AppImage command the same way).
+**Automatic fix:** On Linux x86_64 only, Buzz reads `/proc/cpuinfo`, finds a `flags` line, and checks its whitespace-separated feature tokens for `avx`. If the line is found and `avx` is absent, Buzz sets `JSC_useJIT=0` before WebKit starts. Other architectures, AVX-capable CPUs, and missing, unreadable, or malformed CPU information leave JavaScriptCore unchanged. An explicitly provided `JSC_useJIT` value, including an empty value, is always preserved.
+
+**Support diagnostic:** Run this command in the same environment where Buzz is launched:
+
+```bash
+flags=$(awk -F: 'tolower($1) ~ /^[[:space:]]*flags[[:space:]]*$/ { print $2; exit }' /proc/cpuinfo 2>/dev/null)
+if [ -z "$flags" ]; then
+  echo "AVX status unknown: no readable flags line"
+elif printf '%s\n' "$flags" | grep -qiw avx; then
+  echo "AVX present: Buzz leaves JSC unchanged"
+else
+  echo "AVX absent: Buzz automatically sets JSC_useJIT=0"
+fi
+```
+
+`AVX absent` confirms the automatic fallback applies in current builds. `AVX present` means this workaround is not selected. `AVX status unknown` means Buzz also leaves JSC unchanged because it cannot safely determine that AVX is missing.
+
+**Manual workaround for older builds:** Launch with `JSC_useJIT=0 buzz-desktop`, or prefix the AppImage command, for example `JSC_useJIT=0 ./Buzz.AppImage`. Current builds do not overwrite any user-provided `JSC_useJIT` setting, so this explicit workaround and other deliberate values remain in effect.
 
 ---
 
