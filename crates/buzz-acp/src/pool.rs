@@ -1058,6 +1058,11 @@ async fn create_session_and_apply_model(
         )
         .await?;
 
+    // session/new is the first point at which the ACP session ID exists.
+    // Attach it immediately so model/mode calls and session_config_captured
+    // cannot be mistaken for evidence from a prior session.
+    agent.acp.set_observer_session_id(resp.session_id.clone());
+
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
             match agent
@@ -1274,6 +1279,8 @@ async fn create_session_and_apply_model(
         build_session_config_observation(
             &resp.raw,
             agent.model_overridden && switch_succeeded,
+            agent.desired_model.as_deref(),
+            switch_succeeded,
             ctx,
             permission_mode_applied,
         ),
@@ -1546,6 +1553,8 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
 fn build_session_config_observation(
     session_new_result: &serde_json::Value,
     model_overridden: bool,
+    requested_model: Option<&str>,
+    model_applied: bool,
     ctx: &PromptContext,
     permission_mode_applied: bool,
 ) -> serde_json::Value {
@@ -1584,6 +1593,10 @@ fn build_session_config_observation(
         // keyed by (agent, relay) like the lifecycle frames.
         "relayUrl": ctx.relay_url,
         "capabilityManifest": {
+            "modelApplication": {
+                "requested": requested_model,
+                "applied": model_applied,
+            },
             "toolSources": tool_sources
                 .into_iter()
                 .map(|name| serde_json::json!({ "name": name, "kind": "mcp" }))
@@ -8157,11 +8170,20 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 },
             }),
             false,
+            Some("configured-model"),
+            true,
             &ctx,
             false,
         );
         let manifest = &observation["capabilityManifest"];
         assert_eq!(manifest["toolSources"][0]["name"], "github");
+        assert_eq!(
+            manifest["modelApplication"],
+            json!({
+                "requested": "configured-model",
+                "applied": true,
+            })
+        );
         assert_eq!(
             manifest["permissionMode"],
             json!({
@@ -8189,7 +8211,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let mut ctx = make_prompt_context_impl(&agent_keys, None);
         ctx.permission_mode = PermissionMode::Plan;
 
-        let observation = build_session_config_observation(&json!({}), false, &ctx, true);
+        let observation =
+            build_session_config_observation(&json!({}), false, None, false, &ctx, true);
         assert_eq!(
             observation["capabilityManifest"]["permissionMode"],
             json!({
@@ -8211,6 +8234,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                     "availableModes": [{"id": "plan"}],
                 },
             }),
+            false,
+            None,
             false,
             &ctx,
             false,

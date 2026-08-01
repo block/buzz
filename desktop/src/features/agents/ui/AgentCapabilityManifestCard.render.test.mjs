@@ -12,7 +12,12 @@ function manifest(overrides = {}) {
     lastVerifiedAt: "2026-07-26T02:00:00.000Z",
     runtime: { id: "codex", label: "Codex ACP", version: "1.2.3" },
     protocolVersion: "2",
-    model: { value: "gpt-5.4", source: "observed" },
+    model: {
+      value: "gpt-5.4",
+      source: "applied",
+      requested: "gpt-5.4",
+      matchesRequested: true,
+    },
     provider: { value: "openai", source: "configured" },
     readiness: [
       {
@@ -85,13 +90,14 @@ test("renders readiness, evidence semantics, permission divergence, and tool ris
   );
 
   assert.match(html, /data-testid="agent-capability-manifest"/);
-  assert.match(html, />Ready</);
+  assert.match(html, />Ready locally</);
   assert.match(html, /Codex ACP 1\.2\.3/);
   assert.match(html, /data-state="reported"/);
   assert.match(html, /data-state="unavailable"/);
   assert.match(html, /data-state="unknown"/);
   assert.match(html, /bypassPermissions/);
   assert.match(html, /perToolAutoDecision/);
+  assert.match(html, /Source:.*Buzz harness/);
   assert.match(html, /mystery_tool/);
   assert.match(html, />unknown</);
   assert.match(html, /Runtime audio output is unreported/);
@@ -109,5 +115,36 @@ test("renders stopped and stale state without a ready claim", () => {
 
   assert.match(html, />Stopped</);
   assert.match(html, /Live evidence is stale/);
-  assert.doesNotMatch(html, />Ready</);
+  assert.doesNotMatch(html, />Ready locally</);
+});
+
+test("labels readiness as local evidence rather than a portable trust claim", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(AgentCapabilityManifestView, {
+      manifest: manifest(),
+    }),
+  );
+
+  assert.match(html, /Local evidence for this owner and machine/);
+  assert.match(html, /not a public safety or reputation claim/);
+});
+
+test("warns when the runtime model differs from the requested model", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(AgentCapabilityManifestView, {
+      manifest: manifest({
+        model: {
+          value: "runtime-default",
+          source: "reported",
+          requested: "gpt-5.4",
+          matchesRequested: false,
+        },
+      }),
+    }),
+  );
+
+  assert.match(html, /Requested model/);
+  assert.match(html, /gpt-5\.4/);
+  assert.match(html, /Runtime model differs from the requested model/);
+  assert.match(html, /data-testid="agent-capability-model-mismatch"/);
 });

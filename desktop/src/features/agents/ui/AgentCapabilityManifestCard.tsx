@@ -39,7 +39,7 @@ const overallStatusPresentation: Record<
   }
 > = {
   ready: {
-    label: "Ready",
+    label: "Ready locally",
     variant: "outline",
     className:
       "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
@@ -80,6 +80,7 @@ function queryTimestamp(dataUpdatedAt: number): string | null {
   return dataUpdatedAt > 0 ? new Date(dataUpdatedAt).toISOString() : null;
 }
 
+/** Load and render owner-local capability evidence for a managed agent. */
 export function AgentCapabilityManifestCard({
   agent,
   presenceStatus,
@@ -122,9 +123,61 @@ export function AgentCapabilityManifestCard({
     ],
   );
 
+  if (runtimeCatalogQuery.isPending || runtimeStatusesQuery.isPending) {
+    return (
+      <AgentCapabilityManifestState
+        detail="Checking runtime installation, authentication, and lifecycle evidence."
+        label="Checking readiness"
+        state="loading"
+      />
+    );
+  }
+
+  if (runtimeCatalogQuery.isError || runtimeStatusesQuery.isError) {
+    return (
+      <AgentCapabilityManifestState
+        detail="Runtime readiness evidence could not be loaded. Try again before delegating."
+        label="Readiness unavailable"
+        state="error"
+      />
+    );
+  }
+
   return <AgentCapabilityManifestView manifest={manifest} />;
 }
 
+function AgentCapabilityManifestState({
+  detail,
+  label,
+  state,
+}: {
+  detail: string;
+  label: string;
+  state: "loading" | "error";
+}) {
+  return (
+    <section
+      aria-label="Agent capability and readiness manifest"
+      className="rounded-2xl border border-border/70 bg-card/60 px-4 py-4 shadow-sm"
+      data-state={state}
+      data-testid="agent-capability-manifest"
+    >
+      <div className="flex items-start gap-3">
+        {state === "error" ? (
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+        ) : (
+          <RadioTower className="mt-0.5 h-4 w-4 shrink-0 animate-pulse text-muted-foreground" />
+        )}
+        <div>
+          <p className="text-sm font-semibold text-foreground">{label}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** Render a prebuilt owner-local capability and readiness manifest. */
 export function AgentCapabilityManifestView({
   manifest,
 }: {
@@ -192,7 +245,8 @@ function ManifestHeader({ manifest }: { manifest: AgentCapabilityManifest }) {
           </h3>
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          Owner-only evidence from Buzz and the encrypted ACP observer feed.
+          Local evidence for this owner and machine, not a public safety or
+          reputation claim.
         </p>
       </div>
       <div className="flex shrink-0 flex-col items-end gap-1">
@@ -284,6 +338,10 @@ function IdentityGrid({ manifest }: { manifest: AgentCapabilityManifest }) {
         : "Unknown",
     },
     {
+      label: "Requested model",
+      value: manifest.model.requested ?? "Not configured",
+    },
+    {
       label: "Provider",
       value: manifest.provider.value
         ? `${manifest.provider.value} (${manifest.provider.source})`
@@ -291,20 +349,31 @@ function IdentityGrid({ manifest }: { manifest: AgentCapabilityManifest }) {
     },
   ];
   return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-3 border-y border-border/60 py-3">
-      {rows.map((row) => (
-        <div className="min-w-0" key={row.label}>
-          <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
-            {row.label}
-          </p>
-          <p
-            className="mt-0.5 truncate text-xs font-medium text-foreground"
-            title={row.value}
-          >
-            {row.value}
-          </p>
-        </div>
-      ))}
+    <div className="border-y border-border/60 py-3">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+        {rows.map((row) => (
+          <div className="min-w-0" key={row.label}>
+            <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+              {row.label}
+            </p>
+            <p
+              className="mt-0.5 truncate text-xs font-medium text-foreground"
+              title={row.value}
+            >
+              {row.value}
+            </p>
+          </div>
+        ))}
+      </div>
+      {manifest.model.matchesRequested === false ? (
+        <p
+          className="mt-3 flex items-center gap-1.5 text-2xs text-amber-700 dark:text-amber-300"
+          data-testid="agent-capability-model-mismatch"
+        >
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          Runtime model differs from the requested model.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -368,6 +437,14 @@ function PermissionSection({
           Effective behavior differs from the requested runtime mode.
         </p>
       ) : null}
+      <p className="mt-2 text-2xs text-muted-foreground">
+        Source:{" "}
+        {permission.source === "runtime"
+          ? "runtime-reported"
+          : permission.source === "buzzHarness"
+            ? "Buzz harness"
+            : "unknown"}
+      </p>
     </div>
   );
 }
