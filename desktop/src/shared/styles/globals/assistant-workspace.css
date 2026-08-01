@@ -1,0 +1,58 @@
+/*
+ * Standard mode is intentionally a presentation layer over the upstream Buzz
+ * shell. The existing sidebar, routes, dialogs, message timeline, membership
+ * controls, and profile footer remain mounted; this file only gives that
+ * shared machinery a calmer, assistant-first visual hierarchy.
+ */
+[data-standard-ui="assistant"] {
+  --assistant-sidebar-hover: color-mix(
+    in srgb,
+    hsl(var(--foreground)) 6%,
+    transparent
+  );
+}
+
+[data-standard-ui="assistant"] [data-testid="open-search"] {
+  border: 1px solid hsl(var(--sidebar-border) / 0.5);
+  border-radius: 0.75rem;
+  background-color: hsl(var(--background) / 0.54);
+  box-shadow: none;
+}
+
+[data-standard-ui="assistant"] [data-testid="sidebar-primary-menu"] {
+  padding-top: 0.125rem;
+}
+
+[data-standard-ui="assistant"]
+  [data-testid="app-sidebar"]
+  [data-sidebar="menu-button"] {
+  border-radius: 0.625rem;
+}
+
+[data-standard-ui="assistant"]
+  [data-testid="app-sidebar"]
+  [data-sidebar="menu-button"]:not([data-active="true"]):hover {
+  background-color: var(--assistant-sidebar-hover);
+}
+
+[data-standard-ui="assistant"]
+  [data-testid="app-sidebar"]
+  [data-sidebar="group-label"] {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+[data-standard-ui="assistant"] [data-testid="message-composer"] {
+  border-color: hsl(var(--border) / 0.72);
+  background-color: hsl(var(--background) / 0.94);
+  box-shadow: 0 0.375rem 1.5rem rgb(0 0 0 / 0.05);
+}
+
+[data-standard-ui="assistant"] [data-testid="message-empty"] {
+  border-style: solid;
+  background-color: hsl(var(--card) / 0.46);
+  box-shadow: none;
+}

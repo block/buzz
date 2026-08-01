@@ -703,6 +703,11 @@ export function AppShell() {
             <RemindMeLaterProvider pubkey={identityQuery.data?.pubkey}>
               <div
                 className="buzz-huddle-shell relative h-dvh overflow-hidden overscroll-none"
+                data-standard-ui={
+                  !settingsOpen && displayStyle === "standard"
+                    ? "assistant"
+                    : undefined
+                }
                 data-huddle-open={isHuddleDrawerOpen}
               >
                 <div

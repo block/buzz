@@ -35,6 +35,7 @@ import {
   AppSidebarPinnedHeader,
   AppSidebarPrimaryMenu,
 } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
+import { AssistantWorkspaceHeader } from "@/features/sidebar/ui/AssistantWorkspaceHeader";
 import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
@@ -615,6 +616,7 @@ export function AppSidebar({
                 onSelectWorkflows={onSelectWorkflows}
                 selectedView={selectedView}
               />
+              <AssistantWorkspaceHeader onNewConversation={onNewMessage} />
 
               {isLoading ? (
                 <SidebarLoadingContent shape={sidebarLoadingShape} />
