@@ -1,7 +1,10 @@
 import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
-import { useBackendProvidersQuery } from "@/features/agents/hooks";
+import {
+  useBackendProvidersQuery,
+  useExecutionNodesQuery,
+} from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
@@ -22,8 +25,10 @@ export function WhereToRunSection({
   onDraftChange: (next: WhereToRunDraft) => void;
 }) {
   const backendProviders = useBackendProvidersQuery().data ?? [];
+  const executionNodes = useExecutionNodesQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
-  const isProviderMode = draft.runOn !== "local";
+  const isExecutionNode = draft.runOn.startsWith("execution-node:");
+  const isProviderMode = draft.runOn !== "local" && !isExecutionNode;
   const selectedBackendProvider = React.useMemo(
     () =>
       backendProviders.find((provider) => provider.id === draft.runOn) ?? null,
@@ -72,7 +77,7 @@ export function WhereToRunSection({
     };
   }, [selectedBinaryPath]);
 
-  if (backendProviders.length === 0) return null;
+  if (backendProviders.length === 0 && executionNodes.length === 0) return null;
 
   return (
     <div className="space-y-4">
@@ -93,6 +98,15 @@ export function WhereToRunSection({
           value={draft.runOn}
         >
           <option value="local">This computer</option>
+          {executionNodes.map((node) => (
+            <option
+              disabled={node.availability === "unavailable"}
+              key={node.nodeId}
+              value={`execution-node:${node.nodeId}`}
+            >
+              {node.displayName} ({node.availability})
+            </option>
+          ))}
           {backendProviders.map((provider) => (
             <option key={provider.id} value={provider.id}>
               {provider.id}
@@ -100,6 +114,13 @@ export function WhereToRunSection({
           ))}
         </select>
       </div>
+
+      {isExecutionNode ? (
+        <p className="rounded-2xl border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+          This agent will run on the selected execution node. Node credentials
+          and runtime details stay on that node.
+        </p>
+      ) : null}
 
       {isProviderMode && selectedBackendProvider ? (
         <div className="space-y-4">

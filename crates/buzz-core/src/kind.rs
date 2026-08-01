@@ -145,6 +145,8 @@ pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_MET
 /// storage-layer search defense does not apply to them.
 pub const P_GATED_KINDS: &[u32] = &[
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_EXECUTION_NODE_COMMAND,
+    KIND_EXECUTION_NODE_RECEIPT,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
@@ -454,6 +456,10 @@ pub const KIND_PAIRING: u32 = 24134;
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// Ephemeral: encrypted command addressed to an execution node.
+pub const KIND_EXECUTION_NODE_COMMAND: u32 = 24201;
+/// Ephemeral: encrypted receipt addressed to an execution owner.
+pub const KIND_EXECUTION_NODE_RECEIPT: u32 = 24202;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
@@ -530,6 +536,9 @@ pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 /// Stored globally (channel_id = NULL); owner-scoped reads only (p-gated, NIP-42).
 /// See `docs/nips/NIP-AM.md`.
 pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
+
+/// NIP-EN: replaceable, sanitized execution-node announcement.
+pub const KIND_EXECUTION_NODE_ANNOUNCEMENT: u32 = 30630;
 
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
@@ -684,6 +693,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_BLOSSOM_AUTH,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_EXECUTION_NODE_COMMAND,
+    KIND_EXECUTION_NODE_RECEIPT,
     KIND_HTTP_AUTH,
     KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_V2,
@@ -711,6 +722,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
+    KIND_EXECUTION_NODE_ANNOUNCEMENT,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,

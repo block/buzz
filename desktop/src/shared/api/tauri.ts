@@ -1116,6 +1116,19 @@ export async function probeBackendProvider(
   });
 }
 
+export type ExecutionNodeTarget = {
+  nodeId: string;
+  displayName: string;
+  lifecycle: string;
+  capabilities: string[];
+  observedAt: string;
+  availability: "connected" | "unavailable" | "degraded";
+};
+
+export async function listExecutionNodes(): Promise<ExecutionNodeTarget[]> {
+  return invokeTauri<ExecutionNodeTarget[]>("list_execution_nodes");
+}
+
 // ── NIP-44 encrypt-to-self ───────────────────────────────────────────────────
 
 export async function nip44EncryptToSelf(plaintext: string): Promise<string> {

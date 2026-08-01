@@ -459,7 +459,9 @@ async fn dispatch_persistent_event_inner(
     // subscription can otherwise match it. Pull paths (HTTP /query, WS historical)
     // are gated separately by reader_authorized_for_event.
     let owner_only_kind = kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC;
+        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC
+        || kind_u32 == buzz_core::kind::KIND_EXECUTION_NODE_COMMAND
+        || kind_u32 == buzz_core::kind::KIND_EXECUTION_NODE_RECEIPT;
     let private_event_owner: Option<String> = owner_only_kind
         .then(|| {
             let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
