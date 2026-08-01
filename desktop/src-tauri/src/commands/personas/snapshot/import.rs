@@ -651,7 +651,7 @@ pub async fn confirm_agent_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
-            relay_mesh: None,
+            relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
         };

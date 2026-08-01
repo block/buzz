@@ -308,22 +308,14 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
-  /**
-   * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
-   * `null` means the agent inherits its harness from the linked persona.
-   * Used to count agents referencing a harness definition (delete confirm).
-   */
+  /** Harness/runtime id; null = inherit from persona. */
   runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
   /** Resolved/effective harness command (persona-wins, override-honored). */
   agentCommand: string;
-  /**
-   * Explicit per-instance harness pin. `null` means the agent inherits its
-   * harness from the linked persona's runtime. Lets the Edit dialog show
-   * "Inherit from persona" vs a concrete pin.
-   */
+  /** Explicit harness pin; null = inherit from persona. */
   agentCommandOverride: string | null;
   agentArgs: string[];
   mcpCommand: string;
@@ -375,11 +367,12 @@ export type ManagedAgent = {
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
   respondTo: RespondToMode;
-  /**
-   * Normalized 64-char lowercase hex pubkeys. Used only when `respondTo` is
-   * `"allowlist"`. Preserved across mode toggles.
-   */
+  /** Allowlist pubkeys when respondTo is allowlist. */
   respondToAllowlist: string[];
+  ephemeral?: boolean;
+  parentAgentPubkey?: string | null;
+  expiresAt?: string | null;
+  channelId?: string | null;
 };
 
 /**
@@ -1014,6 +1007,8 @@ export type GlobalAgentConfig = {
   model: string | null;
   /** Preferred ACP runtime for agents without a persona-specific runtime. */
   preferred_runtime: string | null;
+  /** Owner opt-in for agent-spawned temps (default false). */
+  allow_temp_agent_spawn?: boolean;
 };
 
 /**

@@ -270,6 +270,37 @@ pub enum AgentsCmd {
         #[arg(long)]
         system_prompt: String,
     },
+    /// Request Desktop auto-create a temporary task agent (owner grant required)
+    #[command(
+        after_help = "Publishes an async spawn_temp request. Desktop auto-creates when the owner \
+has enabled temp agent spawn. Returns request_id + display_name (not pubkey); poll channel \
+members until the name appears, then @mention it.\n\n\
+Examples:\n  \
+buzz agents spawn-temp --channel <UUID> --display-name temp-scout --system-prompt \"…\""
+    )]
+    SpawnTemp {
+        /// Current channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Explicit unique temp agent name
+        #[arg(long)]
+        display_name: String,
+        /// Boot prompt; use '-' to read from stdin
+        #[arg(long)]
+        system_prompt: String,
+        /// Optional TTL seconds (default 1800, max 14400)
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
+    },
+    /// Request Desktop destroy a temp agent you parented
+    DestroyTemp {
+        /// Current channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Temp agent display name (or pubkey)
+        #[arg(long)]
+        agent_name: String,
+    },
     /// Open a prefilled edit-agent form in the owner's Buzz Desktop
     DraftUpdate {
         /// Current channel UUID
@@ -1935,8 +1966,10 @@ mod tests {
             vec![
                 "archive",
                 "archived",
+                "destroy-temp",
                 "draft-create",
                 "draft-update",
+                "spawn-temp",
                 "unarchive"
             ]
         );
@@ -2063,7 +2096,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 7),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

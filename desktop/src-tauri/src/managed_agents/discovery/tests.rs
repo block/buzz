@@ -282,7 +282,7 @@ fn record_with(
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
-        relay_mesh: None,
+        relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
     }
 }
 

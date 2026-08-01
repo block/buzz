@@ -31,6 +31,61 @@ test("parses the narrow no-secret create request", () => {
   );
 });
 
+test("parses spawn_temp with optional ttlSeconds", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "spawn_temp",
+    requestId: "req-temp",
+    request: {
+      channelId: CHANNEL_ID,
+      displayName: "temp-scout",
+      systemPrompt: "Do one thing.",
+      ttlSeconds: 600,
+    },
+  };
+  assert.deepEqual(parseAgentManagementRequest(payload), payload);
+});
+
+test("rejects spawn_temp with extra fields or bad ttl", () => {
+  const base = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "spawn_temp",
+    requestId: "req-temp",
+    request: {
+      channelId: CHANNEL_ID,
+      displayName: "temp-scout",
+      systemPrompt: "Do one thing.",
+    },
+  };
+  assert.equal(
+    parseAgentManagementRequest({
+      ...base,
+      request: { ...base.request, model: "x" },
+    }),
+    null,
+  );
+  assert.equal(
+    parseAgentManagementRequest({
+      ...base,
+      request: { ...base.request, ttlSeconds: 0 },
+    }),
+    null,
+  );
+});
+
+test("parses destroy_temp", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "destroy_temp",
+    requestId: "req-destroy",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "temp-scout",
+    },
+  };
+  assert.deepEqual(parseAgentManagementRequest(payload), payload);
+});
+
 test("rejects an agent-management request with extra secret-shaped fields", () => {
   const payload = createPayload();
   payload.request.apiKey = "should-not-be-accepted";

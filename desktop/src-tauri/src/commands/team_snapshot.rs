@@ -608,7 +608,7 @@ pub async fn confirm_team_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: definition.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
-            relay_mesh: None,
+            relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),
         };

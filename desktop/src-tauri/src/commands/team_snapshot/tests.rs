@@ -228,7 +228,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
-        relay_mesh: None,
+        relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
         runtime: None,
         name_pool: vec![],
     };

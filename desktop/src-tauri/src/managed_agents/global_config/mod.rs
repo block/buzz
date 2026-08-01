@@ -70,6 +70,11 @@ pub struct GlobalAgentConfig {
     /// Preferred ACP runtime for definitions without an explicit runtime.
     #[serde(default)]
     pub preferred_runtime: Option<String>,
+
+    /// Owner opt-in: allow permanent managed agents to spawn temporary workers
+    /// without a per-agent Desktop review popup. Default off (pre-consent).
+    #[serde(default)]
+    pub allow_temp_agent_spawn: bool,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.

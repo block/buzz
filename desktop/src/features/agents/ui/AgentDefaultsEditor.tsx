@@ -39,6 +39,7 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Checkbox } from "@/shared/ui/checkbox";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -313,6 +314,32 @@ export function AgentDefaultsEditor({
           ) : (
             configFields
           )}
+          <label
+            className="flex cursor-pointer items-start gap-3 rounded-lg border border-border/60 px-3 py-3"
+            data-testid="global-agent-allow-temp-spawn"
+            htmlFor="global-agent-allow-temp-spawn"
+          >
+            <Checkbox
+              checked={Boolean(config.allow_temp_agent_spawn)}
+              className="mt-0.5"
+              id="global-agent-allow-temp-spawn"
+              onCheckedChange={(checked) =>
+                handleConfigChange({
+                  ...config,
+                  allow_temp_agent_spawn: checked === true,
+                })
+              }
+            />
+            <span className="min-w-0 space-y-0.5">
+              <span className="block text-sm font-medium text-foreground">
+                Allow agents to spawn temporary workers
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                When on, permanent agents can create short-lived helpers without
+                a review popup. Turning off archives every live temp agent.
+              </span>
+            </span>
+          </label>
         </>
       )}
 

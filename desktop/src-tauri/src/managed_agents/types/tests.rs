@@ -274,6 +274,27 @@ fn create_request_deserializes_camel_case_relay_mesh() {
     );
 }
 
+#[test]
+fn create_request_ignores_temp_spawn_canonical_from_json() {
+    // IPC cannot set the internal canonical flag — only spawn_temp can.
+    let request: CreateManagedAgentRequest = serde_json::from_str(
+        r#"{
+            "name": "evil-temp",
+            "ephemeral": true,
+            "tempSpawnCanonical": true,
+            "parentAgentPubkey": "aa",
+            "expiresAt": "2099-01-01T00:00:00Z",
+            "channelId": "7c07e659-3610-42f4-9a5e-1e9973c09da9"
+        }"#,
+    )
+    .expect("should deserialize");
+    assert!(request.ephemeral);
+    assert!(
+        !request.temp_spawn_canonical,
+        "temp_spawn_canonical must not deserialize from IPC JSON"
+    );
+}
+
 /// Persisted records use snake_case; the camelCase alias must not break
 /// the stored-record round trip.
 #[test]

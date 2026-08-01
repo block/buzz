@@ -76,33 +76,42 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
     // otherwise overwrite their local snapshot with absent values, with no
     // restore path. This branch retires once every record is
     // definition-backed (B5 backfill).
+    //
+    // Ephemeral temps are local-only task workers: never publish their boot
+    // prompt (or other definition-less quad) — hover reads local summary only.
+    // Create also skips retention for temps; this redaction is defense-in-depth.
     let definition_linked = record.persona_id.is_some();
+    let redact_local_only = record.ephemeral || definition_linked;
     ManagedAgentEventContent {
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
-        system_prompt: if definition_linked {
+        system_prompt: if redact_local_only {
             None
         } else {
             record.system_prompt.clone()
         },
-        model: if definition_linked {
+        model: if redact_local_only {
             None
         } else {
             record.model.clone()
         },
-        provider: if definition_linked {
+        provider: if redact_local_only {
             None
         } else {
             record.provider.clone()
         },
-        persona_source_version: if definition_linked {
+        persona_source_version: if redact_local_only {
             None
         } else {
             record.persona_source_version.clone()
         },
         parallelism: record.parallelism,
         respond_to: record.respond_to,
-        respond_to_allowlist: record.respond_to_allowlist.clone(),
+        respond_to_allowlist: if record.ephemeral {
+            Vec::new()
+        } else {
+            record.respond_to_allowlist.clone()
+        },
     }
 }
 
@@ -215,8 +224,25 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
-            relay_mesh: None,
+            relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
         }
+    }
+
+    #[test]
+    fn ephemeral_projection_redacts_prompt_and_allowlist() {
+        let mut temp = sample_agent();
+        temp.persona_id = None;
+        temp.ephemeral = true;
+        temp.system_prompt = Some("secret task prompt".into());
+        temp.model = Some("claude-opus-4".into());
+        temp.provider = Some("anthropic".into());
+        temp.respond_to_allowlist = vec!["aa".repeat(32)];
+        let content = agent_event_content(&temp);
+        assert_eq!(content.system_prompt, None);
+        assert_eq!(content.model, None);
+        assert_eq!(content.provider, None);
+        assert!(content.respond_to_allowlist.is_empty());
+        assert_eq!(content.name, "Test Agent");
     }
 
     #[test]

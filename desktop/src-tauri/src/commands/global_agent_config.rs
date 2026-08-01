@@ -93,6 +93,13 @@ pub async fn set_global_agent_config(
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
     let (new_global, old_global, candidates, personas_snapshot) = phase1;
 
+    // Kill switch: turning the temp-spawn grant off archives every live temp.
+    if old_global.allow_temp_agent_spawn && !new_global.allow_temp_agent_spawn {
+        if let Err(e) = crate::commands::kill_all_temp_agents(app.clone()).await {
+            eprintln!("buzz-desktop: kill_all_temp_agents after grant revoke: {e}");
+        }
+    }
+
     // ── Phase 2: async restart (outside spawn_blocking) ──────────────────
     //
     // For each candidate: stop under the lock (re-verifying eligibility after

@@ -3,7 +3,10 @@ use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identit
 use nostr::PublicKey;
 use serde_json::json;
 
-use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
+use crate::agent_management::{
+    build_create, build_destroy_temp, build_spawn_temp, build_update, CreateAgentDraft,
+    DestroyTempAgentDraft, SpawnTempAgentDraft, UpdateAgentDraft,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
@@ -36,6 +39,74 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                 obj.insert(
                     "message".into(),
                     "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
+                        .into(),
+                );
+            }
+            println!("{output}");
+            Ok(())
+        }
+
+        AgentsCmd::SpawnTemp {
+            channel,
+            display_name,
+            system_prompt,
+            ttl_seconds,
+        } => {
+            let owner = require_owner(client)?;
+            let display_name = display_name.trim().to_string();
+            let built = build_spawn_temp(
+                client.keys(),
+                &owner,
+                SpawnTempAgentDraft {
+                    channel_id: channel,
+                    display_name: display_name.clone(),
+                    system_prompt: read_or_stdin(&system_prompt)?,
+                    ttl_seconds,
+                },
+            )?;
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), built.request_id.into());
+                obj.insert("action".into(), built.action.into());
+                obj.insert("display_name".into(), display_name.into());
+                obj.insert("saved".into(), false.into());
+                obj.insert(
+                    "message".into(),
+                    "Temp spawn request sent. Desktop auto-creates when owner grant is on; poll channel members for this display_name, then tag it."
+                        .into(),
+                );
+            }
+            println!("{output}");
+            Ok(())
+        }
+
+        AgentsCmd::DestroyTemp {
+            channel,
+            agent_name,
+        } => {
+            let owner = require_owner(client)?;
+            let agent_name = agent_name.trim().to_string();
+            let built = build_destroy_temp(
+                client.keys(),
+                &owner,
+                DestroyTempAgentDraft {
+                    channel_id: channel,
+                    agent_name: agent_name.clone(),
+                },
+            )?;
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), built.request_id.into());
+                obj.insert("action".into(), built.action.into());
+                obj.insert("agent_name".into(), agent_name.into());
+                obj.insert("saved".into(), false.into());
+                obj.insert(
+                    "message".into(),
+                    "Temp destroy request sent. Desktop removes the agent when you are its parent."
                         .into(),
                 );
             }

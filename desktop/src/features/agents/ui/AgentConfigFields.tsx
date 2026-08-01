@@ -61,6 +61,7 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   provider: null,
   model: null,
   preferred_runtime: null,
+  allow_temp_agent_spawn: false,
 };
 
 /** Baked env keys that route to structured controls, not the generic env editor. */

@@ -188,6 +188,49 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// When true, create a temporary task agent. Must only be set by
+    /// `spawn_temp_managed_agent` with `temp_spawn_canonical = true`.
+    #[serde(default)]
+    pub ephemeral: bool,
+    /// Parent agent pubkey (required when `ephemeral`).
+    #[serde(default)]
+    pub parent_agent_pubkey: Option<String>,
+    /// RFC3339 expiry (required when `ephemeral`; Desktop also clamps TTL).
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// Originating channel for a temp agent.
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// Internal: set only by `spawn_temp_managed_agent` after it has
+    /// canonicalized inheritance + policy. Generic create rejects ephemeral
+    /// without this flag.
+    #[serde(default, skip_deserializing)]
+    pub temp_spawn_canonical: bool,
+}
+
+/// Agent-requested temp spawn (Desktop auto-creates when grant is on).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnTempManagedAgentRequest {
+    pub name: String,
+    pub system_prompt: String,
+    pub channel_id: String,
+    pub parent_agent_pubkey: String,
+    /// Optional TTL in seconds; clamped to [1, MAX_TEMP_AGENT_TTL_SECS].
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+}
+
+/// Parent-requested destroy of a temp agent by name or pubkey.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestroyTempManagedAgentRequest {
+    /// Originating channel (validated by frontend trust buffer; kept for wire parity).
+    #[allow(dead_code)]
+    pub channel_id: String,
+    pub parent_agent_pubkey: String,
+    /// Target display name (unique) or pubkey hex.
+    pub agent_name: String,
 }
 
 /// Patch request for updating a managed agent's mutable fields.

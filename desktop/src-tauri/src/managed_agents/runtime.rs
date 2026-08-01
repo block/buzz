@@ -337,7 +337,7 @@ pub fn build_managed_agent_summary(
         auto_restart_on_config_change: record.auto_restart_on_config_change,
         log_path,
         respond_to: record.respond_to,
-        respond_to_allowlist: record.respond_to_allowlist.clone(),
+        respond_to_allowlist: record.respond_to_allowlist.clone(), ephemeral: record.ephemeral, parent_agent_pubkey: record.parent_agent_pubkey.clone(), expires_at: record.expires_at.clone(), channel_id: record.channel_id.clone(),
     })
 }
 

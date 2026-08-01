@@ -612,17 +612,56 @@ export function UserProfilePopover({
           )}
 
           {isBotProfile && (managedAgent || relayAgent) ? (
-            <div className="flex flex-wrap gap-1.5">
-              {managedAgent?.agentCommand ? (
-                <InfoBadge>{runtimeLabel(managedAgent.agentCommand)}</InfoBadge>
-              ) : relayAgent?.agentType ? (
-                <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
-              ) : null}
-              {managedAgent?.model ? (
-                <InfoBadge>{managedAgent.model}</InfoBadge>
-              ) : null}
-              {managedAgent?.acpCommand ? (
-                <InfoBadge>ACP: {managedAgent.acpCommand}</InfoBadge>
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap gap-1.5">
+                {managedAgent?.agentCommand ? (
+                  <InfoBadge>
+                    {runtimeLabel(managedAgent.agentCommand)}
+                  </InfoBadge>
+                ) : relayAgent?.agentType ? (
+                  <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
+                ) : null}
+                {managedAgent?.model ? (
+                  <InfoBadge>{managedAgent.model}</InfoBadge>
+                ) : null}
+                {managedAgent?.acpCommand ? (
+                  <InfoBadge>ACP: {managedAgent.acpCommand}</InfoBadge>
+                ) : null}
+                {managedAgent?.ephemeral ? (
+                  <InfoBadge>Temporary</InfoBadge>
+                ) : null}
+              </div>
+              {managedAgent?.ephemeral ? (
+                <div className="space-y-1.5 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  {managedAgent.parentAgentPubkey ? (
+                    <div>
+                      <span className="font-medium text-foreground">
+                        Spawner:{" "}
+                      </span>
+                      <span className="break-all font-mono">
+                        {managedAgent.parentAgentPubkey.slice(0, 12)}…
+                      </span>
+                    </div>
+                  ) : null}
+                  {managedAgent.expiresAt ? (
+                    <div>
+                      <span className="font-medium text-foreground">
+                        Expires:{" "}
+                      </span>
+                      {managedAgent.expiresAt}
+                    </div>
+                  ) : null}
+                  {managedAgent.systemPrompt ? (
+                    <div>
+                      <div className="mb-1 font-medium text-foreground">
+                        Boot prompt
+                      </div>
+                      <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-foreground/90">
+                        {managedAgent.systemPrompt}
+                      </pre>
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
             </div>
           ) : null}

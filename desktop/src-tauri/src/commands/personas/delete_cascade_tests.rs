@@ -65,7 +65,7 @@ fn make_agent(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
-        relay_mesh: None,
+        relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],

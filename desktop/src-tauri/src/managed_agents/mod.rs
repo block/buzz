@@ -12,6 +12,11 @@ pub(crate) mod custom_harnesses;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;
+pub(crate) mod ephemeral;
+#[allow(unused_imports)] // re-exported for store consumers
+pub use ephemeral::{
+    DEFAULT_TEMP_AGENT_TTL_SECS, MAX_CONCURRENT_TEMP_AGENTS, MAX_TEMP_AGENT_TTL_SECS,
+};
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;

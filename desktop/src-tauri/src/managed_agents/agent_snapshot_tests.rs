@@ -71,7 +71,7 @@ fn minimal_record() -> ManagedAgentRecord {
         catalog_source: None,
         definition_respond_to_allowlist: vec!["abc123def".to_string()],
         definition_parallelism: Some(4),
-        relay_mesh: None,
+        relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
     }
 }
 

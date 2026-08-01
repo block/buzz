@@ -63,7 +63,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
-        relay_mesh: None,
+        relay_mesh: None, ephemeral: false, parent_agent_pubkey: None, expires_at: None, channel_id: None,
     }
 }
 
@@ -109,6 +109,7 @@ fn inherited_runtime_provider_and_model_are_materialized_for_export() {
     let mut record = make_definition("wren");
     let global = crate::managed_agents::GlobalAgentConfig {
         preferred_runtime: Some("goose".to_string()),
+        allow_temp_agent_spawn: false,
         provider: Some("databricks_v2".to_string()),
         model: Some("databricks-gpt-5-6-sol".to_string()),
         ..Default::default()
@@ -129,6 +130,7 @@ fn explicit_runtime_provider_and_model_win_over_global_defaults() {
     record.model = Some("claude-opus-5".to_string());
     let global = crate::managed_agents::GlobalAgentConfig {
         preferred_runtime: Some("goose".to_string()),
+        allow_temp_agent_spawn: false,
         provider: Some("databricks_v2".to_string()),
         model: Some("databricks-gpt-5-6-sol".to_string()),
         ..Default::default()

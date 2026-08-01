@@ -32,6 +32,11 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import {
+  destroyTempManagedAgent,
+  spawnTempManagedAgent,
+} from "@/shared/api/tauriTempAgents";
+import { attachManagedAgentToChannel } from "./channelAgents";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -95,6 +100,49 @@ export function useAgentManagement() {
       }
       seenRequestIds.current.add(next.requestId);
       setError(null);
+
+      // Temp spawn/destroy: auto-path — no owner form, no SecretRevealDialog.
+      if (next.action === "spawn_temp" || next.action === "destroy_temp") {
+        void (async () => {
+          try {
+            assertAgentCanActFromOrigin(next.request.channelId, agentPubkey);
+            if (next.action === "spawn_temp") {
+              const created = await spawnTempManagedAgent({
+                name: next.request.displayName,
+                systemPrompt: next.request.systemPrompt,
+                channelId: next.request.channelId,
+                parentAgentPubkey: agentPubkey,
+                ttlSeconds: next.request.ttlSeconds,
+              });
+              if (created.spawnError) throw new Error(created.spawnError);
+              // Attach to channel; never open SecretRevealDialog for temps.
+              await attachManagedAgentToChannel(next.request.channelId, {
+                agent: created.agent,
+                role: "bot",
+                ensureRunning: true,
+              });
+            } else {
+              await destroyTempManagedAgent({
+                channelId: next.request.channelId,
+                parentAgentPubkey: agentPubkey,
+                agentName: next.request.agentName,
+              });
+            }
+            await queryClient.invalidateQueries({
+              queryKey: managedAgentsQueryKey,
+            });
+          } catch (cause) {
+            console.error("temp agent management failed", cause);
+            setError(
+              cause instanceof Error
+                ? cause.message
+                : "Could not process temp agent request.",
+            );
+          }
+        })();
+        return;
+      }
+
       if (pendingRequestId.current === null) {
         pendingRequestId.current = next.requestId;
         sourceAgentPubkey.current = agentPubkey;
@@ -157,11 +205,18 @@ export function useAgentManagement() {
     updatePersonaMutation.isPending ||
     createAgentMutation.isPending;
 
-  function assertAgentCanActFromOrigin(channelId: string) {
-    const targetChannel = (channelsQuery.data ?? []).find(
-      (channel) => channel.id === channelId,
-    );
-    const requestingPubkey = sourceAgentPubkey.current?.toLowerCase();
+  function assertAgentCanActFromOrigin(
+    channelId: string,
+    agentPubkeyOverride?: string | null,
+  ) {
+    const targetChannel = (
+      channelsQuery.data ??
+      channelsRef.current ??
+      []
+    ).find((channel) => channel.id === channelId);
+    const requestingPubkey = (
+      agentPubkeyOverride ?? sourceAgentPubkey.current
+    )?.toLowerCase();
     if (
       !targetChannel?.isMember ||
       !requestingPubkey ||

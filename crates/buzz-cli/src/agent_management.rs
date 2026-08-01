@@ -20,6 +20,23 @@ pub struct CreateAgentDraft {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SpawnTempAgentDraft {
+    pub channel_id: String,
+    pub display_name: String,
+    pub system_prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestroyTempAgentDraft {
+    pub channel_id: String,
+    pub agent_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateAgentDraft {
     pub channel_id: String,
     pub agent_name: String,
@@ -141,6 +158,43 @@ pub fn build_create(
     build(keys, owner, channel_id, "create", request)
 }
 
+pub fn build_spawn_temp(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: SpawnTempAgentDraft,
+) -> Result<BuiltDraftRequest, CliError> {
+    let channel_id = required(draft.channel_id, "channel", 128)?;
+    uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
+    if let Some(ttl) = draft.ttl_seconds {
+        if ttl == 0 {
+            return Err(CliError::Usage("ttl-seconds must be >= 1".into()));
+        }
+    }
+    let request = SpawnTempAgentDraft {
+        channel_id: channel_id.clone(),
+        display_name: required(draft.display_name, "display name", MAX_NAME_CHARS)?,
+        system_prompt: required(draft.system_prompt, "system prompt", MAX_PROMPT_CHARS)?,
+        ttl_seconds: draft.ttl_seconds,
+    };
+    build(keys, owner, channel_id, "spawn_temp", request)
+}
+
+pub fn build_destroy_temp(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: DestroyTempAgentDraft,
+) -> Result<BuiltDraftRequest, CliError> {
+    let channel_id = required(draft.channel_id, "channel", 128)?;
+    uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
+    let request = DestroyTempAgentDraft {
+        channel_id: channel_id.clone(),
+        agent_name: required(draft.agent_name, "agent name", MAX_NAME_CHARS)?,
+    };
+    build(keys, owner, channel_id, "destroy_temp", request)
+}
+
 pub fn build_update(
     keys: &Keys,
     owner: &PublicKey,
@@ -238,6 +292,42 @@ mod tests {
         );
         assert!(payload["payload"]["request"].get("runtime").is_none());
         assert!(payload["payload"]["request"].get("respondTo").is_none());
+    }
+
+    #[test]
+    fn spawn_temp_is_owner_encrypted_with_action() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_spawn_temp(
+            &agent,
+            &owner.public_key(),
+            SpawnTempAgentDraft {
+                channel_id: CHANNEL.into(),
+                display_name: "temp-scout".into(),
+                system_prompt: "Do one thing.".into(),
+                ttl_seconds: Some(600),
+            },
+        )
+        .unwrap();
+        assert_eq!(built.action, "spawn_temp");
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["action"], "spawn_temp");
+        assert_eq!(payload["payload"]["request"]["displayName"], "temp-scout");
+        assert_eq!(payload["payload"]["request"]["ttlSeconds"], 600);
+    }
+
+    #[test]
+    fn destroy_temp_requires_agent_name() {
+        let error = build_destroy_temp(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            DestroyTempAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "  ".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("agent name"));
     }
 
     #[test]
