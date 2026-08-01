@@ -12,13 +12,16 @@ mod relay;
 mod setup_mode;
 mod usage;
 
+pub use acp::{
+    AcpClient, PermissionDecision, PermissionOption, PermissionPolicy, PermissionRequest,
+};
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp::{AcpClient, EnvVar, McpServer};
+use acp::{EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
