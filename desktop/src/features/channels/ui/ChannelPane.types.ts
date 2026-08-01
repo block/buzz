@@ -12,7 +12,7 @@ import type {
   ProfilePanelTab,
   ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanel";
-import type { Channel } from "@/shared/api/types";
+import type { Channel, RelayEvent } from "@/shared/api/types";
 export type ChannelPaneProps = {
   activeChannel: Channel | null;
   activityAgents?: BotActivityAgent[];
@@ -62,6 +62,7 @@ export type ChannelPaneProps = {
   /** The kickoff is still setting up the team — the banner copy reads as setup status. */
   welcomeKickoffSettingUp?: boolean;
   messages: TimelineMessage[];
+  signedPanelEvents?: readonly RelayEvent[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;
   unreadCount?: number;

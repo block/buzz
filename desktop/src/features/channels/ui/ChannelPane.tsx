@@ -65,7 +65,6 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
-const EMPTY_SIGNED_CHANNEL_PANEL_STATE = { kind: "empty" as const };
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
@@ -98,6 +97,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   welcomeKickoffStage = null,
   welcomeKickoffSettingUp = false,
   messages,
+  signedPanelEvents = [],
   threadSummaries,
   firstUnreadMessageId = null,
   unreadCount = 0,
@@ -508,7 +508,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     threadAllMessages,
     threadHeadMessage,
   ]);
-
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
@@ -597,7 +596,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           data-testid="channel-shared-header-backdrop"
         />
       ) : null}
-
       {!isSinglePanelView ? (
         <section
           aria-label="Channel messages and composer"
@@ -815,19 +813,21 @@ export const ChannelPane = React.memo(function ChannelPane({
           ) : null}
         </section>
       ) : null}
-
-      {/* Keep the focus thread drawer mounted through its exit animation. */}
       <AnimatePresence onExitComplete={markExitComplete}>
         {channelPanelOpen && activeChannel ? (
           <SignedChannelPanelAuxiliaryPanel
             canResetPanelWidth={canResetThreadPanelWidth}
+            channelId={activeChannel.id}
             channelName={activeChannel.name}
+            events={signedPanelEvents}
+            isLoading={isTimelineLoading}
             isSinglePanelView={isSinglePanelView}
             onClose={onCloseChannelPanel ?? (() => undefined)}
+            onOpenThread={onOpenThread}
             onResetPanelWidth={onResetThreadPanelWidth}
             onPanelResizeStart={onThreadPanelResizeStart}
             panelWidthPx={threadPanelWidthPx}
-            state={EMPTY_SIGNED_CHANNEL_PANEL_STATE}
+            sourceMessages={messages}
             useSplitAuxiliaryPane={useSplitAuxiliaryPane}
           />
         ) : channelManagementOpen && activeChannel ? (

@@ -1,35 +1,59 @@
-import type * as React from "react";
+import * as React from "react";
 
+import type { RelayEvent } from "@/shared/api/types";
 import { SignedChannelPanel } from "@/features/channels/ui/SignedChannelPanel";
-import type { SignedChannelPanelState } from "@/features/channels/ui/signedChannelPanelTypes";
+import type { TimelineMessage } from "@/features/messages/types";
+import { composeSignedChannelPanelState } from "@/features/channels/ui/composeSignedChannelPanel";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 
 type SignedChannelPanelAuxiliaryPanelProps = {
   canResetPanelWidth: boolean;
+  channelId: string;
   channelName: string;
+  events: readonly RelayEvent[];
+  isLoading: boolean;
   isSinglePanelView: boolean;
   onClose: () => void;
-  onOpenSourceEvent?: (eventId: string) => void;
+  onOpenThread: (message: TimelineMessage) => void;
   onResetPanelWidth: () => void;
   onPanelResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
   panelWidthPx: number;
-  state: SignedChannelPanelState;
+  sourceMessages: TimelineMessage[];
   useSplitAuxiliaryPane: boolean;
 };
 
 export function SignedChannelPanelAuxiliaryPanel({
   canResetPanelWidth,
+  channelId,
   channelName,
+  events,
+  isLoading,
   isSinglePanelView,
   onClose,
-  onOpenSourceEvent,
+  onOpenThread,
   onResetPanelWidth,
   onPanelResizeStart,
   panelWidthPx,
-  state,
+  sourceMessages,
   useSplitAuxiliaryPane,
 }: SignedChannelPanelAuxiliaryPanelProps) {
+  const state = React.useMemo(
+    () =>
+      isLoading
+        ? { kind: "loading" as const }
+        : composeSignedChannelPanelState(channelId, events),
+    [channelId, events, isLoading],
+  );
+  const onOpenSourceEvent = React.useCallback(
+    (eventId: string) => {
+      const sourceMessage = sourceMessages.find(
+        (message) => message.id === eventId,
+      );
+      if (sourceMessage) onOpenThread(sourceMessage);
+    },
+    [onOpenThread, sourceMessages],
+  );
   const content = (
     <SignedChannelPanel
       channelName={channelName}
