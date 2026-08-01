@@ -7,19 +7,25 @@ import type {
   ConnectionState,
   ObserverEvent,
 } from "@/features/agents/ui/agentSessionTypes";
+import { commandsMatch } from "@/features/agents/agentReuse";
 
 const MAX_SAFE_LABEL_LENGTH = 120;
 const MAX_MANIFEST_ITEMS = 100;
 
+/** Whether a capability is positively reported, absent, or not yet known. */
 export type CapabilityEvidenceState = "reported" | "unavailable" | "unknown";
 
+/** Validity of the local evidence against the current process and connection. */
 export type ManifestFreshness = "fresh" | "stale" | "unknown";
+/** Summary state for the owner-visible local readiness card. */
 export type ManifestOverallStatus =
   | "ready"
   | "attention"
   | "stopped"
   | "unknown";
+/** Status of one local readiness prerequisite. */
 export type ReadinessStatus = "ready" | "attention" | "pending" | "unknown";
+/** Stable identifier for a local readiness prerequisite. */
 export type ReadinessCheckId =
   | "installation"
   | "authentication"
@@ -27,6 +33,7 @@ export type ReadinessCheckId =
   | "community"
   | "presence"
   | "observer";
+/** Coarse display-only risk class derived from a reported tool name. */
 export type ToolRiskClass =
   | "read"
   | "write"
@@ -34,6 +41,7 @@ export type ToolRiskClass =
   | "external"
   | "unknown";
 
+/** One runtime- or catalog-backed feature shown in the manifest. */
 export type CapabilityFeature = {
   id: string;
   label: string;
@@ -41,6 +49,7 @@ export type CapabilityFeature = {
   source: "runtime" | "buzzCatalog";
 };
 
+/** One owner-local readiness check and its supporting detail. */
 export type ReadinessCheck = {
   id: ReadinessCheckId;
   label: string;
@@ -48,15 +57,7 @@ export type ReadinessCheck = {
   detail: string;
 };
 
-const readinessGate: Record<ReadinessCheckId, boolean> = {
-  installation: true,
-  authentication: true,
-  process: true,
-  community: true,
-  presence: true,
-  observer: true,
-};
-
+/** Sanitized tool evidence safe for the owner-visible manifest. */
 export type ManifestTool = {
   name: string;
   source: string | null;
@@ -64,12 +65,14 @@ export type ManifestTool = {
   availability: CapabilityEvidenceState;
 };
 
+/** Requested and locally observed permission behavior. */
 export type ManifestPermissionMode = {
   requested: string | null;
   effective: string | null;
   source: "runtime" | "buzzHarness" | "unknown";
 };
 
+/** Owner-local capability and readiness projection for a managed agent. */
 export type AgentCapabilityManifest = {
   overallStatus: ManifestOverallStatus;
   freshness: ManifestFreshness;
@@ -82,7 +85,9 @@ export type AgentCapabilityManifest = {
   protocolVersion: string | null;
   model: {
     value: string | null;
-    source: "observed" | "configured" | "unknown";
+    source: "applied" | "reported" | "configured" | "unknown";
+    requested: string | null;
+    matchesRequested: boolean | null;
   };
   provider: {
     value: string | null;
@@ -108,6 +113,7 @@ type ManifestInputs = {
   observer: {
     connectionState: ConnectionState;
     events: ObserverEvent[];
+    capabilityEvidence?: AgentCapabilityEvidence;
   };
   catalogObservedAt?: string | null;
   runtimeObservedAt?: string | null;
@@ -122,6 +128,20 @@ type ParsedSessionManifest = {
   event: ObserverEvent;
   payload: Record<string, unknown>;
   manifest: Record<string, unknown>;
+};
+
+/** Durable observer evidence retained independently of the capped event log. */
+export type AgentCapabilityEvidence = {
+  initializeEvent: ObserverEvent | null;
+  sessionConfigEvent: ObserverEvent | null;
+  commandsEvent: ObserverEvent | null;
+};
+
+/** Empty durable evidence state for a new or reset observer stream. */
+export const EMPTY_AGENT_CAPABILITY_EVIDENCE: AgentCapabilityEvidence = {
+  initializeEvent: null,
+  sessionConfigEvent: null,
+  commandsEvent: null,
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -162,32 +182,6 @@ function safeCapabilityName(value: unknown): string | null {
   return label;
 }
 
-function latestEvent(
-  events: readonly ObserverEvent[],
-  predicate: (event: ObserverEvent) => boolean,
-  minimum?: ObserverEvent | null,
-): ObserverEvent | null {
-  let latest: ObserverEvent | null = null;
-  for (const event of events) {
-    if (
-      !predicate(event) ||
-      (minimum !== undefined &&
-        minimum !== null &&
-        !eventIsSameOrAfter(event, minimum))
-    ) {
-      continue;
-    }
-    if (
-      !latest ||
-      Date.parse(event.timestamp) > Date.parse(latest.timestamp) ||
-      (event.timestamp === latest.timestamp && event.seq > latest.seq)
-    ) {
-      latest = event;
-    }
-  }
-  return latest;
-}
-
 function eventIsSameOrAfter(
   candidate: ObserverEvent,
   minimum: ObserverEvent,
@@ -203,34 +197,133 @@ function eventIsSameOrAfter(
   );
 }
 
-function parseLatestInitialize(
+function eventsHaveConflictingSessions(
+  candidate: ObserverEvent,
+  minimum: ObserverEvent,
+): boolean {
+  return (
+    candidate.sessionId !== null &&
+    minimum.sessionId !== null &&
+    candidate.sessionId !== minimum.sessionId
+  );
+}
+
+function isInitializeEvent(event: ObserverEvent): boolean {
+  if (event.kind !== "agent_initialized") return false;
+  const payload = asRecord(event.payload);
+  return asRecord(payload?.initializeResult) !== null;
+}
+
+function isSessionManifestEvent(event: ObserverEvent): boolean {
+  if (event.kind !== "session_config_captured") return false;
+  const payload = asRecord(event.payload);
+  return asRecord(payload?.capabilityManifest) !== null;
+}
+
+function isCommandsEvent(event: ObserverEvent): boolean {
+  if (event.kind !== "acp_read") return false;
+  const payload = asRecord(event.payload);
+  const params = asRecord(payload?.params);
+  const update = asRecord(params?.update);
+  return update?.sessionUpdate === "available_commands_update";
+}
+
+/** Fold one observer event into the durable capability evidence state. */
+export function reduceAgentCapabilityEvidence(
+  current: AgentCapabilityEvidence,
+  event: ObserverEvent,
+): AgentCapabilityEvidence {
+  if (isInitializeEvent(event)) {
+    if (
+      current.initializeEvent &&
+      !eventIsSameOrAfter(event, current.initializeEvent)
+    ) {
+      return current;
+    }
+    const sessionConfigEvent =
+      current.sessionConfigEvent &&
+      eventIsSameOrAfter(current.sessionConfigEvent, event)
+        ? current.sessionConfigEvent
+        : null;
+    const commandsMinimum = sessionConfigEvent ?? event;
+    const commandsEvent =
+      current.commandsEvent &&
+      !eventsHaveConflictingSessions(current.commandsEvent, commandsMinimum) &&
+      eventIsSameOrAfter(current.commandsEvent, commandsMinimum)
+        ? current.commandsEvent
+        : null;
+    return {
+      initializeEvent: event,
+      sessionConfigEvent,
+      commandsEvent,
+    };
+  }
+
+  if (isSessionManifestEvent(event)) {
+    if (
+      (current.initializeEvent &&
+        !eventIsSameOrAfter(event, current.initializeEvent)) ||
+      (current.sessionConfigEvent &&
+        !eventIsSameOrAfter(event, current.sessionConfigEvent))
+    ) {
+      return current;
+    }
+    return {
+      ...current,
+      sessionConfigEvent: event,
+      // Commands are session-scoped. Keep an out-of-order command frame only
+      // when it is from this session or later; otherwise wait for a fresh
+      // available_commands_update frame.
+      commandsEvent:
+        current.commandsEvent &&
+        !eventsHaveConflictingSessions(current.commandsEvent, event) &&
+        eventIsSameOrAfter(current.commandsEvent, event)
+          ? current.commandsEvent
+          : null,
+    };
+  }
+
+  if (isCommandsEvent(event)) {
+    const minimum =
+      current.sessionConfigEvent ?? current.initializeEvent ?? null;
+    if (
+      (minimum &&
+        (eventsHaveConflictingSessions(event, minimum) ||
+          !eventIsSameOrAfter(event, minimum))) ||
+      (current.commandsEvent &&
+        !eventIsSameOrAfter(event, current.commandsEvent))
+    ) {
+      return current;
+    }
+    return { ...current, commandsEvent: event };
+  }
+
+  return current;
+}
+
+/** Reduce an event snapshot into durable capability evidence. */
+export function reduceAgentCapabilityEvidenceEvents(
   events: readonly ObserverEvent[],
+): AgentCapabilityEvidence {
+  return events.reduce(
+    reduceAgentCapabilityEvidence,
+    EMPTY_AGENT_CAPABILITY_EVIDENCE,
+  );
+}
+
+function parseInitializeEvent(
+  event: ObserverEvent | null,
 ): ParsedInitialize | null {
-  const event = latestEvent(events, (candidate) => {
-    if (candidate.kind !== "agent_initialized") return false;
-    const payload = asRecord(candidate.payload);
-    return asRecord(payload?.initializeResult) !== null;
-  });
-  if (!event) return null;
+  if (!event || !isInitializeEvent(event)) return null;
   const payload = asRecord(event.payload);
   const result = asRecord(payload?.initializeResult);
   return result ? { event, result } : null;
 }
 
-function parseLatestSessionManifest(
-  events: readonly ObserverEvent[],
-  minimum?: ObserverEvent | null,
+function parseSessionManifestEvent(
+  event: ObserverEvent | null,
 ): ParsedSessionManifest | null {
-  const event = latestEvent(
-    events,
-    (candidate) => {
-      if (candidate.kind !== "session_config_captured") return false;
-      const payload = asRecord(candidate.payload);
-      return asRecord(payload?.capabilityManifest) !== null;
-    },
-    minimum,
-  );
-  if (!event) return null;
+  if (!event || !isSessionManifestEvent(event)) return null;
   const payload = asRecord(event.payload);
   const manifest = asRecord(payload?.capabilityManifest);
   return payload && manifest ? { event, payload, manifest } : null;
@@ -357,26 +450,26 @@ function parseCurrentModel(
   return null;
 }
 
-function parseCommands(
-  events: readonly ObserverEvent[],
-  minimum?: ObserverEvent | null,
-): {
+function parseModelApplication(session: ParsedSessionManifest | null): {
+  requested: string | null;
+  applied: string | null;
+} {
+  const raw = asRecord(session?.manifest.modelApplication);
+  const requested = safeLabel(raw?.requested);
+  return {
+    requested,
+    applied: raw?.applied === true ? requested : null,
+  };
+}
+
+function parseCommands(event: ObserverEvent | null): {
   commands: string[];
   state: CapabilityEvidenceState;
   event: ObserverEvent | null;
 } {
-  const event = latestEvent(
-    events,
-    (candidate) => {
-      if (candidate.kind !== "acp_read") return false;
-      const payload = asRecord(candidate.payload);
-      const params = asRecord(payload?.params);
-      const update = asRecord(params?.update);
-      return update?.sessionUpdate === "available_commands_update";
-    },
-    minimum,
-  );
-  if (!event) return { commands: [], state: "unknown", event: null };
+  if (!event || !isCommandsEvent(event)) {
+    return { commands: [], state: "unknown", event: null };
+  }
   const payload = asRecord(event.payload);
   const params = asRecord(payload?.params);
   const update = asRecord(params?.update);
@@ -545,7 +638,7 @@ function readinessChecks(
             status: "unknown",
             detail: "Not verified",
           };
-  const active = agent.status === "running" || agent.status === "deployed";
+  const active = isActiveManagedAgent(agent);
   const process: ReadinessCheck = {
     id: "process",
     label: "Process",
@@ -661,7 +754,7 @@ function manifestFreshness(
   initialize: ParsedInitialize | null,
 ): ManifestFreshness {
   if (!initialize) return "unknown";
-  const active = agent.status === "running" || agent.status === "deployed";
+  const active = isActiveManagedAgent(agent);
   if (!active || observerState !== "open") return "stale";
   if (runtimeStatus && runtimeStatus.lifecycle !== "ready") return "stale";
   if (presenceStatus && presenceStatus !== "online") return "stale";
@@ -683,35 +776,37 @@ function overallStatus(
   checks: readonly ReadinessCheck[],
   freshness: ManifestFreshness,
 ): ManifestOverallStatus {
-  if (agent.status !== "running" && agent.status !== "deployed") {
+  if (!isActiveManagedAgent(agent)) {
     return "stopped";
   }
-  const gating = checks.filter((check) => readinessGate[check.id]);
-  if (gating.some((check) => check.status === "attention")) return "attention";
+  if (checks.some((check) => check.status === "attention")) return "attention";
   if (
     freshness === "fresh" &&
-    gating.every((check) => check.status === "ready")
+    checks.every((check) => check.status === "ready")
   ) {
     return "ready";
   }
   return "unknown";
 }
 
+function isActiveManagedAgent(agent: ManagedAgent): boolean {
+  return agent.status === "running" || agent.status === "deployed";
+}
+
+/** Match a managed agent command to the runtime catalog using shared semantics. */
 export function findManifestRuntime(
   agent: ManagedAgent,
   runtimes: readonly AcpRuntimeCatalogEntry[],
 ): AcpRuntimeCatalogEntry | undefined {
-  const command = agent.agentCommand.trim();
-  const basename = command.split(/[\\/]/).at(-1) ?? command;
   return runtimes.find(
     (runtime) =>
-      runtime.id === command ||
-      runtime.id === basename ||
-      runtime.command === command ||
-      runtime.command === basename,
+      commandsMatch(agent.agentCommand, runtime.id) ||
+      (runtime.command !== null &&
+        commandsMatch(agent.agentCommand, runtime.command)),
   );
 }
 
+/** Build the local owner-only manifest from catalog, runtime, and observer facts. */
 export function buildAgentCapabilityManifest({
   agent,
   runtime,
@@ -721,12 +816,14 @@ export function buildAgentCapabilityManifest({
   catalogObservedAt,
   runtimeObservedAt,
 }: ManifestInputs): AgentCapabilityManifest {
-  const initialize = parseLatestInitialize(observer.events);
-  const session = parseLatestSessionManifest(
-    observer.events,
-    initialize?.event,
+  const capabilityEvidence =
+    observer.capabilityEvidence ??
+    reduceAgentCapabilityEvidenceEvents(observer.events);
+  const initialize = parseInitializeEvent(capabilityEvidence.initializeEvent);
+  const session = parseSessionManifestEvent(
+    capabilityEvidence.sessionConfigEvent,
   );
-  const commands = parseCommands(observer.events, initialize?.event);
+  const commands = parseCommands(capabilityEvidence.commandsEvent);
   const toolSources = parseToolSources(session);
   const tools = parseTools(initialize);
   const permissionMode = parsePermissionMode(session);
@@ -751,8 +848,21 @@ export function buildAgentCapabilityManifest({
     Number.isFinite(protocolVersionValue)
       ? String(protocolVersionValue)
       : safeLabel(protocolVersionValue);
-  const observedModel = parseCurrentModel(session);
+  const modelApplication = parseModelApplication(session);
+  const reportedModel = parseCurrentModel(session);
   const configuredModel = safeLabel(agent.model);
+  const requestedModel = modelApplication.requested ?? configuredModel;
+  const appliedModel = modelApplication.applied;
+  const modelValue = appliedModel ?? reportedModel ?? configuredModel;
+  const modelSource = appliedModel
+    ? "applied"
+    : reportedModel
+      ? "reported"
+      : configuredModel
+        ? "configured"
+        : "unknown";
+  const matchesRequested =
+    requestedModel && modelValue ? requestedModel === modelValue : null;
   const configuredProvider = safeLabel(agent.provider);
   const limitations: string[] = [];
   if (!initialize) {
@@ -789,11 +899,12 @@ export function buildAgentCapabilityManifest({
     ]),
     runtime: identity,
     protocolVersion,
-    model: observedModel
-      ? { value: observedModel, source: "observed" }
-      : configuredModel
-        ? { value: configuredModel, source: "configured" }
-        : { value: null, source: "unknown" },
+    model: {
+      value: modelValue,
+      source: modelSource,
+      requested: requestedModel,
+      matchesRequested,
+    },
     provider: configuredProvider
       ? { value: configuredProvider, source: "configured" }
       : { value: null, source: "unknown" },

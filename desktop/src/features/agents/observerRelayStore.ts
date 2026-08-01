@@ -14,6 +14,11 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
+import {
+  EMPTY_AGENT_CAPABILITY_EVIDENCE,
+  type AgentCapabilityEvidence,
+  reduceAgentCapabilityEvidence,
+} from "@/features/agents/lib/capabilityManifest";
 import type {
   ConnectionState,
   ObserverEvent,
@@ -33,12 +38,14 @@ export type ObserverSnapshot = {
   connectionState: ConnectionState;
   errorMessage: string | null;
   events: ObserverEvent[];
+  capabilityEvidence: AgentCapabilityEvidence;
 };
 
 const IDLE_SNAPSHOT: ObserverSnapshot = {
   connectionState: "idle",
   errorMessage: null,
   events: [],
+  capabilityEvidence: EMPTY_AGENT_CAPABILITY_EVIDENCE,
 };
 
 const EMPTY_EVENTS: ObserverEvent[] = [];
@@ -46,6 +53,7 @@ const EMPTY_TRANSCRIPT: TranscriptItem[] = [];
 
 const listeners = new Set<() => void>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
+const capabilityEvidenceByAgent = new Map<string, AgentCapabilityEvidence>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
@@ -211,6 +219,12 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
     ? sorted.slice(sorted.length - MAX_OBSERVER_EVENTS)
     : sorted;
   eventsByAgent.set(key, final);
+  const currentEvidence =
+    capabilityEvidenceByAgent.get(key) ?? EMPTY_AGENT_CAPABILITY_EVIDENCE;
+  const nextEvidence = reduceAgentCapabilityEvidence(currentEvidence, event);
+  if (nextEvidence !== currentEvidence) {
+    capabilityEvidenceByAgent.set(key, nextEvidence);
+  }
 
   // Determine whether the new event landed at the end of the sorted array.
   // If it did (common case), we can incrementally process just this event.
@@ -598,6 +612,8 @@ export function getAgentObserverSnapshot(
     connectionState,
     errorMessage,
     events: eventsByAgent.get(key) ?? [],
+    capabilityEvidence:
+      capabilityEvidenceByAgent.get(key) ?? EMPTY_AGENT_CAPABILITY_EVIDENCE,
   };
   snapshotByAgent.set(key, snapshot);
   return snapshot;
@@ -774,6 +790,7 @@ export function resetAgentObserverStore() {
   startPromise = null;
   eventProcessingQueue = Promise.resolve();
   eventsByAgent.clear();
+  capabilityEvidenceByAgent.clear();
   transcriptByAgent.clear();
   snapshotByAgent.clear();
   archiveEventsByChannel.clear();

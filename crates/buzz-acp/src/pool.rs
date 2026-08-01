@@ -935,6 +935,11 @@ async fn create_session_and_apply_model(
         )
         .await?;
 
+    // session/new is the first point at which the ACP session ID exists.
+    // Attach it immediately so model/mode calls and session_config_captured
+    // cannot be mistaken for evidence from a prior session.
+    agent.acp.set_observer_session_id(resp.session_id.clone());
+
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
             match agent
@@ -969,8 +974,7 @@ async fn create_session_and_apply_model(
     let switch_succeeded = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
-                true
+                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?
             }
             None => {
                 tracing::warn!(
@@ -1019,6 +1023,8 @@ async fn create_session_and_apply_model(
         build_session_config_observation(
             &resp.raw,
             agent.model_overridden && switch_succeeded,
+            agent.desired_model.as_deref(),
+            switch_succeeded,
             ctx,
             permission_mode_applied,
         ),
@@ -1057,16 +1063,15 @@ fn mcp_servers_with_git_origin(
 
 /// Send the appropriate ACP model-switch request with a timeout.
 ///
-/// On timeout or error, logs a warning and returns — the caller proceeds
-/// with the agent's default model. This is intentionally non-fatal: a stale
-/// response from a timed-out request is safely ignored by `read_until_response`
-/// (non-matching JSON-RPC IDs are skipped).
+/// Returns `true` only when the runtime acknowledges the switch. Application
+/// errors are non-fatal and return `false` so downstream evidence does not
+/// claim the configured model was applied. Transport errors remain fatal.
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
     desired: &str,
     method: &ModelSwitchMethod,
-) -> Result<(), AcpError> {
+) -> Result<bool, AcpError> {
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -1096,6 +1101,7 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "applied model {desired} via {method_label} on session {session_id}"
             );
+            Ok(true)
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent instead of reusing a poisoned one.
@@ -1108,7 +1114,7 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "fatal error setting model {desired} via {method_label}: {e}"
             );
-            return Err(e);
+            Err(e)
         }
         // Application-level errors (Json, etc.) — agent is fine, just uses default model.
         Ok(Err(e)) => {
@@ -1116,6 +1122,7 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
             );
+            Ok(false)
         }
         Err(_) => {
             // Outer timeout fired — the inner send_request may have left the
@@ -1124,10 +1131,9 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
         }
     }
-    Ok(())
 }
 
 /// Check whether the agent's `session/new` response advertises a given mode ID
@@ -1149,6 +1155,8 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
 fn build_session_config_observation(
     session_new_result: &serde_json::Value,
     model_overridden: bool,
+    requested_model: Option<&str>,
+    model_applied: bool,
     ctx: &PromptContext,
     permission_mode_applied: bool,
 ) -> serde_json::Value {
@@ -1187,6 +1195,10 @@ fn build_session_config_observation(
         // keyed by (agent, relay) like the lifecycle frames.
         "relayUrl": ctx.relay_url,
         "capabilityManifest": {
+            "modelApplication": {
+                "requested": requested_model,
+                "applied": model_applied,
+            },
             "toolSources": tool_sources
                 .into_iter()
                 .map(|name| serde_json::json!({ "name": name, "kind": "mcp" }))
@@ -6623,11 +6635,20 @@ mod tests {
                 },
             }),
             false,
+            Some("configured-model"),
+            true,
             &ctx,
             false,
         );
         let manifest = &observation["capabilityManifest"];
         assert_eq!(manifest["toolSources"][0]["name"], "github");
+        assert_eq!(
+            manifest["modelApplication"],
+            json!({
+                "requested": "configured-model",
+                "applied": true,
+            })
+        );
         assert_eq!(
             manifest["permissionMode"],
             json!({
@@ -6655,7 +6676,8 @@ mod tests {
         let mut ctx = make_prompt_context_impl(&agent_keys, None);
         ctx.permission_mode = PermissionMode::Plan;
 
-        let observation = build_session_config_observation(&json!({}), false, &ctx, true);
+        let observation =
+            build_session_config_observation(&json!({}), false, None, false, &ctx, true);
         assert_eq!(
             observation["capabilityManifest"]["permissionMode"],
             json!({
@@ -6677,6 +6699,8 @@ mod tests {
                     "availableModes": [{"id": "plan"}],
                 },
             }),
+            false,
+            None,
             false,
             &ctx,
             false,
