@@ -57,3 +57,22 @@ Kategorien **Kunde · Uni · Behörde · Blocker · Noise**; Labels `Triage/<Kat
 | MCP-Handshake | Server `google` v1.0.0, 25 Tools, 7× `gmail_*`, `HAS_SEND_TOOL=false` |
 
 Offen (gehört zu buzz#3, dessen Vorflug „Dispatcher antwortet im Kanal" noch nicht steht): der Kanal-Beweis „@dispatcher Inbox-Triage" in der laufenden Buzz-App.
+
+## Telegram-Anbindung (buzz#5 — bidirektional, Long-Polling)
+
+**Entschieden: Option (a) — eigener Mini-MCP `telegram-mcp` (stdio, Long-Polling) auf dem webhook-freien Bestands-Bot** statt (b) n8n-Bridge. Begründung: n8n ist geteiltes Live-System (max. 1 Agent, eigener Credential-Unterhalt, Latenz); der einzige Webhook-Slot des n8n-Bots ist belegt; Long-Polling braucht keinerlei Webhook und kollidiert mit nichts Bestehendem. Kein neuer Bot nötig: Ticket-Fallback „vorhandener freier Token" griff (s. Inventar).
+
+- Repo: `munirad7s/telegram-mcp` (`C:/Users/rescue/mcp-servers/telegram-mcp`), Stack wie google-mcp (tsx + MCP-SDK + zod — bewusst KEIN vierter Sprach-Stack im MCP-Park; Rust-Präferenz gilt für Systeme, das hier ist ein 200-Zeilen-Sidecar).
+- Tools: `telegram_send_message` (Empfänger hart auf Munirs Chat verdrahtet, kein chat_id-Parameter → Broadcast technisch unmöglich), `telegram_get_updates` (Long-Poll ≤ 50 s, Fremd-Chats werden verworfen und nur gezählt, Offset persistiert in `~/.telegram-mcp-state.json`), `telegram_bot_info` (Diagnose; Webhook MUSS leer bleiben).
+- Secrets: Server liest `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` aus env, Fallback Parse von `~/.secrets/master.env` — nichts in `.mcp.json`/Repo.
+- Wiring: `~/.buzz/.mcp.json` (Nest-Strategie aus buzz#4) + Nutzungs-Doktrin in `~/.buzz/AGENTS.md` (untrusted Input, Gate-Semantik kommt mit #10).
+- Rückkanal-Semantik: Derselbe Bot verschickt die Blocker-Eskalationen (`blocker-mail.sh`) — Munirs Antworten darauf landen in `telegram_get_updates`. Eskalation raus (Script), Antwort rein (Buzz): EIN Kanal.
+
+### Bot-Inventar (verifiziert 2026-08-01 via getMe/getWebhookInfo/kuma.db — vorher war die Dokumentenlage falsch)
+
+| Bot | Token-Quelle | Webhook | Zweck / Consumer |
+|---|---|---|---|
+| `@hydra_trading02112_bot` („Hydra", id 8930901342) | `master.env` `TELEGRAM_BOT_TOKEN` — **der dortige Kommentar „@adas_agency_bot" ist FALSCH** | keiner (Long-Polling frei, getUpdates ohne 409 verifiziert) | Send: Eskalationen `blocker-mail.sh`/`notify-lib.sh`/`ready-watch.sh` · Receive: **telegram-mcp (Buzz)**. Ursprünglich für Hydra G13 angelegt (ungebaut) — beansprucht Hydra ihn, `buzz_empire_bot` via BotFather anlegen + Token tauschen (buzz#24) |
+| `@adas_agency_bot` („Adas Agency", id 8809159404) | `~/.secrets/adas-agency-bot.token` | `https://n8n.adas.jetzt/webhook/0aa56987-…/webhook` (message, callback_query) | n8n-Flows (u. a. ADA-20-Approval-Gateway) + Uptime-Kuma-Alerts (kuma.db notification id=2, gleicher Token) — **Webhook + getUpdates tabu** |
+
+Chat-ID `5504083685` = Munir privat, in beiden Configs identisch, zustell-bewiesen (message_ids in buzz#5).
