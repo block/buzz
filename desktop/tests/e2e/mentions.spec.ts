@@ -30,6 +30,13 @@ const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
+/**
+ * Relay-classified agent whose declared NIP-OA owner is the mock viewer, a
+ * member of #agents, and deliberately absent from `managedAgents`. Mirrors an
+ * agent whose process runs on another machine.
+ */
+const OWNED_RELAY_AGENT_PUBKEY =
+  "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
@@ -847,6 +854,39 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
   await input.fill("@quinn");
 
   await expect(autocomplete(page)).toHaveCount(0);
+});
+
+test("owned in-channel agents managed on another machine stay mentionable", async ({
+  page,
+}) => {
+  // Regression for #2508 / #3739 / #2349. `nadia` is a channel member, is
+  // owned by the viewer, and is NOT in `managedAgents`: her process runs
+  // elsewhere. Her kind:10100 entry keeps the default `owner-only` policy, so
+  // she never enters `mentionableAgentPubkeys` either. Both autocomplete gates
+  // used to drop her, leaving her unmentionable from every machine except the
+  // one hosting her.
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OWNED_RELAY_AGENT_PUBKEY,
+        name: "nadia",
+        channelNames: ["agents"],
+        respondTo: "owner-only",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@nadia");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown).toBeVisible();
+  const nadiaRow = dropdown.locator("button", { hasText: "nadia" });
+  await expect(nadiaRow).toHaveCount(1);
+  await expect(nadiaRow.getByTestId("mention-agent-icon")).toBeVisible();
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({

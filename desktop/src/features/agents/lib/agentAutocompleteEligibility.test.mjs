@@ -6,6 +6,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
+  isAgentMentionEligible,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -162,6 +163,108 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   );
 });
 
+test("isAgentIdentityInManagedList: keeps owned agents that are channel members", () => {
+  // An agent whose process lives on another machine is absent from this
+  // machine's managed list, but its owner must still be able to mention it.
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY,
+      },
+      managedAgentPubkeys,
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+});
+
+test("isAgentIdentityInManagedList: normalizes pubkeys on the ownership branch", () => {
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+      },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+});
+
+test("isAgentIdentityInManagedList: still hides owned agents that are not members", () => {
+  // Ownership alone is not reachability: a profile-only agent we own has no
+  // evidence of running anywhere, and #1243 hides it on purpose.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        isMember: false,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY,
+      },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B, ownerPubkey: CURRENT_PUBKEY },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("isAgentIdentityInManagedList: still hides agents owned by someone else", () => {
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: PUB_D,
+      },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("isAgentIdentityInManagedList: ownership branch is inert without a current pubkey", () => {
+  // Callers that do not pass `currentPubkey` keep the previous behaviour.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY,
+      },
+      new Set(),
+    ),
+    false,
+  );
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, isMember: true, pubkey: PUB_B, ownerPubkey: null },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
@@ -209,6 +312,56 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
       pubkey: PUB_A,
       mentionableAgentPubkeys: new Set(),
       directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    true,
+  );
+});
+
+test("shouldHideAgentFromMentions: shows directory agents owned by the current user", () => {
+  // An `owner-only` agent is absent from `mentionableAgentPubkeys` by
+  // construction, so its directory entry must not read as not-invocable for
+  // the one account it always answers.
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+      currentPubkey: CURRENT_PUBKEY,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    false,
+  );
+});
+
+test("shouldHideAgentFromMentions: still hides directory agents owned by someone else", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      ownerPubkey: PUB_D,
+      currentPubkey: CURRENT_PUBKEY,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    true,
+  );
+});
+
+test("shouldHideAgentFromMentions: still hides non-member agents owned by the current user", () => {
+  // The ownership escape is scoped to members: membership is the reachability
+  // evidence, ownership only the permission.
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: false,
+      pubkey: PUB_A,
+      ownerPubkey: CURRENT_PUBKEY,
+      currentPubkey: CURRENT_PUBKEY,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set(),
     }),
     true,
   );
@@ -305,4 +458,91 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
   const second = makeAgent({ pubkey: PUB_B, isAgent: false });
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
+});
+
+test("isAgentMentionEligible: offers an owned remote agent that is a channel member", () => {
+  // The reported bug: the agent's process runs on another machine, so it is
+  // absent from `managedAgentPubkeys`, and its default `owner-only` policy
+  // keeps it out of `mentionableAgentPubkeys`. Its directory entry then reads
+  // as an explicit exclusion. It is still a member, still answering, and still
+  // ours.
+  assert.equal(
+    isAgentMentionEligible({
+      candidate: {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY,
+      },
+      currentPubkey: CURRENT_PUBKEY,
+      directoryAgentPubkeys: new Set([PUB_B]),
+      managedAgentPubkeys: new Set(),
+      mentionableAgentPubkeys: new Set(),
+    }),
+    true,
+  );
+});
+
+test("isAgentMentionEligible: keeps hiding an owned agent that is not a member", () => {
+  assert.equal(
+    isAgentMentionEligible({
+      candidate: {
+        isAgent: true,
+        isMember: false,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY,
+      },
+      currentPubkey: CURRENT_PUBKEY,
+      directoryAgentPubkeys: new Set(),
+      managedAgentPubkeys: new Set(),
+      mentionableAgentPubkeys: new Set(),
+    }),
+    false,
+  );
+});
+
+test("isAgentMentionEligible: keeps hiding a member agent owned by someone else", () => {
+  assert.equal(
+    isAgentMentionEligible({
+      candidate: {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: PUB_D,
+      },
+      currentPubkey: CURRENT_PUBKEY,
+      directoryAgentPubkeys: new Set([PUB_B]),
+      managedAgentPubkeys: new Set(),
+      mentionableAgentPubkeys: new Set(),
+    }),
+    false,
+  );
+});
+
+test("isAgentMentionEligible: leaves people alone", () => {
+  assert.equal(
+    isAgentMentionEligible({
+      candidate: { isAgent: false, isMember: false, pubkey: PUB_B },
+      currentPubkey: CURRENT_PUBKEY,
+      directoryAgentPubkeys: new Set([PUB_B]),
+      managedAgentPubkeys: new Set(),
+      mentionableAgentPubkeys: new Set(),
+    }),
+    true,
+  );
+});
+
+test("isAgentMentionEligible: applies both gates, not just the managed-list one", () => {
+  // A managed agent still goes through the invocability gate; a directory
+  // entry that excludes us wins over local management for a member.
+  assert.equal(
+    isAgentMentionEligible({
+      candidate: { isAgent: true, isMember: true, pubkey: PUB_A },
+      currentPubkey: CURRENT_PUBKEY,
+      directoryAgentPubkeys: new Set([PUB_A]),
+      managedAgentPubkeys: new Set([PUB_A]),
+      mentionableAgentPubkeys: new Set(),
+    }),
+    false,
+  );
 });
