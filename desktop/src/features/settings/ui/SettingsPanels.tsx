@@ -82,6 +82,7 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { CloseToTraySettingsCard } from "./CloseToTraySettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
@@ -876,6 +877,7 @@ export function renderSettingsSection(
       return (
         <div className="space-y-12">
           <PreventSleepSettingsCard />
+          <CloseToTraySettingsCard />
           <HarnessesSettingsPanel />
           <AgentDefaultsSettingsCard />
         </div>
