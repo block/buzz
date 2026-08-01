@@ -14,6 +14,7 @@ import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomple
 import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
+  getExplicitlyNonInvocableAgentPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
@@ -179,13 +180,8 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
-  const directoryAgentPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (relayAgentsQuery.data ?? []).map((agent) =>
-          normalizePubkey(agent.pubkey),
-        ),
-      ),
+  const explicitlyNonInvocableAgentPubkeys = React.useMemo(
+    () => getExplicitlyNonInvocableAgentPubkeys(relayAgentsQuery.data),
     [relayAgentsQuery.data],
   );
   const sharedChannelIds = React.useMemo(
@@ -255,7 +251,7 @@ export function useMentions(
           isMember: candidate.isMember === true,
           pubkey,
           mentionableAgentPubkeys,
-          directoryAgentPubkeys,
+          directoryAgentPubkeys: explicitlyNonInvocableAgentPubkeys,
         })
       ) {
         return;
@@ -415,7 +411,7 @@ export function useMentions(
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
-    directoryAgentPubkeys,
+    explicitlyNonInvocableAgentPubkeys,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
