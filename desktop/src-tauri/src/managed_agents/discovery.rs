@@ -1238,6 +1238,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
             source: HarnessSource::Builtin,
             definition_env: Default::default(),
             max_parallelism: super::parallelism::harness_max_parallelism(runtime.id),
+            supports_acp_native_config: runtime.supports_acp_native_config,
+            supports_acp_model_switching: runtime.supports_acp_model_switching,
+            mcp_hooks: runtime.mcp_hooks,
         },
     }
 }
@@ -1377,8 +1380,13 @@ pub fn discover_acp_runtimes_from(
                 auth_status: AuthStatus::NotApplicable,
                 login_hint: None,
                 source: HarnessSource::Custom,
-                definition_env: def.env.clone(), // preserve for edit round-trip
+                // Carry definition env into the catalog so the edit form can
+                // read it back — prevents silently erasing env on save.
+                definition_env: def.env.clone(),
                 max_parallelism: super::parallelism::harness_max_parallelism(&def.command),
+                supports_acp_native_config: false,
+                supports_acp_model_switching: false,
+                mcp_hooks: false,
             });
         }
     }
@@ -1433,5 +1441,7 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
     Some(runtime.avatar_url.to_string())
 }
 
+#[cfg(test)]
+mod capability_manifest_tests;
 #[cfg(test)]
 mod tests;
