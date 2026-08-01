@@ -59,7 +59,8 @@ const _allowedImageMimeTypes = {
   'image/webp',
 };
 const _allowedVideoMimeTypes = {'video/mp4'};
-const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
+const _maxVideoSizeBytes =
+    2 * 1024 * 1024 * 1024; // 2 GiB; keep in sync with relay default.
 const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
@@ -265,7 +266,7 @@ class MediaUploadService {
     final length = await pickedVideo.length();
     if (length > _maxVideoSizeBytes) {
       throw Exception(
-        'Video is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
+        'Video is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 2GB.',
       );
     }
 
@@ -278,11 +279,10 @@ class MediaUploadService {
       final transcodedLength = await transcodedFile.length();
       if (transcodedLength > _maxVideoSizeBytes) {
         throw Exception(
-          'Transcoded video is too large (${(transcodedLength / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
+          'Transcoded video is too large (${(transcodedLength / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 2GB.',
         );
       }
-      final bytes = await transcodedFile.readAsBytes();
-      return uploadBytes(bytes, mimeType: 'video/mp4');
+      return await _uploadPreparedFile(transcodedFile, mimeType: 'video/mp4');
     } finally {
       if (transcodedPath != null) {
         try {
@@ -397,6 +397,57 @@ class MediaUploadService {
     return BlobDescriptor.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
+  }
+
+  Future<BlobDescriptor> _uploadPreparedFile(
+    File file, {
+    required String mimeType,
+  }) async {
+    final sha256 = await _sha256File(file);
+    var response = await _sendUploadFileRequest(
+      file: file,
+      mimeType: mimeType,
+      sha256: sha256,
+      path: _mediaUploadPath,
+    );
+    if (response.statusCode == HttpStatus.notFound ||
+        response.statusCode == HttpStatus.methodNotAllowed) {
+      response = await _sendUploadFileRequest(
+        file: file,
+        mimeType: mimeType,
+        sha256: sha256,
+        path: _legacyMediaUploadPath,
+      );
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        'upload failed (${response.statusCode}): ${response.body}',
+      );
+    }
+    return BlobDescriptor.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<http.Response> _sendUploadFileRequest({
+    required File file,
+    required String mimeType,
+    required String sha256,
+    required String path,
+  }) async {
+    final request = http.StreamedRequest(
+      'PUT',
+      Uri.parse(_baseUrl).resolve(path),
+    );
+    request.contentLength = await file.length();
+    request.headers.addAll(
+      _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
+    );
+
+    final responseFuture = _http.send(request);
+    await request.sink.addStream(file.openRead());
+    await request.sink.close();
+    return http.Response.fromStream(await responseFuture);
   }
 
   http.Request _buildUploadRequest({
@@ -550,6 +601,17 @@ String _safeAttachmentFilename(String filename) {
 String _sha256Hex(Uint8List bytes) {
   final digest = SHA256Digest().process(bytes);
   return digest.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+}
+
+Future<String> _sha256File(File file) async {
+  final digest = SHA256Digest();
+  await for (final chunk in file.openRead()) {
+    final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+    digest.update(bytes, 0, bytes.length);
+  }
+  final output = Uint8List(digest.digestSize);
+  digest.doFinal(output, 0);
+  return output.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
 }
 
 String? _tryDetectImageMimeType(Uint8List bytes) {

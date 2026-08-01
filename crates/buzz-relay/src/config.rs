@@ -698,7 +698,7 @@ impl Config {
             max_video_bytes: std::env::var("BUZZ_MAX_VIDEO_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(500 * 1024 * 1024),
+                .unwrap_or(2 * 1024 * 1024 * 1024),
             max_file_bytes: std::env::var("BUZZ_MAX_FILE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())

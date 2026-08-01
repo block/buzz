@@ -84,7 +84,7 @@ impl MediaStorage {
     ///
     /// Uses rust-s3's `put_object_stream_with_content_type` which reads from
     /// the file incrementally via an 8 MiB `BufReader`. The full file is never
-    /// held in memory simultaneously. Intended for video blobs (up to 500 MB).
+    /// held in memory simultaneously. Intended for large video blobs (up to 2 GiB).
     pub async fn put_file(
         &self,
         key: &str,

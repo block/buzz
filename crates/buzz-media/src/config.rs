@@ -34,7 +34,7 @@ impl FromStr for S3AddressingStyle {
 }
 
 fn default_max_video_bytes() -> u64 {
-    524_288_000 // 500 MB
+    2_147_483_648 // 2 GiB
 }
 
 fn default_max_file_bytes() -> u64 {
@@ -71,7 +71,7 @@ pub struct MediaConfig {
     pub max_image_bytes: u64,
     /// Maximum upload size for animated GIFs (bytes). Default: 10 MB.
     pub max_gif_bytes: u64,
-    /// Maximum upload size for video files (bytes). Default: 500 MB.
+    /// Maximum upload size for video files (bytes). Default: 2 GiB.
     #[serde(default = "default_max_video_bytes")]
     pub max_video_bytes: u64,
     /// Maximum upload size for generic (non-image, non-video) files (bytes). Default: 100 MB.

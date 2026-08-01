@@ -1352,12 +1352,55 @@ void main() {
       expect(result, isNull);
     });
 
-    test('rejects videos over 100MB', () async {
-      // Create a temp file with 101MB of zeros.
+    test(
+      'accepts a source video larger than 1GB and streams the result',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('video_size_test_');
+        final sourceFile = File('${dir.path}/source.mov');
+        final sourceRaf = await sourceFile.open(mode: FileMode.write);
+        await sourceRaf.truncate(1100 * 1024 * 1024);
+        await sourceRaf.close();
+        final transcodedFile = File('${dir.path}/transcoded.mp4');
+        final transcodedBytes = buildFtypHeader('isom');
+        await transcodedFile.writeAsBytes(transcodedBytes);
+
+        try {
+          final service = MediaUploadService(
+            baseUrl: 'https://relay.example',
+            nsec: nostr.Keys.generate().nsec,
+            httpClient: http_testing.MockClient((request) async {
+              expect(request.bodyBytes, transcodedBytes);
+              return http.Response(
+                jsonEncode({
+                  'url': 'https://relay.example/media/test.mp4',
+                  'sha256':
+                      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                  'size': transcodedBytes.length,
+                  'type': 'video/mp4',
+                  'uploaded': 1,
+                }),
+                HttpStatus.ok,
+              );
+            }),
+            pickGalleryVideo: () async => XFile(sourceFile.path),
+            pickGalleryImage: () async => null,
+            transcodeVideoToMp4: (_) async => transcodedFile.path,
+          );
+
+          final descriptor = await service.pickAndUploadVideo();
+          expect(descriptor!.size, transcodedBytes.length);
+        } finally {
+          await dir.delete(recursive: true);
+        }
+      },
+    );
+
+    test('rejects videos over 2GB', () async {
+      // Use a sparse file so the test does not allocate more than 2GB.
       final dir = await Directory.systemTemp.createTemp('video_size_test_');
       final file = File('${dir.path}/huge.mp4');
       final raf = await file.open(mode: FileMode.write);
-      await raf.truncate(101 * 1024 * 1024);
+      await raf.truncate((2 * 1024 * 1024 * 1024) + 1);
       await raf.close();
 
       try {
