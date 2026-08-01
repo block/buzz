@@ -14,6 +14,7 @@ import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
+import { FontScaleApplier } from "@/shared/ui/FontScaleApplier";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
@@ -85,6 +86,7 @@ function renderApp() {
             enabled={huddleWindowChannelId() === null}
           >
             <ThemeProvider defaultTheme="buzz">
+              <FontScaleApplier />
               <TooltipProvider delayDuration={300}>
                 <EmojiBurstProvider>
                   <PoofBurstProvider>

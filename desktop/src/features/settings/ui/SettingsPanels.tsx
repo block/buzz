@@ -81,6 +81,7 @@ import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
+import { FontSizeSetting } from "./FontSizeSetting";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
@@ -701,6 +702,7 @@ function ThemeSettingsCard() {
 
       <LinkPreviewStyleSetting />
       <ThreadLayoutSetting />
+      <FontSizeSetting />
     </section>
   );
 }
