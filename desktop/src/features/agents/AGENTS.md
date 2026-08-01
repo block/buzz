@@ -171,6 +171,14 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **Capability manifests project evidence; they never infer it.**
+    `lib/capabilityManifest.ts` combines `KnownAcpRuntime` facts,
+    managed-agent lifecycle, presence, and the encrypted owner observer stream.
+    A missing runtime field is `unknown`, an explicit `false` is
+    `unavailable`, and only a supplied fact is `reported`. Manifest projection
+    is allowlist-only: do not surface raw config, executable commands,
+    arguments, environment variables, prompts, paths, credentials, tool inputs,
+    or tool results.
 
 ## The tests that enforce this
 
