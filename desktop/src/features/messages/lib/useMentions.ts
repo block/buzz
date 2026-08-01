@@ -233,6 +233,41 @@ export function useMentions(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
   );
+  // Issue #3947: Also track persona IDs that have running instances (channel
+  // members or relay agents). Persona candidates should be filtered out when
+  // an instance exists for the same persona, so we only offer the actual
+  // running instance with a valid pubkey.
+  const instancePersonaIds = React.useMemo(() => {
+    const personaIds = new Set<string>();
+    for (const member of members ?? []) {
+      const pubkey = normalizePubkey(member.pubkey);
+      const personaId =
+        managedAgentPersonaIdsByPubkey.get(pubkey) ??
+        (activePersonaById.has(pubkey) ? pubkey : undefined);
+      if (personaId) {
+        personaIds.add(personaId);
+      }
+    }
+    for (const agent of relayAgentsQuery.data ?? []) {
+      const pubkey = normalizePubkey(agent.pubkey);
+      const personaId = managedAgentPersonaIdsByPubkey.get(pubkey);
+      if (personaId) {
+        personaIds.add(personaId);
+      }
+    }
+    for (const agent of managedAgentsQuery.data ?? []) {
+      if (agent.personaId && agent.pubkey) {
+        personaIds.add(agent.personaId);
+      }
+    }
+    return personaIds;
+  }, [
+    members,
+    relayAgentsQuery.data,
+    managedAgentsQuery.data,
+    managedAgentPersonaIdsByPubkey,
+    activePersonaById,
+  ]);
   const memberPubkeys = React.useMemo(
     () =>
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
@@ -386,8 +421,15 @@ export function useMentions(
       }
     }
 
+    // Issue #3947: Filter out personas that have running instances. Only show
+    // persona definitions when there's no actual instance available (i.e., the
+    // persona hasn't been deployed yet).
     const personaCandidates: MentionCandidate[] = activePersonas
-      .filter((persona) => !managedAgentPersonaIds.has(persona.id))
+      .filter(
+        (persona) =>
+          !managedAgentPersonaIds.has(persona.id) &&
+          !instancePersonaIds.has(persona.id),
+      )
       .map((persona) => ({
         kind: "persona" as const,
         personaId: persona.id,
@@ -416,6 +458,7 @@ export function useMentions(
     canSearchGlobalUsers,
     currentPubkey,
     directoryAgentPubkeys,
+    instancePersonaIds,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
