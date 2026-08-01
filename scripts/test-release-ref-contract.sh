@@ -62,8 +62,22 @@ grep -q 'permission-contents: write' "$auto_tag"
 grep -q 'GH_TOKEN:.*steps\.release-tagger\.outputs\.token' "$auto_tag"
 grep -Fq 'git/refs' "$auto_tag"
 grep -Fq 'TAG_PREFIX="desktop-v"' "$auto_tag"
-grep -Fq 'target_sha=${{ github.event.pull_request.head.sha }}' "$auto_tag"
+grep -Fq 'target_sha=${{ github.event.pull_request.merge_commit_sha }}' "$auto_tag"
 grep -Fq 'scripts/verify-desktop-release-merge.sh' "$auto_tag"
+grep -Fq 'current \`main\`' "$repo_root/scripts/prepare-desktop-release.sh"
+if grep -Fq 'current `main`' "$repo_root/scripts/prepare-desktop-release.sh"; then
+  echo "desktop release PR body contains executable command substitution" >&2
+  exit 1
+fi
+"$repo_root/scripts/test-desktop-release-authorization.sh"
+if rg -q 'rule-suites|desktop-release-bypass-authorized|MERGED_BY' \
+  "$repo_root/scripts/verify-desktop-release-merge.sh" \
+  "$repo_root/scripts/verify-desktop-release-authorization.sh" \
+  "$auto_tag"; then
+  echo "desktop auto-tag still depends on unavailable rule-suite authorization" >&2
+  exit 1
+fi
+
 review_filter="$repo_root/scripts/review-decision-approved.jq"
 for fixture in \
   '{"reviewDecision":"CHANGES_REQUESTED"}' \
@@ -120,7 +134,10 @@ grep -Fq "needs.release-macos-x64.result == 'success'" "$release_workflow"
 grep -Fq "needs.release-linux.result == 'success'" "$release_workflow"
 grep -Fq "needs.release-windows.result == 'success'" "$release_workflow"
 grep -Fq "refs/tags/desktop-v{0}" "$release_workflow"
-grep -Fq "if: \${{ env.already_published != 'true' && !contains(needs.setup.outputs.version, '-') }}" "$release_workflow"
+grep -Fq "if: \${{ !contains(needs.setup.outputs.version, '-') }}" "$release_workflow"
+if grep -Fq "env.already_published != 'true' && !contains(needs.setup.outputs.version, '-')" "$release_workflow"; then
+  echo "rolling updater retry is incorrectly gated by versioned publication state" >&2; exit 1
+fi
 grep -Fq 'group: desktop-release-${{ github.ref }}' "$release_workflow"
 grep -Fq 'cancel-in-progress: false' "$release_workflow"
 grep -Fq 'release artifact basename collision' "$release_workflow"

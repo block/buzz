@@ -1813,16 +1813,27 @@ impl Db {
         event::soft_delete_event(&self.pool, community_id, event_id).await
     }
 
-    /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`.
-    /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds.
+    /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`
+    /// when it is not newer than the deletion request.
+    /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds;
+    /// `deletion_created_at_secs` is the deletion event's `created_at`.
     pub async fn soft_delete_by_coordinate(
         &self,
         community_id: CommunityId,
         kind: i32,
         pubkey: &[u8],
         d_tag: &str,
+        deletion_created_at_secs: i64,
     ) -> Result<bool> {
-        event::soft_delete_by_coordinate(&self.pool, community_id, kind, pubkey, d_tag).await
+        event::soft_delete_by_coordinate(
+            &self.pool,
+            community_id,
+            kind,
+            pubkey,
+            d_tag,
+            deletion_created_at_secs,
+        )
+        .await
     }
 
     /// Atomically soft-delete an event and decrement thread reply counters.
@@ -5224,6 +5235,75 @@ mod tests {
         assert_eq!(
             rows_after_legacy_delete, 0,
             "migration trigger must purge soft-deleted mesh status"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn coordinate_delete_spares_head_newer_than_the_deletion() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let kind = buzz_core::kind::KIND_PROJECT as i32;
+        let d_tag = "stale-tombstone-project";
+        let pubkey = keys.public_key().to_bytes().to_vec();
+        let base = Timestamp::now().as_secs();
+
+        let version = |content: &str, offset: u64| {
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), content)
+                .tags(vec![Tag::parse(["d", d_tag]).expect("d tag")])
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign project version")
+        };
+
+        for (content, offset) in [("v1", 0), ("v2", 100)] {
+            assert!(
+                db.replace_parameterized_event(community, &version(content, offset), d_tag, None)
+                    .await
+                    .expect("store project version")
+                    .1
+            );
+        }
+
+        // Tombstone timestamped between V1 and V2: it authorizes deleting V1,
+        // never the newer head that replaced it.
+        let stale_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 50) as i64)
+            .await
+            .expect("stale coordinate delete");
+        assert!(
+            !stale_deleted,
+            "a tombstone older than the live head must delete nothing"
+        );
+
+        let live_content: Option<String> = sqlx::query_scalar(
+            "SELECT content FROM events \
+             WHERE community_id=$1 AND kind=$2 AND pubkey=$3 AND d_tag=$4 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(kind)
+        .bind(&pubkey)
+        .bind(d_tag)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("read live head");
+        assert_eq!(
+            live_content.as_deref(),
+            Some("v2"),
+            "the newer head must survive a stale tombstone"
+        );
+
+        // A tombstone at or after the head's own timestamp still deletes it.
+        let current_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 100) as i64)
+            .await
+            .expect("current coordinate delete");
+        assert!(
+            current_deleted,
+            "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
     }
 

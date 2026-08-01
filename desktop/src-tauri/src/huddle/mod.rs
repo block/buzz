@@ -23,6 +23,7 @@
 //!    takes `stt_pipeline`/`tts_pipeline` out of the lock, then calls `shutdown()`
 //!    and drops them outside the lock (thread joins can block ~200ms).
 
+mod agent_tts_routing;
 pub mod agents;
 pub mod audio_output;
 pub mod jitter;
@@ -37,6 +38,9 @@ pub mod state;
 pub mod stt;
 pub mod transcription;
 pub mod tts;
+pub mod tts_settings;
+mod tts_voice_import;
+mod tts_voice_registry;
 pub mod wire;
 
 // ── Shared utilities ──────────────────────────────────────────────────────────
@@ -63,16 +67,25 @@ pub(super) fn drain_until_shutdown<T>(
 
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
+pub use tts_settings::set_tts_enabled;
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
 use tauri::State;
 use uuid::Uuid;
 
 use crate::{app_state::AppState, events, relay::submit_event};
 
-use pipeline::{maybe_start_stt_pipeline, maybe_start_tts_pipeline, post_connect_setup};
+use agent_tts_routing::{
+    classify_agent_tts_runtime, enqueue_agent_tts_text, normalize_agent_tts_text,
+    AgentTtsRuntimeGate,
+};
+pub use pipeline::check_pipeline_hotstart;
+use pipeline::{
+    await_inflight_tts_start, maybe_start_stt_pipeline, maybe_start_tts_pipeline,
+    post_connect_setup, start_auto_enabled_transcription, PostConnectOutcome,
+};
 use relay_api::{
     count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
     MAX_HUDDLE_AGENTS,
@@ -186,7 +199,7 @@ pub async fn start_huddle(
     };
 
     // Transition to Creating.
-    {
+    let huddle_generation = {
         let mut hs = state.huddle()?;
         if hs.phase != HuddlePhase::Idle {
             return Err(format!(
@@ -194,9 +207,11 @@ pub async fn start_huddle(
                 hs.phase
             ));
         }
+        let generation = hs.begin_huddle_lifetime();
         hs.phase = HuddlePhase::Creating;
         hs.parent_channel_id = Some(parent_channel_id.clone());
-    }
+        generation
+    };
 
     let ephemeral_uuid = Uuid::new_v4();
     let ephemeral_channel_id = ephemeral_uuid.to_string();
@@ -259,27 +274,33 @@ pub async fn start_huddle(
     match result {
         Ok(successful_agents) => {
             // 5. Store active state.
-            {
+            let committed = {
                 let mut hs = state.huddle()?;
-                hs.phase = HuddlePhase::Connected;
-                hs.is_creator = true;
-                hs.ephemeral_channel_id = Some(ephemeral_channel_id.clone());
-                // Only store agents that were successfully enrolled.
-                *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) =
-                    successful_agents.clone();
-                // Include the current user + successfully enrolled agents as participants.
-                // Use successful_agents (not member_pubkeys) so failed enrollments
-                // are not reflected in the participant list.
-                let own_pubkey = state
-                    .keys
-                    .lock()
-                    .map(|k| k.public_key().to_hex())
-                    .unwrap_or_default();
-                let mut participants = successful_agents.clone();
-                if !own_pubkey.is_empty() && !participants.contains(&own_pubkey) {
-                    participants.insert(0, own_pubkey);
+                if !hs.owns_huddle_lifetime(huddle_generation, HuddlePhase::Creating) {
+                    false
+                } else {
+                    hs.phase = HuddlePhase::Connected;
+                    hs.is_creator = true;
+                    hs.ephemeral_channel_id = Some(ephemeral_channel_id.clone());
+                    *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) =
+                        successful_agents.clone();
+                    hs.maybe_auto_enable_transcription_for_agents();
+                    let own_pubkey = state
+                        .keys
+                        .lock()
+                        .map(|k| k.public_key().to_hex())
+                        .unwrap_or_default();
+                    let mut participants = successful_agents.clone();
+                    if !own_pubkey.is_empty() && !participants.contains(&own_pubkey) {
+                        participants.insert(0, own_pubkey);
+                    }
+                    hs.participants = participants;
+                    true
                 }
-                hs.participants = participants;
+            };
+            if !committed {
+                emit_end_and_archive(&parent_channel_id, &ephemeral_channel_id, &state).await;
+                return Err("huddle start was superseded".to_owned());
             }
 
             // 6. Notify frontend of state change.
@@ -287,16 +308,30 @@ pub async fn start_huddle(
 
             // 7. Hydrate members, download models, start pipelines (incl. audio relay).
             // Audio relay failure is fatal — no point in a huddle without audio.
-            if let Err(e) = post_connect_setup(&state, &ephemeral_channel_id).await {
-                // Rollback: audio relay failed after state was committed.
-                // Publish the terminal lifecycle event before archiving so
-                // other clients do not reconstruct a phantom active huddle.
-                emit_end_and_archive(&parent_channel_id, &ephemeral_channel_id, &state).await;
-                if let Ok(mut hs) = state.huddle_state.lock() {
-                    hs.reset_preserving_generation();
+            match post_connect_setup(&state, &ephemeral_channel_id, huddle_generation).await {
+                Ok(PostConnectOutcome::Ready) => {}
+                Ok(PostConnectOutcome::Stale) => {
+                    return Err("huddle start was superseded".to_owned());
                 }
-                state.emit_huddle_state_changed();
-                return Err(e);
+                Err(e) => {
+                    // Roll back only if this failed setup still owns the active
+                    // huddle. A stale failure must not tear down its replacement.
+                    let still_current = state
+                        .huddle()
+                        .map(|hs| hs.is_current_huddle(&ephemeral_channel_id, huddle_generation))
+                        .unwrap_or(false);
+                    if still_current {
+                        emit_end_and_archive(&parent_channel_id, &ephemeral_channel_id, &state)
+                            .await;
+                        if let Ok(mut hs) = state.huddle_state.lock() {
+                            if hs.is_current_huddle(&ephemeral_channel_id, huddle_generation) {
+                                hs.reset_preserving_generation();
+                            }
+                        }
+                        state.emit_huddle_state_changed();
+                    }
+                    return Err(e);
+                }
             }
 
             Ok(HuddleJoinInfo {
@@ -314,11 +349,11 @@ pub async fn start_huddle(
                     }
                 }
             }
-            // Reset state to Idle so the user can retry.
-            // Preserve session_generation so in-flight transcription tasks
-            // from a prior session still see a stale generation and exit.
+            // Reset only if this failed attempt still owns the Creating state.
             if let Ok(mut hs) = state.huddle_state.lock() {
-                hs.reset_preserving_generation();
+                if hs.owns_huddle_lifetime(huddle_generation, HuddlePhase::Creating) {
+                    hs.reset_preserving_generation();
+                }
             }
             Err(e)
         }
@@ -340,7 +375,7 @@ pub async fn join_huddle(
     state: State<'_, AppState>,
 ) -> Result<HuddleJoinInfo, String> {
     // Transition to Connecting.
-    {
+    let huddle_generation = {
         let mut hs = state.huddle()?;
         if hs.phase != HuddlePhase::Idle {
             return Err(format!(
@@ -348,10 +383,12 @@ pub async fn join_huddle(
                 hs.phase
             ));
         }
+        let generation = hs.begin_huddle_lifetime();
         hs.phase = HuddlePhase::Connecting;
         hs.parent_channel_id = Some(parent_channel_id.clone());
         hs.ephemeral_channel_id = Some(ephemeral_channel_id.clone());
-    }
+        generation
+    };
 
     // Seed participant list with own pubkey as a fallback until relay responds.
     let own_pubkey = state
@@ -360,12 +397,20 @@ pub async fn join_huddle(
         .map(|k| k.public_key().to_hex())
         .unwrap_or_default();
 
-    {
+    let committed = {
         let mut hs = state.huddle()?;
-        hs.phase = HuddlePhase::Connected;
-        if !own_pubkey.is_empty() {
-            hs.participants = vec![own_pubkey];
+        if !hs.owns_huddle_lifetime(huddle_generation, HuddlePhase::Connecting) {
+            false
+        } else {
+            hs.phase = HuddlePhase::Connected;
+            if !own_pubkey.is_empty() {
+                hs.participants = vec![own_pubkey];
+            }
+            true
         }
+    };
+    if !committed {
+        return Err("huddle join was superseded".to_owned());
     }
 
     // Notify frontend of state change.
@@ -373,15 +418,25 @@ pub async fn join_huddle(
 
     // Hydrate members, download models, start pipelines (incl. audio relay).
     // Audio relay failure is fatal — no point in a huddle without audio.
-    if let Err(e) = post_connect_setup(&state, &ephemeral_channel_id).await {
-        // Rollback: audio relay failed after state was committed.
-        // Reset state to Idle so the user can retry. The ephemeral channel
-        // has a TTL and will expire — no manual archive needed for joiners.
-        if let Ok(mut hs) = state.huddle_state.lock() {
-            hs.reset_preserving_generation();
+    match post_connect_setup(&state, &ephemeral_channel_id, huddle_generation).await {
+        Ok(PostConnectOutcome::Ready) => {}
+        Ok(PostConnectOutcome::Stale) => {
+            return Err("huddle join was superseded".to_owned());
         }
-        state.emit_huddle_state_changed();
-        return Err(e);
+        Err(e) => {
+            // Reset only the huddle lifetime that failed.
+            let mut did_reset = false;
+            if let Ok(mut hs) = state.huddle_state.lock() {
+                if hs.is_current_huddle(&ephemeral_channel_id, huddle_generation) {
+                    hs.reset_preserving_generation();
+                    did_reset = true;
+                }
+            }
+            if did_reset {
+                state.emit_huddle_state_changed();
+            }
+            return Err(e);
+        }
     }
 
     Ok(HuddleJoinInfo {
@@ -675,123 +730,6 @@ pub fn push_audio_pcm(
     }
 }
 
-/// Hot-start: check if voice models just finished downloading during an active
-/// huddle and start the corresponding pipelines.
-///
-/// Called by the frontend on a timer or after model status changes. No-op if
-/// the huddle is not active or pipelines are already running.
-#[tauri::command]
-pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), String> {
-    let (is_active, ephemeral_channel_id) = {
-        let hs = state.huddle()?;
-        (
-            matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active),
-            hs.ephemeral_channel_id.clone(),
-        )
-    };
-
-    if !is_active {
-        return Ok(());
-    }
-
-    // Detect dead pipelines: if the worker thread has exited (init failure or crash),
-    // clear the pipeline handle so hot-start can retry on the next cycle.
-    {
-        let mut hs = state.huddle()?;
-        if let Some(ref p) = hs.stt_pipeline {
-            if p.is_finished() {
-                hs.stt_pipeline = None;
-            }
-        }
-        if let Some(ref p) = hs.tts_pipeline {
-            if p.is_finished() {
-                hs.tts_pipeline = None;
-            }
-        }
-    }
-    // Re-read after potential cleanup.
-    let (has_stt, has_tts, transcription_enabled) = {
-        let hs = state.huddle()?;
-        (
-            hs.stt_pipeline.is_some(),
-            hs.tts_pipeline.is_some(),
-            hs.transcription_enabled,
-        )
-    };
-
-    // Check if models just became ready (one-shot flags).
-    let stt_ready = models::global_model_manager()
-        .map(|m| m.take_stt_ready())
-        .unwrap_or(false);
-    let tts_ready = models::global_model_manager()
-        .map(|m| m.take_tts_ready())
-        .unwrap_or(false);
-
-    // Start TTS first (so STT can capture tts_cancel).
-    if !has_tts && (tts_ready || models::is_tts_ready()) {
-        if let Err(e) = maybe_start_tts_pipeline(&state).await {
-            eprintln!("buzz-desktop: TTS hotstart failed: {e}");
-        }
-    }
-
-    if transcription_enabled && !has_stt && (stt_ready || models::is_stt_ready()) {
-        if let Some(eph_id) = &ephemeral_channel_id {
-            if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
-                eprintln!("buzz-desktop: STT hotstart failed: {e}");
-            }
-        }
-    }
-
-    // Periodically refresh agent_pubkeys from relay membership.
-    // This catches mid-huddle agent additions/removals by other participants,
-    // keeping STT p-tags authoritative throughout the session.
-    // Throttled to every 15 s (not on every 5 s hotstart poll).
-    //
-    // NOTE: The frontend ALSO polls agent membership independently (every 10 s
-    // via get_huddle_agent_pubkeys). This is intentional — the two polls have
-    // different failure semantics:
-    //   - Rust (here): preserves stale list on failure (STT p-tags should not
-    //     disappear on a transient network blip).
-    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
-    //     must fail-closed — never speak from a stale agent list).
-    //
-    // On Ok: always replace (even with empty — agents may have been removed).
-    // On Err: preserve the existing list (transient failure shouldn't zero it).
-    if let Some(eph_id) = &ephemeral_channel_id {
-        let should_refresh = {
-            let hs = state.huddle()?;
-            match hs.last_agent_refresh {
-                None => true,
-                Some(t) => t.elapsed() >= std::time::Duration::from_secs(15),
-            }
-        };
-        if should_refresh {
-            // Fetch agents (for STT p-tags) and all members (for participant list).
-            // Sequential — tokio::join! requires the `macros` feature.
-            // Only update the throttle timestamp when at least one fetch succeeds,
-            // so transient failures retry immediately on the next poll cycle.
-            // Fetch both lists before acquiring the lock — no lock held across await.
-            let fresh_agents = fetch_channel_members(eph_id, Some("bot"), &state)
-                .await
-                .ok();
-            let fresh_members = fetch_channel_members(eph_id, None, &state).await.ok();
-
-            if fresh_agents.is_some() || fresh_members.is_some() {
-                let mut hs = state.huddle()?;
-                if let Some(agents) = fresh_agents {
-                    *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
-                }
-                if let Some(members) = fresh_members {
-                    hs.participants = members;
-                }
-                hs.last_agent_refresh = Some(std::time::Instant::now());
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Trigger a background download of voice models (Parakeet STT + Pocket TTS).
 ///
 /// Returns immediately — downloads run in tokio background tasks.
@@ -817,91 +755,90 @@ pub fn get_model_status(_state: State<'_, AppState>) -> Result<models::VoiceMode
     })
 }
 
-/// Enable or disable TTS output.
-///
-/// When disabled, the TTS pipeline is shut down and audio output stops.
-/// When re-enabled, the pipeline is restarted if TTS models are available.
-///
-/// Takes the pipeline handle out of the lock before calling shutdown() — the
-/// thread join in Drop can block for ~200 ms (ONNX inference) and we don't
-/// want to hold the HuddleState mutex during that time.
-#[tauri::command]
-pub async fn set_tts_enabled(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
-    let old_pipeline = {
-        let mut hs = state.huddle()?;
-        hs.tts_enabled = enabled;
-        if !enabled {
-            hs.tts_pipeline.take() // Take out of lock.
-        } else {
-            None
-        }
-    };
-    // Shut down outside the lock — thread join happens here.
-    if let Some(ref pipeline) = old_pipeline {
-        pipeline.shutdown();
-    }
-    drop(old_pipeline);
-
-    if enabled {
-        // Re-start TTS pipeline if models are available and huddle is active.
-        let phase = {
-            let hs = state.huddle()?;
-            hs.phase.clone()
-        };
-        if matches!(phase, HuddlePhase::Connected | HuddlePhase::Active) {
-            if let Err(e) = maybe_start_tts_pipeline(&state).await {
-                eprintln!("buzz-desktop: TTS pipeline restart failed: {e}");
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Speak an agent message via TTS.
 ///
-/// Maximum text length accepted for TTS synthesis.
-/// ~2000 chars ≈ 1–2 minutes of speech. Longer messages are truncated.
-const MAX_TTS_TEXT_LEN: usize = 2000;
-
-/// Called by the WebView when it receives an incoming agent kind:9 message.
+/// Called by the WebView when it receives an eligible live agent message.
 /// Lazily starts the TTS pipeline if models are ready but the pipeline hasn't
 /// been created yet (e.g. models finished downloading after huddle started).
 ///
-/// No-op if TTS is disabled or models aren't ready.
+/// Disabled is the only intentional no-op. Enabled-but-unavailable speech
+/// returns an error so the caller cannot mistake a dropped message for success.
 #[tauri::command]
-pub async fn speak_agent_message(text: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn speak_agent_message(
+    text: String,
+    route_id: u64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    eprintln!("buzz-desktop: tts stage=invoke status=started route_id={route_id}");
     // Truncate oversized messages — agents shouldn't monologue in a voice huddle.
     // Use char count (not byte length) to avoid panicking on multi-byte UTF-8.
-    let text = if text.chars().count() > MAX_TTS_TEXT_LEN {
-        let mut truncated: String = text.chars().take(MAX_TTS_TEXT_LEN).collect();
-        truncated.push_str("... message truncated.");
-        truncated
-    } else {
-        text
-    };
+    let text = normalize_agent_tts_text(text);
 
     let needs_pipeline = {
-        let hs = state.huddle()?;
-        hs.tts_enabled
-            && hs.tts_pipeline.is_none()
-            && matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
+        let mut hs = state.huddle()?;
+        if hs
+            .tts_pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.is_finished())
+        {
+            hs.tts_pipeline = None;
+        }
+        match classify_agent_tts_runtime(hs.tts_enabled, &hs.phase, hs.tts_pipeline.is_some()) {
+            AgentTtsRuntimeGate::Disabled => {
+                eprintln!(
+                    "buzz-desktop: tts stage=invoke status=no_op reason=disabled route_id={route_id}"
+                );
+                return Ok(());
+            }
+            AgentTtsRuntimeGate::Inactive => {
+                eprintln!(
+                    "buzz-desktop: tts stage=invoke status=failed reason=inactive_huddle route_id={route_id}"
+                );
+                return Err(
+                    "Agent text to speech is unavailable outside an active huddle".to_string(),
+                );
+            }
+            AgentTtsRuntimeGate::NeedsPipeline => true,
+            AgentTtsRuntimeGate::Ready => false,
+        }
     };
 
     // Lazy-start: models may have finished downloading after the huddle began.
     if needs_pipeline {
-        if let Err(e) = maybe_start_tts_pipeline(&state).await {
-            eprintln!("buzz-desktop: TTS lazy-start failed: {e}");
-        }
+        maybe_start_tts_pipeline(&state).await.inspect_err(|_| {
+            eprintln!(
+                "buzz-desktop: tts stage=invoke status=failed reason=startup_failed route_id={route_id}"
+            );
+        })?;
+        await_inflight_tts_start(&state).await.inspect_err(|_| {
+            eprintln!(
+                "buzz-desktop: tts stage=invoke status=failed reason=startup_timeout route_id={route_id}"
+            );
+        })?;
     }
 
-    let hs = state.huddle()?;
-    if hs.tts_enabled {
-        if let Some(ref pipeline) = hs.tts_pipeline {
-            pipeline.speak(text)?;
-        }
-    }
-    Ok(())
+    let sender = {
+        let hs = state.huddle()?;
+        hs.tts_pipeline
+            .as_ref()
+            .map(|pipeline| pipeline.text_sender())
+    };
+    let Some(sender) = sender else {
+        eprintln!(
+            "buzz-desktop: tts stage=invoke status=failed reason=unavailable route_id={route_id}"
+        );
+        return Err("Agent text to speech is enabled but its audio pipeline is unavailable".into());
+    };
+    enqueue_agent_tts_text(route_id, text, move |route_id, text| {
+        sender
+            .send(route_id, text)
+            .map_err(|error| format!("TTS queue closed while waiting to enqueue: {error}"))
+    })
+    .await
+    .inspect(|_| eprintln!("buzz-desktop: tts stage=queue status=accepted route_id={route_id}"))
+    .inspect_err(|_| {
+        eprintln!("buzz-desktop: tts stage=queue status=failed reason=closed route_id={route_id}")
+    })
 }
 
 /// Add an agent to the active huddle.
@@ -924,7 +861,7 @@ pub async fn add_agent_to_huddle(
 ) -> Result<agents::AgentAddResult, String> {
     validate_pubkey_hex(&agent_pubkey)?;
 
-    let (eph_id, parent_id) = {
+    let (eph_id, parent_id, huddle_generation) = {
         let hs = state.huddle()?;
         if !matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active) {
             return Err("no active huddle".to_string());
@@ -948,7 +885,7 @@ pub async fn add_agent_to_huddle(
             .clone()
             .ok_or("no ephemeral channel")?;
         let parent = hs.parent_channel_id.clone().ok_or("no parent channel")?;
-        (eph, parent)
+        (eph, parent, hs.huddle_generation)
     };
 
     let eph_uuid = Uuid::parse_str(&eph_id).map_err(|e| e.to_string())?;
@@ -957,29 +894,30 @@ pub async fn add_agent_to_huddle(
     // Returns Err only if the ephemeral add fails — parent failure is in the result.
     let result = agents::add_agent_to_huddle(eph_uuid, parent_uuid, &agent_pubkey, &state).await?;
 
-    // Ephemeral add succeeded — safe to register for p-tagging.
-    // Clone the Arc first so we can drop the outer HuddleState lock before
-    // acquiring the inner pubkeys lock (avoids the E0597 borrow-checker error).
-    {
-        let agent_pubkeys_arc = {
-            let hs = state.huddle()?;
-            Arc::clone(&hs.agent_pubkeys)
-        };
-        let mut pubkeys = agent_pubkeys_arc.lock().unwrap_or_else(|e| e.into_inner());
+    // Ephemeral add succeeded — register it only if this is still the huddle
+    // that initiated the relay operation.
+    let transcription_auto_enabled = {
+        let mut hs = state.huddle()?;
+        if !hs.is_current_huddle(&eph_id, huddle_generation) {
+            return Ok(result);
+        }
+        let mut pubkeys = hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
         if !pubkeys.contains(&agent_pubkey) {
             pubkeys.push(agent_pubkey.clone());
         }
-    }
+        drop(pubkeys);
+        if !hs.participants.contains(&agent_pubkey) {
+            hs.participants.push(agent_pubkey.clone());
+        }
+        hs.maybe_auto_enable_transcription_for_agents()
+    };
 
     // No guidelines re-post needed — the agent sees the original kind:48106
     // guidelines via EOSE replay when it subscribes to the ephemeral channel.
-
-    // Also add the agent to the visible participants list.
-    {
-        let mut hs = state.huddle()?;
-        if !hs.participants.contains(&agent_pubkey) {
-            hs.participants.push(agent_pubkey);
-        }
+    if transcription_auto_enabled {
+        start_auto_enabled_transcription(&state, &eph_id).await;
+    } else {
+        state.emit_huddle_state_changed();
     }
 
     Ok(result)

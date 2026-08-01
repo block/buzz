@@ -21,6 +21,7 @@ import {
   SunMoon,
   Ticket,
   UserRound,
+  Volume2,
   type LucideIcon,
 } from "lucide-react";
 import type {
@@ -83,10 +84,12 @@ import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { VoiceSettingsCard } from "./VoiceSettingsCard";
 
 export type SettingsSection =
   | "profile"
   | "notifications"
+  | "voice"
   | "experimental"
   | "agents"
   | "channel-templates"
@@ -106,6 +109,7 @@ export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "profile",
   "notifications",
+  "voice",
   "experimental",
   "agents",
   "channel-templates",
@@ -166,6 +170,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "notifications",
     label: "Notifications",
     icon: BellRing,
+  },
+  {
+    value: "voice",
+    label: "Voice",
+    icon: Volume2,
   },
   {
     value: "experimental",
@@ -807,6 +816,8 @@ export function renderSettingsSection(
           onSetSoundForSlot={props.onSetSoundForSlot}
         />
       );
+    case "voice":
+      return <VoiceSettingsCard />;
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
