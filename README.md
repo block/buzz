@@ -1,4 +1,4 @@
-<h1 align="center"><img src="desktop/public/app-icon@3x.png" alt="Buzz Dev Mode app icon" width="48" align="middle"> Buzz Dev Mode</h1>
+<h1 align="center"><img src="desktop/public/app-icon@3x.png" alt="Buzz Dev Mode app icon" width="48" align="absmiddle"> Buzz Dev Mode</h1>
 
 <p align="center">
   <strong>An experimental, prompt-first fork of Buzz for people who work with agents.</strong>
