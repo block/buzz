@@ -7,6 +7,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInAllowedList,
+  isAgentIdentityMentionable,
   isAgentMentionChannelType,
   relayAgentCanRespondInChannel,
   relayAgentIsSharedWithUser,
@@ -250,6 +251,41 @@ test("isAgentIdentityInAllowedList: keeps people and only explicitly allowed age
     isAgentIdentityInAllowedList(
       { isAgent: true, pubkey: PUB_B },
       allowedAgentPubkeys,
+    ),
+    false,
+  );
+});
+
+test("isAgentIdentityMentionable: keeps people, managed agents, and mentionable relay agents", () => {
+  // Mirrors useMentions: the mentionable set from getMentionableAgentPubkeys
+  // is managed agents (PUB_A) plus shared relay agents (PUB_B).
+  const mentionableAgentPubkeys = new Set([PUB_A, PUB_B]);
+
+  assert.equal(
+    isAgentIdentityMentionable(
+      { isAgent: false, pubkey: PUB_C },
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityMentionable(
+      { isAgent: true, pubkey: PUB_A.toUpperCase() },
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityMentionable(
+      { isAgent: true, pubkey: PUB_B },
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityMentionable(
+      { isAgent: true, pubkey: PUB_C },
+      mentionableAgentPubkeys,
     ),
     false,
   );
