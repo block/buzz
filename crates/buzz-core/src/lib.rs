@@ -16,6 +16,8 @@ pub mod engram;
 pub mod error;
 /// Relay-side event wrapper with verification tracking.
 pub mod event;
+/// Runtime-neutral execution-node protocol types.
+pub mod execution;
 /// NIP-01 subscription filter matching.
 pub mod filter;
 /// Git permission types — ref patterns, protection rules, policy evaluation.
