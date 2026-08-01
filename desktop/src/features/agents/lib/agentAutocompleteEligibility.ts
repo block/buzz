@@ -97,6 +97,33 @@ export function shouldHideAgentFromMentions({
   return directoryAgentPubkeys.has(normalized);
 }
 
+export function isMentionCandidateEligible({
+  isArchived,
+  isAgent,
+  isMember,
+  pubkey,
+  mentionableAgentPubkeys,
+  directoryAgentPubkeys,
+}: {
+  isArchived: boolean;
+  isAgent: boolean;
+  isMember: boolean;
+  pubkey: string;
+  mentionableAgentPubkeys: ReadonlySet<string>;
+  directoryAgentPubkeys: ReadonlySet<string>;
+}) {
+  return (
+    !isArchived &&
+    !shouldHideAgentFromMentions({
+      isAgent,
+      isMember,
+      pubkey,
+      mentionableAgentPubkeys,
+      directoryAgentPubkeys,
+    })
+  );
+}
+
 type AgentAutocompleteCandidate = {
   pubkey?: string;
   displayName?: string | null;

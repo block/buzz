@@ -6,6 +6,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
+  isMentionCandidateEligible,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -185,6 +186,20 @@ test("shouldHideAgentFromMentions: shows invocable agents even when non-member",
       directoryAgentPubkeys: new Set([PUB_A]),
     }),
     false,
+  );
+});
+
+test("isMentionCandidateEligible: admits another owner's anyone agent in a shared channel", () => {
+  assert.equal(
+    isMentionCandidateEligible({
+      isArchived: false,
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set([PUB_A]),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    true,
   );
 });
 
