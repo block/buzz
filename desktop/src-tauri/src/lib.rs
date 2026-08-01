@@ -40,13 +40,10 @@ pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
-use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
-    take_pending_community_deep_link, PendingCommunityDeepLinks,
-};
-use huddle::audio_output::{
-    get_audio_output_device, list_audio_output_devices, set_audio_output_device,
-};
+use deep_link::{acknowledge_pending_community_deep_link, handle_deep_link_url};
+use deep_link::{take_pending_community_deep_link, PendingCommunityDeepLinks};
+use huddle::audio_output::set_audio_output_device;
+use huddle::audio_output::{get_audio_output_device, list_audio_output_devices};
 use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,

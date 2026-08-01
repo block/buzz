@@ -1,22 +1,17 @@
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use crate::{
-    app_state::AppState,
-    managed_agents::{
-        config_bridge::{
-            read_goose_file_config,
-            reader::read_config_surface,
-            types::{
-                AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin,
-                NormalizedField, RuntimeConfigSurface, SessionConfigCache,
-            },
-        },
-        current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
-        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
-        AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey,
-    },
+use crate::app_state::AppState;
+use crate::managed_agents::config_bridge::types::{
+    AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin, NormalizedField,
+    RuntimeConfigSurface, SessionConfigCache,
+};
+use crate::managed_agents::config_bridge::{read_goose_file_config, reader::read_config_surface};
+use crate::managed_agents::{
+    current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
+    resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
+    AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
+    ManagedAgentRuntimeKey,
 };
 
 /// Subset of the goose file config exposed to the frontend for gate evaluation.

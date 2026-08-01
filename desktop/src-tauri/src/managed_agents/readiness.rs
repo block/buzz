@@ -41,14 +41,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::managed_agents::discovery::{known_acp_runtime, KnownAcpRuntime};
+use crate::managed_agents::types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord};
 use crate::managed_agents::{
-    agent_env::baked_build_env,
-    config_bridge::read_goose_file_config,
-    discovery::{known_acp_runtime, KnownAcpRuntime},
-    env_vars::merged_user_env,
-    global_config::GlobalAgentConfig,
-    normalize_agent_args,
-    types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
+    agent_env::baked_build_env, config_bridge::read_goose_file_config, env_vars::merged_user_env,
+    global_config::GlobalAgentConfig, normalize_agent_args,
 };
 
 mod cli_login;
