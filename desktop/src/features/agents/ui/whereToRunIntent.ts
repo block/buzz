@@ -45,7 +45,8 @@ export function applyProbeResult(
 }
 
 export function providerConfigComplete(draft: WhereToRunDraft): boolean {
-  if (draft.runOn === "local") return true;
+  if (draft.runOn === "local" || draft.runOn.startsWith("execution-node:"))
+    return true;
   if (!draft.probedProvider) return false;
   const schema = draft.probedProvider.config_schema as
     | Record<string, unknown>
@@ -64,6 +65,12 @@ export function resolveBackendIntent(
   draft: WhereToRunDraft,
 ): BackendIntent | null {
   if (draft.runOn === "local") return null;
+  if (draft.runOn.startsWith("execution-node:")) {
+    return {
+      type: "execution-node",
+      nodeId: draft.runOn.slice("execution-node:".length),
+    };
+  }
   return {
     type: "provider",
     id: draft.runOn,

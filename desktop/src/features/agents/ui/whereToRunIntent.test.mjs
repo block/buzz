@@ -129,3 +129,15 @@ test("probe resolution preserves unrelated draft fields", () => {
     "kubernetes",
   );
 });
+
+test("execution-node selection is immediately submittable and resolves to a node intent", () => {
+  const draft = {
+    ...emptyWhereToRunDraft,
+    runOn: `execution-node:${"a".repeat(64)}`,
+  };
+  assert.equal(canSubmitWhereToRun(draft), true);
+  assert.deepEqual(resolveBackendIntent(draft), {
+    type: "execution-node",
+    nodeId: "a".repeat(64),
+  });
+});

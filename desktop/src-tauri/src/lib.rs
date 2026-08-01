@@ -72,10 +72,8 @@ use tauri::{Listener, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
-
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
-
 fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
     if let Err(error) = window.show() {
         eprintln!("buzz-desktop: failed to reveal main window: {error}");
@@ -798,6 +796,7 @@ pub fn run() {
             resolve_oa_owner,
             list_relay_agents,
             list_execution_nodes,
+            deploy_execution_workload,
             list_managed_agents,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,

@@ -5,8 +5,8 @@ use buzz_core::kind::{KIND_EXECUTION_NODE_COMMAND, KIND_PAIRING};
 use buzz_core::pairing::session::PairingSession;
 use buzz_core::pairing::{qr::decode_qr, types::PayloadType, PairingError};
 use buzz_node::{
-    build_announcement, parse_desktop_pairing_payload, DesktopPairingPayload, NodeConfig,
-    NodeError, NodeIdentity, OwnerStore,
+    build_announcement, parse_desktop_pairing_payload, DesktopPairingPayload, ExecutionController,
+    NodeConfig, NodeError, NodeIdentity, OwnerStore,
 };
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
@@ -57,6 +57,8 @@ async fn main() {
 async fn run_node() -> Result<(), NodeError> {
     let config = NodeConfig::from_env()?;
     let identity = NodeIdentity::load_or_create(&config.data_dir)?;
+    let owners = OwnerStore::load(&config.data_dir)?;
+    let mut controller = ExecutionController::load(&config.data_dir)?;
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     let mut retry_delay = Duration::from_secs(1);
 
@@ -66,7 +68,7 @@ async fn run_node() -> Result<(), NodeError> {
                 result.map_err(NodeError::Storage)?;
                 return Ok(());
             }
-            result = run_connection(&config, &identity) => {
+            result = run_connection(&config, &identity, &owners, &mut controller) => {
                 if let Err(error) = result {
                     warn!(%error, ?retry_delay, "execution node relay connection ended");
                     sleep(retry_delay).await;
@@ -79,7 +81,12 @@ async fn run_node() -> Result<(), NodeError> {
     }
 }
 
-async fn run_connection(config: &NodeConfig, identity: &NodeIdentity) -> Result<(), NodeError> {
+async fn run_connection(
+    config: &NodeConfig,
+    identity: &NodeIdentity,
+    owners: &OwnerStore,
+    controller: &mut ExecutionController,
+) -> Result<(), NodeError> {
     let mut connection = buzz_ws_client::NostrWsConnection::connect(&config.relay_url)
         .await
         .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
@@ -114,10 +121,27 @@ async fn run_connection(config: &NodeConfig, identity: &NodeIdentity) -> Result<
     loop {
         match connection.next_event(Duration::from_secs(300)).await {
             Ok(buzz_ws_client::RelayMessage::Event { event, .. }) => {
-                // Command execution is introduced in PLO-342. Keeping this
-                // subscription alive now makes node presence and reconnect
-                // observable without inventing a second transport.
-                info!(event_id = %event.id, "execution command received");
+                let receipts = match controller.handle_command_event(
+                    identity,
+                    owners,
+                    &event,
+                    chrono::Utc::now(),
+                ) {
+                    Ok(receipts) => receipts,
+                    Err(error) => {
+                        warn!(event_id = %event.id, %error, "execution command rejected");
+                        continue;
+                    }
+                };
+                for receipt in receipts {
+                    let response = connection
+                        .send_event(receipt)
+                        .await
+                        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+                    if !response.accepted {
+                        warn!(event_id = %response.event_id, message = %response.message, "relay rejected execution receipt");
+                    }
+                }
             }
             Ok(buzz_ws_client::RelayMessage::Closed { message, .. }) => {
                 return Err(NodeError::InvalidConfiguration(format!(

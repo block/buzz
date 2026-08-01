@@ -26,6 +26,10 @@ import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttach
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
+import {
+  deployExecutionWorkload,
+  executionReceiptFailure,
+} from "@/shared/api/tauriExecution";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
 import type {
@@ -205,22 +209,38 @@ export function useAgentManagement() {
       });
 
       if (intent === "definition_start") {
-        const created = await createAgentMutation.mutateAsync(
-          await buildInstanceInputForDefinition(
-            persona,
-            runtime,
-            undefined,
-            backendIntent ?? undefined,
-          ),
-        );
-        if (created.spawnError) throw new Error(created.spawnError);
-        const targetChannel = (channelsQuery.data ?? []).find(
-          (channel) => channel.id === request.request.channelId,
-        );
-        await createdAgentAttachment.presentCreatedAgent(created, {
-          id: request.request.channelId,
-          name: targetChannel?.name ?? "this channel",
-        });
+        if (backendIntent?.type === "execution-node") {
+          const deployment = await deployExecutionWorkload({
+            nodeId: backendIntent.nodeId,
+            displayName: persona.displayName,
+            runtime: runtime.id,
+            model: persona.model ?? undefined,
+            provider: persona.provider ?? undefined,
+          });
+          const failure = executionReceiptFailure(deployment.receipt);
+          if (failure) {
+            throw new Error(
+              `The execution node rejected the workload command: ${failure}.`,
+            );
+          }
+        } else {
+          const created = await createAgentMutation.mutateAsync(
+            await buildInstanceInputForDefinition(
+              persona,
+              runtime,
+              undefined,
+              backendIntent ?? undefined,
+            ),
+          );
+          if (created.spawnError) throw new Error(created.spawnError);
+          const targetChannel = (channelsQuery.data ?? []).find(
+            (channel) => channel.id === request.request.channelId,
+          );
+          await createdAgentAttachment.presentCreatedAgent(created, {
+            id: request.request.channelId,
+            name: targetChannel?.name ?? "this channel",
+          });
+        }
       }
 
       await Promise.all([

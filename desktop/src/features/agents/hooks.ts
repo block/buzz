@@ -34,11 +34,11 @@ import {
   getRuntimeFileConfig,
   installAcpRuntime,
   listManagedAgents,
-  listExecutionNodes,
   listRelayAgents,
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { listExecutionNodes } from "@/shared/api/tauriExecution";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import {
   setManagedAgentAutoRestart,

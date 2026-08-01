@@ -37,6 +37,10 @@ import { personaSaveNotice } from "@/features/agents/lib/personaSaveNotice";
 import { useCreatedAgentChannelAttachment } from "@/features/agents/useCreatedAgentChannelAttachment";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import {
+  deployExecutionWorkload,
+  executionReceiptFailure,
+} from "@/shared/api/tauriExecution";
 import type {
   SnapshotFormat,
   SnapshotMemoryLevel,
@@ -237,6 +241,27 @@ export function usePersonaActions() {
           setPersonaDialogState(null);
           return true;
         }
+        if (startIntent?.type === "execution-node") {
+          const deployment = await deployExecutionWorkload({
+            nodeId: startIntent.nodeId,
+            displayName: persona.displayName,
+            runtime: runtime.id,
+            model: persona.model ?? undefined,
+            provider: persona.provider ?? undefined,
+          });
+          const outcome = deployment.receipt?.outcome.outcome;
+          const failure = executionReceiptFailure(deployment.receipt);
+          setPersonaNoticeMessage(
+            outcome === "succeeded"
+              ? `Deployed ${persona.displayName} to the execution node (receipt: succeeded).`
+              : failure
+                ? `The execution node reported ${outcome}: ${failure}.`
+                : `Published ${persona.displayName} to the execution node; awaiting its receipt.`,
+          );
+          setPersonaDialogState(null);
+          return true;
+        }
+
         const agentInput = await buildInstanceInputForDefinition(
           persona,
           runtime,
