@@ -10,12 +10,9 @@ import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
-import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
-  buildOutgoingMessage,
   findSpoileredImetaMediaUrls,
   type ImetaMedia,
-  mergeOutgoingTags,
   restoreImetaMediaDisplayLabels,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
@@ -23,7 +20,6 @@ import {
 import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
@@ -50,6 +46,15 @@ import {
   type MentionSuggestion,
 } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
+import type { StickerSelection } from "@/features/stickers/ui/ComposerStickerPicker";
+import {
+  captureStickerDraft,
+  shouldRestoreStickerDraft,
+  stickerSendOverrides,
+} from "./stickerComposerSend";
+import { buildMessageEditPayload } from "./messageEditPayload";
+import { resolveEmojiInsertion } from "./composerEmojiInsert";
+import { applyAutocompleteKeyResult } from "./composerAutocompleteKeys";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
@@ -205,7 +210,9 @@ function MessageComposerImpl({
     channelLinks.isChannelOpen ||
     emojiAutocomplete.isEmojiAutocompleteOpen;
 
-  const submitMessageRef = React.useRef<() => void>(() => {});
+  const submitMessageRef = React.useRef<
+    (immediateSticker?: StickerSelection) => void
+  >(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
 
   // Set after `useLinkEditor` exists below; the editor's link-click handler
@@ -441,32 +448,18 @@ function MessageComposerImpl({
   const insertEmoji = React.useCallback(
     (emoji: string) => {
       if (!richText.editor) return;
-      // A `:shortcode:` for a known custom emoji becomes a selectable atom
-      // node (same as the input rule / autocomplete), so it can be selected,
-      // copied, and deleted as one unit. Everything else (native unicode)
-      // inserts as plain content.
-      const match = /^:([^:\s]+):$/.exec(emoji);
-      const shortcode = match?.[1]?.toLowerCase();
-      const known =
-        shortcode &&
-        customEmoji.some((e) => e.shortcode.toLowerCase() === shortcode);
-      if (known && shortcode) {
-        richText.editor
-          .chain()
-          .focus()
+      const insertion = resolveEmojiInsertion(emoji, customEmoji);
+      const chain = richText.editor.chain().focus();
+      if (insertion.kind === "custom-node") {
+        chain
           .insertContent({
             type: CUSTOM_EMOJI_NODE_NAME,
-            attrs: {
-              shortcode,
-              src:
-                customEmoji.find((e) => e.shortcode.toLowerCase() === shortcode)
-                  ?.url ?? "",
-            },
+            attrs: { shortcode: insertion.shortcode, src: insertion.src },
           })
           .insertContent(" ")
           .run();
       } else {
-        richText.editor.chain().focus().insertContent(emoji).run();
+        chain.insertContent(insertion.text).run();
       }
       setIsEmojiPickerOpen(false);
       mentions.clearMentions();
@@ -506,139 +499,146 @@ function MessageComposerImpl({
   ]);
 
   // ── Submit message ──────────────────────────────────────────────────
-  const submitMessage = React.useCallback(async () => {
-    const trimmed = syncComposerContentFromEditor().trim();
+  const submitMessage = React.useCallback(
+    async (immediateSticker?: StickerSelection) => {
+      const trimmed = syncComposerContentFromEditor().trim();
 
-    // Edit mode
-    if (editTargetRef.current && onEditSaveRef.current) {
-      if (isSendingRef.current || isUploadingRef.current) return;
+      // Edit mode
+      if (editTargetRef.current && onEditSaveRef.current) {
+        if (isSendingRef.current || isUploadingRef.current) return;
+        const currentPendingImeta = media.pendingImetaRef.current;
+        const hasMedia = currentPendingImeta.length > 0;
+        // Empty text + zero attachments is a no-op (don't let edit become an
+        // effective deletion).
+        if (!trimmed && !hasMedia) return;
+
+        // Derived before the composer state is cleared below.
+        const { finalContent, outgoingTags, addedMentionPubkeys } =
+          buildMessageEditPayload({
+            trimmed,
+            pendingImeta: currentPendingImeta,
+            spoileredAttachmentUrls,
+            customEmoji,
+            previousBody: editTargetRef.current.body,
+            extractMentionPubkeys: extractMentionPubkeysRef.current,
+            ownerPubkey: ownerPubkeyRef.current ?? "",
+          });
+
+        const savedContent = trimmed;
+        const savedImeta = [...currentPendingImeta];
+        const savedSpoileredAttachmentUrls = new Set(spoileredAttachmentUrls);
+        setComposerContent("");
+        richText.clearContent();
+        media.setPendingImeta([]);
+        setSpoileredAttachmentUrls(new Set());
+        mentions.clearMentions();
+        channelLinks.clearChannels();
+        emojiAutocomplete.clearEmojis();
+        setIsEmojiPickerOpen(false);
+
+        try {
+          await onEditSaveRef.current(
+            finalContent,
+            outgoingTags,
+            addedMentionPubkeys,
+          );
+        } catch {
+          setComposerContent(savedContent);
+          richText.setContent(savedContent);
+          media.setPendingImeta(savedImeta);
+          setSpoileredAttachmentUrls(savedSpoileredAttachmentUrls);
+        }
+        return;
+      }
+
+      // Normal send
       const currentPendingImeta = media.pendingImetaRef.current;
-      // No empty-edit guard here: clearing an edit to empty (no text, no
-      // attachments) flows through to onEditSave as empty content, which
-      // deletes the message instead of publishing it (see handleEditSave).
+      const hasMedia = currentPendingImeta.length > 0;
+      const hasSticker = immediateSticker !== undefined;
+      if (
+        (!trimmed && !hasMedia && !hasSticker) ||
+        disabledRef.current ||
+        isSendingRef.current ||
+        isUploadingRef.current ||
+        mentionSendFlow.isPreparingMentionSend
+      ) {
+        return;
+      }
 
-      // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
-      // because edit semantics use `[]` as the explicit "wipe all
-      // attachments" signal — the receiver overlay drops imeta when the
-      // edit carries an empty (but defined) set.
-      const { content: finalContent, mediaTags } = buildOutgoingMessage(
-        trimmed,
+      const capturedThreadContext = onCaptureSendContext?.() ?? null;
+      if (
+        capturedThreadContext !== null &&
+        !capturedThreadContext.parentEventId
+      ) {
+        return;
+      }
+
+      // A sticker send is the sticker alone; snapshot the draft so the send
+      // flow's composer clear does not eat it. See stickerComposerSend.ts.
+      const stickerDraft = captureStickerDraft(
+        immediateSticker,
+        syncComposerContentFromEditor(),
         currentPendingImeta,
         spoileredAttachmentUrls,
       );
 
-      // NIP-30: attach `["emoji", shortcode, url]` tags for custom emoji in the
-      // edited body, exactly like the send path. Without this an edited message
-      // ships with no emoji tags, so the receiver can't resolve a `:shortcode:`
-      // and renders the literal text. `?? []` preserves edit semantics (a
-      // defined-but-empty media set means "wipe attachments").
-      const outgoingTags =
-        mergeOutgoingTags(
-          mediaTags,
-          buildCustomEmojiTags(finalContent, customEmoji),
-        ) ?? [];
-
-      // Notify only mentions this edit *newly adds* (see
-      // diffAddedMentionPubkeys): a typo-fix edit that leaves the mention set
-      // unchanged emits no `p` tags and re-wakes nobody. Computed before the
-      // composer state is cleared below.
-      const addedMentionPubkeys = diffAddedMentionPubkeys(
-        extractMentionPubkeysRef.current(editTargetRef.current.body),
-        extractMentionPubkeysRef.current(finalContent),
-        ownerPubkeyRef.current ?? "",
-      );
-
-      const savedContent = trimmed;
-      const savedImeta = [...currentPendingImeta];
-      const savedSpoileredAttachmentUrls = new Set(spoileredAttachmentUrls);
-      setComposerContent("");
-      richText.clearContent();
-      media.setPendingImeta([]);
-      setSpoileredAttachmentUrls(new Set());
-      mentions.clearMentions();
-      channelLinks.clearChannels();
-      emojiAutocomplete.clearEmojis();
-      setIsEmojiPickerOpen(false);
-
+      onPreparingMentionSendChange?.(true);
+      persistentMentionHydration.beginSubmit();
       try {
-        await onEditSaveRef.current(
-          finalContent,
-          outgoingTags,
-          addedMentionPubkeys,
-        );
-      } catch {
-        setComposerContent(savedContent);
-        richText.setContent(savedContent);
-        media.setPendingImeta(savedImeta);
-        setSpoileredAttachmentUrls(savedSpoileredAttachmentUrls);
+        await mentionSendFlow.sendMessageWithMentionFlow({
+          capturedChannelId: channelId,
+          capturedThreadContext,
+          sentDraftKey: resolveSentDraftKey(
+            effectiveDraftKeyRef.current,
+            drafts.loadDraft,
+          ),
+          audienceGeneration: persistentAudience.generation,
+          audienceRevision: audienceScope ? persistentAudience.revision : null,
+          ...stickerSendOverrides(
+            immediateSticker,
+            currentPendingImeta,
+            spoileredAttachmentUrls,
+            trimmed,
+          ),
+        });
+      } finally {
+        persistentMentionHydration.endSubmit();
+        onPreparingMentionSendChange?.(false);
       }
-      return;
-    }
 
-    // Normal send
-    const currentPendingImeta = media.pendingImetaRef.current;
-    const hasMedia = currentPendingImeta.length > 0;
-    if (
-      (!trimmed && !hasMedia) ||
-      disabledRef.current ||
-      isSendingRef.current ||
-      isUploadingRef.current ||
-      mentionSendFlow.isPreparingMentionSend
-    ) {
-      return;
-    }
-
-    const capturedThreadContext = onCaptureSendContext?.() ?? null;
-    if (
-      capturedThreadContext !== null &&
-      !capturedThreadContext.parentEventId
-    ) {
-      return;
-    }
-
-    onPreparingMentionSendChange?.(true);
-    persistentMentionHydration.beginSubmit();
-    try {
-      await mentionSendFlow.sendMessageWithMentionFlow({
-        capturedChannelId: channelId,
-        capturedThreadContext,
-        pendingImeta: currentPendingImeta,
-        sentDraftKey: resolveSentDraftKey(
-          effectiveDraftKeyRef.current,
-          drafts.loadDraft,
-        ),
-        spoileredAttachmentUrls,
-        trimmed,
-        audienceGeneration: persistentAudience.generation,
-        audienceRevision: audienceScope ? persistentAudience.revision : null,
-      });
-    } finally {
-      persistentMentionHydration.endSubmit();
-      onPreparingMentionSendChange?.(false);
-    }
-  }, [
-    channelId,
-    channelLinks.clearChannels,
-    customEmoji,
-    drafts.loadDraft,
-    emojiAutocomplete.clearEmojis,
-    media.pendingImetaRef,
-    media.setPendingImeta,
-    mentionSendFlow.isPreparingMentionSend,
-    mentionSendFlow.sendMessageWithMentionFlow,
-    mentions.clearMentions,
-    richText.clearContent,
-    richText.setContent,
-    setComposerContent,
-    spoileredAttachmentUrls,
-    syncComposerContentFromEditor,
-    onCaptureSendContext,
-    onPreparingMentionSendChange,
-    audienceScope,
-    persistentMentionHydration,
-    persistentAudience.generation,
-    persistentAudience.revision,
-  ]);
+      if (
+        shouldRestoreStickerDraft(stickerDraft, syncComposerContentFromEditor())
+      ) {
+        setComposerContent(stickerDraft.content);
+        richText.setContent(stickerDraft.content);
+        media.setPendingImeta(stickerDraft.imeta);
+        setSpoileredAttachmentUrls(stickerDraft.spoileredAttachmentUrls);
+      }
+    },
+    [
+      channelId,
+      channelLinks.clearChannels,
+      customEmoji,
+      drafts.loadDraft,
+      emojiAutocomplete.clearEmojis,
+      media.pendingImetaRef,
+      media.setPendingImeta,
+      mentionSendFlow.isPreparingMentionSend,
+      mentionSendFlow.sendMessageWithMentionFlow,
+      mentions.clearMentions,
+      richText.clearContent,
+      richText.setContent,
+      setComposerContent,
+      spoileredAttachmentUrls,
+      syncComposerContentFromEditor,
+      onCaptureSendContext,
+      onPreparingMentionSendChange,
+      audienceScope,
+      persistentMentionHydration,
+      persistentAudience.generation,
+      persistentAudience.revision,
+    ],
+  );
   submitMessageRef.current = submitMessage;
 
   // ── Auto-submit on draft send ────────────────────────────────────────────
@@ -693,30 +693,21 @@ function MessageComposerImpl({
   // handles autocomplete arrow/enter keys and Escape for edit mode.
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      // Let autocomplete handle keys first
-      const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
-      if (emojiResult.handled) {
-        if (emojiResult.suggestion) {
-          applyEmojiInsert(emojiResult.suggestion);
-        }
-        return;
-      }
-
-      const channelResult = channelLinks.handleChannelKeyDown(event);
-      if (channelResult.handled) {
-        if (channelResult.suggestion) {
-          applyChannelInsert(channelResult.suggestion);
-        }
-        return;
-      }
-
-      const { handled, suggestion } = mentions.handleMentionKeyDown(event);
-      if (handled) {
-        if (suggestion) {
-          applyMentionInsert(suggestion);
-        }
-        return;
-      }
+      // Let autocomplete handle keys first, in priority order.
+      const consumed =
+        applyAutocompleteKeyResult(
+          emojiAutocomplete.handleEmojiKeyDown(event),
+          applyEmojiInsert,
+        ) ||
+        applyAutocompleteKeyResult(
+          channelLinks.handleChannelKeyDown(event),
+          applyChannelInsert,
+        ) ||
+        applyAutocompleteKeyResult(
+          mentions.handleMentionKeyDown(event),
+          applyMentionInsert,
+        );
+      if (consumed) return;
 
       if (event.key === "Tab" && !event.shiftKey && linkEditor.isCardOpen) {
         event.preventDefault();
@@ -835,6 +826,14 @@ function MessageComposerImpl({
       isContentEmpty,
       media.pendingImeta.length,
     ],
+  );
+
+  // Sticker click sends immediately — Signal-style, no pending/attach step.
+  const handleStickerSelect = React.useCallback(
+    (selection: StickerSelection) => {
+      void submitMessageRef.current(selection);
+    },
+    [],
   );
 
   const handleCaptureSelection = React.useCallback(() => {
@@ -1001,6 +1000,7 @@ function MessageComposerImpl({
               onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={openMentionPicker}
               onPaperclip={handlePaperclipClick}
+              onStickerSelect={handleStickerSelect}
               sendDisabled={sendDisabled}
             />
           </form>

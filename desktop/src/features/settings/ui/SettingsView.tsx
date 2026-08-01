@@ -61,6 +61,7 @@ const settingsNavGroups: Array<{
       "voice",
       "shortcuts",
       "custom-emoji",
+      "stickers",
       "local-archive",
     ],
   },

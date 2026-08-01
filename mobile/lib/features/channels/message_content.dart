@@ -14,6 +14,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/stickers/sticker_preview.dart';
+import '../../shared/stickers/sticker_reference.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -185,6 +187,7 @@ class MessageContent extends HookConsumerWidget {
     final inlineCustomEmojiSize = emojiOnly
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
+    final stickerTag = parseStickerReference(tags);
 
     final finalContent = useMemoized(() {
       // Convert autolinks and bare URLs to standard markdown links,
@@ -282,23 +285,43 @@ class MessageContent extends HookConsumerWidget {
         ],
       ),
     );
-    if (trailingGallery == null) return markdown;
 
+    final body = trailingGallery == null
+        ? markdown
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (trailingGallery.content.trim().isNotEmpty) markdown,
+              _MessageImageCarousel(
+                key: ValueKey(
+                  trailingGallery.items.map((item) => item.url).join('\u0000'),
+                ),
+                items: trailingGallery.items,
+                leadingOverflow: mediaCarouselLeadingOverflow,
+                trailingOverflow: mediaCarouselTrailingOverflow,
+                onReply: onMediaReply,
+                onMore: onMediaMore,
+              ),
+            ],
+          );
+
+    if (stickerTag.status == StickerTagStatus.absent) return body;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (trailingGallery.content.trim().isNotEmpty) markdown,
-        _MessageImageCarousel(
-          key: ValueKey(
-            trailingGallery.items.map((item) => item.url).join('\u0000'),
-          ),
-          items: trailingGallery.items,
-          leadingOverflow: mediaCarouselLeadingOverflow,
-          trailingOverflow: mediaCarouselTrailingOverflow,
-          onReply: onMediaReply,
-          onMore: onMediaMore,
+        StickerPreview(
+          stickerTag: stickerTag,
+          size: maxLines == null
+              ? stickerPreviewSize
+              : compactStickerPreviewSize,
         ),
+        if (stickerTag.status != StickerTagStatus.valid &&
+            content.isNotEmpty) ...[
+          const SizedBox(height: Grid.half),
+          body,
+        ],
       ],
     );
   }

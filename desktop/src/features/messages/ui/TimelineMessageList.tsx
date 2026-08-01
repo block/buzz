@@ -31,6 +31,7 @@ import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
+import { parseStickerReference } from "@/shared/api/stickers";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
 import { UnreadDivider } from "./UnreadDivider";
@@ -759,7 +760,10 @@ function MessageRowItem({
     profiles,
   );
   const canDelete = canManage && onDelete ? onDelete : undefined;
-  const canEdit = canManage && onEdit ? onEdit : undefined;
+  const canEdit =
+    canManage && onEdit && !parseStickerReference(message.tags)
+      ? onEdit
+      : undefined;
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;

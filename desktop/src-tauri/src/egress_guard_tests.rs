@@ -157,13 +157,14 @@ fn boundary_huddle_stt_blocks_ncryptsec() {
     let keys = nostr::Keys::generate();
     let channel = uuid::Uuid::new_v4();
     let builder =
-        crate::events::build_message(channel, NCRYPTSEC, None, &[], &[], &[], &[]).unwrap();
+        crate::events::build_message(channel, NCRYPTSEC, None, &[], &[], &[], &[], &[]).unwrap();
     let err = crate::huddle::pipeline::sign_and_guard_stt_body(builder, &keys).unwrap_err();
     assert_guard_error(&err);
 
     // Clean transcripts pass through the same seam.
     let builder =
-        crate::events::build_message(channel, "hello huddle", None, &[], &[], &[], &[]).unwrap();
+        crate::events::build_message(channel, "hello huddle", None, &[], &[], &[], &[], &[])
+            .unwrap();
     assert!(crate::huddle::pipeline::sign_and_guard_stt_body(builder, &keys).is_ok());
 }
 

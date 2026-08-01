@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   Smartphone,
   Smile,
+  Sticker,
   Sun,
   SunMoon,
   Ticket,
@@ -37,6 +38,7 @@ import {
   useThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import { StickerSettingsCard } from "@/features/stickers/ui/StickerSettingsCard";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -86,51 +88,12 @@ import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { VoiceSettingsCard } from "./VoiceSettingsCard";
 
-export type SettingsSection =
-  | "profile"
-  | "notifications"
-  | "voice"
-  | "experimental"
-  | "agents"
-  | "channel-templates"
-  | "compute"
-  | "appearance"
-  | "shortcuts"
-  | "hosted-communities"
-  | "community-members"
-  | "moderation"
-  | "custom-emoji"
-  | "local-archive"
-  | "mobile"
-  | "updates";
-
-export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
-
-const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
-  "profile",
-  "notifications",
-  "voice",
-  "experimental",
-  "agents",
-  "channel-templates",
-  "compute",
-  "appearance",
-  "shortcuts",
-  "hosted-communities",
-  "community-members",
-  "moderation",
-  "custom-emoji",
-  "local-archive",
-  "mobile",
-  "updates",
-];
-
-export function isSettingsSection(value: unknown): value is SettingsSection {
-  return (
-    typeof value === "string" &&
-    (SETTINGS_SECTION_VALUES as readonly string[]).includes(value)
-  );
-}
+import type { SettingsSection } from "../lib/settingsSections";
+export {
+  DEFAULT_SETTINGS_SECTION,
+  isSettingsSection,
+  type SettingsSection,
+} from "../lib/settingsSections";
 
 export type SettingsSectionDescriptor = {
   value: SettingsSection;
@@ -223,6 +186,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Custom emoji",
     icon: Smile,
     featureGate: "custom-emoji",
+  },
+  {
+    value: "stickers",
+    label: "Stickers",
+    icon: Sticker,
   },
   {
     value: "local-archive",
@@ -844,6 +812,8 @@ export function renderSettingsSection(
       );
     case "moderation":
       return <ModerationQueueCard />;
+    case "stickers":
+      return <StickerSettingsCard />;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
     case "local-archive":

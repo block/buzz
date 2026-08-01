@@ -18,6 +18,10 @@ pub mod nip_oa;
 
 pub use builders::*;
 
+/// Re-export the canonical Sonar sticker wire models used by the typed
+/// builders in this crate.
+pub use sonar_stickers::{InstalledPackList, PackAddress, Sticker, StickerPack, StickerRef};
+
 /// Re-export kind constants so consumers don't need buzz-core directly.
 pub use buzz_core::kind;
 

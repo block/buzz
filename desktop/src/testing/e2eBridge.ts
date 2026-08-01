@@ -9,6 +9,11 @@ import {
   handleSaveCustomHarness,
   handleDeleteCustomHarness,
 } from "./e2eBridgeCustomHarnesses.ts";
+import {
+  mockInstalledStickerPacksEvent,
+  mockStickerCatalogEvent,
+  mockStickerPackEvents,
+} from "./stickerFixtures.ts";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
@@ -45,10 +50,13 @@ import {
   KIND_PERSONA,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
+  KIND_STICKER_CATALOG,
+  KIND_STICKER_PACK,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
   KIND_USER_STATUS,
+  KIND_USER_STICKER_PACKS,
 } from "@/shared/constants/kinds";
 import type {
   RawAcpAuthMethodsResult,
@@ -350,8 +358,16 @@ type E2eConfig = {
     /** Delay EOSE for membership snapshots after delivering the event. */
     relayMembershipEoseDelayMs?: number;
     relayRole?: "owner" | "admin" | "member" | null;
-    // Descriptors returned by the mocked `pick_and_upload_media` /
-    // `upload_media_bytes` commands. Lets a spec drive the attachment flow
+    /**
+     * Whether the mock viewer has the approved sticker packs installed
+     * (kind:10031). Defaults to true so the composer picker renders a
+     * populated grid; set false to exercise the picker's install-a-pack
+     * empty state while the catalog itself stays non-empty.
+     */
+    stickerPacksInstalled?: boolean;
+    // Descriptors returned by the mocked `pick_and_upload_media`,
+    // `pick_and_upload_sticker_image`, and `upload_media_bytes` commands.
+    // Lets a spec drive the attachment or sticker-authoring flow
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     uploadDelayMs?: number;
@@ -2864,6 +2880,14 @@ const mockMessages = new Map<string, RelayEvent[]>();
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
 const mockPersonaEvents: RelayEvent[] = [];
+/**
+ * The viewer's most recently published kind:10031 installed-sticker-pack list,
+ * if any. `setStickerPackInstalled` re-reads the list right after publishing
+ * and throws unless the relay echoes the exact event it just wrote, so the
+ * install/uninstall toggle only round-trips if the mock stores the write.
+ * Null until the viewer touches it — the seeded fixture is served instead.
+ */
+let mockInstalledStickerPacksEventOverride: RelayEvent | null = null;
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketUnavailable = false;
@@ -8659,6 +8683,8 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    mentionTags?: string[][] | null;
+    stickerTags?: string[][] | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8678,8 +8704,15 @@ async function handleSendChannelMessage(
   // relay echoes them back on the stored event too, so mirror that here so the
   // emoji renderer keeps resolving `:shortcode:` after the round-trip.
   const emojiTags = args.emojiTags ?? [];
+  const mentionTags = args.mentionTags ?? [];
+  const stickerTags = args.stickerTags ?? [];
   // Both kinds end up on the stored event's tag set, just like the real relay.
-  const extraTags = [...mediaTags, ...emojiTags];
+  const extraTags = [
+    ...mediaTags,
+    ...emojiTags,
+    ...mentionTags,
+    ...stickerTags,
+  ];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);
@@ -9332,6 +9365,50 @@ function sendToMockSocket(args: {
       return;
     }
 
+    // Sonar sticker packs. `fetchStickerCatalog` reads the kind:13536 snapshot
+    // first, then re-fetches the approved pack events BY ID, so all three
+    // kinds have to be served for the picker/settings UI to leave its empty
+    // state. See src/testing/stickerFixtures.ts for the seed itself.
+    if (filter.kinds?.includes(KIND_STICKER_CATALOG)) {
+      sendWsText(socket.handler, ["EVENT", subId, mockStickerCatalogEvent()]);
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    if (filter.kinds?.includes(KIND_USER_STICKER_PACKS)) {
+      const installedEvent =
+        mockInstalledStickerPacksEventOverride ??
+        (getConfig()?.mock?.stickerPacksInstalled === false
+          ? null
+          : mockInstalledStickerPacksEvent());
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      if (
+        installedEvent &&
+        (!authors || authors.includes(installedEvent.pubkey.toLowerCase()))
+      ) {
+        sendWsText(socket.handler, ["EVENT", subId, installedEvent]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    if (filter.kinds?.includes(KIND_STICKER_PACK)) {
+      const ids = filter.ids?.map((id) => id.toLowerCase());
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      const identifiers = filter["#d"];
+      for (const packEvent of mockStickerPackEvents()) {
+        if (ids && !ids.includes(packEvent.id.toLowerCase())) continue;
+        if (authors && !authors.includes(packEvent.pubkey.toLowerCase()))
+          continue;
+        const identifier = packEvent.tags.find((tag) => tag[0] === "d")?.[1];
+        if (identifiers && (!identifier || !identifiers.includes(identifier)))
+          continue;
+        sendWsText(socket.handler, ["EVENT", subId, packEvent]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     if (filter.kinds?.includes(KIND_USER_STATUS)) {
       for (const statusEvent of filterMockUserStatuses(filter)) {
         sendWsText(socket.handler, ["EVENT", subId, statusEvent]);
@@ -9505,6 +9582,15 @@ function sendToMockSocket(args: {
       if (status === "online" || status === "away" || status === "offline") {
         setMockPresenceStatus(event.pubkey, status);
       }
+      emitMockGlobalEvent(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    if (event.kind === KIND_USER_STICKER_PACKS) {
+      // Store the write so the install/uninstall round-trip check in
+      // `setStickerPackInstalled` sees its own event come back.
+      mockInstalledStickerPacksEventOverride = event;
       emitMockGlobalEvent(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
@@ -11789,6 +11875,22 @@ export function maybeInstallE2eTauriMocks() {
         return await resolveMockUploadDescriptors(activeConfig);
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
+      case "pick_and_upload_sticker_image":
+        return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
+      case "import_signal_sticker_pack":
+        return {
+          identifier: "mock-signal-pack",
+          title: "Mock Signal Pack",
+          stickers: [],
+          skippedStickerIds: [],
+        };
+      case "import_nostr_sticker_pack":
+        return {
+          identifier: "mock-nostr-pack",
+          title: "Mock Nostr Pack",
+          stickers: [],
+          skippedStickerIds: [],
+        };
       case "upload_media_bytes":
         return resolveMockUploadDescriptorForBytes(
           payload as { data: number[]; filename?: string | null },

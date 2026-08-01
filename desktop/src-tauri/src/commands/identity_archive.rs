@@ -16,7 +16,6 @@ use tauri::State;
 
 use crate::{
     app_state::AppState,
-    events,
     relay::{
         classify_request_error, query_relay, relay_http_base_url, relay_ws_url_with_override,
         submit_event, SubmitEventResponse,
@@ -151,7 +150,7 @@ pub async fn archive_identity(
     let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
     let auth_ref = auth_tag.as_ref();
 
-    let builder = events::build_archive_identity_request(
+    let builder = crate::identity_archive_events::build_archive_identity_request(
         &req.target_pubkey,
         &req.content,
         req.reason.as_deref(),
@@ -170,7 +169,7 @@ pub async fn unarchive_identity(
     let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
     let auth_ref = auth_tag.as_ref();
 
-    let builder = events::build_unarchive_identity_request(
+    let builder = crate::identity_archive_events::build_unarchive_identity_request(
         &req.target_pubkey,
         &req.content,
         req.reason.as_deref(),

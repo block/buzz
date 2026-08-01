@@ -931,6 +931,7 @@ dependencies = [
  "diffy",
  "dirs",
  "hex",
+ "imagesize",
  "infer",
  "nostr",
  "rand 0.10.1",
@@ -939,11 +940,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sonar-stickers",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -971,6 +974,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sonar-stickers",
  "subtle",
  "thiserror 2.0.18",
  "url",
@@ -996,6 +1000,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1208,6 +1213,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.11.0",
+ "sonar-stickers",
  "sqlx",
  "subtle",
  "tempfile",
@@ -1255,6 +1261,7 @@ dependencies = [
  "nostr",
  "serde",
  "serde_json",
+ "sonar-stickers",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -7662,6 +7669,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -8718,6 +8726,26 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sonar-stickers"
+version = "0.1.0"
+source = "git+https://github.com/hedwig-corp/bitchat-to-sonar?rev=eea8ada304517d6a3ea6c81d6ffa57ce00504bcd#eea8ada304517d6a3ea6c81d6ffa57ce00504bcd"
+dependencies = [
+ "aes",
+ "base64 0.22.1",
+ "cbc",
+ "hex",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "nostr",
+ "prost 0.13.5",
+ "reqwest 0.12.28",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]

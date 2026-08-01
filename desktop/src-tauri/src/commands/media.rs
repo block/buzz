@@ -467,7 +467,7 @@ pub(crate) async fn upload_image_bytes(
     do_upload(body, &mime, state, None).await
 }
 
-async fn do_upload(
+pub(crate) async fn do_upload(
     body: Vec<u8>,
     mime: &str,
     state: &AppState,

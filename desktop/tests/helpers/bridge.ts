@@ -355,6 +355,13 @@ type MockBridgeOptions = {
    */
   relayRole?: "owner" | "admin" | "member" | null;
   /**
+   * Whether the mock viewer already has the approved Sonar sticker packs
+   * installed (the seeded kind:10031 list). Defaults to true, so the composer
+   * sticker picker opens onto a populated grid. Set `false` to render the
+   * picker's install-a-pack state while the catalog itself stays non-empty.
+   */
+  stickerPacksInstalled?: boolean;
+  /**
    * Descriptors returned by the mocked `pick_and_upload_media` /
    * `upload_media_bytes` commands. When omitted, the bridge returns a single
    * generic PDF so the file-attachment flow can be exercised by default. An

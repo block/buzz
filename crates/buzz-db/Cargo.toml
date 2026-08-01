@@ -22,6 +22,7 @@ thiserror   = { workspace = true }
 nostr       = { workspace = true }
 rand        = { workspace = true }
 metrics     = { workspace = true }
+url         = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

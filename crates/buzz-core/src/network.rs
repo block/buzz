@@ -43,6 +43,14 @@ fn embedded_ipv4(v6: &std::net::Ipv6Addr, prefix: &[u8; 12]) -> Option<std::net:
 /// - NAT64 local-use     64:ff9b:1::/48 (RFC 8215)
 /// - Teredo              2001::/32 (RFC 4380)
 /// - 6to4                2002::/16 (RFC 3056)
+/// - IPv6 site-local     fec0::/10 (deprecated, RFC 3879)
+/// - IPv6 discard        100::/64 (RFC 6666)
+/// - IPv6 benchmarking   2001:2::/48 (RFC 5180)
+/// - IPv6 documentation  3fff::/20 (RFC 9637)
+/// - IPv6 SRv6           5f00::/16 (RFC 9602)
+///
+/// Note that the rest of the 2001::/23 IETF protocol-assignment block is
+/// globally reachable and is deliberately NOT blocked.
 pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -88,6 +96,21 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                     && segments[2] == 1) // 64:ff9b:1::/48 local-use NAT64
                 || (segments[0] == 0x2001 && segments[1] == 0) // 2001::/32 Teredo
                 || segments[0] == 0x2002 // 2002::/16 6to4
+                || segments[0] & 0xffc0 == 0xfec0 // fec0::/10 deprecated site-local
+                || (segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0) // 100::/64 discard (RFC 6666)
+                // 2001:2::/48 benchmarking (RFC 5180). Deliberately NOT the whole
+                // 2001::/23 IETF protocol-assignment block: most of that block is
+                // globally reachable per the IANA special-purpose registry —
+                // 2001:1::1 (PCP anycast), 2001:1::2 (TURN anycast), 2001:3::/32
+                // (AMT), 2001:20::/28 (ORCHIDv2). Blocking the whole /23 would
+                // reject reachable hosts, so each non-reachable sub-block is
+                // tested on its own (Teredo and 2001:db8::/32 are listed
+                // separately above and below).
+                || (segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0)
+                // 3fff::/20 documentation (RFC 9637) — a /20, not a /16: the
+                // prefix fixes the top nibble of the second group as well.
+                || (segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
+                || segments[0] == 0x5f00 // 5f00::/16 SRv6 (RFC 9602)
                 // RFC 3849 — documentation range, should never appear in production
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8)
         }
@@ -279,6 +302,58 @@ mod tests {
                 .unwrap()
         ));
         assert!(!is_private_ip(&"2001:1::1".parse::<IpAddr>().unwrap()));
+    }
+
+    /// The 2001::/23 IETF protocol-assignment block is mostly globally
+    /// reachable, so only its individually-registered non-reachable sub-blocks
+    /// may be rejected. Blocking the whole /23 would break approved sticker
+    /// origins and workflow webhook targets hosted on these anycast addresses.
+    #[test]
+    fn test_ietf_protocol_assignment_block_is_not_blanket_private() {
+        // Globally reachable per the IANA IPv6 special-purpose registry.
+        assert!(!is_private_ip(&"2001:1::1".parse::<IpAddr>().unwrap())); // PCP anycast
+        assert!(!is_private_ip(&"2001:1::2".parse::<IpAddr>().unwrap())); // TURN anycast
+        assert!(!is_private_ip(&"2001:3::1".parse::<IpAddr>().unwrap())); // AMT
+        assert!(!is_private_ip(&"2001:20::1".parse::<IpAddr>().unwrap())); // ORCHIDv2
+        assert!(!is_private_ip(&"2001:30::1".parse::<IpAddr>().unwrap()));
+
+        // Not globally reachable — these must stay blocked.
+        assert!(is_private_ip(&"2001:2::1".parse::<IpAddr>().unwrap())); // benchmarking
+        assert!(is_private_ip(&"2001::1".parse::<IpAddr>().unwrap())); // Teredo
+        assert!(is_private_ip(&"2001:db8::1".parse::<IpAddr>().unwrap())); // documentation
+    }
+
+    /// 2001:2::/48 is a /48, not a /32 — the third group is part of the prefix.
+    #[test]
+    fn test_benchmarking_prefix_is_a_48() {
+        assert!(is_private_ip(&"2001:2::".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(
+            &"2001:2:0:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
+        ));
+        // 2001:2:1:: is outside the /48 and is globally reachable.
+        assert!(!is_private_ip(&"2001:2:1::1".parse::<IpAddr>().unwrap()));
+    }
+
+    /// 3fff::/20 documentation (RFC 9637) — a /20, so only 3fff:0000-3fff:0fff.
+    #[test]
+    fn test_documentation_3fff_prefix_is_a_20() {
+        assert!(is_private_ip(&"3fff::1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"3fff:0fff::1".parse::<IpAddr>().unwrap()));
+        assert!(!is_private_ip(&"3fff:1000::1".parse::<IpAddr>().unwrap()));
+    }
+
+    /// 5f00::/16 SRv6 segment routing (RFC 9602).
+    #[test]
+    fn test_srv6_prefix() {
+        assert!(is_private_ip(&"5f00::1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(
+            &"5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
+        ));
+        assert!(!is_private_ip(&"5f01::1".parse::<IpAddr>().unwrap()));
     }
     #[test]
     fn test_6to4_prefix_boundaries() {

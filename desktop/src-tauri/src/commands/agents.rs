@@ -147,7 +147,7 @@ pub(super) fn build_agent_archive_request(
                 .map_err(|_| "owner auth tag must have four elements".to_string())?,
         )
     };
-    crate::events::build_archive_identity_request(
+    crate::identity_archive_events::build_archive_identity_request(
         agent_pubkey,
         "",
         Some("retired"),

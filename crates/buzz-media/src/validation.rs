@@ -12,7 +12,13 @@ use crate::error::MediaError;
 /// (`process_video_upload`) with its own magic-byte check. If an MP4 is uploaded
 /// through the image path (Content-Type spoofing), `infer::get()` detects
 /// `video/mp4` and `validate_content()` rejects it here.
-const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+const ALLOWED_MIME_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/apng",
+    "image/gif",
+    "image/webp",
+];
 
 const MP4_BRANDS: &[[u8; 4]] = &[
     *b"isom", *b"iso2", *b"iso3", *b"iso4", *b"iso5", *b"iso6", *b"iso7", *b"iso8", *b"iso9",
@@ -230,6 +236,289 @@ pub struct VideoMeta {
     pub has_audio: bool,
 }
 
+/// Validated metadata for a Sonar sticker asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickerContentMeta {
+    /// Sniffed, canonical MIME type.
+    pub mime: String,
+    /// Canonical content-addressed object extension.
+    pub extension: String,
+    /// Parsed image width in pixels.
+    pub width: u32,
+    /// Parsed image height in pixels.
+    pub height: u32,
+}
+
+const MAX_STICKER_ANIMATION_FRAMES: u32 = 200;
+const MAX_STICKER_ANIMATION_PIXELS: u64 = 100_000_000;
+
+fn skip_gif_sub_blocks(bytes: &[u8], mut offset: usize) -> Option<usize> {
+    loop {
+        let length = *bytes.get(offset)? as usize;
+        offset = offset.checked_add(1)?;
+        if length == 0 {
+            return Some(offset);
+        }
+        offset = offset.checked_add(length)?;
+        if offset > bytes.len() {
+            return None;
+        }
+    }
+}
+
+/// Frame count plus the largest per-frame rectangle an animation declares.
+///
+/// Animated containers let every frame carry its own width and height, which a
+/// decoder allocates independently of the logical canvas. Budgeting the canvas
+/// alone would let a file advertise a tiny screen while smuggling a frame of up
+/// to 65535x65535 (GIF/WebP) or 2^32 (APNG) past the pixel guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnimationBounds {
+    frames: u32,
+    /// Largest declared frame width, or 0 when frames inherit the canvas.
+    max_frame_width: u32,
+    /// Largest declared frame height, or 0 when frames inherit the canvas.
+    max_frame_height: u32,
+}
+
+/// Count GIF image descriptors and bound their rectangles without decompressing
+/// pixel data.
+fn gif_animation_bounds(bytes: &[u8]) -> Option<AnimationBounds> {
+    if bytes.get(..6)? != b"GIF87a" && bytes.get(..6)? != b"GIF89a" {
+        return None;
+    }
+    let packed = *bytes.get(10)?;
+    let mut offset = 13usize;
+    if packed & 0x80 != 0 {
+        let color_table_len = 3usize.checked_mul(1usize << ((packed & 0x07) + 1))?;
+        offset = offset.checked_add(color_table_len)?;
+    }
+    let mut frames = 0u32;
+    let mut max_frame_width = 0u32;
+    let mut max_frame_height = 0u32;
+    loop {
+        match *bytes.get(offset)? {
+            0x2c => {
+                // Image descriptor: left, top, width, height (u16 LE each), packed.
+                let descriptor = bytes.get(offset.checked_add(1)?..offset.checked_add(10)?)?;
+                let frame_width = u16::from_le_bytes(descriptor.get(4..6)?.try_into().ok()?);
+                let frame_height = u16::from_le_bytes(descriptor.get(6..8)?.try_into().ok()?);
+                max_frame_width = max_frame_width.max(u32::from(frame_width));
+                max_frame_height = max_frame_height.max(u32::from(frame_height));
+                let packed = *descriptor.get(8)?;
+                offset = offset.checked_add(10)?;
+                if packed & 0x80 != 0 {
+                    let color_table_len = 3usize.checked_mul(1usize << ((packed & 0x07) + 1))?;
+                    offset = offset.checked_add(color_table_len)?;
+                }
+                // LZW minimum code size, followed by image data sub-blocks.
+                offset = offset.checked_add(1)?;
+                frames = frames.checked_add(1)?;
+                offset = skip_gif_sub_blocks(bytes, offset)?;
+            }
+            0x21 => {
+                // Extension introducer and label, followed by sub-blocks.
+                offset = offset.checked_add(2)?;
+                offset = skip_gif_sub_blocks(bytes, offset)?;
+            }
+            0x3b => {
+                return (frames > 0).then_some(AnimationBounds {
+                    frames,
+                    max_frame_width,
+                    max_frame_height,
+                });
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Count animated WebP frame chunks and bound their rectangles without decoding
+/// their contents.
+fn webp_animation_bounds(bytes: &[u8]) -> Option<AnimationBounds> {
+    if bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WEBP" {
+        return None;
+    }
+    let riff_size = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+    if riff_size.checked_add(8)? != bytes.len() {
+        return None;
+    }
+    let mut offset = 12usize;
+    let mut frames = 0u32;
+    let mut animated = false;
+    let mut max_frame_width = 0u32;
+    let mut max_frame_height = 0u32;
+    while offset < bytes.len() {
+        let header_end = offset.checked_add(8)?;
+        let chunk_type = bytes.get(offset..offset + 4)?;
+        let chunk_len =
+            u32::from_le_bytes(bytes.get(offset + 4..header_end)?.try_into().ok()?) as usize;
+        let data_end = header_end.checked_add(chunk_len)?;
+        let chunk_end = data_end.checked_add(chunk_len & 1)?;
+        if chunk_end > bytes.len() {
+            return None;
+        }
+        match chunk_type {
+            b"ANIM" => animated = true,
+            b"ANMF" => {
+                frames = frames.checked_add(1)?;
+                // ANMF header: x, y, width-1, height-1 as u24 LE, then duration.
+                let payload = bytes.get(header_end..data_end)?;
+                let read_u24 = |start: usize| -> Option<u32> {
+                    let field = payload.get(start..start.checked_add(3)?)?;
+                    Some(
+                        u32::from(field[0])
+                            | (u32::from(field[1]) << 8)
+                            | (u32::from(field[2]) << 16),
+                    )
+                };
+                max_frame_width = max_frame_width.max(read_u24(6)?.checked_add(1)?);
+                max_frame_height = max_frame_height.max(read_u24(9)?.checked_add(1)?);
+            }
+            _ => {}
+        }
+        offset = chunk_end;
+    }
+    if animated {
+        (frames > 0).then_some(AnimationBounds {
+            frames,
+            max_frame_width,
+            max_frame_height,
+        })
+    } else if frames == 0 {
+        Some(AnimationBounds {
+            frames: 1,
+            max_frame_width: 0,
+            max_frame_height: 0,
+        })
+    } else {
+        None
+    }
+}
+
+/// Bound the frame rectangles APNG `fcTL` chunks declare.
+///
+/// The chunk sequence itself is validated by
+/// [`buzz_core::stickers::apng_frame_count`]; this second pass only reads the
+/// rectangles, which that counter does not inspect.
+fn apng_animation_bounds(bytes: &[u8]) -> Option<AnimationBounds> {
+    const PNG_SIGNATURE_LEN: usize = 8;
+    let frames = buzz_core::stickers::apng_frame_count(bytes)?;
+    let mut max_frame_width = 0u32;
+    let mut max_frame_height = 0u32;
+    let mut offset = PNG_SIGNATURE_LEN;
+    while let Some(header) = bytes.get(offset..offset.checked_add(8)?) {
+        let length = u32::from_be_bytes(header.get(..4)?.try_into().ok()?) as usize;
+        let data_start = offset.checked_add(8)?;
+        let data_end = data_start.checked_add(length)?;
+        if header.get(4..8)? == b"fcTL" {
+            // fcTL: sequence number, then frame width and height as u32 BE.
+            let data = bytes.get(data_start..data_end)?;
+            max_frame_width =
+                max_frame_width.max(u32::from_be_bytes(data.get(4..8)?.try_into().ok()?));
+            max_frame_height =
+                max_frame_height.max(u32::from_be_bytes(data.get(8..12)?.try_into().ok()?));
+        }
+        offset = data_end.checked_add(4)?;
+    }
+    Some(AnimationBounds {
+        frames,
+        max_frame_width,
+        max_frame_height,
+    })
+}
+
+fn sticker_animation_bounds(bytes: &[u8], mime: &str) -> Option<AnimationBounds> {
+    match mime {
+        "image/apng" => apng_animation_bounds(bytes),
+        "image/gif" => gif_animation_bounds(bytes),
+        "image/webp" => webp_animation_bounds(bytes),
+        "image/png" => Some(AnimationBounds {
+            frames: 1,
+            max_frame_width: 0,
+            max_frame_height: 0,
+        }),
+        _ => None,
+    }
+}
+
+/// Validate externally fetched Sonar sticker bytes against their declared MIME.
+///
+/// This is stricter than general media uploads: Sonar excludes JPEG, caps each
+/// plaintext asset at 4 MiB and each dimension at 4096 pixels, and distinguishes
+/// animated PNG from ordinary PNG when `image/apng` is declared. It applies the
+/// same structural metadata ban as the upload path, and bounds per-frame
+/// rectangles in addition to the logical canvas.
+pub fn validate_sticker_content(
+    bytes: &[u8],
+    declared_mime: &str,
+) -> Result<StickerContentMeta, MediaError> {
+    const MAX_STICKER_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_STICKER_DIMENSION: usize = 4_096;
+
+    if bytes.len() > MAX_STICKER_BYTES {
+        return Err(MediaError::FileTooLarge {
+            size: bytes.len() as u64,
+            max: MAX_STICKER_BYTES as u64,
+        });
+    }
+
+    let sniffed = infer::get(bytes)
+        .map(|kind| kind.mime_type())
+        .ok_or(MediaError::UnknownContentType)?;
+    let is_apng = sniffed == "image/png" && buzz_core::stickers::apng_frame_count(bytes).is_some();
+    let (mime, extension, mime_matches) = match declared_mime {
+        "image/webp" => ("image/webp", "webp", sniffed == "image/webp"),
+        "image/png" => ("image/png", "png", sniffed == "image/png" && !is_apng),
+        "image/apng" => ("image/apng", "png", is_apng),
+        "image/gif" => ("image/gif", "gif", sniffed == "image/gif"),
+        other => return Err(MediaError::DisallowedContentType(other.to_owned())),
+    };
+    if !mime_matches {
+        return Err(MediaError::DisallowedContentType(sniffed.to_owned()));
+    }
+
+    // Fetched pack assets are cached and re-served verbatim, so they carry the
+    // same metadata ban as uploads: EXIF, XMP, comments, and private chunks
+    // would otherwise republish whatever the pack author embedded. Checked
+    // before geometry so a metadata-bearing container reports the real reason.
+    validate_image_metadata_free(bytes, mime)?;
+
+    let size = imagesize::blob_size(bytes).map_err(|_| MediaError::InvalidImage)?;
+    if size.width == 0
+        || size.height == 0
+        || size.width > MAX_STICKER_DIMENSION
+        || size.height > MAX_STICKER_DIMENSION
+    {
+        return Err(MediaError::ImageTooLarge);
+    }
+
+    let bounds = sticker_animation_bounds(bytes, mime).ok_or(MediaError::InvalidImage)?;
+    // Each frame is decoded into its own buffer, so the canvas does not bound
+    // decoder allocation — budget the largest declared frame rectangle.
+    let width = (size.width as u64).max(u64::from(bounds.max_frame_width));
+    let height = (size.height as u64).max(u64::from(bounds.max_frame_height));
+    if width > MAX_STICKER_DIMENSION as u64 || height > MAX_STICKER_DIMENSION as u64 {
+        return Err(MediaError::ImageTooLarge);
+    }
+    let animation_pixels = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(u64::from(bounds.frames)))
+        .ok_or(MediaError::ImageTooLarge)?;
+    if bounds.frames > MAX_STICKER_ANIMATION_FRAMES
+        || animation_pixels > MAX_STICKER_ANIMATION_PIXELS
+    {
+        return Err(MediaError::ImageTooLarge);
+    }
+
+    Ok(StickerContentMeta {
+        mime: mime.to_owned(),
+        extension: extension.to_owned(),
+        width: size.width as u32,
+        height: size.height as u32,
+    })
+}
+
 /// Validate uploaded bytes for the **image** upload path.
 ///
 /// Checks magic bytes, MIME allowlist (images only), size, and pixel dimensions.
@@ -238,7 +527,15 @@ pub struct VideoMeta {
 pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, MediaError> {
     // 1. Magic bytes — never trust Content-Type header
     let mime = infer::get(bytes)
-        .map(|t| t.mime_type().to_string())
+        .map(|kind| {
+            if kind.mime_type() == "image/png"
+                && buzz_core::stickers::apng_frame_count(bytes).is_some()
+            {
+                "image/apng".to_owned()
+            } else {
+                kind.mime_type().to_owned()
+            }
+        })
         .ok_or(MediaError::UnknownContentType)?;
 
     // 2. Allowlist (SVG, PDF, executables all rejected)
@@ -492,7 +789,7 @@ fn check_moov_before_mdat(path: &Path) -> Result<(), MediaError> {
 fn validate_image_metadata_free(bytes: &[u8], mime: &str) -> Result<(), MediaError> {
     match mime {
         "image/jpeg" => validate_jpeg_metadata_free(bytes),
-        "image/png" => validate_png_metadata_free(bytes),
+        "image/png" | "image/apng" => validate_png_metadata_free(bytes),
         "image/webp" => validate_webp_metadata_free(bytes),
         "image/gif" => validate_gif_metadata_free(bytes),
         _ => Ok(()),
@@ -930,7 +1227,7 @@ fn validate_mp4_metadata_free(path: &Path) -> Result<(), MediaError> {
 pub fn mime_to_ext(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" => "jpg",
-        "image/png" => "png",
+        "image/png" | "image/apng" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
         "video/mp4" => "mp4",
@@ -1552,6 +1849,289 @@ mod tests {
                 "generic path accepted {name}"
             );
         }
+    }
+
+    #[test]
+    fn sticker_validation_accepts_matching_png() {
+        let meta = validate_sticker_content(TINY_PNG, "image/png").expect("valid sticker");
+        assert_eq!(meta.mime, "image/png");
+        assert_eq!(meta.extension, "png");
+        assert_eq!((meta.width, meta.height), (1, 1));
+    }
+
+    #[test]
+    fn sticker_validation_rejects_jpeg_and_mime_confusion() {
+        assert!(matches!(
+            validate_sticker_content(TINY_JPEG, "image/jpeg"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+        assert!(matches!(
+            validate_sticker_content(TINY_PNG, "image/webp"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+    }
+
+    #[test]
+    fn sticker_validation_requires_animation_marker_for_apng() {
+        assert!(matches!(
+            validate_sticker_content(TINY_PNG, "image/apng"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+    }
+
+    #[test]
+    fn sticker_validation_distinguishes_structural_apng_from_png() {
+        fn append_chunk(bytes: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+            bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(chunk_type);
+            bytes.extend_from_slice(data);
+            // Chunk CRC integrity is outside this metadata-only detector. The
+            // browser/image decoder remains responsible for complete decoding.
+            bytes.extend_from_slice(&[0; 4]);
+        }
+
+        // Strip TINY_PNG's trailing IEND (12 bytes: length + type + CRC) so the
+        // appended animation chunks land before the image ends.
+        let mut apng = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        let mut animation_control = Vec::new();
+        animation_control.extend_from_slice(&1u32.to_be_bytes());
+        animation_control.extend_from_slice(&0u32.to_be_bytes());
+        append_chunk(&mut apng, b"acTL", &animation_control);
+        append_chunk(&mut apng, b"fcTL", &[0; 26]);
+        append_chunk(&mut apng, b"IDAT", &[]);
+        append_chunk(&mut apng, b"IEND", &[]);
+
+        assert_eq!(buzz_core::stickers::apng_frame_count(&apng), Some(1));
+        assert!(validate_sticker_content(&apng, "image/apng").is_ok());
+        assert!(matches!(
+            validate_sticker_content(&apng, "image/png"),
+            Err(MediaError::DisallowedContentType(_))
+        ));
+
+        let mut false_positive = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        append_chunk(&mut false_positive, b"tEXt", b"contains acTL bytes");
+        append_chunk(&mut false_positive, b"IDAT", &[]);
+        append_chunk(&mut false_positive, b"IEND", &[]);
+        assert_eq!(buzz_core::stickers::apng_frame_count(&false_positive), None);
+    }
+
+    #[test]
+    fn sticker_validation_bounds_animation_work() {
+        fn append_chunk(bytes: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+            bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(chunk_type);
+            bytes.extend_from_slice(data);
+            bytes.extend_from_slice(&[0; 4]);
+        }
+
+        let mut apng = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        let mut animation_control = Vec::new();
+        animation_control.extend_from_slice(&201u32.to_be_bytes());
+        animation_control.extend_from_slice(&0u32.to_be_bytes());
+        append_chunk(&mut apng, b"acTL", &animation_control);
+        for _ in 0..201 {
+            append_chunk(&mut apng, b"fcTL", &[0; 26]);
+        }
+        append_chunk(&mut apng, b"IDAT", &[]);
+        append_chunk(&mut apng, b"IEND", &[]);
+
+        assert!(matches!(
+            validate_sticker_content(&apng, "image/apng"),
+            Err(MediaError::ImageTooLarge)
+        ));
+    }
+
+    fn append_png_chunk(bytes: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+        bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(chunk_type);
+        bytes.extend_from_slice(data);
+        // Chunk CRC integrity is outside these structural validators.
+        bytes.extend_from_slice(&[0; 4]);
+    }
+
+    /// Single-frame APNG whose `fcTL` declares the given frame rectangle.
+    fn apng_with_frame_rect(width: u32, height: u32) -> Vec<u8> {
+        let mut apng = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        let mut animation_control = Vec::new();
+        animation_control.extend_from_slice(&1u32.to_be_bytes());
+        animation_control.extend_from_slice(&0u32.to_be_bytes());
+        append_png_chunk(&mut apng, b"acTL", &animation_control);
+        let mut frame_control = Vec::new();
+        frame_control.extend_from_slice(&0u32.to_be_bytes()); // sequence number
+        frame_control.extend_from_slice(&width.to_be_bytes());
+        frame_control.extend_from_slice(&height.to_be_bytes());
+        frame_control.resize(26, 0); // offsets, delay, dispose/blend
+        append_png_chunk(&mut apng, b"fcTL", &frame_control);
+        append_png_chunk(&mut apng, b"IDAT", &[]);
+        append_png_chunk(&mut apng, b"IEND", &[]);
+        apng
+    }
+
+    /// GIF built from `TINY_GIF` with one extra image descriptor of the given
+    /// frame size appended before the trailer.
+    fn gif_with_extra_frame(width: u16, height: u16) -> Vec<u8> {
+        let mut gif = TINY_GIF[..TINY_GIF.len() - 1].to_vec();
+        gif.push(0x2c);
+        gif.extend_from_slice(&0u16.to_le_bytes()); // left
+        gif.extend_from_slice(&0u16.to_le_bytes()); // top
+        gif.extend_from_slice(&width.to_le_bytes());
+        gif.extend_from_slice(&height.to_le_bytes());
+        gif.push(0x00); // no local colour table
+        gif.extend_from_slice(&[0x02, 0x02, 0x4C, 0x01, 0x00]); // LZW data
+        gif.push(0x3b);
+        gif
+    }
+
+    /// Animated WebP with one `ANMF` frame of the given size on a 1x1 canvas.
+    fn animated_webp_with_frame(width: u32, height: u32) -> Vec<u8> {
+        fn u24(value: u32) -> [u8; 3] {
+            [value as u8, (value >> 8) as u8, (value >> 16) as u8]
+        }
+
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&u24(0)); // x
+        frame.extend_from_slice(&u24(0)); // y
+        frame.extend_from_slice(&u24(width - 1));
+        frame.extend_from_slice(&u24(height - 1));
+        frame.extend_from_slice(&u24(0)); // duration
+        frame.push(0); // flags
+        frame.extend_from_slice(b"VP8 ");
+        frame.extend_from_slice(&3u32.to_le_bytes());
+        frame.extend_from_slice(&[1, 2, 3, 0]);
+
+        let mut body = b"WEBP".to_vec();
+        for (kind, payload) in [
+            (b"VP8X", &[0x02u8, 0, 0, 0, 0, 0, 0, 0, 0, 0][..]),
+            (b"ANIM", &[0; 6][..]),
+            (b"ANMF", &frame[..]),
+        ] {
+            body.extend_from_slice(kind);
+            body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            body.extend_from_slice(payload);
+            if payload.len() % 2 != 0 {
+                body.push(0);
+            }
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn upload_path_applies_png_metadata_guard_to_apng() {
+        let config = test_config();
+        let clean = apng_with_frame_rect(1, 1);
+        assert_eq!(
+            validate_content(&clean, &config).expect("clean apng"),
+            "image/apng"
+        );
+
+        // Reclassifying an animated PNG as image/apng must not skip the PNG
+        // metadata guard the ordinary png branch applies.
+        for chunk in [b"eXIf", b"iTXt", b"zTXt", b"iCCP"] {
+            let mut apng = clean[..clean.len() - 12].to_vec();
+            append_png_chunk(&mut apng, chunk, b"GPS=37.7,-122.4");
+            append_png_chunk(&mut apng, b"IEND", &[]);
+            assert!(
+                matches!(
+                    validate_content(&apng, &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "upload path accepted APNG {}",
+                String::from_utf8_lossy(chunk)
+            );
+        }
+    }
+
+    #[test]
+    fn sticker_validation_rejects_metadata_bearing_assets() {
+        // PNG and APNG metadata chunks.
+        for chunk in [b"eXIf", b"iTXt", b"zTXt", b"iCCP"] {
+            let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+            append_png_chunk(&mut png, chunk, b"GPS=37.7,-122.4");
+            append_png_chunk(&mut png, b"IDAT", &[]);
+            append_png_chunk(&mut png, b"IEND", &[]);
+            assert!(
+                matches!(
+                    validate_sticker_content(&png, "image/png"),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "sticker path accepted PNG {}",
+                String::from_utf8_lossy(chunk)
+            );
+        }
+
+        let mut apng = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        let mut animation_control = Vec::new();
+        animation_control.extend_from_slice(&1u32.to_be_bytes());
+        animation_control.extend_from_slice(&0u32.to_be_bytes());
+        append_png_chunk(&mut apng, b"acTL", &animation_control);
+        append_png_chunk(&mut apng, b"fcTL", &[0; 26]);
+        append_png_chunk(&mut apng, b"eXIf", b"GPS=37.7,-122.4");
+        append_png_chunk(&mut apng, b"IDAT", &[]);
+        append_png_chunk(&mut apng, b"IEND", &[]);
+        assert_eq!(buzz_core::stickers::apng_frame_count(&apng), Some(1));
+        assert!(matches!(
+            validate_sticker_content(&apng, "image/apng"),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        // GIF comment extension.
+        let mut gif = TINY_GIF[..TINY_GIF.len() - 1].to_vec();
+        gif.extend_from_slice(&[0x21, 0xfe, 15]);
+        gif.extend_from_slice(b"GPS=37.7,-122.4");
+        gif.extend_from_slice(&[0x00, 0x3b]);
+        assert!(matches!(
+            validate_sticker_content(&gif, "image/gif"),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        // WebP EXIF chunk.
+        let mut webp = animated_webp_with_frame(1, 1);
+        let exif = b"Exif\0\0GPS=37.7,-122.40";
+        webp.extend_from_slice(b"EXIF");
+        webp.extend_from_slice(&(exif.len() as u32).to_le_bytes());
+        webp.extend_from_slice(exif);
+        assert!(exif.len().is_multiple_of(2), "RIFF chunks are word-aligned");
+        let body_len = (webp.len() - 8) as u32;
+        webp[4..8].copy_from_slice(&body_len.to_le_bytes());
+        assert!(matches!(
+            validate_sticker_content(&webp, "image/webp"),
+            Err(MediaError::MetadataForbidden)
+        ));
+    }
+
+    #[test]
+    fn sticker_validation_bounds_per_frame_geometry() {
+        // A frame rectangle is decoded independently of the logical canvas, so
+        // a 1x1 canvas must not license an oversized frame.
+        let oversized_gif = gif_with_extra_frame(u16::MAX, u16::MAX);
+        let canvas = imagesize::blob_size(&oversized_gif).expect("canvas geometry");
+        assert_eq!((canvas.width, canvas.height), (1, 1));
+        assert!(matches!(
+            validate_sticker_content(&oversized_gif, "image/gif"),
+            Err(MediaError::ImageTooLarge)
+        ));
+        assert!(validate_sticker_content(&gif_with_extra_frame(1, 1), "image/gif").is_ok());
+
+        let oversized_apng = apng_with_frame_rect(u32::MAX, u32::MAX);
+        assert_eq!(
+            buzz_core::stickers::apng_frame_count(&oversized_apng),
+            Some(1)
+        );
+        assert!(matches!(
+            validate_sticker_content(&oversized_apng, "image/apng"),
+            Err(MediaError::ImageTooLarge)
+        ));
+        assert!(validate_sticker_content(&apng_with_frame_rect(1, 1), "image/apng").is_ok());
+
+        let oversized_webp = animated_webp_with_frame(1 << 20, 1 << 20);
+        assert!(matches!(
+            validate_sticker_content(&oversized_webp, "image/webp"),
+            Err(MediaError::ImageTooLarge)
+        ));
+        assert!(validate_sticker_content(&animated_webp_with_frame(1, 1), "image/webp").is_ok());
     }
 
     #[test]

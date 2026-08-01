@@ -21,6 +21,12 @@ import { invoke } from "@tauri-apps/api/core";
 // Also matches thumbnails: /media/{64-hex}.thumb.jpg
 const RELAY_MEDIA_RE =
   /^(?:https?:\/\/[^/]+)\/media\/([\da-f]{64}(?:\.thumb)?\.(?:jpg|png|gif|webp|mp4|webm|mov)(?:\?.*)?)$/;
+// Narrow Sonar cache route. Every segment is a validated identifier/hash, so
+// this cannot turn the local proxy into an arbitrary URL fetcher. Group 1 is
+// the origin when the URL is absolute (undefined for origin-less paths);
+// group 2 is the media path.
+const RELAY_STICKER_RE =
+  /^(?:(https?:\/\/[^/]+))?(\/media\/sticker\/[0-9a-f]{64}\/[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9_+%-]{1,192}\/[0-9a-f]{64})$/;
 
 /** Cached proxy port — fetched once from the Tauri backend. */
 let cachedPort: number | null = null;
@@ -298,7 +304,8 @@ export function mediaProxyUrl(port: number, mediaPath: string): string {
  */
 export function rewriteRelayUrl(url: string): string {
   const m = RELAY_MEDIA_RE.exec(url);
-  if (!m) return url;
+  const sticker = RELAY_STICKER_RE.exec(url);
+  if (!m && !sticker) return url;
 
   // Only proxy URLs that belong to our relay. External Blossom URLs
   // (different origin) pass through unchanged — they work fine via WKWebView.
@@ -307,20 +314,27 @@ export function rewriteRelayUrl(url: string): string {
   // Compare canonicalized origins: hosts are case-insensitive, and the relay
   // always returns lowercased media URLs even when the saved community URL
   // was typed with uppercase (e.g. wss://PENDING-SEED.communities.buzz.xyz).
-  if (cachedRelayOrigin) {
+  // Only origin-less sticker cache paths (no origin captured by
+  // RELAY_STICKER_RE) skip the same-origin gate; absolute sticker URLs from
+  // another host must pass through unchanged.
+  const isRelativeSticker = sticker !== null && sticker[1] === undefined;
+  if (!isRelativeSticker && cachedRelayOrigin) {
     const urlOrigin = canonicalOrigin(url);
     if (urlOrigin !== cachedRelayOrigin) {
       return url;
     }
   }
 
+  const mediaPath = sticker ? sticker[2].slice("/media/".length) : m?.[1];
+  if (!mediaPath) return url;
+
   if (cachedPort && cachedPort > 0) {
-    return mediaProxyUrl(cachedPort, m[1]);
+    return mediaProxyUrl(cachedPort, mediaPath);
   }
 
   if (!portPromise && typeof window !== "undefined") {
     portPromise = fetchProxyPort();
   }
 
-  return `buzz-media://localhost/media/${m[1]}`;
+  return `buzz-media://localhost/media/${mediaPath}`;
 }
