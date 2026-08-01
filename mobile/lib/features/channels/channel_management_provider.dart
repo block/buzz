@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -63,12 +64,19 @@ class DirectoryUser {
   final String? avatarUrl;
   final String? nip05Handle;
 
+  /// Verified NIP-OA owner pubkey — non-null iff this directory entry is an
+  /// agent, per [verifiedOaOwnerPubkey].
+  final String? ownerPubkey;
+
   const DirectoryUser({
     required this.pubkey,
     this.displayName,
     this.avatarUrl,
     this.nip05Handle,
+    this.ownerPubkey,
   });
+
+  bool get isAgent => ownerPubkey != null;
 
   String get label {
     final display = displayName?.trim();
@@ -220,6 +228,7 @@ List<DirectoryUser> directoryUsersFromProfileEvents(List<NostrEvent> events) {
           displayName: profile.displayName,
           avatarUrl: profile.avatarUrl,
           nip05Handle: profile.nip05,
+          ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
         ),
   ]..sort((a, b) {
     final labelComparison = a.label.toLowerCase().compareTo(

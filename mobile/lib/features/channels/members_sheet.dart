@@ -10,6 +10,7 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../profile/user_status.dart';
 import '../profile/user_status_cache_provider.dart';
+import 'add_member_sheet.dart';
 import 'agent_activity/agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel.dart';
@@ -44,6 +45,27 @@ class MembersSheet extends HookConsumerWidget {
         currentMember != null &&
         currentMember.isElevated &&
         !channel.isArchived;
+
+    final canAddMembers = !channel.isDm && !channel.isArchived;
+
+    void openAddMember() {
+      final navigator = Navigator.of(context);
+      navigator.pop();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!navigator.mounted) return;
+        showModalBottomSheet<void>(
+          context: navigator.context,
+          isScrollControlled: true,
+          showDragHandle: true,
+          builder: (_) => AddChannelMemberSheet(
+            channelId: channel.id,
+            existingMemberPubkeys: allMembers
+                .map((member) => member.pubkey.toLowerCase())
+                .toSet(),
+          ),
+        );
+      });
+    }
 
     void openActivity(ChannelMember bot) {
       final navigator = Navigator.of(context);
@@ -92,7 +114,21 @@ class MembersSheet extends HookConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Members', style: context.textTheme.titleMedium),
+            Row(
+              children: [
+                Expanded(
+                  child: Text('Members', style: context.textTheme.titleMedium),
+                ),
+                if (canAddMembers)
+                  IconButton(
+                    key: const Key('open-add-member'),
+                    icon: const Icon(LucideIcons.userPlus, size: 18),
+                    onPressed: openAddMember,
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Add member',
+                  ),
+              ],
+            ),
             const SizedBox(height: Grid.xxs),
             if (!channel.isDm) ...[const Divider(height: 1)],
             ConstrainedBox(
