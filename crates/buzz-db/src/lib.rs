@@ -4096,6 +4096,12 @@ impl Db {
         relay_members::bootstrap_owner(&self.pool, community, owner_pubkey).await
     }
 
+    /// Returns `true` if any member of `community` holds the `admin` or
+    /// `owner` role.
+    pub async fn has_admin_or_owner(&self, community: CommunityId) -> Result<bool> {
+        relay_members::has_admin_or_owner(&self.pool, community).await
+    }
+
     /// Atomically transfers ownership of `community` to `new_owner_pubkey`,
     /// demoting the previous owner(s) to `member`. Verifies
     /// `expected_owner_pubkey` matches the current owner inside the same
