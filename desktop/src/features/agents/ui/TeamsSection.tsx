@@ -20,9 +20,9 @@ import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { SectionHeader } from "@/shared/ui/PageHeader";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
+import { IDENTITY_CARD_GRID_CLASS } from "./UnifiedAgentsSection";
 
 const TEAM_CARD_COLUMN_CLASS = "w-full";
-const TEAM_CARD_GRID_CLASS = `${TEAM_CARD_COLUMN_CLASS} mx-auto grid max-w-[996px] grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-center gap-3`;
 
 type TeamsSectionProps = {
   teams: AgentTeam[];
@@ -63,7 +63,7 @@ export function TeamsSection({
       </div>
 
       {isLoading ? (
-        <div className={TEAM_CARD_GRID_CLASS}>
+        <div className={IDENTITY_CARD_GRID_CLASS}>
           <IdentityCardSkeleton
             footerSubtitleWidthClass="w-14"
             footerTitleWidthClass="w-24"
@@ -83,7 +83,7 @@ export function TeamsSection({
       ) : null}
 
       {!isLoading ? (
-        <div className={TEAM_CARD_GRID_CLASS}>
+        <div className={IDENTITY_CARD_GRID_CLASS}>
           {teams.map((team) => {
             const resolution = resolveTeamPersonas(team, personas);
             const missingPersonaCount = resolution.missingPersonaCount;

@@ -16,19 +16,20 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/widgets/sheet_divider.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
+import 'reaction_row.dart';
+import 'recent_emoji_provider.dart';
 import 'read_state/message_read_state.dart';
 import 'read_state/read_state_format.dart';
 import 'read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
-
-const quickEmojis = ['\u{1F44D}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F389}'];
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
@@ -65,42 +66,11 @@ void showMessageActions({
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Quick emoji row
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    for (final emoji in quickEmojis)
-                      _QuickReactionCircle(
-                        onTap: () {
-                          Navigator.of(sheetContext).pop();
-                          ref
-                              .read(channelActionsProvider)
-                              .addReaction(message.id, emoji);
-                        },
-                        child: Text(
-                          emoji,
-                          style: const TextStyle(fontSize: 24),
-                        ),
-                      ),
-                    _QuickReactionCircle(
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        showEmojiPicker(
-                          context: context,
-                          onSelect: (emoji) {
-                            ref
-                                .read(channelActionsProvider)
-                                .addReaction(message.id, emoji);
-                          },
-                        );
-                      },
-                      child: Icon(
-                        LucideIcons.plus,
-                        size: 24,
-                        color: sheetContext.colors.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
+                _QuickReactionRow(
+                  message: message,
+                  sheetContext: sheetContext,
+                  pageContext: context,
+                  pageRef: ref,
                 ),
                 const SizedBox(height: Grid.xs),
                 if (!message.isSystem) ...[
@@ -611,6 +581,115 @@ class _FastActionTile extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// The row of one-tap reactions at the top of the action sheet, plus the "+"
+/// tile that opens the full picker.
+///
+/// The emoji shown are the user's own frequently-used set (desktop's
+/// `useQuickReactionEmojis` behaviour), topped up with [defaultQuickEmojis] so
+/// the row is full on a fresh install.
+class _QuickReactionRow extends ConsumerWidget {
+  final TimelineMessage message;
+
+  /// The sheet's context, popped before the reaction fires.
+  final BuildContext sheetContext;
+
+  /// The long-pressed message's page context — survives the sheet pop, so the
+  /// picker opened from "+" isn't torn down with the sheet.
+  final BuildContext pageContext;
+
+  /// The long-pressed message's page ref. The picker callback outlives this
+  /// bottom sheet, so it must not read through the sheet's disposed ref.
+  final WidgetRef pageRef;
+
+  const _QuickReactionRow({
+    required this.message,
+    required this.sheetContext,
+    required this.pageContext,
+    required this.pageRef,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final customEmoji = ref.watch(customEmojiListProvider);
+    final emoji = quickReactionEmoji(
+      ref.watch(recentEmojiProvider),
+      customShortcodes: {
+        for (final entry in customEmoji) entry.shortcode.toLowerCase(),
+      },
+    );
+    final customByShortcode = {
+      for (final entry in customEmoji) entry.shortcode.toLowerCase(): entry,
+    };
+
+    void react(String value) {
+      // The generic picker is also used for composing and statuses. Record
+      // recency here, at the reaction call site, so only reactions drive the
+      // quick-reaction row.
+      pageRef.read(recentEmojiProvider.notifier).record(value);
+      // The sheet is on its way out, so the burst can't come from this tile —
+      // hand it to the pill that's about to appear in the timeline.
+      armReactionBurst(pageRef, message, value);
+      pageRef.read(channelActionsProvider).addReaction(message.id, value);
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        for (final value in emoji)
+          _QuickReactionCircle(
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              react(value);
+            },
+            child: _QuickReactionGlyph(
+              value: value,
+              customByShortcode: customByShortcode,
+            ),
+          ),
+        _QuickReactionCircle(
+          onTap: () {
+            Navigator.of(sheetContext).pop();
+            showEmojiPicker(context: pageContext, onSelect: react);
+          },
+          child: Icon(
+            LucideIcons.plus,
+            size: 24,
+            color: context.colors.onSurfaceVariant,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Renders a quick-reaction value: a Unicode glyph as text, a `:shortcode:` as
+/// its custom-emoji image.
+class _QuickReactionGlyph extends StatelessWidget {
+  final String value;
+  final Map<String, CustomEmoji> customByShortcode;
+
+  const _QuickReactionGlyph({
+    required this.value,
+    required this.customByShortcode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (value.startsWith(':') && value.endsWith(':')) {
+      final shortcode = value.substring(1, value.length - 1).toLowerCase();
+      final custom = customByShortcode[shortcode];
+      if (custom != null) {
+        return CustomEmojiImage(
+          shortcode: custom.shortcode,
+          url: custom.url,
+          size: 24,
+        );
+      }
+    }
+    return Text(value, style: const TextStyle(fontSize: 24));
   }
 }
 

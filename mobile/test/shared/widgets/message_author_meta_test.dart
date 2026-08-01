@@ -4,6 +4,41 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('keeps the separator and timestamp next to a short name', (
+    tester,
+  ) async {
+    const displayNameKey = Key('author-display-name');
+    const timestampKey = Key('author-timestamp');
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: const Scaffold(
+          body: SizedBox(
+            width: 300,
+            child: MessageAuthorMeta(
+              displayName: 'Alice',
+              timestamp: '2m',
+              displayNameKey: displayNameKey,
+              timestampKey: timestampKey,
+              nameColor: Colors.black,
+              metadataColor: Colors.grey,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final displayNameRect = tester.getRect(find.byKey(displayNameKey));
+    final separatorRect = tester.getRect(find.text('·'));
+    final timestampRect = tester.getRect(find.byKey(timestampKey));
+
+    expect(separatorRect.left - displayNameRect.right, Grid.half);
+    expect(timestampRect.left - separatorRect.right, Grid.half);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('reallocates unused metadata width to the display name', (
     tester,
   ) async {

@@ -108,7 +108,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
-  threadHeadVideoReviewContext?: VideoReviewContext;
+  videoReviewContextsByMessageId?: ReadonlyMap<string, VideoReviewContext>;
   activityAccessoryContent?: React.ReactNode;
   activityAccessoryVisible: boolean;
   widthPx: number;
@@ -221,7 +221,7 @@ export function MessageThreadPanel({
   scrollTargetId,
   scrollTargetHighlights = true,
   threadHead,
-  threadHeadVideoReviewContext,
+  videoReviewContextsByMessageId,
   threadReplies,
   threadRepliesPending = false,
   threadUnreadCount,
@@ -600,7 +600,9 @@ export function MessageThreadPanel({
               }
               profiles={profiles}
               showDepthGuides={shouldShowThreadBranchGuides}
-              videoReviewContext={threadHeadVideoReviewContext}
+              videoReviewContext={videoReviewContextsByMessageId?.get(
+                threadHead.id,
+              )}
             />
           </div>
         </div>
@@ -753,9 +755,13 @@ export function MessageThreadPanel({
                         onMarkUnread={onMarkUnread}
                         onMarkRead={onMarkRead}
                         onReply={onSelectReplyTarget}
+                        onOpenThread={onExpandReplies}
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}
                         showDepthGuides={shouldShowThreadBranchGuides}
+                        videoReviewContext={videoReviewContextsByMessageId?.get(
+                          entry.message.id,
+                        )}
                       />
                       {entry.summary ? (
                         <MessageThreadSummaryRow

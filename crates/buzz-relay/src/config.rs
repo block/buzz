@@ -56,6 +56,10 @@ pub struct Config {
     /// Optional read-replica connection URL (e.g. an Aurora `cluster-ro-`
     /// endpoint). Unset means all reads stay on the writer.
     pub read_database_url: Option<String>,
+    /// Replica read budget `B` in milliseconds (`BUZZ_REPLICA_READ_MAX_AGE_MS`).
+    /// `0` (the default) disables bounded-staleness replica routing; see
+    /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
+    pub replica_read_max_age_ms: u64,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
     /// Maximum connections in the shared Redis pool. Defaults to 16.
@@ -72,6 +76,11 @@ pub struct Config {
     /// the per-pod pool and requests fail on acquire timeout while the
     /// database sits idle.
     pub db_pool_size: u32,
+    /// Maximum connections in the Postgres read-replica pool
+    /// (`BUZZ_DB_READ_POOL_SIZE`). Defaults to `db_pool_size`. Sized
+    /// independently so reader capacity can be tuned against the replica's
+    /// headroom without touching the writer pool.
+    pub db_read_pool_size: Option<u32>,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -423,6 +432,27 @@ impl Config {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
+        // The old seconds-denominated name is a hard startup error, not an
+        // alias: silently honouring it would mean 1000x the intended budget.
+        if std::env::var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS").is_ok() {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_REPLICA_HEAD_MAX_AGE_SECS was renamed to BUZZ_REPLICA_READ_MAX_AGE_MS \
+                 (note: milliseconds, not seconds); refusing to start"
+                    .to_string(),
+            ));
+        }
+
+        // Replica read budget: 0 = off (the rollout default), so this is a
+        // non-negative parse, unlike `positive_u64_from_env`.
+        let replica_read_max_age_ms = match std::env::var("BUZZ_REPLICA_READ_MAX_AGE_MS") {
+            Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
+                ConfigError::InvalidValue(
+                    "BUZZ_REPLICA_READ_MAX_AGE_MS must be a non-negative integer".to_string(),
+                )
+            })?,
+            Err(_) => 0,
+        };
+
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
@@ -437,6 +467,11 @@ impl Config {
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(50);
+
+        let db_read_pool_size = std::env::var("BUZZ_DB_READ_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0);
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -630,6 +665,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
 
+        let s3_addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
+            Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
+            Err(std::env::VarError::NotPresent) => buzz_media::config::S3AddressingStyle::default(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_S3_ADDRESSING_STYLE must be valid Unicode and one of 'path' or 'virtual'"
+                        .to_string(),
+                ));
+            }
+        };
         let media = buzz_media::MediaConfig {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
@@ -641,6 +686,7 @@ impl Config {
             s3_region: std::env::var("BUZZ_S3_REGION")
                 .or_else(|_| std::env::var("AWS_REGION"))
                 .unwrap_or_else(|_| "us-east-1".to_string()),
+            s3_addressing_style,
             max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -887,9 +933,11 @@ impl Config {
             bind_addr,
             database_url,
             read_database_url,
+            replica_read_max_age_ms,
             redis_url,
             redis_pool_size,
             db_pool_size,
+            db_read_pool_size,
             relay_url,
             pairing_relay_url,
             max_connections,
@@ -990,6 +1038,11 @@ mod tests {
             !config.require_media_get_auth,
             "require_media_get_auth should default to false for staged client rollout"
         );
+        assert_eq!(
+            config.media.s3_addressing_style,
+            buzz_media::config::S3AddressingStyle::Path,
+            "S3 addressing must default to path style for bundled MinIO compatibility"
+        );
         assert!(
             config.join_policy.is_none(),
             "join_policy should default to None so policy prompts and acceptance receipts are opt-in"
@@ -998,6 +1051,61 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    #[test]
+    fn s3_addressing_style_env_accepts_virtual_and_rejects_invalid_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
+
+        std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "virtual");
+        let configured = Config::from_env()
+            .expect("virtual style config")
+            .media
+            .s3_addressing_style;
+
+        std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "auto");
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", value);
+        } else {
+            std::env::remove_var("BUZZ_S3_ADDRESSING_STYLE");
+        }
+
+        assert_eq!(configured, buzz_media::config::S3AddressingStyle::Virtual);
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn s3_addressing_style_env_rejects_non_unicode_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
+        std::env::set_var(
+            "BUZZ_S3_ADDRESSING_STYLE",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", value);
+        } else {
+            std::env::remove_var("BUZZ_S3_ADDRESSING_STYLE");
+        }
+
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must be valid Unicode")
+        ));
     }
 
     #[test]
@@ -1051,6 +1159,35 @@ mod tests {
     }
 
     #[test]
+    fn db_read_pool_size_env_override_and_invalid_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_DB_READ_POOL_SIZE");
+
+        std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
+        let unset = Config::from_env().expect("config").db_read_pool_size;
+
+        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "40");
+        let overridden = Config::from_env().expect("config").db_read_pool_size;
+
+        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "0");
+        let zero = Config::from_env().expect("config").db_read_pool_size;
+
+        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "not-a-number");
+        let junk = Config::from_env().expect("config").db_read_pool_size;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_DB_READ_POOL_SIZE", value);
+        } else {
+            std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
+        }
+
+        assert_eq!(unset, None, "unset must inherit the writer pool sizing");
+        assert_eq!(overridden, Some(40));
+        assert_eq!(zero, None, "zero must fall back to inheriting");
+        assert_eq!(junk, None, "unparsable value must fall back to inheriting");
+    }
+
+    #[test]
     fn read_database_url_unset_or_blank_is_none() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let previous = std::env::var_os("READ_DATABASE_URL");
@@ -1076,6 +1213,58 @@ mod tests {
             set.as_deref(),
             Some("postgres://buzz:pw@replica:5432/buzz") // sadscan:disable np.postgres.1
         );
+    }
+
+    #[test]
+    fn replica_read_max_age_defaults_off_and_rejects_junk() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        let previous_old = std::env::var_os("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
+        std::env::remove_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
+
+        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        let unset = Config::from_env().expect("config").replica_read_max_age_ms;
+
+        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "1000");
+        let set = Config::from_env().expect("config").replica_read_max_age_ms;
+
+        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "0");
+        let zero = Config::from_env().expect("config").replica_read_max_age_ms;
+
+        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "soon");
+        let junk = Config::from_env();
+
+        // The retired seconds-denominated name must be a hard startup
+        // error even alongside a valid new-name value: silently ignoring
+        // it (or honouring it) would mean 1000x the intended budget.
+        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "1000");
+        std::env::set_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS", "5");
+        let old_name = Config::from_env();
+
+        std::env::remove_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        }
+        if let Some(value) = previous_old {
+            std::env::set_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS", value);
+        }
+
+        assert_eq!(unset, 0, "replica read routing must default off");
+        assert_eq!(set, 1000);
+        assert_eq!(zero, 0, "explicit 0 is off");
+        assert!(
+            junk.is_err(),
+            "an unparsable budget must fail loudly, not silently disable"
+        );
+        match old_name {
+            Err(ConfigError::InvalidValue(message)) => assert!(
+                message.contains("BUZZ_REPLICA_READ_MAX_AGE_MS"),
+                "the error must name the replacement env var, got: {message}"
+            ),
+            other => panic!("old env name must hard-fail startup, got {other:?}"),
+        }
     }
 
     #[test]
