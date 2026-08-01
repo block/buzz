@@ -3,8 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::fs::File;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const MAX_CONCURRENT_COMMANDS: usize = 1024;
 
 use buzz_core::execution::{
     ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope, ExecutionNodeId,
@@ -33,6 +36,10 @@ pub struct NodeConfig {
     pub display_name: String,
     /// Optional NIP-OA tag used when authenticating to the relay.
     pub auth_tag: Option<Tag>,
+    /// Local HTTP address used for process health and relay readiness probes.
+    pub health_addr: SocketAddr,
+    /// Maximum number of encrypted commands processed concurrently.
+    pub max_concurrent_commands: usize,
 }
 
 impl NodeConfig {
@@ -52,12 +59,41 @@ impl NodeConfig {
             .filter(|value| !value.trim().is_empty())
             .map(|value| parse_auth_tag(&value))
             .transpose()?;
+        let health_addr = std::env::var("BUZZ_NODE_HEALTH_ADDR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value.parse().map_err(|error| {
+                    NodeError::InvalidConfiguration(format!("BUZZ_NODE_HEALTH_ADDR: {error}"))
+                })
+            })
+            .transpose()?
+            .unwrap_or(SocketAddr::from(([127, 0, 0, 1], 8081)));
+        let max_concurrent_commands = std::env::var("BUZZ_NODE_MAX_CONCURRENT_COMMANDS")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value.parse::<usize>().map_err(|error| {
+                    NodeError::InvalidConfiguration(format!(
+                        "BUZZ_NODE_MAX_CONCURRENT_COMMANDS must be a positive integer: {error}"
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or(8);
+        if max_concurrent_commands == 0 || max_concurrent_commands > MAX_CONCURRENT_COMMANDS {
+            return Err(NodeError::InvalidConfiguration(format!(
+                "BUZZ_NODE_MAX_CONCURRENT_COMMANDS must be between 1 and {MAX_CONCURRENT_COMMANDS}"
+            )));
+        }
 
         Ok(Self {
             relay_url,
             data_dir,
             display_name,
             auth_tag,
+            health_addr,
+            max_concurrent_commands,
         })
     }
 }
@@ -510,9 +546,14 @@ impl ExecutionController {
 
     /// Load command idempotency state from a node data directory.
     pub fn load(data_dir: &Path) -> Result<Self, NodeError> {
+        Self::load_with_concurrency(data_dir, 8)
+    }
+
+    /// Load command state with an explicit bounded command concurrency.
+    pub fn load_with_concurrency(data_dir: &Path, limit: usize) -> Result<Self, NodeError> {
         let path = data_dir.join("execution-state.json");
         if !path.exists() {
-            let controller = Self::new();
+            let controller = Self::with_concurrency(limit);
             controller
                 .state
                 .try_lock()
@@ -556,7 +597,7 @@ impl ExecutionController {
                 }
             }
         };
-        let controller = Self::new();
+        let controller = Self::with_concurrency(limit);
         *controller.state.try_lock().map_err(|_| {
             NodeError::InvalidConfiguration(
                 "new execution controller was unexpectedly locked".into(),

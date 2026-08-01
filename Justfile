@@ -311,6 +311,10 @@ test-unit:
         ./scripts/run-tests.sh unit
     fi
 
+# Start buzz-node against an already-running local relay and verify readiness.
+buzz-node-smoke RELAY_URL="ws://127.0.0.1:3000":
+    ./scripts/smoke-buzz-node.sh {{RELAY_URL}}
+
 # Run integration tests only (starts services if needed)
 test-integration:
     ./scripts/run-tests.sh integration

@@ -111,6 +111,30 @@ impl NostrWsConnection {
         self.recv_one(timeout_dur).await
     }
 
+    /// Wait for a subscription's end-of-stored-events marker without losing
+    /// events that arrive before the marker.
+    pub async fn wait_for_eose(
+        &mut self,
+        subscription_id: &str,
+        timeout_dur: Duration,
+    ) -> Result<(), WsClientError> {
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(WsClientError::Timeout);
+            }
+            match self.recv_one(remaining).await? {
+                RelayMessage::Eose {
+                    subscription_id: id,
+                } if id == subscription_id => return Ok(()),
+                message => self.buffer.push_back(message),
+            }
+        }
+    }
+
     /// Closes the WebSocket connection gracefully.
     pub async fn disconnect(mut self) -> Result<(), WsClientError> {
         self.ws.close(None).await?;
