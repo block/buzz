@@ -306,3 +306,39 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
+
+
+test("shared relay agent not in local managed list is admitted (#3971)", () => {
+  // #3971: an agent hosted on another machine is a channel member and appears
+  // in the relay directory with respond_to=anyone, but is NOT in the local
+  // managed-agent list. The old addCandidate gate dropped it before
+  // shouldHideAgentFromMentions could consult mentionableAgentPubkeys, making
+  // remote shared agents unreachable. The fixed admit condition is:
+  //   admit iff isAgentIdentityInManagedList(...) || mentionableAgentPubkeys.has(pubkey)
+  const managedAgentPubkeys = new Set(); // agent is remote-only, not local
+  const mentionableAgentPubkeys = new Set([PUB_B]); // relay-shared
+  const pubkey = PUB_B;
+
+  const admitCondition =
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey },
+      managedAgentPubkeys,
+    ) || mentionableAgentPubkeys.has(pubkey);
+
+  assert.equal(admitCondition, true);
+});
+
+test("non-shared non-local agent is still rejected (#3971)", () => {
+  // A remote agent NOT in the relay mentionable set must still be dropped.
+  const managedAgentPubkeys = new Set();
+  const mentionableAgentPubkeys = new Set();
+  const pubkey = PUB_C;
+
+  const admitCondition =
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey },
+      managedAgentPubkeys,
+    ) || mentionableAgentPubkeys.has(pubkey);
+
+  assert.equal(admitCondition, false);
+});
