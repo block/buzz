@@ -70,6 +70,62 @@ pub fn effective_agent_relay_url(_record_relay: &str, workspace_relay: &str) -> 
     workspace_relay.to_string()
 }
 
+/// True when `url` carries an `https://` scheme (scheme match is
+/// case-insensitive per RFC 3986 §3.1).
+fn is_https_url(url: &str) -> bool {
+    url.trim_start()
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+}
+
+/// Core selection rule for the relay URL embedded in a mobile pairing
+/// credential payload. Split out as a pure function so it is testable without
+/// mutating process-wide env state.
+///
+/// Precedence: `BUZZ_RELAY_HTTP` (when HTTPS) > active relay base URL (when
+/// HTTPS) > error.
+pub(crate) fn select_mobile_pairing_relay_url(
+    env_http: Option<&str>,
+    base_url: &str,
+) -> Result<String, String> {
+    if let Some(env_url) = env_http {
+        let env_url = env_url.trim().trim_end_matches('/');
+        if is_https_url(env_url) {
+            return Ok(env_url.to_string());
+        }
+    }
+
+    let base = base_url.trim().trim_end_matches('/');
+    if is_https_url(base) {
+        return Ok(base.to_string());
+    }
+
+    Err(format!(
+        "mobile pairing requires an HTTPS relay URL — set BUZZ_RELAY_HTTP \
+         (current relay URL: {base})"
+    ))
+}
+
+/// Returns the relay HTTP base URL to embed in a mobile pairing credential
+/// payload.
+///
+/// This is deliberately NOT `relay_api_base_url_with_override`: the mobile
+/// client rejects any non-HTTPS relay URL in release builds
+/// (`_validateRelayUrl` in `mobile/lib/features/pairing/pairing_provider.dart`
+/// throws `FormatException: Relay URL must use HTTPS`). A workspace relay
+/// pinned to `ws://…` — which is legitimate for the desktop's own WebSocket
+/// connection and keys the community row — would otherwise be handed to the
+/// phone as `http://…` and fail there with a cryptic error.
+///
+/// Returning `Err` surfaces an actionable message in the desktop pairing UI
+/// instead of silently emitting a URL that cannot work.
+pub fn relay_api_base_url_for_mobile_pairing(state: &AppState) -> Result<String, String> {
+    select_mobile_pairing_relay_url(
+        configured_env_var("BUZZ_RELAY_HTTP").as_deref(),
+        &relay_api_base_url_with_override(state),
+    )
+}
+
 pub fn relay_http_base_url(relay_url: &str) -> String {
     let trimmed = relay_url.trim().trim_end_matches('/');
 
@@ -603,9 +659,104 @@ mod tests {
     use super::{
         build_profile_event, classify_intercepted_response, effective_agent_relay_url,
         extract_retry_in_hint, parse_command_response, relay_http_base_url,
-        MALFORMED_RESPONSE_MESSAGE,
+        select_mobile_pairing_relay_url, MALFORMED_RESPONSE_MESSAGE,
     };
     use serde::Deserialize;
+
+    // ── mobile pairing relay URL selection ───────────────────────────────────
+    //
+    // The mobile client throws `FormatException: Relay URL must use HTTPS` for
+    // any non-HTTPS relay URL in release builds, so the pairing payload must
+    // never emit one. These pin the precedence and the error path.
+
+    #[test]
+    fn mobile_pairing_prefers_https_env_over_http_base() {
+        assert_eq!(
+            select_mobile_pairing_relay_url(
+                Some("https://relay.example.ts.net:10443"),
+                "http://100.93.190.120:3000",
+            ),
+            Ok("https://relay.example.ts.net:10443".to_string())
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_env_wins_over_https_base() {
+        assert_eq!(
+            select_mobile_pairing_relay_url(
+                Some("https://env.example.ts.net:10443"),
+                "https://base.example.com",
+            ),
+            Ok("https://env.example.ts.net:10443".to_string())
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_falls_back_to_https_override_when_env_unset() {
+        assert_eq!(
+            select_mobile_pairing_relay_url(None, "https://base.example.com"),
+            Ok("https://base.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_errors_when_only_http_available() {
+        let err = select_mobile_pairing_relay_url(None, "http://100.93.190.120:3000")
+            .expect_err("http-only relay must not produce a pairing URL");
+        assert!(
+            err.contains("BUZZ_RELAY_HTTP"),
+            "error must name the env var to set: {err}"
+        );
+        assert!(
+            err.contains("http://100.93.190.120:3000"),
+            "error must echo the offending URL: {err}"
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_ignores_non_https_env_and_errors() {
+        // A misconfigured http:// env value must not be emitted just because
+        // it was explicitly set — it fails on the phone the same way.
+        assert!(select_mobile_pairing_relay_url(
+            Some("http://env.example.com"),
+            "http://100.93.190.120:3000",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mobile_pairing_ignores_non_https_env_but_uses_https_base() {
+        assert_eq!(
+            select_mobile_pairing_relay_url(
+                Some("ws://env.example.com"),
+                "https://base.example.com",
+            ),
+            Ok("https://base.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_trims_whitespace_and_trailing_slash() {
+        assert_eq!(
+            select_mobile_pairing_relay_url(Some("  https://relay.example.com:10443/  "), ""),
+            Ok("https://relay.example.com:10443".to_string())
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_accepts_uppercase_scheme() {
+        // RFC 3986 §3.1: scheme comparison is case-insensitive.
+        assert_eq!(
+            select_mobile_pairing_relay_url(Some("HTTPS://relay.example.com"), ""),
+            Ok("HTTPS://relay.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn mobile_pairing_rejects_https_lookalike_host() {
+        // "https-relay.example.com" must not satisfy the HTTPS check.
+        assert!(select_mobile_pairing_relay_url(None, "http://https-relay.example.com").is_err());
+    }
 
     // ── extract_retry_in_hint ────────────────────────────────────────────────
 
