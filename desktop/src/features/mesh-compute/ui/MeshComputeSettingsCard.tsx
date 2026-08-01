@@ -301,8 +301,9 @@ export function MeshComputeSettingsCard() {
               value={modelInput}
             />
             <p className="text-sm font-normal text-muted-foreground">
-              Choose a suggested model below, or enter a model reference or
-              local file. Buzz downloads remote models when sharing starts.
+              Choose a suggested model below, or enter a catalog name or
+              HuggingFace ref. Buzz downloads remote models when sharing
+              starts; local files are not supported yet.
             </p>
             {catalog && catalog.entries.length > 0 ? (
               <CatalogPicker

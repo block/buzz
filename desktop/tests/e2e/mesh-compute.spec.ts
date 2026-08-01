@@ -28,7 +28,7 @@ test("Share compute selects the curated default and starts and stops sharing", a
 
   await expect(card).toContainText("Not sharing right now");
   await expect(card).toContainText(
-    "Choose a suggested model below, or enter a model reference or local file",
+    "Choose a suggested model below, or enter a catalog name or HuggingFace ref",
   );
   await expect(model).toHaveValue("Gemma-4-E4B-it-Q4_K_M");
   await expect(toggle).toBeEnabled();
