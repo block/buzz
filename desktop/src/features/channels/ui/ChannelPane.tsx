@@ -681,6 +681,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             onMarkUnread={onMarkUnread}
             onMarkRead={onMarkRead}
             onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
+            onOpenThread={onOpenThread}
             channelName={activeChannel?.name}
             channelType={activeChannel?.channelType ?? null}
             isSendingVideoReviewComment={isSending}
