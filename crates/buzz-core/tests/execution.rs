@@ -1,8 +1,8 @@
 use buzz_core::execution::{
     CredentialRef, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
     ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt,
-    ExecutionValidationError, ProviderAuthSession, ReceiptOutcome, SafeErrorCode, WorkloadId,
-    WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
+    ExecutionValidationError, ProviderAuthResponse, ProviderAuthSession, ReceiptDetail,
+    ReceiptOutcome, SafeErrorCode, WorkloadId, WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
 };
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
@@ -154,6 +154,18 @@ fn commands_cover_lifecycle_and_provider_authentication_without_secrets() {
             workload_id: workload_id(),
         },
         ExecutionCommand::AuthenticateProvider { session: auth },
+        ExecutionCommand::SubmitProviderAuthentication {
+            response: ProviderAuthResponse::new(
+                workload_id(),
+                "login-session",
+                "encrypted-provider-response",
+            )
+            .unwrap(),
+        },
+        ExecutionCommand::CancelProviderAuthentication {
+            workload_id: workload_id(),
+            session_id: "login-session".into(),
+        },
     ];
 
     for command in commands {
@@ -163,6 +175,18 @@ fn commands_cover_lifecycle_and_provider_authentication_without_secrets() {
         assert!(value.get("secret").is_none());
         assert!(value.get("token").is_none());
     }
+
+    assert!(matches!(
+        ProviderAuthResponse::new(workload_id(), "login-session", ""),
+        Err(ExecutionValidationError::EmptyAuthenticationResponse)
+    ));
+    assert!(matches!(
+        ProviderAuthResponse::new(workload_id(), "login-session", "x".repeat(16 * 1024 + 1)),
+        Err(ExecutionValidationError::TooLong {
+            field: "provider auth response",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -226,6 +250,24 @@ fn receipts_correlate_and_enforce_sequence_and_terminal_outcomes() {
             current: 1
         })
     );
+
+    let detailed = ExecutionReceipt::for_command_with_detail(
+        &command,
+        workload_id(),
+        3,
+        ReceiptOutcome::Progress,
+        Some(ReceiptDetail::ProviderAuthChallenge {
+            provider: "anthropic".into(),
+            session_id: "login-session".into(),
+            instructions: "finish login".into(),
+        }),
+    )
+    .unwrap();
+    let mut legacy = serde_json::to_value(detailed).unwrap();
+    assert_eq!(legacy["detail"]["detail"], "provider_auth_challenge");
+    legacy.as_object_mut().unwrap().remove("detail");
+    let decoded: ExecutionReceipt = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.detail, None);
 }
 
 #[test]

@@ -47,6 +47,14 @@ export type ExecutionReceipt = {
     | { outcome: "succeeded" }
     | { outcome: "failed"; error: string }
     | { outcome: "rejected"; error: string };
+  detail?:
+    | {
+        detail: "provider_auth_challenge";
+        provider: string;
+        sessionId: string;
+        instructions: string;
+      }
+    | { detail: "provider_authenticated"; provider: string };
   observedAt: string;
 };
 
@@ -128,4 +136,41 @@ export function removeExecutionWorkload(
   input: ExecutionWorkloadCommandInput,
 ): Promise<DeployExecutionWorkloadResponse> {
   return sendExecutionWorkloadCommand("remove", input);
+}
+
+/** Request an actionable provider-authentication challenge from a node. */
+export function startExecutionAuthentication(input: {
+  nodeId: string;
+  workloadId: string;
+  provider: string;
+}): Promise<DeployExecutionWorkloadResponse> {
+  return invokeTauri<DeployExecutionWorkloadResponse>(
+    "start_execution_authentication",
+    { input },
+  );
+}
+
+/** Submit provider-authentication material through the encrypted node command. */
+export function submitExecutionAuthentication(input: {
+  nodeId: string;
+  workloadId: string;
+  sessionId: string;
+  response: string;
+}): Promise<DeployExecutionWorkloadResponse> {
+  return invokeTauri<DeployExecutionWorkloadResponse>(
+    "submit_execution_authentication",
+    { input },
+  );
+}
+
+/** Cancel a pending provider-authentication session. */
+export function cancelExecutionAuthentication(input: {
+  nodeId: string;
+  workloadId: string;
+  sessionId: string;
+}): Promise<DeployExecutionWorkloadResponse> {
+  return invokeTauri<DeployExecutionWorkloadResponse>(
+    "cancel_execution_authentication",
+    { input },
+  );
 }

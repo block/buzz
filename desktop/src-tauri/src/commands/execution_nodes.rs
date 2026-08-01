@@ -5,8 +5,8 @@ use std::time::Duration as StdDuration;
 
 use buzz_core_pkg::execution::{
     CredentialRef, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
-    ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, WorkloadSpec,
-    WorkloadStatus,
+    ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt,
+    ProviderAuthResponse, ProviderAuthSession, WorkloadSpec, WorkloadStatus,
 };
 use buzz_core_pkg::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
@@ -15,6 +15,7 @@ use chrono::{Duration, Utc};
 use nostr::{nips::nip44, EventBuilder, Kind, PublicKey, Tag};
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
@@ -101,6 +102,44 @@ pub struct ExecutionWorkloadCommandInput {
     pub node_id: String,
     /// Existing workload identity.
     pub workload_id: buzz_core_pkg::execution::WorkloadId,
+}
+
+/// Input for starting a provider-authentication session on a node.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartExecutionAuthenticationInput {
+    /// Target node public key.
+    pub node_id: String,
+    /// Existing workload identity.
+    pub workload_id: buzz_core_pkg::execution::WorkloadId,
+    /// Provider namespace to authenticate.
+    pub provider: String,
+}
+
+/// Input for submitting or cancelling a provider-authentication session.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionAuthenticationSessionInput {
+    /// Target node public key.
+    pub node_id: String,
+    /// Existing workload identity.
+    pub workload_id: buzz_core_pkg::execution::WorkloadId,
+    /// Session returned by the start command.
+    pub session_id: String,
+}
+
+/// Encrypted provider response submitted by Desktop.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitExecutionAuthenticationInput {
+    /// Target node public key.
+    pub node_id: String,
+    /// Existing workload identity.
+    pub workload_id: buzz_core_pkg::execution::WorkloadId,
+    /// Session returned by the start command.
+    pub session_id: String,
+    /// Provider response; this is only placed in the encrypted command.
+    pub response: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -237,6 +276,66 @@ pub async fn remove_execution_workload(
     send_lifecycle_command(&state, input, WorkloadLifecycleOperation::Remove).await
 }
 
+/// Start a provider-authentication session on a paired execution node.
+#[tauri::command]
+pub async fn start_execution_authentication(
+    input: StartExecutionAuthenticationInput,
+    state: State<'_, AppState>,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    let node_id = ExecutionNodeId::new(input.node_id.trim().to_string())
+        .map_err(|error| format!("invalid execution node id: {error}"))?;
+    let session = ProviderAuthSession::new(
+        input.workload_id,
+        input.provider,
+        Uuid::new_v4().to_string(),
+        Utc::now() + Duration::minutes(10),
+    )
+    .map_err(|error| format!("could not build authentication session: {error}"))?;
+    send_execution_command(
+        &state,
+        node_id,
+        ExecutionCommand::AuthenticateProvider { session },
+    )
+    .await
+}
+
+/// Submit a provider-authentication response through the encrypted command path.
+#[tauri::command]
+pub async fn submit_execution_authentication(
+    input: SubmitExecutionAuthenticationInput,
+    state: State<'_, AppState>,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    let node_id = ExecutionNodeId::new(input.node_id.trim().to_string())
+        .map_err(|error| format!("invalid execution node id: {error}"))?;
+    let response = ProviderAuthResponse::new(input.workload_id, input.session_id, input.response)
+        .map_err(|error| format!("invalid authentication response: {error}"))?;
+    send_execution_command(
+        &state,
+        node_id,
+        ExecutionCommand::SubmitProviderAuthentication { response },
+    )
+    .await
+}
+
+/// Cancel a provider-authentication session on a paired execution node.
+#[tauri::command]
+pub async fn cancel_execution_authentication(
+    input: ExecutionAuthenticationSessionInput,
+    state: State<'_, AppState>,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    let node_id = ExecutionNodeId::new(input.node_id.trim().to_string())
+        .map_err(|error| format!("invalid execution node id: {error}"))?;
+    send_execution_command(
+        &state,
+        node_id,
+        ExecutionCommand::CancelProviderAuthentication {
+            workload_id: input.workload_id,
+            session_id: input.session_id,
+        },
+    )
+    .await
+}
+
 async fn send_lifecycle_command(
     state: &State<'_, AppState>,
     input: ExecutionWorkloadCommandInput,
@@ -370,11 +469,10 @@ async fn wait_for_execution_receipt(
             continue;
         }
         if let Ok(receipt) = decrypt_execution_receipt(keys, &event) {
-            if receipt.command_id == command_id
-                && &receipt.node_id == node_id
-                && receipt.is_terminal()
-            {
-                return Ok(Some(receipt));
+            if receipt.command_id == command_id && &receipt.node_id == node_id {
+                if receipt.is_terminal() || receipt.detail.is_some() {
+                    return Ok(Some(receipt));
+                }
             }
         }
     }

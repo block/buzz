@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use buzz_core::execution::{
     ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope, ExecutionNodeId,
-    ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, ReceiptOutcome, SafeErrorCode,
-    WorkloadId, WorkloadLifecycle, WorkloadSpec, WorkloadStatus, EXECUTION_PROTOCOL_VERSION,
+    ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, ProviderAuthResponse,
+    ReceiptDetail, ReceiptOutcome, SafeErrorCode, WorkloadId, WorkloadLifecycle, WorkloadSpec,
+    WorkloadStatus, EXECUTION_PROTOCOL_VERSION,
 };
 use buzz_core::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
@@ -193,6 +194,7 @@ pub fn build_announcement_with_workloads(
             ExecutionCapability::Stop,
             ExecutionCapability::Restart,
             ExecutionCapability::Remove,
+            ExecutionCapability::ProviderAuthentication,
         ],
     )?;
     let status = status
@@ -245,6 +247,101 @@ pub struct FakeWorkloadRuntime {
     workloads: BTreeMap<WorkloadId, RuntimeWorkload>,
     removed_workloads: BTreeSet<WorkloadId>,
     deploy_invocations: usize,
+}
+
+/// Encrypted local state proving a provider subscription has been authenticated.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct FakeCredentialStore {
+    authenticated: Vec<StoredCredentialState>,
+    pending_sessions: Vec<PendingAuthSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredCredentialState {
+    workload_id: WorkloadId,
+    provider: String,
+    encrypted_response: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingAuthSession {
+    workload_id: WorkloadId,
+    session_id: String,
+    provider: String,
+    expires_at: DateTime<Utc>,
+}
+
+impl FakeCredentialStore {
+    fn begin(
+        &mut self,
+        session: &buzz_core::execution::ProviderAuthSession,
+    ) -> Result<ReceiptDetail, SafeErrorCode> {
+        self.pending_sessions.retain(|pending| {
+            pending.workload_id != session.workload_id || pending.session_id != session.session_id
+        });
+        self.pending_sessions.push(PendingAuthSession {
+            workload_id: session.workload_id.clone(),
+            session_id: session.session_id.clone(),
+            provider: session.provider.clone(),
+            expires_at: session.expires_at,
+        });
+        Ok(ReceiptDetail::ProviderAuthChallenge {
+            provider: session.provider.clone(),
+            session_id: session.session_id.clone(),
+            instructions:
+                "Complete the provider subscription login, then submit the response from Desktop."
+                    .into(),
+        })
+    }
+
+    fn submit(
+        &mut self,
+        response: &ProviderAuthResponse,
+        now: DateTime<Utc>,
+        node_keys: &Keys,
+    ) -> Result<ReceiptDetail, SafeErrorCode> {
+        let pending_index = self
+            .pending_sessions
+            .iter()
+            .position(|pending| {
+                pending.workload_id == response.workload_id
+                    && pending.session_id == response.session_id
+            })
+            .ok_or(SafeErrorCode::AuthenticationFailed)?;
+        let pending = self.pending_sessions.remove(pending_index);
+        if pending.expires_at <= now {
+            return Err(SafeErrorCode::AuthenticationFailed);
+        }
+        if !self.authenticated.iter().any(|stored| {
+            stored.workload_id == response.workload_id && stored.provider == pending.provider
+        }) {
+            let encrypted_response = nip44::encrypt(
+                node_keys.secret_key(),
+                &node_keys.public_key(),
+                &response.response,
+                nip44::Version::V2,
+            )
+            .map_err(|_| SafeErrorCode::RuntimeFailed)?;
+            self.authenticated.push(StoredCredentialState {
+                workload_id: response.workload_id.clone(),
+                provider: pending.provider.clone(),
+                encrypted_response,
+            });
+        }
+        Ok(ReceiptDetail::ProviderAuthenticated {
+            provider: pending.provider,
+        })
+    }
+
+    fn cancel(&mut self, workload_id: &WorkloadId, session_id: &str) -> Result<(), SafeErrorCode> {
+        let Some(index) = self.pending_sessions.iter().position(|pending| {
+            pending.workload_id == *workload_id && pending.session_id == session_id
+        }) else {
+            return Err(SafeErrorCode::AuthenticationFailed);
+        };
+        self.pending_sessions.remove(index);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +460,7 @@ impl Default for ExecutionController {
 #[derive(Debug, Default)]
 struct ControllerState {
     runtimes: BTreeMap<String, FakeWorkloadRuntime>,
+    credentials: BTreeMap<String, FakeCredentialStore>,
     processed: HashMap<JournalKey, ProcessedCommand>,
     conflicts: HashMap<JournalKey, StoredEvents>,
     next_sequences: BTreeMap<String, BTreeMap<WorkloadId, u64>>,
@@ -437,6 +535,7 @@ impl ExecutionController {
                         .map(|runtime| BTreeMap::from([("legacy".to_string(), runtime)]))
                         .unwrap_or_default(),
                     runtime: None,
+                    credentials: BTreeMap::new(),
                     processed: legacy
                         .processed
                         .into_iter()
@@ -464,6 +563,7 @@ impl ExecutionController {
             )
         })? = ControllerState {
             runtimes: state.runtimes,
+            credentials: state.credentials,
             processed: state
                 .processed
                 .into_iter()
@@ -652,7 +752,13 @@ impl ExecutionController {
                 },
             )?]
         } else {
-            execute(&mut state, &journal_key.owner, &envelope)?
+            execute(
+                &mut state,
+                &journal_key.owner,
+                &envelope,
+                now,
+                &identity.keys,
+            )?
         };
 
         let events = self.receipt_events(identity, &owner, receipts.clone())?;
@@ -721,24 +827,71 @@ fn execute(
     state: &mut ControllerState,
     owner: &str,
     envelope: &ExecutionCommandEnvelope,
+    now: DateTime<Utc>,
+    node_keys: &Keys,
 ) -> Result<Vec<ExecutionReceipt>, NodeError> {
     let accepted = next_receipt(state, owner, envelope, ReceiptOutcome::Accepted)?;
     let runtime = state.runtimes.entry(owner.to_string()).or_default();
-    let outcome = match &envelope.command {
-        ExecutionCommand::Deploy { workload } => runtime.deploy(workload),
-        ExecutionCommand::Start { workload_id } => runtime.start(workload_id),
-        ExecutionCommand::Stop { workload_id } => runtime.stop(workload_id),
-        ExecutionCommand::Restart { workload_id } => runtime.restart(workload_id),
-        ExecutionCommand::Remove { workload_id } => runtime.remove(workload_id),
-        ExecutionCommand::AuthenticateProvider { .. } => Err(SafeErrorCode::Unsupported),
+    let (outcome, detail) = match &envelope.command {
+        ExecutionCommand::Deploy { workload } => (runtime.deploy(workload), None),
+        ExecutionCommand::Start { workload_id } => (runtime.start(workload_id), None),
+        ExecutionCommand::Stop { workload_id } => (runtime.stop(workload_id), None),
+        ExecutionCommand::Restart { workload_id } => (runtime.restart(workload_id), None),
+        ExecutionCommand::Remove { workload_id } => (runtime.remove(workload_id), None),
+        ExecutionCommand::AuthenticateProvider { session } => {
+            let result = if runtime.workloads.contains_key(&session.workload_id) {
+                state
+                    .credentials
+                    .entry(owner.to_string())
+                    .or_default()
+                    .begin(session)
+            } else {
+                Err(SafeErrorCode::WorkloadNotFound)
+            };
+            match result {
+                Ok(detail) => (Ok(WorkloadLifecycle::Pending), Some(detail)),
+                Err(error) => (Err(error), None),
+            }
+        }
+        ExecutionCommand::SubmitProviderAuthentication { response } => {
+            let result = state
+                .credentials
+                .entry(owner.to_string())
+                .or_default()
+                .submit(response, now, node_keys);
+            match result {
+                Ok(detail) => (Ok(WorkloadLifecycle::Running), Some(detail)),
+                Err(error) => (Err(error), None),
+            }
+        }
+        ExecutionCommand::CancelProviderAuthentication {
+            workload_id,
+            session_id,
+        } => {
+            let result = state
+                .credentials
+                .entry(owner.to_string())
+                .or_default()
+                .cancel(workload_id, session_id)
+                .map(|_| WorkloadLifecycle::Stopped);
+            (result, None)
+        }
     };
     let outcome = match outcome {
+        Ok(_)
+            if matches!(
+                &envelope.command,
+                ExecutionCommand::AuthenticateProvider { .. }
+            ) =>
+        {
+            ReceiptOutcome::Progress
+        }
         Ok(_) => ReceiptOutcome::Succeeded,
         Err(error) => ReceiptOutcome::Failed { error },
     };
     Ok(vec![
         accepted,
-        next_receipt(state, owner, envelope, outcome)?,
+        next_receipt_with_detail(state, owner, envelope, outcome, detail)?,
     ])
 }
 
@@ -748,6 +901,16 @@ fn next_receipt(
     envelope: &ExecutionCommandEnvelope,
     outcome: ReceiptOutcome,
 ) -> Result<ExecutionReceipt, NodeError> {
+    next_receipt_with_detail(state, owner, envelope, outcome, None)
+}
+
+fn next_receipt_with_detail(
+    state: &mut ControllerState,
+    owner: &str,
+    envelope: &ExecutionCommandEnvelope,
+    outcome: ReceiptOutcome,
+    detail: Option<ReceiptDetail>,
+) -> Result<ExecutionReceipt, NodeError> {
     let workload_id = envelope.command.workload_id().clone();
     let sequence = state
         .next_sequences
@@ -756,7 +919,7 @@ fn next_receipt(
         .entry(workload_id.clone())
         .or_insert(0);
     *sequence += 1;
-    ExecutionReceipt::for_command(envelope, workload_id, *sequence, outcome)
+    ExecutionReceipt::for_command_with_detail(envelope, workload_id, *sequence, outcome, detail)
         .map_err(|error| NodeError::InvalidCommand(error.to_string()))
 }
 
@@ -769,6 +932,7 @@ fn persisted_state(state: &ControllerState) -> PersistedExecutionState {
     PersistedExecutionState {
         runtimes: state.runtimes.clone(),
         runtime: None,
+        credentials: state.credentials.clone(),
         processed: state
             .processed
             .iter()
@@ -813,6 +977,8 @@ struct PersistedExecutionState {
     runtimes: BTreeMap<String, FakeWorkloadRuntime>,
     #[serde(default)]
     runtime: Option<FakeWorkloadRuntime>,
+    #[serde(default)]
+    credentials: BTreeMap<String, FakeCredentialStore>,
     processed: Vec<PersistedProcessedCommand>,
     #[serde(default)]
     conflicts: Vec<PersistedConflict>,
@@ -1233,6 +1399,308 @@ mod tests {
             receipt.outcome,
             ReceiptOutcome::Rejected {
                 error: SafeErrorCode::Conflict
+            }
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn provider_auth_challenge_and_response_keep_secrets_off_node_projections() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let mut owners = OwnerStore::default();
+        owners
+            .add(&owner.public_key().to_hex(), &dir)
+            .expect("pair owner");
+        let workload_id = WorkloadId::random();
+        let now = Utc::now();
+        let deploy = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::Deploy {
+                workload: WorkloadSpec::agent(
+                    workload_id.clone(),
+                    "Auth agent",
+                    "fake-runtime",
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .expect("workload"),
+            },
+        )
+        .expect("deploy command");
+        let controller = ExecutionController::load(&dir).expect("controller");
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &deploy),
+                now,
+            )
+            .await
+            .expect("deploy");
+
+        let session = buzz_core::execution::ProviderAuthSession::new(
+            workload_id.clone(),
+            "anthropic",
+            "auth-session",
+            now + Duration::minutes(5),
+        )
+        .expect("session");
+        let begin = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::AuthenticateProvider { session },
+        )
+        .expect("begin command");
+        let challenge_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &begin),
+                now,
+            )
+            .await
+            .expect("challenge");
+        let challenge_plaintext = nip44::decrypt(
+            owner.secret_key(),
+            &node.keys.public_key(),
+            &challenge_events[1].content,
+        )
+        .expect("decrypt challenge");
+        let challenge: ExecutionReceipt =
+            serde_json::from_str(&challenge_plaintext).expect("challenge receipt");
+        assert_eq!(challenge.outcome, ReceiptOutcome::Progress);
+        assert!(matches!(
+            challenge.detail,
+            Some(ReceiptDetail::ProviderAuthChallenge { .. })
+        ));
+
+        let response = ProviderAuthResponse::new(
+            workload_id.clone(),
+            "auth-session",
+            "secret-token-that-must-stay-local",
+        )
+        .expect("response");
+        let submit = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::SubmitProviderAuthentication { response },
+        )
+        .expect("submit command");
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &submit),
+                now,
+            )
+            .await
+            .expect("submit");
+        let persisted = fs::read_to_string(dir.join("execution-state.json")).expect("state");
+        assert!(!persisted.contains("secret-token-that-must-stay-local"));
+        assert!(persisted.contains("authenticated"));
+        assert!(persisted.contains("anthropic"));
+
+        let retry_session = buzz_core::execution::ProviderAuthSession::new(
+            workload_id.clone(),
+            "anthropic",
+            "retry-session",
+            now + Duration::minutes(5),
+        )
+        .expect("retry session");
+        let retry_begin = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::AuthenticateProvider {
+                session: retry_session,
+            },
+        )
+        .expect("retry begin command");
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &retry_begin),
+                now,
+            )
+            .await
+            .expect("retry begin");
+        let cancel = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::CancelProviderAuthentication {
+                workload_id: workload_id.clone(),
+                session_id: "retry-session".into(),
+            },
+        )
+        .expect("cancel command");
+        let cancel_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &cancel),
+                now,
+            )
+            .await
+            .expect("cancel");
+        let cancel_plaintext = nip44::decrypt(
+            owner.secret_key(),
+            &node.keys.public_key(),
+            &cancel_events[1].content,
+        )
+        .expect("decrypt cancel receipt");
+        let cancel_receipt: ExecutionReceipt =
+            serde_json::from_str(&cancel_plaintext).expect("cancel receipt");
+        assert_eq!(cancel_receipt.outcome, ReceiptOutcome::Succeeded);
+
+        let retry_response = ProviderAuthResponse::new(
+            workload_id.clone(),
+            "retry-session",
+            "response-after-cancel",
+        )
+        .expect("retry response");
+        let retry_submit = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::SubmitProviderAuthentication {
+                response: retry_response,
+            },
+        )
+        .expect("retry submit command");
+        let retry_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &retry_submit),
+                now,
+            )
+            .await
+            .expect("retry submit");
+        let retry_plaintext = nip44::decrypt(
+            owner.secret_key(),
+            &node.keys.public_key(),
+            &retry_events[1].content,
+        )
+        .expect("decrypt retry receipt");
+        let retry_receipt: ExecutionReceipt =
+            serde_json::from_str(&retry_plaintext).expect("retry receipt");
+        assert_eq!(
+            retry_receipt.outcome,
+            ReceiptOutcome::Failed {
+                error: SafeErrorCode::AuthenticationFailed
+            }
+        );
+
+        let expiring_session = buzz_core::execution::ProviderAuthSession::new(
+            workload_id.clone(),
+            "anthropic",
+            "expiring-session",
+            now + Duration::seconds(1),
+        )
+        .expect("expiring session");
+        let expiring_begin = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::AuthenticateProvider {
+                session: expiring_session,
+            },
+        )
+        .expect("expiring begin command");
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &expiring_begin),
+                now,
+            )
+            .await
+            .expect("expiring begin");
+        let expired_response = ProviderAuthResponse::new(
+            workload_id.clone(),
+            "expiring-session",
+            "response-after-expiry",
+        )
+        .expect("expired response");
+        let expired_submit = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::SubmitProviderAuthentication {
+                response: expired_response,
+            },
+        )
+        .expect("expired submit command");
+        let expired_submit_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &expired_submit),
+                now + Duration::seconds(2),
+            )
+            .await
+            .expect("expired submit");
+        let expired_submit_plaintext = nip44::decrypt(
+            owner.secret_key(),
+            &node.keys.public_key(),
+            &expired_submit_events[1].content,
+        )
+        .expect("decrypt expired submit receipt");
+        let expired_submit_receipt: ExecutionReceipt =
+            serde_json::from_str(&expired_submit_plaintext).expect("expired submit receipt");
+        assert_eq!(
+            expired_submit_receipt.outcome,
+            ReceiptOutcome::Failed {
+                error: SafeErrorCode::AuthenticationFailed
+            }
+        );
+
+        let expired_start_session = buzz_core::execution::ProviderAuthSession::new(
+            workload_id,
+            "anthropic",
+            "already-expired-session",
+            now + Duration::seconds(1),
+        )
+        .expect("expired start session");
+        let expired = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::AuthenticateProvider {
+                session: expired_start_session,
+            },
+        )
+        .expect("expiring command");
+        let expired_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                &deploy_command_event(&owner, &node, &expired),
+                now + Duration::seconds(2),
+            )
+            .await
+            .expect("expired auth");
+        let expired_plaintext = nip44::decrypt(
+            owner.secret_key(),
+            &node.keys.public_key(),
+            &expired_events[0].content,
+        )
+        .expect("decrypt expired receipt");
+        let expired_receipt: ExecutionReceipt =
+            serde_json::from_str(&expired_plaintext).expect("expired receipt");
+        assert_eq!(
+            expired_receipt.outcome,
+            ReceiptOutcome::Rejected {
+                error: SafeErrorCode::Expired
             }
         );
         let _ = fs::remove_dir_all(dir);

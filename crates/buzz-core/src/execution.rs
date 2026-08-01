@@ -12,7 +12,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// The current wire version for execution-node commands and receipts.
-pub const EXECUTION_PROTOCOL_VERSION: u16 = 1;
+pub const EXECUTION_PROTOCOL_VERSION: u16 = 2;
 
 /// The maximum lifetime of a command envelope.
 pub const MAX_COMMAND_TTL: Duration = Duration::minutes(15);
@@ -21,6 +21,7 @@ const MAX_DISPLAY_NAME_BYTES: usize = 128;
 const MAX_PROVIDER_BYTES: usize = 128;
 const MAX_RUNTIME_BYTES: usize = 128;
 const MAX_SESSION_ID_BYTES: usize = 128;
+const MAX_AUTH_RESPONSE_BYTES: usize = 16 * 1024;
 
 /// Validation failures for execution protocol values.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -92,6 +93,9 @@ pub enum ExecutionValidationError {
     /// A successful or non-terminal receipt included an error code.
     #[error("successful and non-terminal receipts must not include an error code")]
     UnexpectedError,
+    /// An authentication response was empty.
+    #[error("authentication response must not be empty")]
+    EmptyAuthenticationResponse,
 }
 
 /// Errors returned when decoding and validating a JSON command envelope.
@@ -364,6 +368,53 @@ pub struct ProviderAuthSession {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Encrypted provider-authentication response sent only to the paired node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderAuthResponse {
+    /// Workload whose provider is being authenticated.
+    pub workload_id: WorkloadId,
+    /// Session receiving the provider response.
+    pub session_id: String,
+    /// Provider response or subscription login material.
+    pub response: String,
+}
+
+impl ProviderAuthResponse {
+    /// Construct an authentication response that remains inside the encrypted command.
+    pub fn new(
+        workload_id: WorkloadId,
+        session_id: impl Into<String>,
+        response: impl Into<String>,
+    ) -> Result<Self, ExecutionValidationError> {
+        let response = Self {
+            workload_id,
+            session_id: session_id.into(),
+            response: response.into(),
+        };
+        validate_text(
+            "provider auth session",
+            &response.session_id,
+            MAX_SESSION_ID_BYTES,
+            false,
+        )?;
+        validate_auth_response(&response.response)?;
+        Ok(response)
+    }
+}
+
+fn validate_auth_response(value: &str) -> Result<(), ExecutionValidationError> {
+    if value.is_empty() {
+        return Err(ExecutionValidationError::EmptyAuthenticationResponse);
+    }
+    validate_text(
+        "provider auth response",
+        value,
+        MAX_AUTH_RESPONSE_BYTES,
+        false,
+    )
+}
+
 impl ProviderAuthSession {
     /// Create a validated provider-authentication session request.
     pub fn new(
@@ -435,6 +486,18 @@ pub enum ExecutionCommand {
         /// Authentication session metadata.
         session: ProviderAuthSession,
     },
+    /// Submit a provider-authentication response to an active session.
+    SubmitProviderAuthentication {
+        /// Encrypted provider response.
+        response: ProviderAuthResponse,
+    },
+    /// Cancel a provider-authentication session.
+    CancelProviderAuthentication {
+        /// Workload owning the session.
+        workload_id: WorkloadId,
+        /// Session to cancel.
+        session_id: String,
+    },
 }
 
 impl ExecutionCommand {
@@ -447,6 +510,8 @@ impl ExecutionCommand {
             | Self::Restart { workload_id }
             | Self::Remove { workload_id } => workload_id,
             Self::AuthenticateProvider { session } => &session.workload_id,
+            Self::SubmitProviderAuthentication { response } => &response.workload_id,
+            Self::CancelProviderAuthentication { workload_id, .. } => workload_id,
         }
     }
 
@@ -458,6 +523,21 @@ impl ExecutionCommand {
                 Ok(())
             }
             Self::AuthenticateProvider { session } => session.validate_at(now),
+            Self::SubmitProviderAuthentication { response } => {
+                validate_text(
+                    "provider auth session",
+                    &response.session_id,
+                    MAX_SESSION_ID_BYTES,
+                    false,
+                )?;
+                validate_auth_response(&response.response)
+            }
+            Self::CancelProviderAuthentication { session_id, .. } => validate_text(
+                "provider auth session",
+                session_id,
+                MAX_SESSION_ID_BYTES,
+                false,
+            ),
         }
     }
 }
@@ -750,6 +830,8 @@ pub enum SafeErrorCode {
     RuntimeFailed,
     /// The provider-authentication session expired or failed.
     AuthenticationFailed,
+    /// The provider-authentication session was cancelled.
+    AuthenticationCancelled,
 }
 
 /// Receipt outcome reported by an execution node.
@@ -771,6 +853,27 @@ pub enum ReceiptOutcome {
     Rejected {
         /// Safe rejection classification.
         error: SafeErrorCode,
+    },
+}
+
+/// Safe, non-secret detail attached to an execution receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "detail", rename_all = "snake_case")]
+pub enum ReceiptDetail {
+    /// Actionable provider-authentication challenge for Desktop.
+    ProviderAuthChallenge {
+        /// Provider namespace requiring authentication.
+        provider: String,
+        /// Session to include in the encrypted response.
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        /// Safe instructions that contain no credential material.
+        instructions: String,
+    },
+    /// Provider authentication completed successfully.
+    ProviderAuthenticated {
+        /// Provider namespace that was authenticated.
+        provider: String,
     },
 }
 
@@ -809,6 +912,9 @@ pub struct ExecutionReceipt {
     pub sequence: u64,
     /// Receipt lifecycle outcome.
     pub outcome: ReceiptOutcome,
+    /// Optional safe detail for actionable non-secret state.
+    #[serde(default)]
+    pub detail: Option<ReceiptDetail>,
     /// Time at which the node produced the receipt.
     pub observed_at: DateTime<Utc>,
 }
@@ -821,6 +927,17 @@ impl ExecutionReceipt {
         sequence: u64,
         outcome: ReceiptOutcome,
     ) -> Result<Self, ExecutionValidationError> {
+        Self::for_command_with_detail(command, workload_id, sequence, outcome, None)
+    }
+
+    /// Construct a receipt with optional safe, non-secret detail.
+    pub fn for_command_with_detail(
+        command: &ExecutionCommandEnvelope,
+        workload_id: WorkloadId,
+        sequence: u64,
+        outcome: ReceiptOutcome,
+        detail: Option<ReceiptDetail>,
+    ) -> Result<Self, ExecutionValidationError> {
         if command.command.workload_id() != &workload_id {
             return Err(ExecutionValidationError::WorkloadMismatch);
         }
@@ -831,6 +948,7 @@ impl ExecutionReceipt {
             workload_id,
             sequence,
             outcome,
+            detail,
         )
     }
 
@@ -841,6 +959,7 @@ impl ExecutionReceipt {
         workload_id: WorkloadId,
         sequence: u64,
         outcome: ReceiptOutcome,
+        detail: Option<ReceiptDetail>,
     ) -> Result<Self, ExecutionValidationError> {
         let receipt = Self {
             protocol_version: EXECUTION_PROTOCOL_VERSION,
@@ -850,6 +969,7 @@ impl ExecutionReceipt {
             workload_id,
             sequence,
             outcome,
+            detail,
             observed_at: Utc::now(),
         };
         receipt.validate()?;
