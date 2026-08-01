@@ -221,9 +221,9 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
-  const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
-    void homeFeedQuery.refetch();
-  });
+  const refetchHomeFeedFromLiveSignal = React.useEffectEvent(
+    () => void homeFeedQuery.refetch(),
+  );
   const { dismissMentionTicker, handleMention, mentionTicker } =
     useDevMentionTicker({
       channels,
@@ -344,9 +344,9 @@ export function AppShell() {
     markChannelRead,
     markChannelUnread,
     unreadChannelIds,
-    topLevelUnreadChannelIds,
+    topLevelUnreadChannelIds: parentUnreadIds,
     unreadChannelCounts,
-    highPriorityUnreadChannelIds,
+    highPriorityUnreadChannelIds: priorityUnreadIds,
     blockedUnreadChannelIds,
     unreadChannelNotificationCount,
     getEffectiveTimestamp: getChannelReadAt,
@@ -433,7 +433,7 @@ export function AppShell() {
       selectedView === "home" && !settingsOpen,
       getChannelReadAt,
       readStateVersion,
-      highPriorityUnreadChannelIds,
+      priorityUnreadIds,
       feedProfilesQuery.data?.profiles,
       mutedChannelIds,
       feedItemState.unreadSet,
@@ -807,14 +807,10 @@ export function AppShell() {
                             <LazyDevModeShell
                               blockedUnreadChannelIds={blockedUnreadChannelIds}
                               hasCommunityRail={hasCommunityRail}
-                              highPriorityUnreadChannelIds={
-                                highPriorityUnreadChannelIds
-                              }
+                              highPriorityUnreadChannelIds={priorityUnreadIds}
                               mentionTicker={mentionTicker}
                               onDismissMentionTicker={dismissMentionTicker}
-                              topLevelUnreadChannelIds={
-                                topLevelUnreadChannelIds
-                              }
+                              topLevelUnreadChannelIds={parentUnreadIds}
                               unreadChannelIds={unreadChannelIds}
                             />
                           </React.Suspense>
