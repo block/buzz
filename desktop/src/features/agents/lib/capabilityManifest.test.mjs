@@ -634,16 +634,11 @@ test("observer reduction retains capability evidence after raw events are trimme
         agentCapabilities: { promptCapabilities: { image: true } },
       },
     }),
-    observerEvent(
-      2,
-      "2026-07-26T01:02:00.000Z",
-      "session_config_captured",
-      {
-        capabilityManifest: {
-          toolSources: [{ name: "github", kind: "mcp" }],
-        },
+    observerEvent(2, "2026-07-26T01:02:00.000Z", "session_config_captured", {
+      capabilityManifest: {
+        toolSources: [{ name: "github", kind: "mcp" }],
       },
-    ),
+    }),
     observerEvent(3, "2026-07-26T01:03:00.000Z", "acp_read", {
       params: {
         update: {
