@@ -1798,7 +1798,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     keys.public_key().to_hex()
                 ))
             })?;
-            (Some(tag), Some(json.clone()))
+            // Canonicalize to JSON so the `x-auth-tag` header we send is valid
+            // regardless of whether the input was JSON or the raw Nostr form.
+            let canonical = buzz_sdk::nip_oa::canonicalize_auth_tag(json).map_err(|e| {
+                CliError::Auth(format!("BUZZ_AUTH_TAG canonicalization failed: {e}"))
+            })?;
+            (Some(tag), Some(canonical))
         }
         _ => (None, None),
     };
