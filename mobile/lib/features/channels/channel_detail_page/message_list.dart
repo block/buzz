@@ -5,6 +5,8 @@ class _MessageList extends HookConsumerWidget {
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final int? initialChannelReadAt;
+  final bool hasInitialUnread;
   final String channelId;
   final String? currentPubkey;
   final bool isMember;
@@ -17,6 +19,8 @@ class _MessageList extends HookConsumerWidget {
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
+    required this.initialChannelReadAt,
+    required this.hasInitialUnread,
     required this.channelId,
     required this.currentPubkey,
     required this.isMember,
@@ -42,6 +46,25 @@ class _MessageList extends HookConsumerWidget {
     final previousLatestEntryId = useRef<String?>(null);
     final didOpenInitialThread = useRef(false);
     final didJumpToInitialMessage = useRef(false);
+    final isUnreadNavigationDismissed = useState(false);
+    final detachedWhileUnreadShown = useRef(false);
+    final oldestUnreadMessageIdRef = useRef<String?>(null);
+    if (hasInitialUnread && oldestUnreadMessageIdRef.value == null) {
+      final readAt = initialChannelReadAt;
+      final unread = entries
+          .where((entry) => readAt == null || entry.message.createdAt > readAt)
+          .map((entry) => entry.message)
+          .firstOrNull;
+      oldestUnreadMessageIdRef.value =
+          unread?.id ?? (entries.isEmpty ? null : entries.last.message.id);
+    }
+    final oldestUnreadMessageId =
+        initialMessageId == null && initialThreadRootId == null
+        ? oldestUnreadMessageIdRef.value
+        : null;
+
+    final showUnreadNavigation =
+        !isUnreadNavigationDismissed.value && oldestUnreadMessageId != null;
 
     int? reversedIndexOf(String? messageId) {
       if (messageId == null) return null;
@@ -67,6 +90,30 @@ class _MessageList extends HookConsumerWidget {
         if (context.mounted && !hasUserScrolled.value) {
           isAtLatest.value = true;
         }
+      } finally {
+        isAutoScrolling.value = false;
+      }
+    }
+
+    Future<void> scrollToOldestUnread() async {
+      final targetIndex = reversedIndexOf(oldestUnreadMessageId);
+      if (targetIndex == null ||
+          !itemScrollController.isAttached ||
+          isAutoScrolling.value) {
+        return;
+      }
+      isUnreadNavigationDismissed.value = true;
+      followsLatest.value = false;
+      hasUserScrolled.value = false;
+      isAtLatest.value = false;
+      isAutoScrolling.value = true;
+      try {
+        await itemScrollController.scrollTo(
+          index: targetIndex,
+          alignment: 0.35,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
       } finally {
         isAutoScrolling.value = false;
       }
@@ -99,6 +146,11 @@ class _MessageList extends HookConsumerWidget {
         final positions = itemPositionsListener.itemPositions.value;
         if (positions.isEmpty) return;
         final nextIsAtLatest = latestIsAtBoundary();
+        if (showUnreadNavigation &&
+            nextIsAtLatest &&
+            detachedWhileUnreadShown.value) {
+          isUnreadNavigationDismissed.value = true;
+        }
         if (nextIsAtLatest) {
           if (!isAtLatest.value) isAtLatest.value = true;
         } else if (followsLatest.value && !hasUserScrolled.value) {
@@ -237,6 +289,9 @@ class _MessageList extends HookConsumerWidget {
                 notification.direction != ScrollDirection.idle) {
               hasUserScrolled.value = true;
               followsLatest.value = false;
+              if (showUnreadNavigation) {
+                detachedWhileUnreadShown.value = true;
+              }
             } else if (notification is ScrollEndNotification &&
                 hasUserScrolled.value) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -354,7 +409,30 @@ class _MessageList extends HookConsumerWidget {
             ),
           ),
         ),
-        if (!isAtLatest.value)
+        if (showUnreadNavigation)
+          Positioned(
+            left: 0,
+            right: 0,
+            top:
+                frostedAppBarHeight(
+                  context,
+                  titleContentHeight: appBarTitleContentHeight,
+                ) +
+                Grid.xs,
+            child: Center(
+              child: IconButton.filled(
+                key: const ValueKey('channel-jump-to-oldest-unread'),
+                onPressed: scrollToOldestUnread,
+                tooltip: 'Jump to oldest unread message',
+                style: IconButton.styleFrom(
+                  backgroundColor: context.colors.primaryContainer,
+                  foregroundColor: context.colors.onPrimaryContainer,
+                ),
+                icon: const Icon(LucideIcons.chevronUp, size: 20),
+              ),
+            ),
+          )
+        else if (!isAtLatest.value)
           Positioned(
             left: 0,
             right: 0,

@@ -1147,6 +1147,60 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('jumps to the oldest unread with compact inverse controls', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final unreadButton = find.byKey(
+        const ValueKey('channel-jump-to-oldest-unread'),
+      );
+      expect(unreadButton, findsOneWidget);
+      expect(find.byTooltip('Jump to oldest unread message'), findsOneWidget);
+      expect(find.byIcon(LucideIcons.chevronUp), findsOneWidget);
+      expect(tester.getSize(unreadButton), const Size.square(48));
+      expect(find.text('Latest'), findsNothing);
+
+      await tester.tap(unreadButton);
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 21'), findsOneWidget);
+      expect(unreadButton, findsNothing);
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Jump to latest message'), findsOneWidget);
+      expect(find.byIcon(LucideIcons.chevronDown), findsOneWidget);
+    });
+
     testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
     ) async {

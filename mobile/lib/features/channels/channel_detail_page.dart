@@ -133,6 +133,13 @@ class ChannelDetailPage extends HookConsumerWidget {
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
+    final initialChannelReadAtRef = useRef<int?>(null);
+    final didCaptureInitialReadAt = useRef(false);
+    if (readState.isReady && !didCaptureInitialReadAt.value) {
+      initialChannelReadAtRef.value = readState.effectiveTimestamp(channel.id);
+      didCaptureInitialReadAt.value = true;
+    }
+    final initialChannelReadAt = initialChannelReadAtRef.value;
     final currentPubkey = ref
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
@@ -379,6 +386,14 @@ class ChannelDetailPage extends HookConsumerWidget {
                               allMessages: messages,
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
+                              initialChannelReadAt: initialChannelReadAt,
+                              hasInitialUnread:
+                                  readState.isReady &&
+                                  (readState.isForcedUnread(channel.id) ||
+                                      (readTimestamp != null &&
+                                          (initialChannelReadAt == null ||
+                                              readTimestamp >
+                                                  initialChannelReadAt))),
                               channelId: channel.id,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
