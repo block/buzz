@@ -17,6 +17,8 @@ import 'manage_channel_sheet.dart';
 import 'read_state/read_state_provider.dart';
 import 'read_state/read_state_time.dart';
 
+/// Opens the mobile channel actions sheet and returns whether its parent page
+/// should close after a successful lifecycle action.
 Future<bool?> showChannelActionsSheet({
   required BuildContext context,
   required Channel channel,
@@ -39,6 +41,8 @@ Future<bool?> showChannelActionsSheet({
   ),
 );
 
+/// Mobile action sheet for channel-level read, organization, and lifecycle
+/// operations.
 class ChannelActionsSheet extends ConsumerWidget {
   const ChannelActionsSheet({
     super.key,
