@@ -11,6 +11,7 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../profile/user_status.dart';
 import '../profile/user_status_cache_provider.dart';
+import 'add_member_sheet.dart';
 import 'agent_activity/agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel.dart';
@@ -46,6 +47,28 @@ class MembersSheet extends HookConsumerWidget {
         currentMember != null &&
         currentMember.isElevated &&
         !channel.isArchived;
+
+    final canAddMembers = !channel.isDm && !channel.isArchived;
+
+    void openAddMember() {
+      final navigator = Navigator.of(context);
+      navigator.pop();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!navigator.mounted) return;
+        showBuzzModalBottomSheet<void>(
+          context: navigator.context,
+          title: 'Add member',
+          isScrollControlled: true,
+          showDragHandle: true,
+          builder: (_) => AddChannelMemberSheet(
+            channelId: channel.id,
+            existingMemberPubkeys: allMembers
+                .map((member) => member.pubkey.toLowerCase())
+                .toSet(),
+          ),
+        );
+      });
+    }
 
     void openActivity(ChannelMember bot) {
       final navigator = Navigator.of(context);
@@ -94,6 +117,7 @@ class MembersSheet extends HookConsumerWidget {
             shrinkWrap: true,
             padding: EdgeInsets.only(top: Grid.xxs, bottom: bottomClearance),
             children: [
+              if (canAddMembers) _AddMemberTile(onTap: openAddMember),
               if (people.isNotEmpty) ...[
                 _SectionLabel(label: 'People · ${people.length}'),
                 for (final member in people)
@@ -157,6 +181,42 @@ class MembersSheet extends HookConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Opens the community-wide add-member search.
+///
+/// Sits above the member sections so an agent or person who is not yet in the
+/// channel can be found — the compose bar's `@` autocomplete only offers
+/// agents that already share a channel with you.
+class _AddMemberTile extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _AddMemberTile({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      key: const Key('open-add-member'),
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        radius: 20,
+        backgroundColor: context.colors.surfaceContainerHighest,
+        child: Icon(
+          LucideIcons.userPlus,
+          size: 18,
+          color: context.colors.primary,
+        ),
+      ),
+      title: Text(
+        'Add member',
+        style: context.textTheme.bodyLarge?.copyWith(
+          color: context.colors.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      onTap: onTap,
     );
   }
 }

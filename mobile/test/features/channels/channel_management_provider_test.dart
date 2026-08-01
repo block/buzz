@@ -1,7 +1,24 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+
+String _sha256Hex(String input) {
+  final digest = SHA256Digest().process(Uint8List.fromList(utf8.encode(input)));
+  return digest.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// Builds a valid NIP-OA `auth` tag — mirrors `mobile/test/shared/crypto/nip_oa_test.dart`.
+List<String> _authTag(nostr.Keys owner, String agentPubkey) {
+  final message = _sha256Hex('nostr:agent-auth:$agentPubkey:');
+  final sig = nostr.Schnorr.sign(secretKey: owner.secret, message: message);
+  return ['auth', owner.public, '', sig];
+}
 
 /// Tests for [channelDetailsFromEvent].
 ///
@@ -77,6 +94,28 @@ void main() {
     expect(users.map((user) => user.label), ['Alice', 'Bob']);
     expect(users.first.pubkey, 'alice');
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
+    expect(users.first.isAgent, isFalse);
+  });
+
+  test('marks a directory entry as an agent when its auth tag verifies', () {
+    final owner = nostr.Keys.generate();
+    final agent = nostr.Keys.generate();
+
+    final users = directoryUsersFromProfileEvents([
+      NostrEvent(
+        id: 'agent-profile',
+        pubkey: agent.public,
+        createdAt: 10,
+        kind: 0,
+        tags: [_authTag(owner, agent.public)],
+        content: '{"display_name":"Joe"}',
+        sig: 'sig',
+      ),
+    ]);
+
+    expect(users, hasLength(1));
+    expect(users.first.isAgent, isTrue);
+    expect(users.first.ownerPubkey, owner.public.toLowerCase());
   });
 
   test('propagates archived state from kind:39000 archived tag', () {
