@@ -21,7 +21,8 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_KANBAN_BOARD, KIND_KANBAN_CARD, KIND_KANBAN_CARD_MOVE,
+    KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
     KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
@@ -293,6 +294,12 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
             Ok(Scope::ChannelsRead)
         }
+        // Buzz Kanban: boards (31001) and cards (31002) are owner-authored
+        // parameterized-replaceable global state, keyed by (pubkey, kind,
+        // d_tag) — the author writes their own board/cards (default only-me;
+        // sharing toggles `h`/`invite` tags, Phase 3). The move-audit kind
+        // (31003, non-replaceable) is emitted by the actor who moved the card.
+        KIND_KANBAN_BOARD | KIND_KANBAN_CARD | KIND_KANBAN_CARD_MOVE => Ok(Scope::UsersWrite),
         // Huddle lifecycle events + guidelines
         KIND_HUDDLE_STARTED
         | KIND_HUDDLE_PARTICIPANT_JOINED
@@ -444,6 +451,12 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // `buzz-channel` tag is a metadata reference, not a routing directive,
             // so a project's state is never channel-scoped.
             | KIND_PROJECT
+            // Buzz Kanban: boards/cards are owner-authored, addressed by
+            // (pubkey, kind, d_tag). A stray `h` tag is a *share* reference, not
+            // a routing directive, so their state is never channel-scoped.
+            | KIND_KANBAN_BOARD
+            | KIND_KANBAN_CARD
+            | KIND_KANBAN_CARD_MOVE
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -3129,6 +3142,32 @@ mod tests {
     fn user_status_is_global_only() {
         assert!(is_global_only_kind(KIND_USER_STATUS));
     }
+
+    #[test]
+    fn kanban_kinds_require_users_write_scope() {
+        let dummy = make_dummy_event();
+        for kind in [KIND_KANBAN_BOARD, KIND_KANBAN_CARD, KIND_KANBAN_CARD_MOVE] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::UsersWrite,
+                "kind {kind} should require UsersWrite scope"
+            );
+        }
+    }
+
+    #[test]
+    fn kanban_kinds_are_global_only() {
+        // Board/card/move events are author-owned, non-channel scoped:
+        // a stray `h` tag is a share reference, never channel scoping.
+        for kind in [KIND_KANBAN_BOARD, KIND_KANBAN_CARD, KIND_KANBAN_CARD_MOVE] {
+            assert!(is_global_only_kind(kind), "kind {kind} must be global-only");
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h tag"
+            );
+        }
+    }
+
 
     #[test]
     fn user_status_does_not_require_h_tag() {

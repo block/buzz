@@ -108,6 +108,31 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// dedicated push lease tables.
 pub const KIND_PUSH_LEASE: u32 = 30350;
 
+/// Buzz Kanban: board container (parameterized replaceable, NIP-33).
+///
+/// `d` = board uuid (stable for the board's life). Content is markdown
+/// (title + description). Tags carry `name` (title), `p` (owner, role=owner),
+/// repeating ordered `column` tags
+/// (`["column",colid,"name",<name>,"wip",<n>,"order",<n>]`), and optional
+/// `h` (shared channel) / `invite` (shared member) tags. Addressed by
+/// `(pubkey, kind, d_tag)`; owner-scoped, default only-me, channel-shareable.
+pub const KIND_KANBAN_BOARD: u32 = 31001;
+
+/// Buzz Kanban: card (parameterized replaceable, NIP-33).
+///
+/// `d` = card uuid. `a` = board ref (`31001:<owner>:<boardid>`), `column` =
+/// the single current lane (must exist on the board), `rank` = base-36
+/// order-preserving order within a column, optional `p` assignees, NIP-32
+/// namespaced `l` labels, `due`, and `e` (comment thread root). Moving a card
+/// replaces this event with new `column`/`rank` (LWW via NIP-33).
+pub const KIND_KANBAN_CARD: u32 = 31002;
+
+/// Buzz Kanban: card move audit trail (non-replaceable), OFF by default.
+///
+/// Only emitted when a board opts in. Tags: `a` (board ref), `e` (card id),
+/// `from`, `to`. Keep event volume low by not emitting by default.
+pub const KIND_KANBAN_CARD_MOVE: u32 = 31003;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
