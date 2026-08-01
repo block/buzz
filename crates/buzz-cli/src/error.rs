@@ -32,6 +32,30 @@ pub enum CliError {
     #[error("{0}")]
     NotFound(String),
 
+    /// An exact query returned more than one event.
+    #[error("ambiguous result: {0}")]
+    Ambiguous(String),
+
+    /// A relay returned an event or subscription other than the requested one.
+    #[error("relay mismatch: {0}")]
+    RelayMismatch(String),
+
+    /// A declared event ID did not match a local NIP-01 recomputation.
+    #[error("event ID mismatch: {0}")]
+    IdMismatch(String),
+
+    /// An event failed local BIP-340 Schnorr verification.
+    #[error("signature invalid: {0}")]
+    SignatureInvalid(String),
+
+    /// A WebSocket connection, timeout, or framing failure.
+    #[error("transport error: {0}")]
+    Transport(String),
+
+    /// A relay returned a well-formed but invalid response sequence.
+    #[error("relay protocol error: {0}")]
+    RelayProtocol(String),
+
     /// A non-idempotent command's outcome is unknown: the request may have
     /// reached the relay, but the response was lost. Never auto-retried and
     /// never labeled retryable — the relay executes these commands before any
@@ -80,6 +104,7 @@ pub fn is_retryable_error(e: &CliError) -> bool {
         }
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
         CliError::DeliveryUnknown(_) => false,
+        CliError::Transport(_) => true,
         _ => false,
     }
 }
@@ -102,6 +127,11 @@ pub fn exit_code(e: &CliError) -> i32 {
         CliError::Key(_) => 3,
         CliError::Conflict(_) => 5,
         CliError::NotFound(_) => 1,
+        CliError::Ambiguous(_)
+        | CliError::RelayMismatch(_)
+        | CliError::IdMismatch(_)
+        | CliError::SignatureInvalid(_) => 4,
+        CliError::Transport(_) | CliError::RelayProtocol(_) => 2,
         CliError::DeliveryUnknown(_) => 2,
         CliError::Other(_) => 4,
     }
@@ -124,6 +154,12 @@ pub fn print_error(e: &CliError) {
         CliError::Key(_) => "key_error",
         CliError::Conflict(_) => "conflict",
         CliError::NotFound(_) => "not_found",
+        CliError::Ambiguous(_) => "ambiguous",
+        CliError::RelayMismatch(_) => "relay_mismatch",
+        CliError::IdMismatch(_) => "id_mismatch",
+        CliError::SignatureInvalid(_) => "signature_invalid",
+        CliError::Transport(_) => "transport_error",
+        CliError::RelayProtocol(_) => "relay_error",
         CliError::DeliveryUnknown(_) => "delivery_unknown",
         CliError::Other(_) => "error",
     };

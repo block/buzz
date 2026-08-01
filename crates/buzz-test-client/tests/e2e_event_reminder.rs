@@ -1119,6 +1119,7 @@ async fn await_scheduler_push(
             Ok(RelayMessage::Event {
                 subscription_id,
                 event,
+                ..
             }) if subscription_id == sub_id && has_d_tag(&event, d_tag) => return Ok(()),
             Ok(_) => {}
             Err(e) => return Err(format!("recv failed: {e:?}")),

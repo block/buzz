@@ -2443,6 +2443,7 @@ mod pubsub_presence_typing {
                 Ok(RelayMessage::Event {
                     subscription_id,
                     event,
+                    ..
                 }) if subscription_id == sub_id => events.push(*event),
                 Ok(_) => {}
                 Err(_) => return events,

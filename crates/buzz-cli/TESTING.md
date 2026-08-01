@@ -482,6 +482,25 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
+### 6.13 Exact Verified Events
+
+This is a raw NIP-01 WebSocket read. Its `--relay` is mandatory and does not
+inherit `BUZZ_RELAY_URL` or the global `--relay`. The command waits for EOSE,
+requires exactly one result, recomputes the event ID, and verifies the Schnorr
+signature locally before writing anything to stdout.
+
+```bash
+# EVENT_ID comes from the message created in section 6.3.
+buzz events get-verified \
+  --relay ws://localhost:3000 \
+  --event "$EVENT_ID" | jq .
+# Expected: {id,pubkey,created_at,kind,tags,content,sig}
+
+# A missing command-local relay is a user error even when BUZZ_RELAY_URL is set.
+buzz events get-verified --event "$EVENT_ID"
+# Expected: exit 1, no stdout
+```
+
 ---
 
 ## 7. Error Path Testing
@@ -621,3 +640,4 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
 | 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |
+| 63 | `events get-verified` | ☐ | Exact ID, raw seven-field event, local ID/signature verification, explicit WS relay |

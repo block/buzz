@@ -68,7 +68,7 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required except public events get-verified reads]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -81,7 +81,7 @@ struct Cli {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
     relay: String,
 
-    /// Nostr private key (hex or nsec). This is the CLI's identity.
+    /// Nostr private key (hex or nsec). Optional only for public events get-verified reads.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
 
@@ -206,6 +206,9 @@ enum Cmd {
     /// Publish notes and manage the social graph (NIP-01/02)
     #[command(subcommand)]
     Social(SocialCmd),
+    /// Fetch raw Nostr events with mandatory local verification
+    #[command(subcommand)]
+    Events(EventsCmd),
     /// Publish and edit long-form NIP-23 notes — team knowledge base
     #[command(subcommand)]
     Notes(NotesCmd),
@@ -951,6 +954,23 @@ pub enum FeedCmd {
         /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
         #[arg(long)]
         types: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EventsCmd {
+    /// Fetch one exact event and verify its NIP-01 ID and Schnorr signature locally
+    #[command(
+        name = "get-verified",
+        after_help = "Example:\n  buzz events get-verified --relay wss://relay.example --event <64hex>\n\nThe relay is required here and never inherited from BUZZ_RELAY_URL or the global --relay flag. No event is emitted unless exactly one result passes local NIP-01 ID recomputation and Schnorr verification."
+    )]
+    GetVerified {
+        /// Single WebSocket relay URL (ws:// or wss://); no default or fallback
+        #[arg(long)]
+        relay: String,
+        /// Exact 64-character hex event ID
+        #[arg(long)]
+        event: String,
     },
 }
 
@@ -1769,8 +1789,6 @@ pub enum ModerationCmd {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
-    let relay_url = client::normalize_relay_url(&cli.relay);
-
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
@@ -1779,7 +1797,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Auth: private key is required for all relay operations.
+    // Verified event reads deliberately use their command-local relay. The global
+    // relay value (including BUZZ_RELAY_URL and its localhost default) is ignored.
+    if let Cmd::Events(ref sub) = cli.command {
+        let (keys, auth_tag) =
+            parse_optional_identity(cli.private_key.as_deref(), cli.auth_tag.as_deref())?;
+        return commands::events::dispatch(sub, keys.as_ref(), auth_tag.as_ref()).await;
+    }
+
+    let relay_url = client::normalize_relay_url(&cli.relay);
+
+    // Auth: private key is required for all other relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
         CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
@@ -1826,8 +1854,38 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Events(_) | Cmd::Pack(_) => unreachable!("handled above"),
     }
+}
+
+fn parse_optional_identity(
+    private_key: Option<&str>,
+    auth_tag_json: Option<&str>,
+) -> Result<(Option<Keys>, Option<nostr::Tag>), CliError> {
+    let keys = private_key
+        .map(|value| {
+            Keys::parse(value)
+                .map_err(|error| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {error}")))
+        })
+        .transpose()?;
+    let auth_tag = match auth_tag_json {
+        Some(json) if !json.is_empty() => {
+            let keys = keys
+                .as_ref()
+                .ok_or_else(|| CliError::Auth("BUZZ_AUTH_TAG requires BUZZ_PRIVATE_KEY".into()))?;
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(json)
+                .map_err(|error| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {error}")))?;
+            buzz_sdk::nip_oa::verify_auth_tag(json, &keys.public_key()).map_err(|error| {
+                CliError::Auth(format!(
+                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {error}",
+                    keys.public_key().to_hex()
+                ))
+            })?;
+            Some(tag)
+        }
+        _ => None,
+    };
+    Ok((keys, auth_tag))
 }
 
 #[cfg(test)]
@@ -1873,6 +1931,7 @@ mod tests {
             "channels",
             "dms",
             "emoji",
+            "events",
             "feed",
             "issues",
             "media",
@@ -1999,6 +2058,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "events"), vec!["get-verified"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -2069,6 +2129,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("events", 1),
             ("issues", 4),
             ("media", 1),
             ("messages", 8),

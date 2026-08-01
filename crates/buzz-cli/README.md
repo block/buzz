@@ -20,13 +20,21 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+`events get-verified` can read from a public Nostr relay without a key. If the
+relay requires NIP-42, it uses `BUZZ_PRIVATE_KEY` and the optional
+`BUZZ_AUTH_TAG` for authentication only; event trust still comes from local ID
+recomputation and signature verification.
+
 ## Usage
 
 All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
 
 ```bash
-# Set relay URL (defaults to http://localhost:3000)
+# Set relay URL (defaults to http://localhost:3000 for ordinary commands)
 export BUZZ_RELAY_URL="https://relay.example.com"
+
+# Exact raw event read (command-local relay is mandatory; no env/default fallback)
+buzz events get-verified --relay wss://relay.example.com --event <64hex>
 
 # Messages
 buzz messages send --channel <uuid> --content "Hello"
@@ -146,6 +154,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `runs` | Get workflow run history |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |
+| `events` | `get-verified` | Fetch one exact raw event and verify its NIP-01 ID and Schnorr signature locally |
 | `social` | `publish` | Publish a NIP-01 note |
 | | `set-contacts` | Set NIP-02 contact list |
 | | `event` | Get a Nostr event |
@@ -174,6 +183,7 @@ buzz <group> <subcommand> [flags]
     │
     ├─ main.rs ──▶ commands/*.rs ──▶ client.rs ──▶ Buzz Relay REST API
     │  (clap)       (handlers)       (reqwest)
+    │                    └──────────▶ buzz-ws-client (exact Nostr reads)
     │
     ├─ validate.rs   (UUID, hex, content size, percent-encode)
     └─ error.rs      (CliError → JSON stderr + exit code)

@@ -62,6 +62,9 @@ impl From<WsClientError> for TestClientError {
         match e {
             WsClientError::WebSocket(e) => TestClientError::WebSocket(e),
             WsClientError::Json(e) => TestClientError::Json(e),
+            WsClientError::InvalidEvent { message, .. } => {
+                TestClientError::UnexpectedMessage(format!("invalid EVENT payload: {message}"))
+            }
             WsClientError::EventBuilder(s) => TestClientError::EventBuilder(s),
             WsClientError::Url(s) => TestClientError::Url(s),
             WsClientError::Timeout => TestClientError::Timeout,
@@ -70,6 +73,13 @@ impl From<WsClientError> for TestClientError {
             WsClientError::AuthFailed(s) => TestClientError::AuthFailed(s),
             WsClientError::EventRejected(s) => TestClientError::EventRejected(s),
             WsClientError::NoAuthChallenge => TestClientError::NoAuthChallenge,
+            WsClientError::AuthChallengeTooLarge { .. }
+            | WsClientError::AmbiguousAuthChallenge
+            | WsClientError::AuthFrameTooLarge { .. }
+            | WsClientError::AuthTransportPoisoned
+            | WsClientError::ReflectedAuthMaterial => {
+                TestClientError::UnexpectedMessage(e.to_string())
+            }
         }
     }
 }
@@ -197,6 +207,7 @@ impl BuzzTestClient {
                 RelayMessage::Event {
                     subscription_id,
                     event,
+                    ..
                 } if subscription_id == sub_id => {
                     events.push(*event);
                 }

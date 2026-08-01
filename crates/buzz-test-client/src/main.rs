@@ -120,6 +120,7 @@ async fn run_subscribe(url: &str, keys: &Keys, channel: &str, kind: u16) {
             Ok(RelayMessage::Event {
                 subscription_id: _,
                 event,
+                ..
             }) => {
                 println!(
                     "[{}] kind={} pubkey={} content={}",

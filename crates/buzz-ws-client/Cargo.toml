@@ -11,7 +11,17 @@ nostr = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
+rand = { workspace = true }
+# Security boundary: Tungstenite 0.29 logs complete data frames at trace and
+# relay-controlled Close reasons at debug. This graph-wide log-facade cap
+# compiles those dependency sinks out of every buzz-ws-client consumer while
+# leaving info/warn/error and `tracing` diagnostics available.
+log = { workspace = true, features = ["max_level_info"] }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+tracing-log = "0.2"

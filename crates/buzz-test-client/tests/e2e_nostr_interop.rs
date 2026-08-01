@@ -732,6 +732,7 @@ async fn test_nip17_gift_wrap_recipient_receives() {
         RelayMessage::Event {
             subscription_id,
             event,
+            ..
         } => {
             assert_eq!(
                 subscription_id, sid_b,

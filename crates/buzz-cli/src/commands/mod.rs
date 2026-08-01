@@ -3,6 +3,7 @@ pub mod channel_templates;
 pub mod channels;
 pub mod dms;
 pub mod emoji;
+pub mod events;
 pub mod feed;
 pub mod issues;
 pub mod mem;

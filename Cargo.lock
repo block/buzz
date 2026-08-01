@@ -930,6 +930,7 @@ dependencies = [
  "clap",
  "diffy",
  "dirs",
+ "futures-util",
  "hex",
  "infer",
  "nostr",
@@ -942,6 +943,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "url",
  "uuid",
 ]
@@ -1348,12 +1350,16 @@ name = "buzz-ws-client"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "log",
  "nostr",
+ "rand 0.10.1",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tracing",
+ "tracing-log",
+ "tracing-subscriber",
  "url",
 ]
 
