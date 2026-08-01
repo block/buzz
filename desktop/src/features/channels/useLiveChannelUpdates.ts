@@ -156,15 +156,25 @@ function useOfflineActivityEditCatchUp(
   relayUrl: string | undefined,
   onEdit: ((channelId: string, event: RelayEvent) => void) | undefined,
 ) {
+  // `onEdit` is rebuilt whenever the channel list changes; keep it in a ref so
+  // catch-up runs once per identity/relay scope rather than on every refresh.
+  const onEditRef = React.useRef(onEdit);
+  onEditRef.current = onEdit;
+  const doneScopeRef = React.useRef<string | null>(null);
+
   React.useEffect(() => {
     const normalizedPubkey = pubkey?.trim().toLowerCase();
-    if (!normalizedPubkey || !relayUrl || !onEdit) return;
+    if (!normalizedPubkey || !relayUrl) return;
+    const scope = `${normalizedPubkey}:${relayUrl}`;
+    if (doneScopeRef.current === scope) return;
+    doneScopeRef.current = scope;
 
     let cancelled = false;
     void (async () => {
+      // Storage keeps rows ascending by createdAt, so the NEWEST rows — the
+      // ones Home actually shows — are at the tail.
       const rows = readActivityFromStorage(normalizedPubkey, relayUrl).slice(
-        0,
-        CATCH_UP_ROW_CAP,
+        -CATCH_UP_ROW_CAP,
       );
       if (rows.length === 0) return;
       try {
@@ -187,7 +197,7 @@ function useOfflineActivityEditCatchUp(
         if (cancelled) return;
         for (const { row, events } of results) {
           for (const edit of events) {
-            onEdit(row.channelId, edit);
+            onEditRef.current?.(row.channelId, edit);
           }
         }
       } catch (error) {
@@ -198,7 +208,7 @@ function useOfflineActivityEditCatchUp(
     return () => {
       cancelled = true;
     };
-  }, [pubkey, relayUrl, onEdit]);
+  }, [pubkey, relayUrl]);
 }
 
 export function useLiveChannelUpdates(

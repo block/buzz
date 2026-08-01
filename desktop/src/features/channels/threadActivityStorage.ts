@@ -2,6 +2,10 @@ import { KIND_STREAM_MESSAGE_EDIT } from "@/shared/constants/kinds";
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 
 export type ThreadActivityItem = {
+  /** `createdAt` of the edit whose content this row currently shows. */
+  contentEditedAt?: number;
+  /** Event id of that edit — the tie-break when timestamps match. */
+  contentEditId?: string;
   id: string;
   kind: number;
   pubkey: string;
@@ -130,8 +134,27 @@ export function addThreadActivityItems(
     if (index === -1 || overlaid[index].content === item.content) {
       continue;
     }
+    // Apply the same rule every other reader uses — newest `createdAt`, ties
+    // to the smallest id — instead of "last one delivered". A reconnect replays
+    // recent events newest-first, so arrival order would otherwise let an
+    // older edit revert a newer one.
+    const appliedAt = overlaid[index].contentEditedAt;
+    const appliedId = overlaid[index].contentEditId;
+    if (
+      appliedAt !== undefined &&
+      appliedId !== undefined &&
+      (item.createdAt < appliedAt ||
+        (item.createdAt === appliedAt && item.id > appliedId))
+    ) {
+      continue;
+    }
     overlaid = [...overlaid];
-    overlaid[index] = { ...overlaid[index], content: item.content };
+    overlaid[index] = {
+      ...overlaid[index],
+      content: item.content,
+      contentEditedAt: item.createdAt,
+      contentEditId: item.id,
+    };
     didOverlay = true;
   }
 

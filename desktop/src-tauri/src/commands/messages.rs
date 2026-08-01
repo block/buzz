@@ -28,7 +28,7 @@ use crate::{
 /// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
 /// kind) but still passes through the p-gate before it runs.
 use crate::commands::query_kinds::{
-    forum_thread_kinds, mention_kinds, thread_parent_kinds, TIMELINE_KINDS,
+    forum_root_kinds, forum_thread_kinds, mention_kinds, thread_parent_kinds, TIMELINE_KINDS,
 };
 
 #[tauri::command]
@@ -194,7 +194,7 @@ pub async fn get_forum_posts(
 ) -> Result<ForumPostsResponse, String> {
     let cap = limit.unwrap_or(20).min(100);
     let mut filter = serde_json::Map::new();
-    filter.insert("kinds".to_string(), serde_json::json!([45001]));
+    filter.insert("kinds".to_string(), serde_json::json!(forum_root_kinds()));
     filter.insert("#h".to_string(), serde_json::json!([channel_id.clone()]));
     filter.insert("limit".to_string(), serde_json::json!(cap));
     if let Some(t) = before {

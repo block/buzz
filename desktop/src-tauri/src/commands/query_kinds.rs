@@ -57,6 +57,15 @@ pub(crate) fn thread_parent_kinds() -> Vec<u32> {
     kinds_with(&[KIND_FORUM_POST, KIND_FORUM_COMMENT, KIND_HUDDLE_STARTED])
 }
 
+/// Kinds that can be a forum thread root.
+///
+/// Forum posts plus surfaces — NIP-SC allows a surface as a thread root, and
+/// without it a card posted to a forum channel is invisible in the index even
+/// though the thread view renders it.
+pub(crate) fn forum_root_kinds() -> Vec<u32> {
+    vec![KIND_FORUM_POST, KIND_SURFACE]
+}
+
 /// Kinds a forum thread is built from (root lookup and reply fan-out).
 pub(crate) fn forum_thread_kinds() -> Vec<u32> {
     kinds_with(&[KIND_FORUM_POST, KIND_FORUM_COMMENT])
@@ -83,6 +92,7 @@ mod tests {
             ("mention", super::mention_kinds()),
             ("thread_parent", super::thread_parent_kinds()),
             ("forum_thread", super::forum_thread_kinds()),
+            ("forum_root", super::forum_root_kinds()),
         ] {
             assert!(
                 kinds.contains(&buzz_core_pkg::kind::KIND_SURFACE),

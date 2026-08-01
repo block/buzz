@@ -350,6 +350,21 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+/// The `e` tag an edit addresses, if any.
+fn edit_target_id(event: &serde_json::Value) -> Option<String> {
+    event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let parts = tag.as_array()?;
+                (parts.first()?.as_str()? == "e")
+                    .then(|| parts.get(1)?.as_str().map(str::to_string))
+                    .flatten()
+            })
+        })
+}
+
 /// Overlay the latest `kind:40003` edit content onto the events it targets,
 /// and report edits that landed in the polling window but target something
 /// outside this page.
@@ -399,10 +414,10 @@ pub(crate) async fn overlay_latest_edits_in_window(
         .filter(|e| e.get("kind").and_then(|v| v.as_u64()) != Some(EDIT_KIND))
         .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(str::to_string))
         .collect();
-    if target_ids.is_empty() {
-        return;
-    }
 
+    // NOTE: no early return on an empty page — the window pass below is what
+    // tells a polling reader that a card published earlier just changed, and a
+    // window can legitimately contain only that edit.
     let mut edits: Vec<serde_json::Value> = Vec::new();
     for chunk in target_ids.chunks(FILTERS_PER_QUERY) {
         let filters: Vec<serde_json::Value> = chunk
@@ -474,12 +489,10 @@ pub(crate) async fn overlay_latest_edits_in_window(
         }
     }
 
-    // An edit whose target is in this page has been folded into that message,
-    // so the raw row would just duplicate it. An edit whose target is NOT here
-    // (an older message updated after this window) is kept: it is the only
-    // signal a polling reader gets that something outside the page changed.
-    // Edits made inside the polling window whose target is not on this page:
-    // the only signal that something published earlier just changed.
+    // Edits made inside the polling window whose target is NOT on this page:
+    // the only signal a reader gets that something published earlier changed.
+    // Only the winning edit per target is reported — a card updated 60 times
+    // is one changed thing, not 60 rows of spec JSON.
     if let (Some(channel_id), Some(since)) = (channel_id, since) {
         let filter = serde_json::json!({
             "kinds": [EDIT_KIND],
@@ -490,22 +503,30 @@ pub(crate) async fn overlay_latest_edits_in_window(
             let window_edits: Vec<serde_json::Value> =
                 serde_json::from_str(&raw).unwrap_or_default();
             let page_ids: std::collections::HashSet<String> = target_ids.iter().cloned().collect();
+            let mut winners: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
             for edit in window_edits {
-                let target = edit
-                    .get("tags")
-                    .and_then(|t| t.as_array())
-                    .and_then(|tags| {
-                        tags.iter().find_map(|tag| {
-                            let parts = tag.as_array()?;
-                            (parts.first()?.as_str()? == "e")
-                                .then(|| parts.get(1)?.as_str().map(str::to_string))
-                                .flatten()
-                        })
-                    });
-                if target.is_some_and(|t| !page_ids.contains(&t)) {
-                    events.push(edit);
+                let Some(target) = edit_target_id(&edit) else {
+                    continue;
+                };
+                if page_ids.contains(&target) {
+                    continue;
+                }
+                let created_at = edit.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                let id = edit.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let wins = winners.get(&target).is_none_or(|existing| {
+                    let at = existing
+                        .get("created_at")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let existing_id = existing.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    created_at > at || (created_at == at && id < existing_id)
+                });
+                if wins {
+                    winners.insert(target, edit);
                 }
             }
+            events.extend(winners.into_values());
         }
     }
 
@@ -513,18 +534,7 @@ pub(crate) async fn overlay_latest_edits_in_window(
         if event.get("kind").and_then(|v| v.as_u64()) != Some(EDIT_KIND) {
             return true;
         }
-        event
-            .get("tags")
-            .and_then(|t| t.as_array())
-            .and_then(|tags| {
-                tags.iter().find_map(|tag| {
-                    let parts = tag.as_array()?;
-                    (parts.first()?.as_str()? == "e")
-                        .then(|| parts.get(1)?.as_str().map(str::to_string))
-                        .flatten()
-                })
-            })
-            .is_none_or(|target| !applied.contains(&target))
+        edit_target_id(event).is_none_or(|target| !applied.contains(&target))
     });
 }
 
@@ -589,8 +599,11 @@ pub async fn cmd_get_thread(
     // Two filters ORed in a single HTTP call:
     // 1. Replies referencing this event via e-tag (no kind restriction)
     // 2. The root event itself by ID
+    // Content kinds only — edits are resolved by target id in the overlay. If
+    // they shared this budget, a root edited 100+ times would fill the page
+    // with edit rows and drop every real reply.
     let mut reply_filter = serde_json::json!({
-        "kinds": [9, 40002, 40003, 40008, 40110, 45003],
+        "kinds": [9, 40002, 40008, 40110, 45003],
         "#h": [channel_id],
         "#e": [event_id],
         "limit": limit
