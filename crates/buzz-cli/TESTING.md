@@ -280,6 +280,11 @@ buzz reactions add --event "$REACT_ID" --emoji "👍" | jq .
 buzz reactions get --event "$REACT_ID" | jq .
 # Expected: {"reactions":[{"emoji":"...","count":N,"pubkeys":["..."]}]}
 
+# complete, cryptographically-verified kind-7 reaction events from every query page,
+# ordered by created_at ascending and then exact event ID for deterministic first-wins consumers
+buzz reactions get --event "$REACT_ID" --events | jq .
+# Expected: {"events":[{"id":"...","pubkey":"...","kind":7,"content":"...","created_at":N,"tags":[...],"sig":"..."}]}
+
 # reactions remove
 buzz reactions remove --event "$REACT_ID" --emoji "👍" | jq .
 ```

@@ -725,6 +725,9 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+        /// Return full kind-7 events, oldest first, instead of aggregate counts
+        #[arg(long)]
+        events: bool,
     },
 }
 
@@ -1863,6 +1866,19 @@ mod tests {
             "--emoji alone must not imply a status"
         );
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
+    fn reactions_get_accepts_full_events_flag() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "reactions",
+            "get",
+            "--event",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--events",
+        ])
+        .is_ok());
     }
 
     #[test]

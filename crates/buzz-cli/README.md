@@ -51,6 +51,7 @@ buzz channels topic --channel <uuid> --topic "New topic"
 # Reactions
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
+buzz reactions get --event <event-id> --events  # verified signed kind-7 events, oldest first
 
 # Users & Presence
 buzz users get                          # your own profile
