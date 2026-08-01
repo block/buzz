@@ -78,18 +78,7 @@ pub(crate) struct EffectiveAgentEnv {
     pub effective_command: String,
 }
 
-// ── Typed effective-harness descriptor ───────────────────────────────────────
-//
-// A single owned type that fully describes what a spawn would run.  Produced
-// by `resolve_effective_harness_descriptor` and consumed by spawn_agent_child,
-// spawn_config_hash, build_managed_agent_summary, get_agent_models, and
-// agent_readiness — so the harness-definition lookup and arg/env resolution
-// happen exactly once, in one place.
-
-/// The complete effective description of a harness spawn: resolved command,
-/// args, and layered env.  This is the single source of truth for what will
-/// actually run — computed once and shared across every consumer that needs
-/// the effective values.
+/// Complete effective description of a harness spawn.
 #[derive(Debug, Clone)]
 pub(crate) struct EffectiveHarnessDescriptor {
     /// The raw effective command string (e.g. `"buzz-agent"`, `"my-acp-agent"`).
@@ -98,15 +87,17 @@ pub(crate) struct EffectiveHarnessDescriptor {
     /// Normalized effective args.  Instance args win when non-empty; otherwise
     /// the harness definition's args apply.
     pub args: Vec<String>,
+    /// MCP sidecar from the custom definition or compiled runtime metadata.
+    pub mcp_command: Option<String>,
     /// The full layered process env: baked floor → runtime metadata → definition
     /// env → global → persona → agent.
     pub env: BTreeMap<String, String>,
 }
 
 /// Resolve the complete harness descriptor from a record + context — the single
-/// authoritative path for command, args, and env.
+/// authoritative path for command, args, MCP sidecar, and env.
 ///
-/// This is the only place where harness-definition lookup and arg/env layering
+/// This is the only place where harness lookup and capability/env layering
 /// happen; spawn, hash, summary, and both model-probe paths all consume this.
 ///
 /// Returns `Err("DANGLING_HARNESS_ID:<id>")` when the record (or its linked
@@ -161,14 +152,23 @@ pub(crate) fn resolve_effective_harness_descriptor(
         }
     };
 
-    // Env: full layered resolution (same as resolve_effective_agent_env).
-    // Pass harness_def directly to avoid a second lookup.
+    // Custom definition wins; built-ins fall back to compiled metadata.
+    let mcp_command = harness_def
+        .as_ref()
+        .and_then(|definition| definition.mcp_command.clone())
+        .or_else(|| {
+            runtime_meta
+                .and_then(|runtime| runtime.mcp_command)
+                .map(str::to_string)
+        });
+
     let effective_env =
         resolve_effective_agent_env_with_def(record, personas, runtime_meta, global, harness_def);
 
     Ok(EffectiveHarnessDescriptor {
         command: effective_command,
         args,
+        mcp_command,
         env: effective_env.env,
     })
 }

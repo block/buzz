@@ -181,6 +181,7 @@ const FULL_ENTRY = {
   id: "my-harness",
   label: "My Harness",
   command: "my-harness",
+  mcpCommand: "my-mcp-server",
   defaultArgs: ["acp", "--verbose"],
   definitionEnv: { FOO: "bar", BAZ: "qux" },
   installInstructionsUrl: "https://example.com/docs",
@@ -192,6 +193,7 @@ test("formValuesFromCatalogEntry_fullEntry_populatesEveryField", () => {
   assert.equal(form.id, "my-harness");
   assert.equal(form.label, "My Harness");
   assert.equal(form.command, "my-harness");
+  assert.equal(form.mcpCommand, "my-mcp-server");
   assert.deepEqual(form.args, ["acp", "--verbose"]);
   assert.deepEqual(form.env, [
     { key: "FOO", value: "bar" },
@@ -211,6 +213,7 @@ test("editRoundTrip_openThenSaveWithoutChanges_losesNothing", () => {
     id: FULL_ENTRY.id,
     label: FULL_ENTRY.label,
     command: FULL_ENTRY.command,
+    mcpCommand: FULL_ENTRY.mcpCommand,
     args: FULL_ENTRY.defaultArgs,
     env: FULL_ENTRY.definitionEnv,
     installInstructionsUrl: FULL_ENTRY.installInstructionsUrl,
@@ -239,12 +242,14 @@ test("formValuesFromCatalogEntry_nullishOptionalFields_defaultsSafely", () => {
     id: "min",
     label: "Min",
     command: null,
+    mcpCommand: null,
     defaultArgs: undefined,
     definitionEnv: undefined,
     installInstructionsUrl: "",
     installHint: "",
   });
   assert.equal(form.command, "");
+  assert.equal(form.mcpCommand, "");
   assert.deepEqual(form.args, []);
   assert.deepEqual(form.env, []);
 });
@@ -254,6 +259,7 @@ test("definitionFromFormValues_trimsScalarFields", () => {
     id: " my-id ",
     label: " Label ",
     command: " cmd ",
+    mcpCommand: " mcp-cmd ",
     args: ["keep", "  "],
     env: [{ key: " K ", value: "v" }],
     installInstructionsUrl: " https://x ",
@@ -262,10 +268,25 @@ test("definitionFromFormValues_trimsScalarFields", () => {
   assert.equal(definition.id, "my-id");
   assert.equal(definition.label, "Label");
   assert.equal(definition.command, "cmd");
+  assert.equal(definition.mcpCommand, "mcp-cmd");
   assert.deepEqual(definition.args, ["keep"]);
   assert.deepEqual(definition.env, { K: "v" });
   assert.equal(definition.installInstructionsUrl, "https://x");
   assert.equal(definition.installHint, "hint");
+});
+
+test("definitionFromFormValues_blankMcpCommand_omitsField", () => {
+  const definition = definitionFromFormValues({
+    id: "my-id",
+    label: "Label",
+    command: "cmd",
+    mcpCommand: "   ",
+    args: [],
+    env: [],
+    installInstructionsUrl: "",
+    installHint: "",
+  });
+  assert.equal(definition.mcpCommand, undefined);
 });
 
 // ── commaArgError ─────────────────────────────────────────────────────────────

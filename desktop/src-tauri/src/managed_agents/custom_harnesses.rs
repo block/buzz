@@ -56,6 +56,9 @@ pub(crate) struct HarnessDefinition {
     /// Default CLI arguments passed to the command (array, not split-string).
     #[serde(default)]
     pub args: Vec<String>,
+    /// Optional MCP sidecar passed to `buzz-acp` for this harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_command: Option<String>,
     /// Environment variables injected at spawn time. Definition env is applied
     /// first and LOSES on conflict with Buzz-injected vars — `BUZZ_MANAGED_AGENT`
     /// is always authoritative and cannot be overridden here.
@@ -172,6 +175,9 @@ fn validate_harness_definition(def: &HarnessDefinition) -> Result<(), String> {
     }
     if def.label.trim().is_empty() {
         return Err("label must not be empty".into());
+    }
+    if matches!(def.mcp_command.as_deref(), Some(command) if command.trim().is_empty()) {
+        return Err("mcpCommand must not be blank when provided".into());
     }
     // Args travel to the harness through the comma-delimited
     // `BUZZ_ACP_AGENT_ARGS` env transport (clap `value_delimiter = ','` on the
@@ -733,18 +739,13 @@ mod tests {
         assert_eq!(loaded[0].id, "custom-dup");
     }
 
-    // ── Round-trip via save_custom_harness_to_dir (B-4) ─────────────────────
-    //
-    // These tests exercise the REAL persistence helper, not raw fs::write.
-    // They prove: create, same-ID edit (backup-swap), rename (old file removed),
-    // backup file cleaned up on success.
-
     fn make_def(id: &str, label: &str) -> HarnessDefinition {
         HarnessDefinition {
             id: id.to_string(),
             label: label.to_string(),
             command: format!("{id}-bin"),
             args: vec![],
+            mcp_command: None,
             env: BTreeMap::new(),
             install_instructions_url: String::new(),
             install_hint: String::new(),
@@ -773,11 +774,9 @@ mod tests {
         let v1 = make_def("my-harness", "V1 Label");
         save_custom_harness_to_dir(dir.path(), &v1, None).unwrap();
 
-        // Same-ID edit: label changes.
         let v2 = make_def("my-harness", "V2 Label");
         let outcome = save_custom_harness_to_dir(dir.path(), &v2, None).unwrap();
 
-        // No old-path reported (id unchanged).
         assert!(outcome.removed_old_path.is_none());
 
         let loaded = load_custom_harnesses(dir.path());
@@ -794,7 +793,6 @@ mod tests {
         let v2 = make_def("my-harness", "V2");
         save_custom_harness_to_dir(dir.path(), &v2, None).unwrap();
 
-        // .bak file must be gone after a successful commit.
         let bak = dir.path().join("my-harness.json.bak");
         assert!(
             !bak.exists(),
@@ -808,11 +806,9 @@ mod tests {
         let old_def = make_def("old-id", "Old");
         save_custom_harness_to_dir(dir.path(), &old_def, None).unwrap();
 
-        // Rename: new id, old_id supplied.
         let new_def = make_def("new-id", "New");
         let outcome = save_custom_harness_to_dir(dir.path(), &new_def, Some("old-id")).unwrap();
 
-        // The outcome carries the old path that was removed.
         let expected_old = dir.path().join("old-id.json");
         assert_eq!(
             outcome.removed_old_path,
@@ -820,7 +816,6 @@ mod tests {
             "removed_old_path must be the old file"
         );
 
-        // Old file gone, new file present.
         assert!(!expected_old.exists(), "old-id.json must be removed");
         let loaded = load_custom_harnesses(dir.path());
         assert_eq!(loaded.len(), 1);
@@ -829,13 +824,11 @@ mod tests {
 
     #[test]
     fn save_to_dir_rename_nonexistent_old_id_is_non_fatal() {
-        // rename_old_id pointing to a file that does not exist must succeed
-        // (NotFound is silently ignored by the helper).
+        // NotFound for rename_old_id is ignored.
         let dir = tempfile::tempdir().unwrap();
         let def = make_def("alpha", "Alpha");
         let outcome = save_custom_harness_to_dir(dir.path(), &def, Some("ghost-id")).unwrap();
 
-        // New file created, no old path removed.
         assert_eq!(outcome.target_path, dir.path().join("alpha.json"));
         assert!(
             outcome.removed_old_path.is_none(),
@@ -854,6 +847,7 @@ mod tests {
             label: "Env Harness".to_string(),
             command: "env-bin".to_string(),
             args: vec!["--flag".to_string()],
+            mcp_command: Some("mcp-sidecar".to_string()),
             env,
             install_instructions_url: "https://example.com".to_string(),
             install_hint: "Install from example.com".to_string(),
@@ -864,14 +858,13 @@ mod tests {
         let loaded = load_custom_harnesses(dir.path());
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].args, vec!["--flag"]);
+        assert_eq!(loaded[0].mcp_command.as_deref(), Some("mcp-sidecar"));
         assert_eq!(
             loaded[0].env.get("MY_KEY").map(String::as_str),
             Some("my_value"),
             "env must round-trip through save_custom_harness_to_dir"
         );
     }
-
-    // ── B-3: env validation boundary (validate_harness_definition_pub integration) ──
 
     #[test]
     fn validate_rejects_malformed_key_with_equals_sign() {
@@ -885,6 +878,7 @@ mod tests {
             label: "Bad".to_string(),
             command: "bad-bin".to_string(),
             args: vec![],
+            mcp_command: None,
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
@@ -914,6 +908,7 @@ mod tests {
             label: "Bad".to_string(),
             command: "bad-bin".to_string(),
             args: vec![],
+            mcp_command: None,
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
@@ -935,6 +930,7 @@ mod tests {
             label: "CI".to_string(),
             command: "ci-bin".to_string(),
             args: vec![],
+            mcp_command: None,
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
@@ -956,6 +952,7 @@ mod tests {
             label: "NUL".to_string(),
             command: "nul-bin".to_string(),
             args: vec![],
+            mcp_command: None,
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
@@ -978,6 +975,7 @@ mod tests {
             label: "Big".to_string(),
             command: "big-bin".to_string(),
             args: vec![],
+            mcp_command: None,
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),
@@ -999,6 +997,7 @@ mod tests {
             label: "Good".to_string(),
             command: "good-bin".to_string(),
             args: vec![],
+            mcp_command: None,
             env,
             install_instructions_url: String::new(),
             install_hint: String::new(),

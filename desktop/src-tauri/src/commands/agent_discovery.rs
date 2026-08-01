@@ -173,7 +173,7 @@ pub async fn save_custom_harness(
         command: command_opt,
         binary_path,
         default_args,
-        mcp_command: None,
+        mcp_command: definition.mcp_command.clone(),
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,

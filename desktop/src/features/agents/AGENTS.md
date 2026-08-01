@@ -12,8 +12,10 @@ Plan of record: `Buzz/Harness-Provider-Model.md` in Morgan's Obsidian vault
 
 **Harness capability facts have exactly one source: the Rust runtime catalog.**
 `KnownAcpRuntime` (`desktop/src-tauri/src/managed_agents/discovery/runtime_metadata.rs`)
-declares each harness's model/provider/effort env keys and capabilities. Spawn
-applies them; `AcpRuntimeCatalogEntry` exposes them over IPC; and
+declares each built-in harness's model/provider/effort env keys and capabilities;
+user-owned custom harness definitions may declare their optional MCP sidecar.
+Spawn resolves both through the effective harness descriptor;
+`AcpRuntimeCatalogEntry` exposes them over IPC; and
 `lib/agentConfigCore.ts` projects them into field descriptors. The frontend
 never maintains a rival copy of this table. Setup guidance follows the same
 rule: `requires_external_cli` is derived from `KnownAcpRuntime` and projected

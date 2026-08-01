@@ -923,18 +923,17 @@ export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
   ).map(fromRawAcpRuntimeCatalogEntry);
 }
 
-/** Input shape for creating or updating a custom harness. */
 export type HarnessDefinitionInput = {
   id: string;
   label: string;
   command: string;
+  mcpCommand?: string;
   args?: string[];
   env?: Record<string, string>;
   installInstructionsUrl?: string;
   installHint?: string;
 };
 
-/** Save (create or overwrite) a custom harness definition. Returns the catalog entry. */
 export async function saveCustomHarness(
   definition: HarnessDefinitionInput,
   originalId?: string,
@@ -946,6 +945,7 @@ export async function saveCustomHarness(
         id: definition.id,
         label: definition.label,
         command: definition.command,
+        mcpCommand: definition.mcpCommand,
         args: definition.args ?? [],
         env: definition.env ?? {},
         installInstructionsUrl: definition.installInstructionsUrl ?? "",

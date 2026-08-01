@@ -727,6 +727,49 @@ fn spawn_hash_changes_when_definition_env_changes() {
     assert_ne!(h1, h2, "adding definition env must change the spawn hash");
 }
 
+/// Editing a custom definition's MCP sidecar changes the spawn hash, so a
+/// running agent is marked for restart before the new sidecar can take effect.
+#[test]
+fn spawn_hash_changes_when_definition_mcp_command_changes() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    let _lock = registry_test_lock();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("mcp-def.json");
+
+    fs::write(
+        &path,
+        r#"{"id":"mcp-def","label":"MCP Def","command":"agent-bin","mcpCommand":"mcp-v1"}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let mut r = record();
+    r.runtime = Some("mcp-def".into());
+    let descriptor =
+        crate::managed_agents::resolve_effective_harness_descriptor(&r, &[], &Default::default())
+            .unwrap();
+    assert_eq!(descriptor.mcp_command.as_deref(), Some("mcp-v1"));
+    let h1 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+
+    fs::write(
+        &path,
+        r#"{"id":"mcp-def","label":"MCP Def","command":"agent-bin","mcpCommand":"mcp-v2"}"#,
+    )
+    .unwrap();
+    warm_harness_registry_from_dir(Some(dir.path()));
+
+    let h2 = spawn_config_hash(&r, &[], &[], "ws://relay", &Default::default());
+    assert_ne!(
+        h1, h2,
+        "changing the MCP command must change the spawn hash"
+    );
+}
+
 /// Instance-level args win over definition default args (non-empty instance
 /// args must NOT be overridden by the definition). The hash must match a record
 /// that has the same effective args from either source.
