@@ -169,13 +169,22 @@ function isHiddenLocally(project: Project): boolean {
   return readHiddenProjectCards().includes(projectCoordinate(project));
 }
 
-function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
+export function isDeletedByA(
+  project: Project,
+  deletionEvents: RelayEvent[],
+): boolean {
   const coordinate = projectCoordinate(project);
   // NIP-09: a deletion is only valid when signed by the author of the
   // referenced event — otherwise anyone could hide someone else's project.
+  //
+  // Additionally, the deletion must be newer than the (re-)announcement.
+  // If a project was deleted and later re-published, the re-announcement
+  // has a newer `created_at` than the deletion event, so the stale
+  // deletion must not tombstone it permanently.
   return deletionEvents.some(
     (event) =>
       event.pubkey.toLowerCase() === project.owner.toLowerCase() &&
+      event.created_at > project.createdAt &&
       event.tags.some((tag) => tag[0] === "a" && tag[1] === coordinate),
   );
 }
