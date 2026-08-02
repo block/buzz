@@ -526,11 +526,20 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
         FEATURES=(--features mesh-llm)
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
-    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
+    # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
+    # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
+    # exe dir for executable buzz-backend-* files, so the non-executable stub that
+    # tauri dev copies next to the exe would hide the provider from "Run on".
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    STAGING_SIDECARS=(buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        STAGING_SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${STAGING_SIDECARS[@]}"; do
+        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     source ../scripts/instance-env.sh
@@ -553,11 +562,20 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
         FEATURES=(--features mesh-llm)
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
-    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
+    # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
+    # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
+    # exe dir for executable buzz-backend-* files, so the non-executable stub that
+    # tauri dev copies next to the exe would hide the provider from "Run on".
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    PRODUCTION_SIDECARS=(buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        PRODUCTION_SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${PRODUCTION_SIDECARS[@]}"; do
+        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://buzz.block.builderlab.xyz"
     source ../scripts/instance-env.sh
