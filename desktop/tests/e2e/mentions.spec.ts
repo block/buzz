@@ -7,6 +7,7 @@ import {
 } from "../helpers/bridge";
 
 const MOCK_VIEWER_PUBKEY = "deadbeef".repeat(8);
+const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -506,17 +507,33 @@ test("relay-only shared agents stay hidden from DM mentions", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 
   const input = page.getByTestId("message-input");
-  await input.fill("@ali");
+  await input.fill("@");
 
-  await expect(autocomplete(page).getByText("alice")).toHaveCount(0);
+  await expect(
+    autocomplete(page).getByTestId(`mention-suggestion-${MOCK_VIEWER_PUBKEY}`),
+  ).toBeVisible();
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toHaveCount(0);
 });
 
 test("relay-only shared agents stay hidden while channel type is unresolved", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByTestId("channel-alice-tyler").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@alice");
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toBeVisible();
+  await input.fill("");
 
   await page.evaluate(async (channelId) => {
     const bridge = window as Window & {
@@ -528,12 +545,34 @@ test("relay-only shared agents stay hidden while channel type is unresolved", as
     };
     bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({ channelId, channelType: null });
     await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
-  }, "f48efb06-0c93-5025-aac9-2e646bb6bfa8");
+  }, GENERAL_CHANNEL_ID);
+
+  await input.fill("@");
+
+  await expect(
+    autocomplete(page).getByTestId(`mention-suggestion-${MOCK_VIEWER_PUBKEY}`),
+  ).toBeVisible();
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toHaveCount(0);
+});
+
+test("relay-only shared agents appear in forum mentions", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-watercooler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
+  await page.getByRole("button", { name: "Start a new post..." }).click();
 
   const input = page.getByTestId("message-input");
   await input.fill("@alice");
 
-  await expect(autocomplete(page).getByText("alice")).toHaveCount(0);
+  const aliceRow = page
+    .getByTestId("mention-autocomplete")
+    .getByTestId(`mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`);
+  await expect(aliceRow).toBeVisible();
+  await expect(aliceRow.getByTestId("mention-agent-icon")).toBeVisible();
 });
 
 test("autocomplete filters managed-agent suggestions as user types", async ({
