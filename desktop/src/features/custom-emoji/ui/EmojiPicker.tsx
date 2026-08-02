@@ -124,7 +124,7 @@ export const EmojiPicker = React.memo(function EmojiPicker({
   }, [autoFocus]);
 
   return (
-    <div ref={hostRef}>
+    <div data-selection-exclude="" className="select-none" ref={hostRef}>
       <Picker
         autoFocus={autoFocus}
         custom={custom}

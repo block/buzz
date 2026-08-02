@@ -40,9 +40,10 @@ import { ComposerImageEditor } from "./ComposerImageEditor";
 export function DropZoneOverlay({ className }: { className?: string }) {
   return (
     <div
+      data-selection-exclude=""
       data-testid="drop-zone-overlay"
       className={cn(
-        "pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/10",
+        "select-none pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/10",
         className,
       )}
     >
