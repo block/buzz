@@ -813,6 +813,9 @@ const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`classify_control_cancel_failure`].
 const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// ACP `configId` for the permission-mode select.
+const MODE_CONFIG_ID: &str = "mode";
+
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1084,7 +1087,8 @@ async fn apply_model_switch(
 /// in `result.modes.availableModes[].id`. Returns `false` if the modes
 /// field is absent or the mode isn't listed.
 fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) -> bool {
-    session_new_result
+    // Unstable path: `modes.availableModes[].id`.
+    let unstable = session_new_result
         .get("modes")
         .and_then(|m| m.get("availableModes"))
         .and_then(|a| a.as_array())
@@ -1092,6 +1096,44 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
             modes
                 .iter()
                 .any(|m| m.get("id").and_then(|v| v.as_str()) == Some(mode_wire))
+        })
+        .unwrap_or(false);
+    if unstable {
+        return true;
+    }
+
+    // Stable path: a `configOptions` entry for modes, listing the value.
+    //
+    // Agents that only advertise modes here used to fail the gate, so
+    // `apply_permission_mode` never ran and the session silently stayed on the
+    // agent's default. For a harness running headless that is not cosmetic: the
+    // agent then auto-denies every permission-gated tool (it cannot prompt), the
+    // turn produces no output, and nothing is posted — a silent no-op that looks
+    // like the agent is simply idle. The model path already accepts both the
+    // stable and unstable shapes; this brings modes in line.
+    //
+    // `configId` is spelled `id` by some adapters (claude-agent-acp), matching
+    // the leniency in `extract_model_config_options`' consumers.
+    session_new_result
+        .get("configOptions")
+        .and_then(|a| a.as_array())
+        .map(|opts| {
+            opts.iter()
+                .filter(|opt| {
+                    opt.get("category").and_then(|c| c.as_str()) == Some("mode")
+                        || opt.get("configId").and_then(|c| c.as_str()) == Some(MODE_CONFIG_ID)
+                        || opt.get("id").and_then(|c| c.as_str()) == Some(MODE_CONFIG_ID)
+                })
+                .any(|opt| {
+                    opt.get("options")
+                        .and_then(|o| o.as_array())
+                        .map(|values| {
+                            values
+                                .iter()
+                                .any(|v| v.get("value").and_then(|x| x.as_str()) == Some(mode_wire))
+                        })
+                        .unwrap_or(false)
+                })
         })
         .unwrap_or(false)
 }
@@ -1107,7 +1149,7 @@ async fn apply_permission_mode(
 ) -> Result<(), AcpError> {
     let wire = mode.as_wire_str();
     let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
-        acp.session_set_config_option(session_id, "mode", wire)
+        acp.session_set_config_option(session_id, MODE_CONFIG_ID, wire)
             .await
     })
     .await;
@@ -3779,6 +3821,73 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    // `agent_supports_mode` gates whether the permission mode is pushed at all.
+    // A false negative is silent and severe: the session keeps the agent's
+    // default mode, a headless agent then auto-denies every permission-gated
+    // tool, and the turn ends with no output and nothing posted.
+
+    #[test]
+    fn agent_supports_mode_accepts_unstable_modes_shape() {
+        let result = json!({
+            "modes": {
+                "currentModeId": "default",
+                "availableModes": [{ "id": "default" }, { "id": "bypassPermissions" }],
+            }
+        });
+        assert!(agent_supports_mode(&result, "bypassPermissions"));
+        assert!(!agent_supports_mode(&result, "plan"));
+    }
+
+    #[test]
+    fn agent_supports_mode_accepts_stable_config_options_shape() {
+        // Antigravity's ACP adapter advertises modes only here, with no `modes`
+        // object at all — this shape used to fail the gate entirely.
+        let result = json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "options": [{ "value": "gemini-3.1-pro-high" }],
+                },
+                {
+                    "id": "mode",
+                    "category": "mode",
+                    "options": [
+                        { "value": "default" },
+                        { "value": "plan" },
+                        { "value": "bypassPermissions" },
+                    ],
+                },
+            ]
+        });
+        assert!(agent_supports_mode(&result, "bypassPermissions"));
+        assert!(agent_supports_mode(&result, "plan"));
+        assert!(!agent_supports_mode(&result, "acceptEdits"));
+    }
+
+    #[test]
+    fn agent_supports_mode_ignores_values_from_other_categories() {
+        // A model option that happens to carry a mode-like value must not be
+        // mistaken for mode support.
+        let result = json!({
+            "configOptions": [{
+                "id": "model",
+                "category": "model",
+                "options": [{ "value": "bypassPermissions" }],
+            }]
+        });
+        assert!(!agent_supports_mode(&result, "bypassPermissions"));
+    }
+
+    #[test]
+    fn agent_supports_mode_false_when_agent_advertises_nothing() {
+        assert!(!agent_supports_mode(&json!({}), "bypassPermissions"));
+        assert!(!agent_supports_mode(
+            &json!({ "configOptions": [] }),
+            "bypassPermissions"
+        ));
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
