@@ -1123,7 +1123,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} no_mention_filter={} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1134,6 +1134,7 @@ impl Config {
             self.agents,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
+            self.no_mention_filter,
             self.dedup_mode,
             self.multiple_event_handling,
             self.ignore_self,
@@ -1532,6 +1533,16 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_summary_includes_no_mention_filter_state() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.no_mention_filter = true;
+        assert!(config.summary().contains("no_mention_filter=true"));
+
+        config.no_mention_filter = false;
+        assert!(config.summary().contains("no_mention_filter=false"));
     }
 
     #[test]
