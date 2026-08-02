@@ -138,6 +138,7 @@ strip-ansi-escapes = "0.2"
 tracing = "0.1"
 
 [dev-dependencies]
+tauri-utils = "2"
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay
 # admission gate tests can assert exact wait durations without real sleeps.
 tokio = { version = "1", features = ["test-util"] }

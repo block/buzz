@@ -155,7 +155,11 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${SIDECARS[@]}"; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 
@@ -236,6 +240,9 @@ desktop-release-build target="aarch64-apple-darwin":
     mkdir -p desktop/src-tauri/binaries
     touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+    if [[ "$TARGET" != *windows* ]]; then
+        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
+    fi
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
@@ -274,6 +281,7 @@ test:
 # Run unit tests only (no infra needed)
 test-unit:
     #!/usr/bin/env bash
+    set -euo pipefail
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         cargo nextest run -p buzz-voice --lib
@@ -293,6 +301,12 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        # Kubernetes backend provider: the decision layers (state machine, GC
+        # planner, env precedence, naming, wire) are pure functions with a fake
+        # substrate, so they belong in the unit job. Enumerated explicitly
+        # because nothing in CI runs `cargo test --workspace` — workspace
+        # membership alone buys clippy/check, not a single executed test.
+        cargo nextest run -p buzz-backend-kubernetes
     else
         ./scripts/run-tests.sh unit
     fi
@@ -430,7 +444,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
             fi
         done
     fi
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
     if [[ -n "{{mesh}}" ]]; then
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
@@ -477,10 +491,10 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+    for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
         cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
@@ -506,7 +520,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     pnpm install  # unconditional: staging must always start with a clean dep tree
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
@@ -533,7 +547,7 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     pnpm install  # unconditional: production must always start with a clean dep tree
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
