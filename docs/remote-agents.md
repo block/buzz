@@ -842,14 +842,15 @@ can yield two live instances in one scope.
   derive an upper bound for this path from its segment timeouts, because
   review proved that arithmetic wrong twice**: the visible constants (30s
   drain, 2s presence, 5s relay close) omit terms that are *variable*, not
-  constant — at `c1bca1b56` the post-drain reap segment (late-arriving
-  reap `lib.rs:2401`, idle-slot reap loop `:2407`, respawn drain `:2425`)
-  runs *outside* the 30s drain timeout (opened at `:2366`, closed at
-  `:2394`) and serially awaits a 5s post-SIGKILL wait per occupied pool
-  slot (`acp.rs:393`), so the worst-case tail is `30 + 5×parallelism + 7`
-  — **~157s at the desktop's default parallelism of 24**
-  (`DEFAULT_AGENT_PARALLELISM`, `types.rs:725`), ~197s at the harness cap
-  of 32 (`config.rs:292`), against a 60s grace.
+  constant — at this PR's base `b4f4ed1a6` the post-drain reap segment
+  (late-arriving reap `lib.rs:2664`, idle-slot reap loop `:2670`, respawn
+  drain `:2684-2688`) runs *outside* the 30s drain timeout (opened at
+  `:2636`, closed at `:2657`) and serially awaits a 5s post-SIGKILL wait
+  per occupied pool slot (`acp.rs:436`), so the worst-case tail is
+  `30 + 5×parallelism + 7` — **~87s at the desktop's default parallelism
+  of 10** (`DEFAULT_AGENT_PARALLELISM`, `types.rs:809`; lowered from 24 by
+  #3038), ~197s at the harness cap of 32 (`config.rs:293`), against a 60s
+  grace.
   The requirement is therefore stated as a budget, not a sum (Known
   Defect 7): **the harness MUST bound its total shutdown tail — every
   post-signal segment, including per-slot reaping — under one shared
@@ -905,7 +906,7 @@ I5's enforcement point. A new harness knob:
   `RESERVED_ENV_KEYS` (`env_vars.rs`) when it lands — it is tier-3
   authoritative (§Launch data), and without reservation a user env var
   could disable the reaper and reopen unbounded lifetime through the front
-  door. `BUZZ_ACP_NO_PRESENCE` (`config.rs:377`) MUST join in the same
+  door. `BUZZ_ACP_NO_PRESENCE` (`config.rs:378`) MUST join in the same
   change, for the same shape of reason at I3 instead of I5: unreserved, it
   lets user env silently defeat the 90s presence bound (I3). One knob
   guards "knows when to leave", the other "you can see that it left";
@@ -1077,7 +1078,19 @@ regardless of `HOME`.
     `OnFailure` against an undefended exit convention). `OnFailure`
     restarts the *in-place* abnormal deaths — process crash, container
     OOM-kill — and honors the intentional ones (clean exit completes the
-    pod): I5's intent-vs-accident distinction, realized. **Honest
+    pod): I5's intent-vs-accident distinction, realized. **Second
+    prerequisite — reconciler classification:** `OnFailure` introduces a
+    pod state the deploy state machine's rows do not cover — a
+    crash-looping harness sits in phase `Running` with
+    `state.waiting{reason: CrashLoopBackOff}`, `restartCount > 0`: not
+    deletion-marked, not terminated (the kubelet keeps restarting it),
+    not "live and started" (`state.running` is false), and not
+    never-started (it started, repeatedly) — and it fails the startup
+    success criterion while the kubelet is actively reviving it. Before
+    the binding ships `OnFailure`, the state machine MUST gain a
+    crash-loop classification row and the started-criterion's treatment
+    of `restartCount > 0` MUST be specified; the exit-code contract alone
+    is *not* the green light. **Honest
     limit:** `restartPolicy` is
     kubelet-level and cannot survive *node-level* loss — a drain or
     API-initiated eviction deletes a bare pod outright, and no
@@ -1139,8 +1152,8 @@ regardless of `HOME`.
   would SIGKILL the harness mid-drain, leaving presence stale-online — the
   avoidable half of I3's staleness window — so the binding declares 60s.
   But the shutdown tail is *variable*, not constant (§Stop: the post-drain
-  reap segment scales with occupied pool slots — ~157s worst case at
-  default parallelism at `c1bca1b56`), so no fixed grace can be proven
+  reap segment scales with occupied pool slots — ~87s worst case at
+  default parallelism at `b4f4ed1a6`), so no fixed grace can be proven
   sufficient by adding segment timeouts. The two halves of the requirement:
   the binding *declares* the budget here, and the harness *enforces* it —
   one shared deadline across the entire post-signal path, with a reserved
@@ -1432,8 +1445,9 @@ The realization the two lists above require, in this binding's vocabulary:
    (I5) through this binding's `inactivity_seconds` field: `> 0` →
    a working inactivity bound and `restartPolicy: Never`; `0` (the
    blessed indefinite opt-in) → no bound and `restartPolicy: OnFailure`,
-   **only after the pinned exit-code contract lands** — until then the
-   provider MUST refuse the combination (I5 ordering rule).
+   **only after both prerequisites land** — the pinned exit-code contract
+   (I5 ordering rule) *and* the crash-loop classification row (§Pod
+   shape); until then the provider MUST refuse the combination.
 3. The harness is the deployed container's **signal-receiving process**
    (PID 1 or the target of the pod's termination signal — §K8s
    Entrypoint's `exec` rule), and `terminationGracePeriodSeconds` carries
@@ -1506,6 +1520,13 @@ hand-written model would have reproduced convincingly.
 
 ## Known Defects (at `c1bca1b56`)
 
+**Citation-pin caveat:** `c1bca1b56` is an unmerged feature-branch commit
+that diverged from main on Jul 18 and predates #3038 (default parallelism
+24 → 10). Line references marked `at b4f4ed1a6` were re-verified against
+this PR's own base; unmarked `c1bca1b56` references may be offset on
+current main. A follow-up re-pins the whole document to one merged
+commit.
+
 Desktop- and harness-side, discovered during this design:
 
 1. **Windows discovery id pollution**: the `.exe` suffix survives into the
@@ -1563,9 +1584,10 @@ Desktop- and harness-side, discovered during this design:
    resolve-once → stage-and-digest → `info` → explicit-version check →
    `deploy`, both invocations running the staged bytes.
 6. **The clean-exit contract is emergent, not defended** (harness code
-   prerequisite; gates `OnFailure`). The graceful path returns `Ok(())`
-   (`lib.rs:2460`), and owner `!shutdown` (`:1883`), Ctrl-C (`:1549`), and
-   SIGTERM (`:1558`) all route into the same shutdown channel — so clean
+   prerequisite; gates `OnFailure`). At `b4f4ed1a6`: the graceful path
+   returns `Ok(())` (`lib.rs:2723`), and owner `!shutdown` (`:2045`),
+   Ctrl-C (`:1635`), and
+   SIGTERM (`:1644`) all route into the same shutdown channel — so clean
    stops exit 0 *today*, but no distinguished exit code exists and no test
    pins "intentional exit ⇒ 0"; every `process::exit(1)` in the crate is a
    startup failure. Until a
@@ -1575,16 +1597,30 @@ Desktop- and harness-side, discovered during this design:
    timeout would silently convert every clean stop into a restart loop —
    I5 defeated with no failing test (I5 ordering rule).
 7. **The shutdown tail overruns the declared grace budget at default
-   config** (harness code prerequisite). The post-drain reap segment
-   (`lib.rs:2401-2430`) runs *after* the 30s drain timeout closes
-   (`:2366,:2394`) and serially awaits a 5s post-SIGKILL wait per occupied
-   slot (`acp.rs:393`) — worst case ~157s at the desktop's default
-   parallelism of 24 (`types.rs:725`), ~197s at the harness cap of 32
-   (`config.rs:292`), against the binding's
+   config** (harness code prerequisite). At `b4f4ed1a6`: the post-drain
+   reap segment
+   (`lib.rs:2664-2688`) runs *after* the 30s drain timeout closes
+   (`:2636,:2657`) and serially awaits a 5s post-SIGKILL wait per occupied
+   slot (`acp.rs:436`) — worst case ~87s at the desktop's default
+   parallelism of 10 (`types.rs:809`; #3038 lowered it from 24), ~197s at
+   the harness cap of 32
+   (`config.rs:293`), against the binding's
    60s grace. The fix is one shared deadline across the entire post-signal
    path with a reserved finalization slice for presence `offline` and
    relay close, child cleanup degrading first (§Stop); natural home is the
    same harness change as the I5 reaper (defect 4).
+8. **Cleared numeric config fields ship as strings** (desktop code
+   prerequisite, raised by blessing `0`). `coerceConfigValues`
+   (`desktop/src/features/agents/ui/ProviderConfigFields.tsx:6` at
+   `b4f4ed1a6`) skips numeric coercion when the value is `""`, so a
+   *cleared* numeric field reaches the provider as a JSON string instead
+   of a number. Blessing `inactivity_seconds: 0` makes clearing that
+   field a legitimate user action, so the empty-string arm now sits on a
+   documented path: the provider receives `""` where the schema says
+   integer, and "0 MUST NOT be rejected" cannot protect a value that
+   never parses as 0. Fix is desktop-side (map cleared numeric →
+   omit-or-default, never `""`); provider-side, a non-numeric value for a
+   numeric field is an in-band error, not a silent default.
 
 ## Implementation Correspondence
 
