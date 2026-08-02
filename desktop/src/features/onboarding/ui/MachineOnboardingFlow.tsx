@@ -54,6 +54,7 @@ export type PostOnboardingNavigation = {
 export function MachineOnboardingFlow({
   complete,
   continueWithIdentity,
+  continueWithRecoveredIdentity,
   identityLost,
   initialPage,
   queryClient,
@@ -61,6 +62,7 @@ export function MachineOnboardingFlow({
 }: {
   complete: (pubkey?: string) => void;
   continueWithIdentity: (pubkey: string) => void;
+  continueWithRecoveredIdentity: (pubkey: string) => void;
   identityLost: boolean;
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
@@ -131,6 +133,26 @@ export function MachineOnboardingFlow({
       setIsPending(false);
     }
   }, [queryClient]);
+
+  const loadRecoveredIdentity = React.useCallback(async () => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const identity = await getIdentity();
+      continueWithRecoveredIdentity(identity.pubkey);
+      queryClient.setQueryData(["identity"], identity);
+      setIdentityWasImported(true);
+      setSelectedPubkey(identity.pubkey);
+      setIdentityStorage(identity.storage);
+      setPage("setup");
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Failed to load identity",
+      );
+    } finally {
+      setIsPending(false);
+    }
+  }, [continueWithRecoveredIdentity, queryClient]);
 
   const replaceLostIdentity = React.useCallback(async () => {
     const confirmed = window.confirm(
@@ -308,7 +330,9 @@ export function MachineOnboardingFlow({
               >
                 {keyImportMethod === "phone" ? (
                   <div className="flex flex-col items-center">
-                    <IdentityRecoveryPairing onRecovered={loadFreshIdentity} />
+                    <IdentityRecoveryPairing
+                      onRecovered={loadRecoveredIdentity}
+                    />
                     <Button
                       className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
                       onClick={() => setKeyImportMethod("key")}

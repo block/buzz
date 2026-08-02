@@ -125,6 +125,34 @@ test("lost boot offers phone recovery with a single-use QR", async ({
   ).toBe(true);
 });
 
+test("phone recovery continues to harness setup without creating or restarting", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityLost: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
+
+  await page.evaluate(async () => {
+    await window.__TAURI_INTERNALS__?.invoke?.(
+      "complete_identity_recovery_pairing",
+    );
+  });
+
+  await expect(
+    page.getByRole("heading", { name: "Set up your agent harnesses" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("relaunch-required")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", {
+      name: "Your unique identity key has been created",
+    }),
+  ).toHaveCount(0);
+});
+
 test("recovery turns relay failures into actionable copy", async ({ page }) => {
   await installMockBridge(
     page,
