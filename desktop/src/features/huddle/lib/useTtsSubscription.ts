@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { buildHuddleTtsLiveFilter } from "@/shared/api/relayChannelFilters";
 import { relayClient } from "@/shared/api/relayClient";
+import type { CaptionSpeechPreferences } from "./ttsLiveMessages";
 import {
   createInitialTtsReadinessGate,
   createLatestStateGate,
@@ -12,6 +13,12 @@ import {
 } from "./ttsLiveMessages";
 
 const AGENT_PUBKEY_REFRESH_INTERVAL_MS = 30_000;
+// Fails open to today's behavior (speak everything) if settings never load —
+// see the field docs on the Rust `TtsSettings` struct.
+const DEFAULT_CAPTION_PREFERENCES: CaptionSpeechPreferences = {
+  speakCaptions: true,
+  captionLanguage: "en",
+};
 let nextTtsRouteId = 1;
 
 function allocateTtsRouteId(): number {
@@ -49,6 +56,24 @@ export function useTtsSubscription(
     // successful fetch means "no agents in the huddle" → still mute.
     let agentsLoaded = false;
     const agentPubkeys = new Set<string>();
+    let captionPreferences: CaptionSpeechPreferences =
+      DEFAULT_CAPTION_PREFERENCES;
+
+    async function loadCaptionPreferences() {
+      try {
+        const settings =
+          await invoke<CaptionSpeechPreferences>("get_tts_settings");
+        if (disposed) return;
+        captionPreferences = {
+          speakCaptions: settings.speakCaptions,
+          captionLanguage: settings.captionLanguage,
+        };
+      } catch (e) {
+        // Keep the last known preferences (defaults on first failure) —
+        // gating fails open rather than going silent on a fetch error.
+        console.error("[huddle] Failed to load caption preferences:", e);
+      }
+    }
 
     const speakInOrder = createOrderedSpeaker(
       async (text, routeId) => {
@@ -99,6 +124,7 @@ export function useTtsSubscription(
         ephemeralChannelId,
         routeId,
         speakInOrder.enqueue,
+        captionPreferences,
       );
       if (result === "queued") {
         console.debug(
@@ -146,10 +172,13 @@ export function useTtsSubscription(
       }
     }
 
-    // Initial load + periodic refresh (catches mid-huddle agent additions).
+    // Initial load + periodic refresh (catches mid-huddle agent additions
+    // and settings changes made from another window/session).
     void loadAgentPubkeys(true);
+    void loadCaptionPreferences();
     const agentRefreshId = window.setInterval(() => {
       void loadAgentPubkeys();
+      void loadCaptionPreferences();
     }, AGENT_PUBKEY_REFRESH_INTERVAL_MS);
 
     // Install the state listener before requesting a snapshot. If a newer

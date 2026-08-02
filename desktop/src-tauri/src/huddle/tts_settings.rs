@@ -137,6 +137,24 @@ pub struct TtsSettings {
     pub version: u32,
     pub agent_text_to_speech: bool,
     pub voice_preferences: VoicePreferences,
+    /// Preferred language for translated huddle captions, as a lowercase
+    /// ISO 639-1 code (e.g. "en", "es"). Captions tagged with a different
+    /// language still render as text but are not spoken aloud.
+    #[serde(default = "default_caption_language")]
+    pub caption_language: String,
+    /// Whether captions matching `caption_language` are spoken aloud.
+    /// Captions always render as text regardless of this setting — it only
+    /// gates `speak_agent_message`.
+    #[serde(default = "default_speak_captions")]
+    pub speak_captions: bool,
+}
+
+fn default_caption_language() -> String {
+    "en".to_string()
+}
+
+fn default_speak_captions() -> bool {
+    true
 }
 
 impl Default for TtsSettings {
@@ -145,6 +163,8 @@ impl Default for TtsSettings {
             version: CURRENT_VERSION,
             agent_text_to_speech: true,
             voice_preferences: vec![MARY_VOICE_KEY.to_string()],
+            caption_language: default_caption_language(),
+            speak_captions: default_speak_captions(),
         }
     }
 }
@@ -272,6 +292,7 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
             voice_preferences: vec![voice_key],
+            ..TtsSettings::default()
         });
     }
 
@@ -345,7 +366,7 @@ pub fn list_voice_registry(app: AppHandle) -> Vec<VoiceRegistryEntry> {
     voice_registry(&app)
 }
 
-fn ensure_settings_writable(state: &AppState) -> Result<(), String> {
+pub(crate) fn ensure_settings_writable(state: &AppState) -> Result<(), String> {
     if let Some(error) = state
         .huddle_audio
         .tts_load_error
@@ -463,7 +484,7 @@ async fn apply_tts_settings(
     Ok(voice_change_wait)
 }
 
-fn current_settings(state: &AppState) -> Result<TtsSettings, String> {
+pub(crate) fn current_settings(state: &AppState) -> Result<TtsSettings, String> {
     state
         .huddle_audio
         .tts
@@ -738,6 +759,8 @@ mod tests {
                 version: 1,
                 agent_text_to_speech: true,
                 voice_preferences: vec!["pocket:mary".to_string()],
+                caption_language: "en".to_string(),
+                speak_captions: true,
             }
         );
     }
@@ -864,6 +887,8 @@ mod tests {
                 version: 1,
                 agent_text_to_speech: false,
                 voice_preferences: vec![EVE_VOICE_KEY.to_string()],
+                caption_language: "en".to_string(),
+                speak_captions: true,
             }
         );
     }

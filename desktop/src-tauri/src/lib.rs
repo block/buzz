@@ -895,6 +895,8 @@ pub fn run() {
             huddle::tts_settings::get_tts_settings,
             huddle::tts_settings::list_voice_registry,
             huddle::tts_settings::set_pocket_voice,
+            huddle::caption_settings::set_caption_language,
+            huddle::caption_settings::set_speak_captions,
             huddle::tts_settings::preview_pocket_voice,
             huddle::tts_settings::import_pocket_voice,
             huddle::tts_settings::delete_pocket_voice,

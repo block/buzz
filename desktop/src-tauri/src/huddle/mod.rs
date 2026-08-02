@@ -26,6 +26,7 @@
 mod agent_tts_routing;
 pub mod agents;
 pub mod audio_output;
+pub mod caption_settings;
 pub mod jitter;
 pub mod models;
 pub mod pipeline;

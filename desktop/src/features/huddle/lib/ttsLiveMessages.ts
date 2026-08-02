@@ -2,6 +2,7 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
 } from "../../../shared/constants/kinds.ts";
+import { shouldSpeakCaption } from "./captionLanguage.ts";
 
 export type LiveTtsEvent = {
   id: string;
@@ -20,7 +21,8 @@ export type LiveTtsEligibility =
         | "h_tag_mismatch"
         | "author_not_agent"
         | "self_authored"
-        | "empty_or_system";
+        | "empty_or_system"
+        | "caption_language_mismatch";
     };
 
 export type LiveTtsRouteResult =
@@ -52,11 +54,17 @@ function textWithoutAttachments(event: LiveTtsEvent): string {
   );
 }
 
+export type CaptionSpeechPreferences = {
+  speakCaptions: boolean;
+  captionLanguage: string;
+};
+
 export function classifySpeakableAgentText(
   event: LiveTtsEvent,
   agentPubkeys: ReadonlySet<string>,
   selfPubkey: string | null,
   channelId: string,
+  captionPreferences: CaptionSpeechPreferences,
 ): LiveTtsEligibility {
   if (
     event.kind !== KIND_STREAM_MESSAGE &&
@@ -72,6 +80,14 @@ export function classifySpeakableAgentText(
   const content = textWithoutAttachments(event).trim();
   if (content.length === 0 || content.startsWith("[System]"))
     return { text: null, reason: "empty_or_system" };
+  if (
+    !shouldSpeakCaption(
+      content,
+      captionPreferences.speakCaptions,
+      captionPreferences.captionLanguage,
+    )
+  )
+    return { text: null, reason: "caption_language_mismatch" };
   return { text: content, reason: null };
 }
 
@@ -83,12 +99,14 @@ export function routeLiveAgentText(
   channelId: string,
   routeId: number,
   enqueue: (text: string, routeId: number) => "queued" | "disabled",
+  captionPreferences: CaptionSpeechPreferences,
 ): LiveTtsRouteResult {
   const eligibility = classifySpeakableAgentText(
     event,
     agentPubkeys,
     selfPubkey,
     channelId,
+    captionPreferences,
   );
   if (eligibility.text === null) return eligibility.reason;
   return enqueue(eligibility.text, routeId);
