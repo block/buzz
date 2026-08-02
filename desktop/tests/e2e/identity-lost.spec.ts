@@ -90,6 +90,26 @@ test("lost boot offers phone recovery with a single-use QR", async ({
     fullPage: true,
   });
 
+  const copyButton = page.getByTestId("copy-identity-recovery-code");
+  await expect(copyButton).toHaveText("Copy pairing code");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await copyButton.click();
+  await expect(copyButton).toHaveText("Copied");
+
+  const copiedPayload = await page.evaluate(() => {
+    const log = (
+      window as Window & {
+        __BUZZ_E2E_COMMAND_LOG__?: Array<{
+          command: string;
+          payload: Record<string, unknown> | null;
+        }>;
+      }
+    ).__BUZZ_E2E_COMMAND_LOG__;
+    return log?.findLast(({ command }) => command === "copy_text_to_clipboard")
+      ?.payload;
+  });
+  expect(copiedPayload?.text).toMatch(/^nostrpair:\/\/.+&mode=recover$/);
+
   const commands = await page.evaluate(
     () =>
       (

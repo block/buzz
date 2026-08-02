@@ -1,9 +1,16 @@
 import * as React from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Check, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
+import {
+  Check,
+  Copy,
+  LoaderCircle,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
 
 import { cancelPairing, confirmPairingSas } from "@/shared/api/tauri";
 import { startIdentityRecoveryPairing } from "@/shared/api/tauriPairing";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { StyledQrCode } from "@/shared/ui/styled-qr-code";
 
@@ -18,7 +25,9 @@ export function IdentityRecoveryPairing({
   const [qrUri, setQrUri] = React.useState<string | null>(null);
   const [sas, setSas] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [copied, setCopied] = React.useState(false);
   const active = React.useRef(true);
+  const copyTimer = React.useRef<number | null>(null);
 
   const start = React.useCallback(async () => {
     active.current = true;
@@ -26,6 +35,7 @@ export function IdentityRecoveryPairing({
     setError(null);
     setSas(null);
     setQrUri(null);
+    setCopied(false);
     try {
       setQrUri(await startIdentityRecoveryPairing());
       setStep("qr");
@@ -72,9 +82,22 @@ export function IdentityRecoveryPairing({
       disposed = true;
       active.current = false;
       for (const unlisten of unlisteners) unlisten();
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
       void cancelPairing();
     };
   }, [onRecovered, start]);
+
+  async function copyPairingCode() {
+    if (!qrUri) return;
+    try {
+      await writeTextToClipboard(qrUri);
+      setCopied(true);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 2_000);
+    } catch {
+      setError("Could not copy the pairing code. Try again.");
+    }
+  }
 
   async function confirm() {
     setStep("receiving");
@@ -144,6 +167,26 @@ export function IdentityRecoveryPairing({
           </div>
         )}
       </div>
+      {step === "qr" && qrUri ? (
+        <Button
+          className="mt-3"
+          data-testid="copy-identity-recovery-code"
+          onClick={() => void copyPairingCode()}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {copied ? (
+            <Check className="mr-2 h-4 w-4" />
+          ) : (
+            <Copy className="mr-2 h-4 w-4" />
+          )}
+          {copied ? "Copied" : "Copy pairing code"}
+        </Button>
+      ) : null}
+      {step === "qr" && error ? (
+        <p className="mt-2 text-xs text-destructive">{error}</p>
+      ) : null}
       <p className="mt-3 max-w-md text-sm leading-5 text-foreground/75">
         On your phone, open Settings → Send identity to desktop. This code
         expires shortly and works once.
