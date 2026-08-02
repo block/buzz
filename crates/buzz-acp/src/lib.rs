@@ -4333,18 +4333,24 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     }
 
     servers.extend(config.configured_mcp_servers.iter().map(|configured| {
-        McpServer {
-            name: configured.name.clone(),
-            command: configured.command.clone(),
-            args: configured.args.clone(),
-            env: configured
-                .env
-                .iter()
-                .map(|(name, value)| EnvVar {
-                    name: name.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
+        match configured {
+            config::ConfiguredMcpServer::Stdio {
+                name,
+                command,
+                args,
+                env,
+            } => McpServer {
+                name: name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                env: env
+                    .iter()
+                    .map(|(name, value)| EnvVar {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            },
         }
     }));
 
@@ -5166,7 +5172,7 @@ mod build_mcp_servers_tests {
         args: &[&str],
         env: &[(&str, &str)],
     ) -> config::ConfiguredMcpServer {
-        config::ConfiguredMcpServer {
+        config::ConfiguredMcpServer::Stdio {
             name: name.into(),
             command: command.into(),
             args: args.iter().map(|arg| (*arg).to_string()).collect(),
@@ -5415,6 +5421,7 @@ mod build_mcp_servers_tests {
             "servers": [
                 {
                     "name": "analytics",
+                    "transport": "stdio",
                     "command": "/opt/MCP Servers/analytics,prod",
                     "args": ["--stdio", "literal value"],
                     "env": {
@@ -5423,6 +5430,7 @@ mod build_mcp_servers_tests {
                 },
                 {
                     "name": "search",
+                    "transport": "stdio",
                     "command": "/opt/search-mcp",
                     "args": [],
                     "env": {}
