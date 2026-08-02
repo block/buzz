@@ -617,10 +617,12 @@ pub async fn preview_pocket_voice(
     let voice_name = pocket_voice_reference(&app, std::slice::from_ref(&voice_key))?;
     tokio::task::spawn_blocking(move || {
         let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let synthesizing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pipeline = super::tts::TtsPipeline::new_with_voice(
             model_dir,
             active.clone(),
+            synthesizing.clone(),
             cancel,
             &voice_name,
             output_device,
@@ -630,8 +632,9 @@ pub async fn preview_pocket_voice(
         let mut heard_audio = false;
         while started.elapsed() < std::time::Duration::from_secs(30) {
             let is_active = active.load(std::sync::atomic::Ordering::Acquire);
+            let is_synthesizing = synthesizing.load(std::sync::atomic::Ordering::Acquire);
             heard_audio |= is_active;
-            if heard_audio && !is_active {
+            if voice_preview_finished(heard_audio, is_active, is_synthesizing) {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
@@ -705,6 +708,10 @@ pub async fn delete_pocket_voice(
     })
 }
 
+fn voice_preview_finished(heard_audio: bool, is_active: bool, is_synthesizing: bool) -> bool {
+    heard_audio && !is_active && !is_synthesizing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,6 +735,12 @@ mod tests {
         assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
         prepare_enable_cancel(&cancel, false);
         assert!(!cancel.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn voice_preview_waits_across_streaming_gaps() {
+        assert!(!voice_preview_finished(true, false, true));
+        assert!(voice_preview_finished(true, false, false));
     }
 
     #[test]

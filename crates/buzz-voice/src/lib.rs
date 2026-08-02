@@ -5,7 +5,7 @@ pub mod pocket;
 
 pub use pocket::{
     april_model_info, load_text_to_speech, load_voice_style, PocketModelInfo, PocketTts,
-    VoiceStyle, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
+    SynthesisOutcome, VoiceStyle, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
 
 /// One immutable artifact required by the April Pocket bundle.

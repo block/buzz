@@ -17,8 +17,9 @@
 //!    `tts_starting` sentinels prevent TOCTOU races during the ~200ms window.
 //! 3. **`agent_pubkeys` has its own inner `Arc<Mutex>`** — the transcription task
 //!    clones the `Arc` and reads at post time without the outer lock.
-//! 4. **Atomics for cross-thread signaling** — `tts_active`, `tts_cancel`,
-//!    `ptt_active`, `session_generation` are shared with pipeline worker threads.
+//! 4. **Atomics for cross-thread signaling** — `tts_active`,
+//!    `tts_synthesizing`, `tts_cancel`, `ptt_active`, `session_generation` are
+//!    shared with pipeline worker threads.
 //! 5. **Pipeline teardown extracts handles before dropping** — `teardown_huddle`
 //!    takes `stt_pipeline`/`tts_pipeline` out of the lock, then calls `shutdown()`
 //!    and drops them outside the lock (thread joins can block ~200ms).

@@ -61,11 +61,14 @@ pub struct SttPipeline {
 impl SttPipeline {
     /// Spawn the pipeline thread.
     ///
-    /// `tts_active` is a shared flag set by the TTS pipeline while audio is
-    /// playing. The STT worker uses it to:
+    /// `tts_active` is set while TTS audio is queued or playing. The STT worker
+    /// uses it to:
     ///   - discard accumulated speech (echo prevention / barge-in gating)
-    ///   - apply a 200 ms cooldown after TTS stops before re-enabling STT
+    ///   - apply a short cooldown after TTS stops before re-enabling STT
     ///   - detect barge-in: speech onset during TTS → set `tts_cancel`
+    ///
+    /// `tts_synthesizing` keeps barge-in armed during silent gaps between
+    /// streamed decoder blocks without suppressing microphone input.
     ///
     /// `tts_cancel` (optional) is the TTS pipeline's cancel flag. When the STT
     /// worker detects speech onset while TTS is active, it sets this flag to
@@ -86,6 +89,7 @@ impl SttPipeline {
     pub fn new(
         model_dir: PathBuf,
         tts_active: Arc<AtomicBool>,
+        tts_synthesizing: Arc<AtomicBool>,
         tts_cancel: Option<Arc<AtomicBool>>,
         ptt_active: Option<Arc<AtomicBool>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
@@ -96,6 +100,10 @@ impl SttPipeline {
         let shutdown_worker = Arc::clone(&shutdown);
         let tts_cancel_worker = tts_cancel.as_ref().map(Arc::clone);
         let ptt_active_worker = ptt_active.as_ref().map(Arc::clone);
+        let tts_activity = TtsActivity {
+            active: tts_active,
+            synthesizing: tts_synthesizing,
+        };
         let handle = thread::Builder::new()
             .name("stt-worker".into())
             .spawn(move || {
@@ -104,7 +112,7 @@ impl SttPipeline {
                     audio_rx,
                     text_tx,
                     shutdown_worker,
-                    tts_active,
+                    tts_activity,
                     tts_cancel_worker,
                     ptt_active_worker,
                 )
@@ -201,12 +209,21 @@ const TTS_COOLDOWN: Duration = Duration::from_millis(50);
 /// shows it's safe on the minimum-spec target.
 const STT_NUM_THREADS: i32 = 1;
 
+fn tts_playback_ended(was_active: bool, is_active: bool, is_synthesizing: bool) -> bool {
+    was_active && !is_active && !is_synthesizing
+}
+
+struct TtsActivity {
+    active: Arc<AtomicBool>,
+    synthesizing: Arc<AtomicBool>,
+}
+
 fn stt_worker(
     model_dir: PathBuf,
     audio_rx: Receiver<Vec<u8>>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
-    tts_active: Arc<AtomicBool>,
+    tts_activity: TtsActivity,
     tts_cancel: Option<Arc<AtomicBool>>,
     ptt_active: Option<Arc<AtomicBool>>,
 ) {
@@ -291,8 +308,9 @@ fn stt_worker(
         }
 
         // Track TTS transitions to set the cooldown timer.
-        let tts_now = tts_active.load(Ordering::Acquire);
-        if tts_was_active && !tts_now {
+        let tts_now = tts_activity.active.load(Ordering::Acquire);
+        let tts_is_synthesizing = tts_activity.synthesizing.load(Ordering::Acquire);
+        if tts_playback_ended(tts_was_active, tts_now, tts_is_synthesizing) {
             // TTS just stopped — record the timestamp for the cooldown window.
             tts_stopped_at = Some(std::time::Instant::now());
         }
@@ -345,7 +363,8 @@ fn stt_worker(
                     &mut barge_in_frames,
                     &recognizer,
                     &text_tx,
-                    &tts_active,
+                    &tts_activity.active,
+                    &tts_activity.synthesizing,
                     tts_cancel.as_deref(),
                     &mut tts_stopped_at,
                     ptt_active.as_ref(),
@@ -408,6 +427,7 @@ fn process_16k_samples(
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
     tts_active: &Arc<AtomicBool>,
+    tts_synthesizing: &Arc<AtomicBool>,
     tts_cancel: Option<&AtomicBool>,
     tts_stopped_at: &mut Option<std::time::Instant>,
     ptt_active: Option<&Arc<AtomicBool>>,
@@ -432,6 +452,8 @@ fn process_16k_samples(
         };
 
         let tts_playing = tts_active.load(Ordering::Acquire);
+        let tts_interruptible =
+            super::tts::is_tts_interruptible(tts_active.as_ref(), tts_synthesizing.as_ref());
 
         // While TTS is playing: skip accumulation (echo prevention).
         if tts_playing {
@@ -466,6 +488,14 @@ fn process_16k_samples(
             speech_buf.clear();
             *silence_frames = 0;
             continue;
+        }
+
+        // A decoder gap is silent, so microphone accumulation remains enabled,
+        // but real speech still cancels the in-flight utterance.
+        if tts_interruptible && is_speech {
+            if let Some(cancel) = tts_cancel {
+                cancel.store(true, Ordering::Release);
+            }
         }
 
         // TTS not playing — check cooldown window.
@@ -565,3 +595,18 @@ fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
 
 // drain_until_shutdown lives in super (huddle/mod.rs) — shared with tts.rs.
 use super::drain_until_shutdown;
+
+#[cfg(test)]
+mod tests {
+    use super::tts_playback_ended;
+
+    #[test]
+    fn decoder_gap_is_not_a_playback_end() {
+        assert!(!tts_playback_ended(true, false, true));
+    }
+
+    #[test]
+    fn drained_completed_stream_is_a_playback_end() {
+        assert!(tts_playback_ended(true, false, false));
+    }
+}

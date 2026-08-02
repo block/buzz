@@ -137,6 +137,7 @@ pub(crate) async fn run_playout_recv_loop(
     app_handle: Option<tauri::AppHandle>,
     initial_peers: Vec<(u8, String)>,
     tts_active: Arc<AtomicBool>,
+    tts_synthesizing: Arc<AtomicBool>,
     tts_cancel: Arc<AtomicBool>,
 ) {
     use rodio::buffer::SamplesBuffer;
@@ -256,7 +257,10 @@ pub(crate) async fn run_playout_recv_loop(
                         }
 
                         // TTS interrupt frame counter — reset on TTS rising edge.
-                        let tts_now = tts_active.load(Ordering::Acquire);
+                        let tts_now = super::tts::is_tts_interruptible(
+                            tts_active.as_ref(),
+                            tts_synthesizing.as_ref(),
+                        );
                         if tts_now && !tts_was_active {
                             frame_counts.clear();
                             last_frame_reset = tokio::time::Instant::now();
