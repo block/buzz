@@ -3787,6 +3787,23 @@ fn is_terminal_auth_failure(message: &str) -> bool {
     !message.trim_start().starts_with("error:")
 }
 
+/// Whether a failed connect was the relay *rejecting this identity or config*,
+/// as opposed to any other way the handshake can fail.
+///
+/// Narrower than [`is_terminal_connect_error`] on purpose. That predicate
+/// decides "should the startup retry loop give up?", and answers yes for
+/// deterministic transport failures (a malformed URL, an incompatible TLS
+/// peer) as well as for auth rejections. This one decides "is restarting the
+/// process pointless?", and only an auth rejection earns that: a bad URL is a
+/// misconfiguration a redeploy fixes, whereas a ban or an allowlist denial is
+/// the relay's standing answer to this key.
+///
+/// Drives [`crate::EXIT_TERMINAL_AUTH_FAILURE`], which the SSH binding's unit
+/// pairs with `RestartPreventExitStatus=`.
+pub(crate) fn is_terminal_auth_rejection(err: &RelayError) -> bool {
+    matches!(err, RelayError::AuthFailed(message) if is_terminal_auth_failure(message))
+}
+
 /// Retry `op` with bounded jittered backoff, stopping immediately on a
 /// terminal error (see [`is_terminal_connect_error`]). Used by
 /// `HarnessRelay::connect()` so a transient failure during the initial
@@ -5617,6 +5634,64 @@ mod tests {
             1,
             "a terminal error must fail on the first attempt with no retries"
         );
+    }
+
+    /// The predicate behind [`crate::EXIT_TERMINAL_AUTH_FAILURE`], and the one
+    /// place the "restarting is pointless" claim is decided.
+    ///
+    /// It must be strictly narrower than `is_terminal_connect_error`: that one
+    /// also stops the *retry loop* for deterministic transport failures, but a
+    /// bad URL or an incompatible TLS peer is a misconfiguration a redeploy
+    /// fixes, so suppressing restart for those would strand an agent a fix
+    /// would otherwise revive.
+    #[test]
+    fn only_an_auth_rejection_suppresses_the_supervisor_restart() {
+        // Explicit rejections of this identity/config: nothing a restart does
+        // changes the answer.
+        for message in [
+            "invalid: bad signature",
+            "auth-required: not a member",
+            "restricted: not on the allowlist",
+            "blocked: banned",
+            "unrecognized-prefix: something new",
+        ] {
+            let err = RelayError::AuthFailed(message.to_string());
+            assert!(is_terminal_auth_rejection(&err), "{message}");
+            // Every rejection is also terminal for the retry loop.
+            assert!(is_terminal_connect_error(&err), "{message}");
+        }
+
+        // The relay failing closed on its own dependency is transient, so it
+        // neither stops the retry loop nor suppresses restart.
+        let dependency_fault = RelayError::AuthFailed("error: ban lookup failed".into());
+        assert!(!is_terminal_auth_rejection(&dependency_fault));
+        assert!(!is_terminal_connect_error(&dependency_fault));
+
+        // Terminal for the retry loop, but NOT an identity rejection: these
+        // must keep restarting, because a redeploy can fix them.
+        for err in [
+            RelayError::Http("404 Not Found".into()),
+            RelayError::UnexpectedMessage("garbage".into()),
+        ] {
+            assert!(
+                is_terminal_connect_error(&err),
+                "{err} should stop the retry loop"
+            );
+            assert!(
+                !is_terminal_auth_rejection(&err),
+                "{err} must not suppress restart"
+            );
+        }
+
+        // Plainly transient failures: neither.
+        for err in [
+            RelayError::ConnectionClosed,
+            RelayError::Timeout,
+            RelayError::NoAuthChallenge,
+        ] {
+            assert!(!is_terminal_auth_rejection(&err), "{err}");
+            assert!(!is_terminal_connect_error(&err), "{err}");
+        }
     }
 
     /// A relay-side dependency fault (NIP-01 `error:` prefix) is transient —

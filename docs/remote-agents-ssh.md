@@ -425,6 +425,7 @@ EnvironmentFile=%h/.config/buzz-acp/%i.env
 ExecStart=@BUZZ_ACP_BIN@
 Restart=always
 RestartSec=5
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target
@@ -443,6 +444,33 @@ WantedBy=default.target
 - `ExecStart` is an absolute path, substituted at install time from the host's resolved `buzz-acp`.
   systemd does not expand environment variables in the program position, and the shell indirection
   that would work around that is not worth adding to a unit whose environment carries a private key.
+- `RestartPreventExitStatus=78` — the one exit that must not restart. `buzz-acp` exits `78`
+  (`buzz_acp::EXIT_TERMINAL_AUTH_FAILURE`, `EX_CONFIG` from `sysexits.h`) when the relay rejects
+  this agent's identity outright: a bad signature, a ban, a non-member, an allowlist denial. Those
+  are the relay's standing answer for this key, so `Restart=always` would reconnect every five
+  seconds forever against a "no" — burning host and relay resources and hiding the reason inside a
+  restart loop. Preventing restart for exactly this code leaves the unit in `failed` state, where
+  `systemctl --user status` names the cause. Every other exit still restarts. Note the deliberate
+  narrowness: a *transport* failure the harness also refuses to retry (an unreachable relay URL, an
+  incompatible TLS peer) is a misconfiguration a redeploy fixes, so it keeps restarting rather than
+  stranding an agent a fix would revive. Only identity rejection stops the unit.
+
+### Lifetime
+
+**The SSH binding's lifetime policy is supervised-persistent.** A deployed agent is an
+always-paid substrate: the unit is `enable --now`, the host lingers, and `Restart=always` brings the
+harness back after a crash, an OOM kill, a dropped link, a `!shutdown`, or a host reboot. There is
+no idle scale-to-zero and no cold-start path, and this is a policy choice rather than an omission —
+the whole point of a remote agent here is that it is *present on the relay*, and presence is the
+only liveness signal the desktop has (there is no status op and no polling channel). An agent that
+suspended itself when idle would be indistinguishable from one that died, and would miss the
+mention that was supposed to wake it.
+
+The cost is the honest one: a deployed agent consumes host memory for as long as it exists, whether
+or not anyone talks to it, and the operator pays for the host either way. That is the trade the
+binding makes, and it is why "delete" is the only way to stop paying — see the missing `undeploy`
+op below. A binding whose substrate bills per-second (the Kubernetes binding is the obvious
+candidate) may reasonably choose differently; this policy is the SSH binding's, not the spec's.
   The substitution is shell parameter expansion, not in-place editing: `sed -i` is a GNU extension
   that BSD and macOS hosts reject. Resolution runs *first*; the install only fills an empty `$acp`,
   so a deploy that installed `buzz-acp` writes the path of the copy it just installed, not a stale
@@ -593,7 +621,8 @@ The restart is what makes an already-running unit adopt the rewritten env file.
 outright. The frontend sends a signed `!shutdown` @mention; the harness consumes it, drains
 in-flight prompts, publishes `offline` presence, and exits. `Restart=always` then restarts the unit
 after `RestartSec=5` — a `!shutdown` stops the current process, not the unit. To stop the unit,
-`systemctl --user stop buzz-acp@<slug>.service` on the host.
+`systemctl --user stop buzz-acp@<slug>.service` on the host. The single exit that does *not* come
+back is `78`, a relay rejection of the agent's identity; see `RestartPreventExitStatus` above.
 
 **There is no `undeploy` op.** Deleting a deployed remote agent requires `force_remote_delete: true`
 and permanently orphans a systemd unit and an env file containing an nsec on the host. This is the
@@ -629,6 +658,15 @@ redeploy. This is the one host-side complaint that is deliberately not fatal.
 `PATH="$HOME/.local/bin:<the host's PATH at deploy time>"`; `systemctl --user show-environment` and
 `cat ~/.config/buzz-acp/<slug>.env` show what the harness actually got. A tool installed after the
 last deploy into a directory that was not on the deploying shell's `PATH` needs one redeploy.
+
+**The unit is `failed` and did not restart, with exit code 78 in `systemctl --user status`.** The
+relay rejected this agent's identity — a bad signature, a ban, a non-member, or an allowlist denial
+— and stopping was deliberate: retrying cannot change the answer, so the unit stops once with the
+reason visible rather than reconnecting every five seconds forever. `journalctl --user -u
+buzz-acp@<slug>` carries the relay's own message. Check that the agent is a member of the
+community, that its `BUZZ_AUTH_TAG` is present and current in `~/.config/buzz-acp/<slug>.env`, and
+that the record was not rekeyed since the last deploy. Redeploy from the desktop after fixing it;
+`systemctl --user restart` alone will just fail again with the same code.
 
 **`the server has no 'base64' / 'sha256sum'` (exit 92).** The host is missing coreutils, so a pushed
 binary cannot be decoded or — the part that is not negotiable — verified. Install coreutils, or

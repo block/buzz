@@ -34,6 +34,19 @@ EnvironmentFile=%h/.config/buzz-acp/%i.env
 ExecStart=@BUZZ_ACP_BIN@
 Restart=always
 RestartSec=5
+# The one exit that must not restart. `buzz-acp` exits 78 when the relay
+# rejects this agent's identity outright — a bad signature, a ban, a
+# non-member, an allowlist denial (buzz_acp::EXIT_TERMINAL_AUTH_FAILURE). The
+# relay has already given its standing answer for this key, so `Restart=always`
+# would reconnect every 5 seconds forever against a "no", burning host and
+# relay resources and hiding the reason inside a restart loop. Preventing
+# restart for exactly this code leaves the unit in `failed` state, where
+# `systemctl --user status` shows the cause.
+#
+# Everything else still restarts. A crash, an OOM kill, a dropped link, a
+# harness that exits on its own — all transient, and an agent that stays down
+# is worse than one that flaps.
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target

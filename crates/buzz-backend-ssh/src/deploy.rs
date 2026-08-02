@@ -1230,6 +1230,33 @@ mod tests {
         assert!(script.contains(r#"if [ -z "${XDG_RUNTIME_DIR:-}" ]; then"#));
     }
 
+    /// The lifetime policy, stated in the one file that enforces it.
+    ///
+    /// `Restart=always` is deliberate — see `docs/remote-agents-ssh.md`,
+    /// "Lifetime" — and the single exception is a relay rejection of this
+    /// agent's identity, which no restart can clear. The exit code is
+    /// `buzz_acp::EXIT_TERMINAL_AUTH_FAILURE`; it is a literal here because
+    /// this crate does not (and should not) link the harness, so this test is
+    /// what keeps the two from drifting apart silently.
+    #[test]
+    fn the_unit_restarts_always_except_on_a_terminal_auth_failure() {
+        let agent = Agent::from_request(&request()).unwrap();
+        let script = deploy_script(&agent, &config(), UNIT_TEMPLATE, &Pushes::default()).unwrap();
+        for directive in [
+            "\nRestart=always\n",
+            "\nRestartSec=5\n",
+            // Keep in sync with buzz_acp::EXIT_TERMINAL_AUTH_FAILURE.
+            "\nRestartPreventExitStatus=78\n",
+        ] {
+            assert!(UNIT_TEMPLATE.contains(directive), "{directive:?}");
+            assert!(script.contains(directive.trim()), "{directive:?}");
+        }
+        // A start limiter would turn a flapping agent into a silently-stopped
+        // one that only `systemctl reset-failed` revives, so the "stop" path is
+        // exactly one exit code and nothing else.
+        assert!(UNIT_TEMPLATE.contains("StartLimitIntervalSec=0"));
+    }
+
     /// Run the generated script against a real `/bin/sh` in a sandbox, with
     /// `systemctl`/`loginctl` stubbed out.
     ///
