@@ -1,19 +1,18 @@
 use nostr::{Keys, ToBech32};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_route_inventory, build_managed_agent_summary, current_instance_id,
-        discover_provider_candidates, ensure_persona_is_active, find_managed_agent_mut,
-        load_managed_agents, load_personas, load_teams, managed_agent_avatar_url,
-        normalize_agent_args, provider_deploy, require_signing_identity_available,
+        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
+        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
+        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentRouteInventoryEntry, ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND,
-        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -560,28 +559,6 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn export_managed_agent_route_inventory(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<ManagedAgentRouteInventoryEntry>, String> {
-    require_signing_identity_available(state.signing_keys().map(|keys| keys.public_key()))?;
-
-    tokio::task::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|error| error.to_string())?;
-        let records = load_managed_agents(&app)?;
-        let personas = load_personas(&app)?;
-        let global = crate::managed_agents::load_global_agent_config(&app)?;
-        build_managed_agent_route_inventory(&records, &personas, &global)
-    })
-    .await
-    .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }
 
 #[tauri::command]

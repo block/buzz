@@ -1,10 +1,12 @@
 use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
 
 use super::{
     effective_config::{resolve_effective_config, ConfigSource, EffectiveConfigResult},
     known_acp_runtime, resolve_effective_harness_descriptor, AgentDefinition, GlobalAgentConfig,
     ManagedAgentRecord,
 };
+use crate::app_state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -174,6 +176,28 @@ pub(crate) fn require_signing_identity_available<T>(
     identity
         .map(|_| ())
         .map_err(|_| "route inventory requires an available signing identity".to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn export_managed_agent_route_inventory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ManagedAgentRouteInventoryEntry>, String> {
+    require_signing_identity_available(state.signing_keys().map(|keys| keys.public_key()))?;
+
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let records = super::load_managed_agents(&app)?;
+        let personas = super::load_personas(&app)?;
+        let global = super::load_global_agent_config(&app)?;
+        build_managed_agent_route_inventory(&records, &personas, &global)
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }
 
 #[cfg(test)]

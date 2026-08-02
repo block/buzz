@@ -72,10 +72,7 @@ pub use repos::{
     write_persisted_repos_dir,
 };
 pub use restore::*;
-pub(crate) use route_inventory::{
-    build_managed_agent_route_inventory, require_signing_identity_available,
-    ManagedAgentRouteInventoryEntry,
-};
+pub(crate) use route_inventory::export_managed_agent_route_inventory;
 pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
