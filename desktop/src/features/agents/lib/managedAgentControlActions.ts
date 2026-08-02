@@ -1,5 +1,6 @@
 import { sendChannelMessage } from "@/shared/api/tauri";
 import {
+  restartExecutionWorkload as restartRemoteExecutionWorkload,
   startExecutionWorkload,
   stopExecutionWorkload,
 } from "@/shared/api/tauriExecution";
@@ -19,6 +20,10 @@ type DeleteManagedAgentInput = {
 type StartManagedAgent = (pubkey: string) => Promise<unknown>;
 type StopManagedAgent = (pubkey: string) => Promise<unknown>;
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
+type RestartExecutionWorkload = (input: {
+  nodeId: string;
+  workloadId: string;
+}) => Promise<unknown>;
 
 type ManagedAgentChannelContext = {
   channels: readonly Channel[];
@@ -115,26 +120,37 @@ export async function respawnManagedAgentWithRules({
   agent,
   startManagedAgent,
   stopManagedAgent,
+  restartExecutionWorkload = restartRemoteExecutionWorkload,
   onStopped,
   refreshManagedAgents,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
   stopManagedAgent: StopManagedAgent;
+  restartExecutionWorkload?: RestartExecutionWorkload;
   refreshManagedAgents?: RefreshManagedAgents;
   /** Called after a successful stop and before start begins — use this to
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
 }) {
+  if (agent.backend.type === "execution_node") {
+    if (!agent.backendAgentId) {
+      throw new Error("Agent has not been deployed to its execution node");
+    }
+    await restartExecutionWorkload({
+      nodeId: agent.backend.nodeId,
+      workloadId: agent.backendAgentId,
+    });
+    await refreshManagedAgents?.();
+    return;
+  }
+
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
     await stopManagedAgent(agent.pubkey);
     onStopped?.();
   }
 
   await startManagedAgent(agent.pubkey);
-  if (agent.backend.type === "execution_node") {
-    await refreshManagedAgents?.();
-  }
 }
 
 export async function stopManagedAgentWithRules({
