@@ -1044,6 +1044,7 @@ dependencies = [
  "audioadapter-buffers",
  "axum",
  "base64 0.22.1",
+ "block2",
  "buzz-agent",
  "buzz-core",
  "buzz-media",
