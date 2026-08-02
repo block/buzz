@@ -69,6 +69,12 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;
+// Kanban (NIP-33 param-replaceable, mirror of buzz-core kind.rs): a board
+// (31001, root `d` tag), a card (31002, `#a` board ref), and an optional
+// card-move audit event (31003, ignored in P2 render).
+export const KIND_KANBAN_BOARD = 31001;
+export const KIND_KANBAN_CARD = 31002;
+export const KIND_KANBAN_CARD_MOVE = 31003;
 
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.

@@ -10,8 +10,9 @@ use buzz_core::{
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_USER_STATUS,
+        KIND_KANBAN_BOARD, KIND_KANBAN_CARD, KIND_KANBAN_CARD_MOVE, KIND_MODERATION_BAN,
+        KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+        KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_USER_STATUS,
         KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
@@ -3883,5 +3884,289 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().map(String::as_str) == Some("replaced-by")));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Buzz Kanban — board (31001), card (31002), move-audit (31003)
+// ---------------------------------------------------------------------------
+
+/// A Kanban board column definition (carried on the board event as a
+/// repeatable `column` tag). `id` is a stable colid (renaming a lane must not
+/// renumber cards), `order` positions the column (WIP limits are advisory).
+#[derive(Debug, Clone)]
+pub struct KanbanColumnDef {
+    /// Stable column id (colid).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Advisory WIP limit (badge only in v1). `None` = unbounded.
+    pub wip: Option<u32>,
+    /// Position in the board (0-based, contiguous).
+    pub order: u32,
+}
+
+/// Metadata for a Kanban board event (kind:31001).
+#[derive(Default)]
+pub struct KanbanBoardMeta {
+    /// Ordered column definitions (sorted by `order` on build).
+    pub columns: Vec<KanbanColumnDef>,
+    /// Channel shares (`h` tags) — owner shares the board to these channels.
+    pub channels: Vec<String>,
+    /// Direct member shares (`invite` tags).
+    pub invites: Vec<String>,
+}
+
+/// Build a Kanban board event (kind:31001). `board_id` is the `d` tag,
+/// `owner` the author/owner pubkey, `name` the board title, `content` markdown.
+pub fn build_kanban_board(
+    board_id: &str,
+    owner: &str,
+    name: &str,
+    content: &str,
+    meta: &KanbanBoardMeta,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let owner = check_pubkey_hex(owner, "board owner")?;
+    if name.trim().is_empty() {
+        return Err(SdkError::InvalidInput("board name must not be empty".into()));
+    }
+    if board_id.trim().is_empty() {
+        return Err(SdkError::InvalidInput("board id must not be empty".into()));
+    }
+
+    let mut tags = vec![
+        tag(&["d", board_id])?,
+        tag(&["name", name])?,
+        tag(&["p", &owner, "owner"])?,
+    ];
+
+    let mut columns = meta.columns.clone();
+    columns.sort_by_key(|c| c.order);
+    for c in &columns {
+        let mut parts: Vec<String> = vec![
+            "column".into(),
+            c.id.clone(),
+            "name".into(),
+            c.name.clone(),
+        ];
+        if let Some(w) = c.wip {
+            parts.push("wip".into());
+            parts.push(w.to_string());
+        }
+        parts.push("order".into());
+        parts.push(c.order.to_string());
+        let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
+        tags.push(tag(&refs)?);
+    }
+    for ch in &meta.channels {
+        tags.push(tag(&["h", ch])?);
+    }
+    for pk in &meta.invites {
+        tags.push(tag(&["invite", pk])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_KANBAN_BOARD as u16), content).tags(tags))
+}
+
+/// Metadata for a Kanban card event (kind:31002).
+#[derive(Default)]
+pub struct KanbanCardMeta {
+    /// Board ref value (`31001:<owner>:<boardid>`).
+    pub board: String,
+    /// The single current column (colid) the card sits in.
+    pub column: String,
+    /// Base-36 order-preserving rank string within the column.
+    pub rank: Option<String>,
+    /// Assignee pubkeys (`p` tags).
+    pub assignees: Vec<String>,
+    /// Labels (NIP-32 namespaced `["l",<label>,"kanban"]`).
+    pub labels: Vec<String>,
+    /// Optional due date (`YYYY-MM-DD`).
+    pub due: Option<String>,
+    /// Optional comment thread root event id (`e`).
+    pub thread: Option<String>,
+}
+
+/// Build a Kanban card event (kind:31002). `card_id` is the `d` tag, `content`
+/// the markdown body (title + description). Replacing this event (new column /
+/// rank) performs a move via NIP-33 last-write-wins.
+pub fn build_kanban_card(
+    card_id: &str,
+    content: &str,
+    meta: &KanbanCardMeta,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    if card_id.trim().is_empty() {
+        return Err(SdkError::InvalidInput("card id must not be empty".into()));
+    }
+    if meta.board.trim().is_empty() {
+        return Err(SdkError::InvalidInput("board ref is required".into()));
+    }
+    if meta.column.trim().is_empty() {
+        return Err(SdkError::InvalidInput("column is required".into()));
+    }
+
+    let mut tags = vec![
+        tag(&["d", card_id])?,
+        tag(&["a", &meta.board])?,
+        tag(&["column", &meta.column])?,
+    ];
+    if let Some(rank) = &meta.rank {
+        tags.push(tag(&["rank", rank])?);
+    }
+    for pk in &meta.assignees {
+        let pk = check_pubkey_hex(pk, "card assignee")?;
+        tags.push(tag(&["p", &pk])?);
+    }
+    for label in &meta.labels {
+        tags.push(tag(&["l", label, "kanban"])?);
+    }
+    if let Some(due) = &meta.due {
+        tags.push(tag(&["due", due])?);
+    }
+    if let Some(thread) = &meta.thread {
+        tags.push(tag(&["e", thread])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_KANBAN_CARD as u16), content).tags(tags))
+}
+
+/// Metadata for a Kanban card move audit event (kind:31003, non-replaceable).
+#[derive(Default)]
+pub struct KanbanCardMoveMeta {
+    /// Board ref value (`31001:<owner>:<boardid>`).
+    pub board: String,
+    /// Card id (`d` tag of the moved card).
+    pub card: String,
+    /// Source column colid.
+    pub from: String,
+    /// Destination column colid.
+    pub to: String,
+}
+
+/// Build a Kanban card move audit event (kind:31003). Only emitted when a board
+/// opts in (default OFF) to keep event volume low.
+pub fn build_kanban_card_move(meta: &KanbanCardMoveMeta) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["a", &meta.board])?, tag(&["e", &meta.card])?];
+    if !meta.from.is_empty() {
+        tags.push(tag(&["from", &meta.from])?);
+    }
+    tags.push(tag(&["to", &meta.to])?);
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_KANBAN_CARD_MOVE as u16),
+        "",
+    )
+    .tags(tags))
+}
+
+#[cfg(test)]
+mod kanban_tests {
+    use super::*;
+    use nostr::EventBuilder;
+
+    const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const BOARD_ID: &str = "ab12cd34-ab12-4bcd-8ef0-ab12cd34ab12";
+    const CARD_ID: &str = "cd34ef56-cd34-4def-9ef0-cd34ef56cd34";
+
+    fn build_and_inspect(builder: EventBuilder) -> nostr::Event {
+        let keys = nostr::Keys::generate();
+        builder.sign_with_keys(&keys).unwrap()
+    }
+
+    #[test]
+    fn board_builds_expected_tags() {
+        let meta = KanbanBoardMeta {
+            columns: vec![
+                KanbanColumnDef { id: "col-b".into(), name: "Backlog".into(), wip: Some(5), order: 0 },
+                KanbanColumnDef { id: "col-d".into(), name: "Done".into(), wip: None, order: 1 },
+            ],
+            channels: vec!["ch-abc".into()],
+            invites: vec![OWNER.into()],
+        };
+        let builder = build_kanban_board(BOARD_ID, OWNER, "Launch", "## Launch", &meta).unwrap();
+        let ev = build_and_inspect(builder);
+        let tags: Vec<Vec<String>> = ev
+            .tags
+            .iter()
+            .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+            .collect();
+        assert_eq!(ev.kind.as_u16(), 31001);
+        // columns sorted by order with stable colid
+        let col: Vec<&Vec<String>> = tags.iter().filter(|t| t[0] == "column").collect();
+        assert_eq!(col[0][1], "col-b");
+        assert_eq!(col[0][3], "Backlog");
+        assert_eq!(col[0][5], "5");
+        assert_eq!(col[1][1], "col-d"); // order 1 after sort; no wip
+        // no-wip column: ["column",colid,"name",<name>,"order",<n>] (6 elements, no "wip")
+        assert_eq!(col[1].len(), 6, "col-d should omit wip: {:?}", col[1]);
+        assert_eq!(col[1][4], "order");
+        assert!(tags.iter().any(|t| t[0] == "p" && t[1] == OWNER && t[2] == "owner"));
+        assert!(tags.iter().any(|t| t[0] == "h" && t[1] == "ch-abc"));
+        assert!(tags.iter().any(|t| t[0] == "invite" && t[1] == OWNER));
+    }
+
+    #[test]
+    fn board_rejects_empty_name() {
+        let err = build_kanban_board(BOARD_ID, OWNER, "  ", "x", &KanbanBoardMeta::default()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn card_builds_expected_tags() {
+        let meta = KanbanCardMeta {
+            board: format!("31001:{OWNER}:{BOARD_ID}"),
+            column: "col-b".into(),
+            rank: Some("i".into()),
+            assignees: vec![OWNER.into()],
+            labels: vec!["feature".into(), "p1".into()],
+            due: Some("2026-09-01".into()),
+            thread: None,
+        };
+        let builder = build_kanban_card(CARD_ID, "## Ship DnD", &meta).unwrap();
+        let ev = build_and_inspect(builder);
+        let tags: Vec<Vec<String>> = ev
+            .tags
+            .iter()
+            .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+            .collect();
+        assert_eq!(ev.kind.as_u16(), 31002);
+        assert!(tags.iter().any(|t| t[0] == "a" && t[1] == format!("31001:{OWNER}:{BOARD_ID}")));
+        assert!(tags.iter().any(|t| t[0] == "column" && t[1] == "col-b"));
+        assert!(tags.iter().any(|t| t[0] == "rank" && t[1] == "i"));
+        assert!(tags.iter().any(|t| t[0] == "p" && t[1] == OWNER));
+        // NIP-32 namespaced labels
+        assert!(tags.iter().any(|t| t[0] == "l" && t[1] == "feature" && t[2] == "kanban"));
+        assert!(tags.iter().any(|t| t[0] == "due" && t[1] == "2026-09-01"));
+    }
+
+    #[test]
+    fn card_requires_column_and_board() {
+        let mut meta = KanbanCardMeta::default();
+        meta.board = format!("31001:{OWNER}:{BOARD_ID}");
+        assert!(build_kanban_card(CARD_ID, "x", &meta).is_err()); // no column
+        meta.column = "col-b".into();
+        assert!(build_kanban_card(CARD_ID, "x", &meta).is_ok());
+    }
+
+    #[test]
+    fn move_audit_builds() {
+        let meta = KanbanCardMoveMeta {
+            board: format!("31001:{OWNER}:{BOARD_ID}"),
+            card: CARD_ID.into(),
+            from: "col-b".into(),
+            to: "col-d".into(),
+        };
+        let builder = build_kanban_card_move(&meta).unwrap();
+        let ev = build_and_inspect(builder);
+        let tags: Vec<Vec<String>> = ev
+            .tags
+            .iter()
+            .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+            .collect();
+        assert_eq!(ev.kind.as_u16(), 31003);
+        assert!(tags.iter().any(|t| t[0] == "e" && t[1] == CARD_ID));
+        assert!(tags.iter().any(|t| t[0] == "from" && t[1] == "col-b"));
+        assert!(tags.iter().any(|t| t[0] == "to" && t[1] == "col-d"));
     }
 }
