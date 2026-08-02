@@ -203,9 +203,9 @@ one.
   deployment axis (`deployed`/`not_deployed`, from the stored
   `backend_agent_id`) is bookkeeping, not liveness. Staleness bound: presence
   can be wrong for the window between an abnormal agent death (SIGKILL, node
-  loss) and the relay's presence expiry — **90 seconds**
+  loss) and the relay's presence expiry — **180 seconds**
   (`PRESENCE_TTL_SECS`, `buzz-pubsub/src/presence.rs:16`; the vision's
-  "ninety seconds of a wrong dot, never an indefinite one"), the accepted
+  "three minutes of a wrong dot, never an indefinite one"), the accepted
   cost of M1.
   The Kubernetes binding minimizes the *avoidable* part of that window by
   sizing the termination grace period to the harness's full graceful-shutdown
@@ -213,7 +213,7 @@ one.
   presence-suppression knob, `BUZZ_ACP_NO_PRESENCE`, MUST join
   `RESERVED_ENV_KEYS` — locally the knob is cosmetic (the process and UI
   remain visible), but remotely M1 makes presence the *only* signal, so an
-  unreserved user env var would convert "wrong for ≤90s" into "wrong
+  unreserved user env var would convert "wrong for ≤180s" into "wrong
   indefinitely" and silently disarm the one bound in print; (b) presence is
   scoped to a **community**: the relay derives community from its host, so
   the deploy-time `relay_url` binds the body to one community for its whole
@@ -925,7 +925,7 @@ I5's enforcement point. A new harness knob:
   could disable the reaper and reopen unbounded lifetime through the front
   door. `BUZZ_ACP_NO_PRESENCE` (`config.rs:378`) MUST join in the same
   change, for the same shape of reason at I3 instead of I5: unreserved, it
-  lets user env silently defeat the 90s presence bound (I3). One knob
+  lets user env silently defeat the 180s presence bound (I3). One knob
   guards "knows when to leave", the other "you can see that it left";
   both are promises users must not be able to un-make by typo.
 - Distinctness note: this is a **fourth** timeout concept, deliberately named
