@@ -19,8 +19,15 @@
 //! under another — an agent that looks deployed and is permanently unreachable,
 //! which is exactly the failure the fail-closed nsec check already guards.
 //!
-//! Key material is handled as `Zeroizing` throughout: the bech32 decode yields
-//! the 32 secret bytes, and they are wiped when this module is done with them.
+//! Every buffer this module owns holds the decoded key as `Zeroizing`, so the
+//! 32 secret bytes are wiped when derivation finishes rather than left on the
+//! stack. `secp256k1::SecretKey` does *not* erase itself on drop — it exposes
+//! `non_secure_erase` instead — so this module calls that explicitly before
+//! the key goes out of scope. What remains is the by-value copy
+//! `SecretKey::from_byte_array` takes, which no caller can reach; the crate's
+//! own documentation is candid that fully preventing such copies is not
+//! something a library can promise. This is best-effort hygiene on a value
+//! that lives for microseconds, not a claim of guaranteed erasure.
 
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::Bech32;
@@ -54,22 +61,26 @@ pub fn derive_pubkey(nsec: &Secret) -> Result<String, String> {
         ));
     }
 
+    // `try_from` is the length check: taking it as the fallible conversion
+    // rather than checking `len()` and then unwrapping keeps the panic-free
+    // property structural instead of dependent on the two staying in sync.
     let bytes = Zeroizing::new(checked.byte_iter().collect::<Vec<u8>>());
-    if bytes.len() != 32 {
-        return Err(format!(
-            "'private_key_nsec' decodes to {} bytes, expected 32",
-            bytes.len()
-        ));
-    }
+    let bytes: Zeroizing<[u8; 32]> = <[u8; 32]>::try_from(bytes.as_slice())
+        .map(Zeroizing::new)
+        .map_err(|_| {
+            format!(
+                "'private_key_nsec' decodes to {} bytes, expected 32",
+                bytes.len()
+            )
+        })?;
 
-    let secret = SecretKey::from_byte_array(
-        <[u8; 32]>::try_from(bytes.as_slice()).expect("length checked above"),
-    )
-    .map_err(|_| {
+    let mut secret = SecretKey::from_byte_array(*bytes).map_err(|_| {
         "'private_key_nsec' decodes to bytes that are not a valid secp256k1 secret key".to_string()
     })?;
 
     let (x_only, _parity) = secret.x_only_public_key(&Secp256k1::new());
+    // `SecretKey` has no zeroizing Drop; this is the crate's own opt-in.
+    secret.non_secure_erase();
     Ok(hex_lower(&x_only.serialize()))
 }
 
@@ -182,6 +193,24 @@ mod tests {
         );
         // No assertion at all is fine — the nsec is sufficient.
         assert_eq!(reconcile(derived.clone(), None).unwrap(), derived);
+    }
+
+    /// `fragment` slices, and the only thing making that safe is that
+    /// `char_indices` yields char boundaries. `deploy` shape-checks an
+    /// assertion to hex before it gets here, but this function must not depend
+    /// on a caller's validation to avoid panicking.
+    #[test]
+    fn fragmenting_never_splits_a_character() {
+        for value in [
+            "",
+            "abc",
+            "é".repeat(40).as_str(),
+            "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑",
+        ] {
+            let fragment = fragment(value);
+            assert!(fragment.ends_with('…'), "{fragment}");
+            assert!(value.starts_with(fragment.trim_end_matches('…')));
+        }
     }
 
     #[test]
