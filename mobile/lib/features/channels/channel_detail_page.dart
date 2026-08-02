@@ -134,12 +134,20 @@ class ChannelDetailPage extends HookConsumerWidget {
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
     final initialChannelReadAtRef = useRef<int?>(null);
+    final initialForcedUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final didCaptureInitialReadAt = useRef(false);
     if (readState.isReady && !didCaptureInitialReadAt.value) {
       initialChannelReadAtRef.value = readState.effectiveTimestamp(channel.id);
+      initialForcedUnreadMessageIdsRef.value = {
+        for (final entry in readState.forcedUnreadContexts.entries)
+          if (entry.value == channel.id && entry.key.startsWith('msg:'))
+            entry.key.substring('msg:'.length),
+      };
       didCaptureInitialReadAt.value = true;
     }
     final initialChannelReadAt = initialChannelReadAtRef.value;
+    final initialForcedUnreadMessageIds =
+        initialForcedUnreadMessageIdsRef.value;
     final currentPubkey = ref
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
@@ -213,14 +221,26 @@ class ChannelDetailPage extends HookConsumerWidget {
       return null;
     }, [channel.id]);
 
-    useEffect(() {
-      final messageId = initialMessageId;
-      if (messageId == null || channel.isForum) return null;
-      final eventIds = {messageId, ?initialThreadRootId};
-      final notifier = ref.read(channelMessagesProvider(channel.id).notifier);
-      unawaited(_loadDeepLinkEvents(ref, channel.id, eventIds));
-      return () => notifier.releaseDeepLinkEvents(eventIds);
-    }, [channel.id, initialMessageId, initialThreadRootId]);
+    useEffect(
+      () {
+        if (channel.isForum) return null;
+        final eventIds = {
+          ?initialMessageId,
+          ?initialThreadRootId,
+          ...initialForcedUnreadMessageIds,
+        };
+        if (eventIds.isEmpty) return null;
+        final notifier = ref.read(channelMessagesProvider(channel.id).notifier);
+        unawaited(_loadDeepLinkEvents(ref, channel.id, eventIds));
+        return () => notifier.releaseDeepLinkEvents(eventIds);
+      },
+      [
+        channel.id,
+        initialMessageId,
+        initialThreadRootId,
+        initialForcedUnreadMessageIds,
+      ],
+    );
 
     useEffect(() {
       if (!readState.isReady || readTimestamp == null) {
@@ -387,9 +407,13 @@ class ChannelDetailPage extends HookConsumerWidget {
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
                               initialChannelReadAt: initialChannelReadAt,
+                              initialForcedUnreadMessageIds:
+                                  initialForcedUnreadMessageIds,
                               hasInitialUnread:
                                   readState.isReady &&
-                                  (readState.isForcedUnread(channel.id) ||
+                                  (readState.locallyForcedChannelIds.contains(
+                                        channel.id,
+                                      ) ||
                                       (readTimestamp != null &&
                                           (initialChannelReadAt == null ||
                                               readTimestamp >

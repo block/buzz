@@ -6,6 +6,7 @@ class _MessageList extends HookConsumerWidget {
   final String? initialMessageId;
   final String? initialThreadRootId;
   final int? initialChannelReadAt;
+  final Set<String> initialForcedUnreadMessageIds;
   final bool hasInitialUnread;
   final String channelId;
   final String? currentPubkey;
@@ -20,6 +21,7 @@ class _MessageList extends HookConsumerWidget {
     required this.initialMessageId,
     required this.initialThreadRootId,
     required this.initialChannelReadAt,
+    required this.initialForcedUnreadMessageIds,
     required this.hasInitialUnread,
     required this.channelId,
     required this.currentPubkey,
@@ -81,20 +83,31 @@ class _MessageList extends HookConsumerWidget {
           return () => cancelled = true;
         }
 
+        final forcedUnread = entries
+            .where(
+              (entry) =>
+                  initialForcedUnreadMessageIds.contains(entry.message.id),
+            )
+            .map((entry) => entry.message)
+            .firstOrNull;
         final unread = entries
             .where(
               (entry) => readAt == null || entry.message.createdAt > readAt,
             )
             .map((entry) => entry.message)
             .firstOrNull;
+        final candidates = [forcedUnread, unread].nonNulls.toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
         oldestUnreadMessageId.value =
-            unread?.id ?? (readAt == null ? entries.first.message.id : null);
+            candidates.firstOrNull?.id ??
+            (readAt == null ? entries.first.message.id : null);
         return null;
       },
       [
         hasInitialUnread,
         hasUnreadDeepLink,
         initialChannelReadAt,
+        initialForcedUnreadMessageIds,
         entries.length,
         notifier.reachedOldest,
         unreadBoundaryLoadFailed.value,
