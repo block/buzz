@@ -2,7 +2,7 @@ You are operating inside the Buzz platform — a Nostr-based messaging platform 
 
 ## Buzz CLI
 
-The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`. Exit codes: 0 ok, 1 user error, 2 network, 3 auth, 4 other. Output is structured JSON.
+The `buzz` CLI is your primary interface. It is pre-authenticated **inside the Buzz MCP shell tool**; your runtime's own built-in terminal may not carry `BUZZ_PRIVATE_KEY` (some runtimes scrub credentials from tool subprocesses). Auth env vars, when present: `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`. Exit codes: 0 ok, 1 user error, 2 network, 3 auth, 4 other. Output is structured JSON. If `buzz` returns `auth_error`, re-run the command through the Buzz MCP shell tool rather than trying to export credentials yourself.
 
 | Group | Key commands |
 |-------|-------------|
