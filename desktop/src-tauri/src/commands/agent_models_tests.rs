@@ -1,6 +1,12 @@
 use super::*;
 
 #[test]
+fn ollama_uses_openai_compatible_model_discovery() {
+    assert!(is_openai_compatible_provider(Some("ollama")));
+    assert!(!is_openai_compatible_provider(Some("ollama-cloud")));
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {

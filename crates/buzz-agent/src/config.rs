@@ -764,8 +764,12 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let databricks_host = env("DATABRICKS_HOST");
         let databricks_model = env("DATABRICKS_MODEL");
+        let requested_provider = env("BUZZ_AGENT_PROVIDER");
+        let is_ollama = requested_provider
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("ollama"));
         let provider = resolve_provider(
-            env("BUZZ_AGENT_PROVIDER").as_deref(),
+            requested_provider.as_deref(),
             env("ANTHROPIC_API_KEY").as_deref(),
             env("OPENAI_COMPAT_API_KEY").as_deref(),
             env("OPENROUTER_API_KEY").as_deref(),
@@ -794,16 +798,32 @@ impl Config {
                 env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
                 OpenAiApi::Auto, // unused for Anthropic
             ),
-            Provider::OpenAi => (
-                req("OPENAI_COMPAT_API_KEY")?,
-                resolve_model(
+            Provider::OpenAi => {
+                let api_key = if is_ollama {
+                    env("OPENAI_COMPAT_API_KEY").unwrap_or_else(|| "ollama".to_string())
+                } else {
+                    req("OPENAI_COMPAT_API_KEY")?
+                };
+                let model = resolve_model(
                     buzz_agent_model.as_deref(),
                     env("OPENAI_COMPAT_MODEL").as_deref(),
                 )
-                .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
-                parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
-            ),
+                .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?;
+                let base_url = env_or(
+                    "OPENAI_COMPAT_BASE_URL",
+                    if is_ollama {
+                        "http://127.0.0.1:11434/v1"
+                    } else {
+                        "https://api.openai.com/v1"
+                    },
+                );
+                let openai_api = if is_ollama {
+                    OpenAiApi::Chat
+                } else {
+                    parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?
+                };
+                (api_key, model, base_url, openai_api)
+            }
             Provider::Databricks | Provider::DatabricksV2 => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
                 resolve_model(buzz_agent_model.as_deref(), databricks_model.as_deref())
@@ -1042,6 +1062,7 @@ fn resolve_provider(
                 "openai" | "openai-compat" => Err(
                     "config: OPENAI_COMPAT_API_KEY required".into(),
                 ),
+                "ollama" => Ok(Provider::OpenAi),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
                 "openrouter" if present_nonempty(openrouter_key) => Ok(Provider::OpenRouter),
@@ -1268,6 +1289,14 @@ mod tests {
         );
         assert_eq!(
             resolve_provider(Some("openai"), None, Some("sk-openai"), None).unwrap(),
+            Provider::OpenAi
+        );
+    }
+
+    #[test]
+    fn resolve_provider_accepts_local_ollama_without_api_key() {
+        assert_eq!(
+            resolve_provider(Some("ollama"), None, None, None).unwrap(),
             Provider::OpenAi
         );
     }

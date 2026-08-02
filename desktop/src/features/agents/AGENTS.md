@@ -147,6 +147,11 @@ with a TypeScript lookup table or an id comparison in a component.
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
+12. **Ollama is a local preset over the OpenAI-compatible transport.** The
+    provider id is `ollama`; it requires no API key, defaults to
+    `http://127.0.0.1:11434/v1`, and discovers models from that local endpoint.
+    Keep custom OpenAI-compatible endpoints key-driven and configurable; do not
+    make their credential semantics inherit Ollama's local-only exception.
 
 ## The tests that enforce this
 

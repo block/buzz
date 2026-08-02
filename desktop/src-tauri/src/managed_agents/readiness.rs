@@ -388,6 +388,7 @@ impl AgentReadiness {
 ///   provider-specific credentials are required:
 ///   - `anthropic` → `ANTHROPIC_API_KEY`
 ///   - `openai` → `OPENAI_COMPAT_API_KEY`
+///   - `ollama` → no credential (local loopback service)
 ///   - `databricks` / `databricks_v2` → `DATABRICKS_HOST` (token optional —
 ///     OAuth PKCE is the fallback)
 /// * **claude**: a successful `claude auth status` probe.
@@ -480,7 +481,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
             Some("DATABRICKS_MODEL")
         }
         Some("anthropic") => Some("ANTHROPIC_MODEL"),
-        Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
+        Some("openai") | Some("openai-compat") | Some("ollama") => Some("OPENAI_COMPAT_MODEL"),
         Some("openrouter") => Some("OPENROUTER_MODEL"),
         _ => None,
     };
@@ -1657,6 +1658,21 @@ mod tests {
         assert!(
             agent_readiness(&env).is_ready(),
             "OPENAI_COMPAT_MODEL must satisfy the model requirement for openai"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_ollama_with_local_model_and_no_api_key_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "ollama"),
+                ("OPENAI_COMPAT_MODEL", "qwen3.5:4b"),
+            ]),
+        );
+        assert!(
+            agent_readiness(&env).is_ready(),
+            "local Ollama must not require an API key"
         );
     }
 
