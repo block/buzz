@@ -155,8 +155,12 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
+    ext=""
+    if [[ "$TARGET" == *"windows"* ]]; then
+        ext=".exe"
+    fi
     for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        touch "desktop/src-tauri/binaries/${bin}-${TARGET}${ext}"
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
@@ -234,11 +238,15 @@ desktop-release-build target="aarch64-apple-darwin":
     set -euo pipefail
     TARGET={{target}}
     mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    ext=""
+    if [[ "$TARGET" == *"windows"* ]]; then
+        ext=".exe"
+    fi
+    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET$ext"
+    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET$ext"
+    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET$ext"
+    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET$ext"
+    touch "desktop/src-tauri/binaries/buzz-$TARGET$ext"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
@@ -480,9 +488,13 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    ext=""
+    if [[ "$TARGET" == *"windows"* ]]; then
+        ext=".exe"
+    fi
     for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        cp "${TARGET_DIR}/debug/${bin}${ext}" "desktop/src-tauri/binaries/${bin}-${TARGET}${ext}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}${ext}"
     done
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
@@ -515,8 +527,12 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    ext=""
+    if [[ "$TARGET" == *"windows"* ]]; then
+        ext=".exe"
+    fi
+    cp "${TARGET_DIR}/release/buzz${ext}" "desktop/src-tauri/binaries/buzz-${TARGET}${ext}"
+    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}${ext}"
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     source ../scripts/instance-env.sh
@@ -542,8 +558,12 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    ext=""
+    if [[ "$TARGET" == *"windows"* ]]; then
+        ext=".exe"
+    fi
+    cp "${TARGET_DIR}/release/buzz${ext}" "desktop/src-tauri/binaries/buzz-${TARGET}${ext}"
+    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}${ext}"
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://buzz.block.builderlab.xyz"
     source ../scripts/instance-env.sh

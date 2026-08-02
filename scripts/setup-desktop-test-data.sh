@@ -32,9 +32,14 @@ run_sql() {
   run_psql -c "$1"
 }
 
+PYTHON_CMD="python3"
+if ! python3 --version &>/dev/null; then
+  PYTHON_CMD="python"
+fi
+
 uuid5_hex() {
   local slug="$1"
-  python3 - "$slug" <<'PYEOF'
+  $PYTHON_CMD - "$slug" <<'PYEOF'
 import sys, uuid
 # Format as UUID with hyphens for Postgres
 print(str(uuid.uuid5(uuid.NAMESPACE_DNS, sys.argv[1])))
