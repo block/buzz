@@ -3,11 +3,12 @@
 //! Persona events are NIP-33 parameterized replaceable events keyed by
 //! `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use buzz_core_pkg::kind::{event_is_shared, KIND_PERSONA};
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
@@ -245,6 +246,21 @@ pub async fn flush_active_pending_events(
 ) -> Result<u32, String> {
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
     flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
+}
+
+/// Periodically drain active-scope events that the retention store marked
+/// `pending_sync`. One loop is the sole publisher for persona, team, and
+/// managed-agent writers; relay failures leave rows pending for the next sweep.
+pub fn spawn_active_pending_event_flusher(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let state = app.state::<AppState>();
+            if let Err(error) = flush_active_pending_events(&app, &state).await {
+                eprintln!("buzz-desktop: event-flush: {error}");
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
 }
 
 async fn flush_pending_events_at(

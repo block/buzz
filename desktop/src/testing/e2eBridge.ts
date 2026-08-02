@@ -176,6 +176,22 @@ type E2eConfig = {
       name?: string;
       expiresAt: string;
     } | null;
+    /** Whether the local ClickUp personal-token prototype is connected. */
+    clickupConnected?: boolean;
+    /** Typed native error returned while validating the local ClickUp connection. */
+    clickupConnectionError?: string;
+    /** Typed native error returned while connecting a ClickUp token. */
+    clickupConnectError?: string;
+    /** Typed native error returned while loading authorized Workspaces. */
+    clickupWorkspacesError?: string;
+    /** Typed native error returned when the task list is requested. */
+    clickupTasksError?: string;
+    /** Return no assigned ClickUp tasks. */
+    clickupTasksEmpty?: boolean;
+    /** Typed native error returned when task comments are requested. */
+    clickupCommentsError?: string;
+    /** Typed native error returned while disconnecting ClickUp. */
+    clickupDisconnectError?: string;
     /** Optional policy returned by the native join-policy discovery command. */
     joinPolicy?: {
       terms_markdown?: string;
@@ -9942,11 +9958,15 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       }
     })();
+    const safePayload =
+      command === "clickup_connect"
+        ? { personalToken: "[REDACTED]" }
+        : loggedPayload;
     window.__BUZZ_E2E_COMMAND_PAYLOADS__?.push({
       command,
-      payload: loggedPayload,
+      payload: safePayload,
     });
-    window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
+    window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload: safePayload });
 
     switch (command) {
       case "get_huddle_state": {
@@ -10206,6 +10226,164 @@ export function maybeInstallE2eTauriMocks() {
           registry: await handleMockCommand("list_voice_registry", null),
         };
       }
+      case "clickup_auth_status": {
+        if (activeConfig?.mock?.clickupConnectionError) {
+          throw new Error(activeConfig.mock.clickupConnectionError);
+        }
+        const connected = activeConfig?.mock?.clickupConnected !== false;
+        return {
+          connected,
+          account: connected
+            ? {
+                id: 42,
+                username: "Mikes",
+                email: "mikes@example.com",
+                initials: "MS",
+              }
+            : null,
+        };
+      }
+      case "clickup_connect":
+        if (activeConfig?.mock?.clickupConnectError) {
+          throw new Error(activeConfig.mock.clickupConnectError);
+        }
+        if (activeConfig?.mock) activeConfig.mock.clickupConnected = true;
+        return {
+          connected: true,
+          account: {
+            id: 42,
+            username: "Mikes",
+            email: "mikes@example.com",
+            initials: "MS",
+          },
+        };
+      case "clickup_disconnect":
+        if (activeConfig?.mock?.clickupDisconnectError) {
+          throw new Error(activeConfig.mock.clickupDisconnectError);
+        }
+        if (activeConfig?.mock) activeConfig.mock.clickupConnected = false;
+        return null;
+      case "clickup_list_workspaces":
+        if (activeConfig?.mock?.clickupWorkspacesError) {
+          throw new Error(activeConfig.mock.clickupWorkspacesError);
+        }
+        return [{ id: "workspace-1", name: "Operations", color: "#7b68ee" }];
+      case "clickup_list_tasks": {
+        if (activeConfig?.mock?.clickupTasksError) {
+          throw new Error(activeConfig.mock.clickupTasksError);
+        }
+        const now = Date.now();
+        const day = 24 * 60 * 60 * 1_000;
+        const task = (
+          id: string,
+          name: string,
+          dueDate: number | null,
+          status: string,
+          priority: string,
+        ) => ({
+          id,
+          name,
+          text_content: `${name} summary`,
+          description: `${name} details`,
+          status: { status, color: "#87909e", type: "custom" },
+          priority: { priority, color: "#f9d900" },
+          due_date: dueDate === null ? null : String(dueDate),
+          archived: false,
+          url: `https://app.clickup.com/t/${id}`,
+          team_id: "workspace-1",
+          list: { id: "list-1", name: "Launch" },
+          folder: { id: "folder-1", name: "Product" },
+          space: { id: "space-1", name: "Buzz" },
+          assignees: [{ id: 42, username: "Mikes", initials: "MS" }],
+          tags: [],
+          subtasks: [],
+          custom_fields: [],
+          dependencies: [],
+        });
+        return {
+          tasks: activeConfig?.mock?.clickupTasksEmpty
+            ? []
+            : [
+                task(
+                  "task-overdue",
+                  "Resolve launch blocker",
+                  now - day,
+                  "in progress",
+                  "urgent",
+                ),
+                task(
+                  "task-today",
+                  "Review onboarding copy",
+                  now,
+                  "open",
+                  "high",
+                ),
+                task(
+                  "task-week",
+                  "Prepare rollout checklist",
+                  now + 3 * day,
+                  "open",
+                  "normal",
+                ),
+                task(
+                  "task-later",
+                  "Plan OAuth broker",
+                  now + 21 * day,
+                  "backlog",
+                  "low",
+                ),
+                task(
+                  "task-undated",
+                  "Capture follow-up ideas",
+                  null,
+                  "open",
+                  "normal",
+                ),
+              ],
+          fetched_at_ms: now,
+          truncated: false,
+        };
+      }
+      case "clickup_get_task": {
+        const id = (payload as { taskId?: string })?.taskId ?? "task-overdue";
+        return {
+          id,
+          name:
+            id === "task-overdue" ? "Resolve launch blocker" : "ClickUp task",
+          text_content: "Confirm the local read-only path before rollout.",
+          description:
+            "Verify the route, keyring boundary, pagination, and error states.",
+          status: { status: "in progress", color: "#87909e", type: "custom" },
+          priority: { priority: "urgent", color: "#f50000" },
+          due_date: String(Date.now() - 24 * 60 * 60 * 1_000),
+          archived: false,
+          url: `https://app.clickup.com/t/${id}`,
+          team_id: "workspace-1",
+          list: { id: "list-1", name: "Launch" },
+          folder: { id: "folder-1", name: "Product" },
+          space: { id: "space-1", name: "Buzz" },
+          assignees: [{ id: 42, username: "Mikes", initials: "MS" }],
+          tags: [{ name: "prototype", tag_fg: "#ffffff", tag_bg: "#7b68ee" }],
+          subtasks: [],
+          custom_fields: [],
+          dependencies: [],
+        };
+      }
+      case "clickup_get_task_comments":
+        if (activeConfig?.mock?.clickupCommentsError) {
+          throw new Error(activeConfig.mock.clickupCommentsError);
+        }
+        return {
+          comments: [
+            {
+              id: "comment-1",
+              comment_text: "Ready for a focused read-only review.",
+              date: String(Date.now() - 60 * 60 * 1_000),
+              user: { id: 42, username: "Mikes", initials: "MS" },
+              resolved: false,
+            },
+          ],
+        };
       case "get_builderlab_auth":
         return activeConfig?.mock?.builderlabAuth ?? null;
       case "start_builderlab_login": {

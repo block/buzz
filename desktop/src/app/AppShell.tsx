@@ -103,7 +103,6 @@ const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
 });
-
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
@@ -127,6 +126,7 @@ export function AppShell() {
   const {
     goAgents,
     goChannel,
+    goClickUp,
     goHome,
     goNewMessage,
     goProjects,
@@ -254,7 +254,6 @@ export function AppShell() {
       return;
     }
     hasRestoredCommunityDestinationRef.current = true;
-
     // Restoration belongs to an explicit community transition. Cold boot and
     // reconnect remounts must preserve the route the user explicitly opened.
     if (!consumePendingCommunityRestore(activeCommunityId)) {
@@ -875,6 +874,7 @@ export function AppShell() {
                               await goChannel(directMessage.id);
                             }}
                             onSelectAgents={() => void goAgents()}
+                            onSelectClickUp={() => void goClickUp()}
                             onSelectChannel={(channelId) =>
                               void goChannel(channelId)
                             }

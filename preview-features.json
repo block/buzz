@@ -14,6 +14,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "clickup",
+      "name": "ClickUp",
+      "description": "Read-only view of your assigned ClickUp work",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",

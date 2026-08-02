@@ -174,6 +174,22 @@ type MockBridgeOptions = {
   huddle?: MockHuddleSeed;
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
   builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
+  /** Whether the local ClickUp personal-token prototype is connected. */
+  clickupConnected?: boolean;
+  /** Typed native error returned while validating the local ClickUp connection. */
+  clickupConnectionError?: string;
+  /** Typed native error returned while connecting a ClickUp token. */
+  clickupConnectError?: string;
+  /** Typed native error returned while loading authorized Workspaces. */
+  clickupWorkspacesError?: string;
+  /** Typed native error returned when the task list is requested. */
+  clickupTasksError?: string;
+  /** Return no assigned ClickUp tasks. */
+  clickupTasksEmpty?: boolean;
+  /** Typed native error returned when task comments are requested. */
+  clickupCommentsError?: string;
+  /** Typed native error returned while disconnecting ClickUp. */
+  clickupDisconnectError?: string;
   /** Optional policy returned by the native join-policy discovery command. */
   joinPolicy?: {
     terms_markdown?: string;

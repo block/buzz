@@ -633,31 +633,12 @@ pub fn run() {
                 }
             });
 
-            // Drain events the retention store flagged `pending_sync` (UI
-            // create/edit, delete tombstones, launch reconcile) to the relay.
-            // One loop is the sole publisher for persona, team, and managed-
-            // agent writers; a relay-unreachable tick leaves rows pending for
-            // the next sweep.
             // Skipped in recovery mode — flushing under an ephemeral key would
             // publish events attributed to an identity the user doesn't own.
             if !recovery_mode {
-                let flush_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    use std::time::Duration;
-                    use tauri::Manager;
-                    loop {
-                        let state = flush_handle.state::<AppState>();
-                        if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
-                            &flush_handle,
-                            &state,
-                        )
-                        .await
-                        {
-                            eprintln!("buzz-desktop: event-flush: {e}");
-                        }
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                });
+                managed_agents::persona_events::spawn_active_pending_event_flusher(
+                    app.handle().clone(),
+                );
             }
 
             Ok(())
@@ -669,6 +650,13 @@ pub fn run() {
             cancel_builderlab_login,
             get_builderlab_auth,
             clear_builderlab_auth,
+            clickup_auth_status,
+            clickup_connect,
+            clickup_disconnect,
+            clickup_list_workspaces,
+            clickup_list_tasks,
+            clickup_get_task,
+            clickup_get_task_comments,
             get_builderlab_nostr_identity,
             bind_builderlab_nostr_identity,
             delete_builderlab_nostr_identity,
