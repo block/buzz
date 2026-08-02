@@ -69,6 +69,10 @@ function providerModelEnvKey(provider: string): string | null {
     case "openai":
     case "openai-compat":
       return "OPENAI_COMPAT_MODEL";
+    case "openrouter":
+      return "OPENROUTER_MODEL";
+    case "deepseek":
+      return "DEEPSEEK_MODEL";
     default:
       return null;
   }
