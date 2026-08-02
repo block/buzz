@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   beginRelayOriginFetch,
+  rewriteRelayUrl,
   getCachedRelayOrigin,
   mediaProxyUrl,
   resetMediaCaches,
@@ -19,6 +20,32 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+const PREFIX_HASH = "a".repeat(64);
+
+test("rewriteRelayUrl: recognises relay media under a base path", () => {
+  // BUZZ_BASE_PATH deployments serve media at <prefix>/media/<hash>. Without a
+  // proxy port cached, a recognised relay URL falls back to buzz-media://; an
+  // unrecognised one is returned unchanged, which is how we detect the match.
+  resetMediaCaches();
+  const prefixed = `https://relay.example.com/relay/media/${PREFIX_HASH}.png`;
+  assert.equal(rewriteRelayUrl(prefixed), `buzz-media://localhost/media/${PREFIX_HASH}.png`);
+
+  const multi = `https://relay.example.com/buzz/relay/media/${PREFIX_HASH}.png`;
+  assert.equal(rewriteRelayUrl(multi), `buzz-media://localhost/media/${PREFIX_HASH}.png`);
+});
+
+test("rewriteRelayUrl: root-hosted relay media still recognised", () => {
+  resetMediaCaches();
+  const root = `https://relay.example.com/media/${PREFIX_HASH}.png`;
+  assert.equal(rewriteRelayUrl(root), `buzz-media://localhost/media/${PREFIX_HASH}.png`);
+});
+
+test("rewriteRelayUrl: a media-lookalike segment is left alone", () => {
+  resetMediaCaches();
+  const evil = `https://relay.example.com/relay/media-evil/${PREFIX_HASH}.png`;
+  assert.equal(rewriteRelayUrl(evil), evil);
+});
 
 test("mediaProxyUrl: uses the IPv4 loopback literal for the localhost proxy", () => {
   assert.equal(

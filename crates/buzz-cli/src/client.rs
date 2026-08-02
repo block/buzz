@@ -272,12 +272,17 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
     if input.starts_with("http://") || input.starts_with("https://") {
         let parsed = url::Url::parse(input)
             .map_err(|e| CliError::Usage(format!("invalid media URL: {e}")))?;
-        if !parsed.path().starts_with("/media/") {
-            return Err(CliError::Usage(
-                "media URL must point at a /media/ path".to_string(),
-            ));
-        }
-        let Some(sha256_ext) = parsed.path().strip_prefix("/media/") else {
+        let relay = url::Url::parse(relay_url)
+            .map_err(|e| CliError::Usage(format!("invalid relay URL: {e}")))?;
+        // A relay served under a base path (BUZZ_BASE_PATH) hosts media at
+        // `<prefix>/media/<hash>`, so the relay URL's own path is stripped before
+        // the `/media/` check rather than assuming the relay owns the root.
+        let relay_prefix = relay.path().trim_end_matches('/');
+        let media_path = parsed
+            .path()
+            .strip_prefix(relay_prefix)
+            .unwrap_or(parsed.path());
+        let Some(sha256_ext) = media_path.strip_prefix("/media/") else {
             return Err(CliError::Usage(
                 "media URL must point at a /media/ path".to_string(),
             ));
@@ -287,8 +292,6 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
                 "media path must be sha256, sha256.ext, or sha256.thumb.jpg".to_string(),
             ));
         }
-        let relay = url::Url::parse(relay_url)
-            .map_err(|e| CliError::Usage(format!("invalid relay URL: {e}")))?;
         if parsed.scheme() != relay.scheme()
             || parsed.host_str() != relay.host_str()
             || parsed.port_or_known_default() != relay.port_or_known_default()
@@ -398,6 +401,44 @@ mod media_download_tests {
         assert_eq!(
             media_url_from_input("https://relay.example/", &format!("/media/{hash}.jpg")).unwrap(),
             format!("https://relay.example/media/{hash}.jpg")
+        );
+    }
+
+    /// A relay served under `BUZZ_BASE_PATH` hosts media at
+    /// `<prefix>/media/<hash>`, so both the sha shorthand and a full URL have to
+    /// work against a relay URL that carries a path.
+    #[test]
+    fn media_url_handles_a_relay_served_under_a_base_path() {
+        let hash = "a".repeat(64);
+        assert_eq!(
+            media_url_from_input("https://relay.example/relay", &format!("{hash}.jpg")).unwrap(),
+            format!("https://relay.example/relay/media/{hash}.jpg"),
+            "sha shorthand resolves under the prefix"
+        );
+        assert_eq!(
+            media_url_from_input(
+                "https://relay.example/relay",
+                &format!("https://relay.example/relay/media/{hash}.jpg")
+            )
+            .unwrap(),
+            format!("https://relay.example/relay/media/{hash}.jpg"),
+            "a full prefixed URL is accepted, not rejected as non-media"
+        );
+        assert!(
+            media_url_from_input(
+                "https://relay.example/relay",
+                &format!("https://relay.example/relay/media-evil/{hash}.jpg")
+            )
+            .is_err(),
+            "the /media/ requirement still holds inside the prefix"
+        );
+        assert!(
+            media_url_from_input(
+                "https://relay.example/relay",
+                &format!("https://evil.example/relay/media/{hash}.jpg")
+            )
+            .is_err(),
+            "origin pinning still holds under a prefix"
         );
     }
 

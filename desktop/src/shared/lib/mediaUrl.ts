@@ -19,8 +19,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 // Matches: https://anything.com/media/{64-hex}.{ext}
 // Also matches thumbnails: /media/{64-hex}.thumb.jpg
+// An optional path prefix before /media/ is allowed so relays served under
+// BUZZ_BASE_PATH (https://host/relay/media/...) are still recognised as relay
+// media; without it their URLs look external and skip the authenticated proxy.
 const RELAY_MEDIA_RE =
-  /^(?:https?:\/\/[^/]+)\/media\/([\da-f]{64}(?:\.thumb)?\.(?:jpg|png|gif|webp|mp4|webm|mov)(?:\?.*)?)$/;
+  /^(?:https?:\/\/[^/]+)(?:\/.*?)?\/media\/([\da-f]{64}(?:\.thumb)?\.(?:jpg|png|gif|webp|mp4|webm|mov)(?:\?.*)?)$/;
 
 /** Cached proxy port — fetched once from the Tauri backend. */
 let cachedPort: number | null = null;

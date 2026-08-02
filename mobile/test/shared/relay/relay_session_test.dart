@@ -50,7 +50,9 @@ void main() {
 
     expect(capturedRequest, isNotNull);
     expect(capturedRequest!.method, 'POST');
-    expect(capturedRequest!.url.toString(), 'https://relay.example/query');
+    // The fixture's base URL carries a path (a BUZZ_BASE_PATH deployment), so
+    // the bridge call must land under it rather than at the origin root.
+    expect(capturedRequest!.url.toString(), 'https://relay.example/base/query');
     expect(capturedRequest!.headers['Content-Type'], 'application/json');
     expect(jsonDecode(capturedRequest!.body), [filter.toJson()]);
 
@@ -70,9 +72,11 @@ void main() {
 
     expect(authEvent['kind'], 27235);
     expect(authEvent['pubkey'], keychain.public);
+    // The signed `u` tag must carry the base path as well: the relay
+    // reconstructs the prefixed URL, so a bare-origin tag would 401.
     expect(
       tags,
-      anyElement(equals(<String>['u', 'https://relay.example/query'])),
+      anyElement(equals(<String>['u', 'https://relay.example/base/query'])),
     );
     expect(tags, anyElement(equals(<String>['method', 'POST'])));
     expect(tags, anyElement(equals(<String>['payload', payloadHash])));

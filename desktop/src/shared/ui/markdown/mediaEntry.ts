@@ -60,6 +60,13 @@ export function isVideoMedia(src: string, imetaMime?: string): boolean {
  * it anyway). Callers must read `relayOrigin` from a reactive source
  * (`useRelayOrigin`) so eligibility recomputes — and Download appears for a
  * genuine relay URL — the moment the origin resolves.
+ *
+ * The `/media/` segment is matched anywhere in the path rather than only at the
+ * root, because a relay served under `BUZZ_BASE_PATH` hosts media at
+ * `<prefix>/media/<hash>`. `relayOrigin` is origin-only by design (it backs
+ * proxy decisions and is canonicalized for case-insensitive host comparison),
+ * so the prefix isn't available here to anchor against. Requiring a full
+ * `/media/` segment still rejects near-misses like `/media-evil/<hash>`.
  */
 export function isRelayDownloadable(
   src: string,
@@ -72,6 +79,6 @@ export function isRelayDownloadable(
   } catch {
     return false;
   }
-  if (!parsed.pathname.startsWith("/media/")) return false;
+  if (!parsed.pathname.includes("/media/")) return false;
   return parsed.origin === relayOrigin;
 }

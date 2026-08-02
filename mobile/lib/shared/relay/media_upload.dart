@@ -13,6 +13,7 @@ import 'package:pointycastle/digests/sha256.dart';
 import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
+import 'relay_endpoint.dart';
 import 'relay_provider.dart';
 
 const _mediaUploadPath = '/upload';
@@ -405,7 +406,10 @@ class MediaUploadService {
     required String sha256,
     required String path,
   }) {
-    final request = http.Request('PUT', Uri.parse(_baseUrl).resolve(path));
+    final request = http.Request(
+      'PUT',
+      Uri.parse(relayEndpoint(_baseUrl, path)),
+    );
     request.bodyBytes = bytes;
     request.headers.addAll(
       _buildUploadHeaders(mimeType: mimeType, sha256: sha256),

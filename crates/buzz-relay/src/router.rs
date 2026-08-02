@@ -186,10 +186,45 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         merged = merged.fallback_service(spa_fallback);
     }
 
-    merged
+    // Optional path prefix (`BUZZ_BASE_PATH`). Empty is the default and leaves
+    // the router exactly as built above. When set, the whole surface nests
+    // under the prefix so the relay can live behind a gateway that routes by
+    // path rather than by hostname.
+    //
+    // `nest` strips the prefix before the inner router sees the request, so
+    // every route match, the SPA fallback's `req.uri().path()` checks, and the
+    // media/git sub-routers keep working against their unprefixed paths.
+    //
+    // Health probes stay mounted at the root as well: Kubernetes probes reach
+    // the pod directly rather than through the gateway that needs the prefix,
+    // and `deploy/compose` curls `/_liveness` on the published port.
+    let root_health = Router::new()
+        .route("/health", get(health_handler))
+        .route("/_liveness", get(liveness_handler))
+        .route("/_readiness", get(readiness_handler))
+        .with_state(state.clone());
+    let routed = nest_under_base_path(&state.config.base_path, merged, root_health);
+
+    routed
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+}
+
+/// Mount `router` under `base_path`, keeping `root_extras` reachable at the root.
+///
+/// An empty `base_path` returns `router` untouched — the default, and byte-identical
+/// to the pre-`BUZZ_BASE_PATH` router. Otherwise everything nests under the prefix
+/// so the relay can sit behind a gateway that routes by path rather than hostname.
+/// `nest` strips the prefix before the inner router sees the request, so route
+/// matches and the SPA fallback's own `req.uri().path()` checks keep working
+/// against their unprefixed paths.
+fn nest_under_base_path(base_path: &str, router: Router, root_extras: Router) -> Router {
+    if base_path.is_empty() {
+        router
+    } else {
+        Router::new().nest(base_path, router).merge(root_extras)
+    }
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
@@ -488,6 +523,79 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    /// Build the two-router pair `build_router` hands to [`nest_under_base_path`],
+    /// standing in for the real relay surface and the root-mounted health probes.
+    fn base_path_fixture(base_path: &str) -> Router {
+        // The real surface already carries the health probes (they live in
+        // `api_router`), so `root_extras` is a deliberate duplicate that only
+        // matters once the surface moves under a prefix.
+        let surface = Router::new()
+            .route("/", get(|| async { "ws-or-nip11" }))
+            .route("/events", get(|| async { "events" }))
+            .route("/_liveness", get(|| async { "ok" }));
+        let root_extras = Router::new().route("/_liveness", get(|| async { "ok" }));
+        nest_under_base_path(base_path, surface, root_extras)
+    }
+
+    async fn status_of(router: Router, path: &str) -> StatusCode {
+        let request = Request::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("request");
+        router
+            .oneshot(request)
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_base_path_leaves_every_route_at_the_root() {
+        let router = base_path_fixture("");
+        assert_eq!(status_of(router.clone(), "/").await, StatusCode::OK);
+        assert_eq!(status_of(router.clone(), "/events").await, StatusCode::OK);
+        assert_eq!(status_of(router, "/_liveness").await, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn base_path_moves_the_surface_under_the_prefix() {
+        let router = base_path_fixture("/relay");
+        // The WebSocket/NIP-11 route answers on the bare prefix, which is what a
+        // client connecting to wss://host/relay asks for.
+        assert_eq!(status_of(router.clone(), "/relay").await, StatusCode::OK);
+        assert_eq!(
+            status_of(router.clone(), "/relay/events").await,
+            StatusCode::OK
+        );
+        // Root probes stay reachable: Kubernetes hits the pod directly, bypassing
+        // the gateway that requires the prefix.
+        assert_eq!(
+            status_of(router.clone(), "/_liveness").await,
+            StatusCode::OK
+        );
+        // Unprefixed application paths no longer resolve — the gateway owns the
+        // root, and a stale client hitting it should fail loudly, not silently
+        // reach a half-configured relay.
+        assert_eq!(
+            status_of(router.clone(), "/events").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(status_of(router, "/other").await, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn multi_segment_base_path_routes() {
+        let router = base_path_fixture("/buzz/relay");
+        assert_eq!(
+            status_of(router.clone(), "/buzz/relay").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_of(router, "/buzz/relay/events").await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -28,6 +28,51 @@ test("parseInviteInput_http_invite_url_returns_ws_relay_and_code", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Base-path deployments (BUZZ_BASE_PATH): the prefix must survive into the
+// derived relay URL, or the client dials a relay that isn't there.
+// ---------------------------------------------------------------------------
+
+test("parseInviteInput_base_path_invite_url_keeps_prefix_in_relay_url", () => {
+  const result = parseInviteInput(
+    "https://relay.example.com/relay/invite/abc123",
+  );
+  assert.deepEqual(result, {
+    relayWsUrl: "wss://relay.example.com/relay",
+    code: "abc123",
+  });
+});
+
+test("parseInviteInput_multi_segment_base_path_keeps_full_prefix", () => {
+  const result = parseInviteInput(
+    "https://relay.example.com/buzz/relay/invite/abc123",
+  );
+  assert.deepEqual(result, {
+    relayWsUrl: "wss://relay.example.com/buzz/relay",
+    code: "abc123",
+  });
+});
+
+test("parseInviteInput_base_path_invite_url_over_http_uses_ws", () => {
+  const result = parseInviteInput(
+    "http://relay.example.com:3000/relay/invite/abc123",
+  );
+  assert.deepEqual(result, {
+    relayWsUrl: "ws://relay.example.com:3000/relay",
+    code: "abc123",
+  });
+});
+
+test("parseInviteInput_base_path_invite_url_tolerates_trailing_slash", () => {
+  const result = parseInviteInput(
+    "https://relay.example.com/relay/invite/abc123/",
+  );
+  assert.deepEqual(result, {
+    relayWsUrl: "wss://relay.example.com/relay",
+    code: "abc123",
+  });
+});
+
 test("parseInviteInput_https_with_port_preserves_port", () => {
   const result = parseInviteInput(
     "https://relay.example.com:8443/invite/abc123",

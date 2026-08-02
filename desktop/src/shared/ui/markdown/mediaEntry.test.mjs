@@ -76,6 +76,21 @@ test("isRelayDownloadable: non-/media/ path on the relay is not eligible", () =>
   assert.equal(isRelayDownloadable(`${RELAY}/other/abc.mp4`, RELAY), false);
 });
 
+test("isRelayDownloadable: relay served under a base path is eligible", () => {
+  // BUZZ_BASE_PATH deployments host media at <prefix>/media/<hash>.
+  assert.equal(
+    isRelayDownloadable(`${RELAY}/relay/media/abc.mp4`, RELAY),
+    true,
+  );
+});
+
+test("isRelayDownloadable: near-miss segment under a base path is not eligible", () => {
+  assert.equal(
+    isRelayDownloadable(`${RELAY}/relay/media-evil/abc.mp4`, RELAY),
+    false,
+  );
+});
+
 test("isRelayDownloadable: malformed URL is not eligible", () => {
   assert.equal(isRelayDownloadable("not a url", RELAY), false);
 });

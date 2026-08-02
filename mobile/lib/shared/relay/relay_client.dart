@@ -1,5 +1,7 @@
 import 'package:http/http.dart' as http;
 
+import 'relay_endpoint.dart';
+
 /// Lightweight HTTP context for talking to the Buzz relay.
 ///
 /// In the pure-nostr architecture, all data flow happens over the relay
@@ -18,10 +20,7 @@ class RelayClient {
   http.Client get httpClient => _http;
 
   /// Fully-qualified URL for the relay's Blossom-style media upload endpoint.
-  String get mediaUploadUrl {
-    final base = Uri.parse(baseUrl);
-    return base.resolve('/upload').toString();
-  }
+  String get mediaUploadUrl => relayEndpoint(baseUrl, '/upload');
 
   void dispose() => _http.close();
 }
