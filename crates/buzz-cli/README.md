@@ -37,6 +37,7 @@ buzz messages thread --channel <uuid> --event <event-id>
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
+buzz messages edit --event <event-id> --content - < message.md   # read replacement body from stdin
 buzz messages delete --event <event-id>
 
 # Diffs
