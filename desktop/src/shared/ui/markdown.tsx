@@ -975,7 +975,7 @@ function ImageZoomOverlay({
   );
 }
 
-const LinkPreviewImageLightbox =
+export const LinkPreviewImageLightbox =
   createLinkPreviewImageLightbox(ImageZoomOverlay);
 
 /**
@@ -1357,17 +1357,12 @@ function createMarkdownComponents(
       return <span className="font-medium text-current">{children}</span>;
     }
 
-    // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the
-    // image lightbox button inside an anchor. Keep the image as the lightbox
-    // trigger and suppress the parent link activation for block media.
     if (hasBlockMedia(React.Children.toArray(children))) {
       return <>{children}</>;
     }
 
     const label = getReactNodeText(children);
 
-    // Snapshot attachment (agent or team): classify before generic FileCard.
-    // resolveSnapshotCard checks the filename suffix + SHA-256 field.
     const snapshotCard = resolveSnapshotCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1395,9 +1390,6 @@ function createMarkdownComponents(
       );
     }
 
-    // Generic file attachment: a `[filename](url)` link whose href matches an
-    // imeta entry with a non-image, non-video MIME. Render a download card
-    // instead of a plain link. (Media uses the `img` renderer, not this path.)
     const card = resolveFileCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1822,6 +1814,7 @@ function MarkdownInner({
   mediaInset = false,
   messageId,
   linkPreviewsSuppressed = false,
+  suppressedLinkPreviewUrls = [],
   onRemoveLinkPreviewsForEveryone,
   mentionNames,
   mentionPubkeysByName,
@@ -1854,13 +1847,12 @@ function MarkdownInner({
     },
     [goChannel],
   );
-  const previewsGloballySuppressed = linkPreviewsSuppressed;
   const linkPreviews = React.useMemo(
     () =>
-      interactive && !previewsGloballySuppressed
-        ? extractSupportedLinkPreviews(content)
+      interactive && !linkPreviewsSuppressed
+        ? extractSupportedLinkPreviews(content, suppressedLinkPreviewUrls)
         : [],
-    [content, interactive, previewsGloballySuppressed],
+    [content, interactive, linkPreviewsSuppressed, suppressedLinkPreviewUrls],
   );
   const configNudge = React.useMemo(
     () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
@@ -1977,6 +1969,10 @@ export const Markdown = React.memo(
     prev.mediaInset === next.mediaInset &&
     prev.messageId === next.messageId &&
     prev.linkPreviewsSuppressed === next.linkPreviewsSuppressed &&
+    shallowArrayEqual(
+      prev.suppressedLinkPreviewUrls,
+      next.suppressedLinkPreviewUrls,
+    ) &&
     prev.onRemoveLinkPreviewsForEveryone ===
       next.onRemoveLinkPreviewsForEveryone &&
     shallowRecordEqual(

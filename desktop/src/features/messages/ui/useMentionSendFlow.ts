@@ -27,6 +27,7 @@ import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
+import { buildLinkPreviewSuppressionTags } from "@/shared/lib/linkPreviewSuppression.mjs";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 
 type PendingNonMemberMentionSend = {
@@ -45,6 +46,7 @@ type PendingNonMemberMentionSend = {
   savedContent: string;
   savedImeta: ImetaMedia[];
   savedSpoileredAttachmentUrls: Set<string>;
+  savedSuppressedLinkPreviewUrls: Set<string>;
   sentDraftKey: string | null | undefined;
   audienceGeneration: number;
   audienceRevision: number | null;
@@ -62,6 +64,7 @@ type SendMessageWithMentionFlowInput = {
   pendingImeta: ImetaMedia[];
   sentDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
+  suppressedLinkPreviewUrls?: ReadonlySet<string>;
   trimmed: string;
   audienceGeneration?: number;
   audienceRevision?: number | null;
@@ -89,6 +92,7 @@ type UseMentionSendFlowOptions = {
         parentEventId: string | null;
         threadHeadId: string | null;
       } | null,
+      suppressedLinkPreviewUrls?: string[],
     ) => Promise<void>
   >;
   richText: Pick<
@@ -521,6 +525,7 @@ export function useMentionSendFlow({
             outgoingTags,
             sendChannelId,
             draft.capturedThreadContext,
+            [...draft.savedSuppressedLinkPreviewUrls],
           );
           if (effectiveExplicitAgentPubkeys.length > 0) {
             // Promote only explicitly authored agents that remained effective
@@ -644,6 +649,7 @@ export function useMentionSendFlow({
       pendingImeta,
       sentDraftKey,
       spoileredAttachmentUrls = new Set(),
+      suppressedLinkPreviewUrls = new Set(),
       trimmed,
       audienceGeneration = 0,
       audienceRevision = null,
@@ -708,10 +714,10 @@ export function useMentionSendFlow({
           pendingImeta,
           spoileredAttachmentUrls,
         );
-        const outgoingTags = mergeOutgoingTags(
-          mediaTags,
-          buildCustomEmojiTags(finalContent, customEmoji),
-        );
+        const outgoingTags = mergeOutgoingTags(mediaTags, [
+          ...buildCustomEmojiTags(finalContent, customEmoji),
+          ...buildLinkPreviewSuppressionTags(suppressedLinkPreviewUrls),
+        ]);
         const nonMemberPubkeys = getNonMemberMentionPubkeys(pubkeys);
         let promptNonMemberPubkeys = nonMemberPubkeys.filter(
           (pubkey) =>
@@ -746,6 +752,7 @@ export function useMentionSendFlow({
           savedContent: trimmed,
           savedImeta: [...pendingImeta],
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
+          savedSuppressedLinkPreviewUrls: new Set(suppressedLinkPreviewUrls),
           sentDraftKey,
           audienceGeneration,
           audienceRevision,

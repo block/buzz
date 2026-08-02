@@ -69,7 +69,10 @@ export function hasBlockMedia(childArray: React.ReactNode[]): boolean {
   return imageChildren.length >= 1;
 }
 
-export function shallowArrayEqual(a?: string[], b?: string[]): boolean {
+export function shallowArrayEqual(
+  a?: readonly string[],
+  b?: readonly string[],
+): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
   if (a.length !== b.length) return false;

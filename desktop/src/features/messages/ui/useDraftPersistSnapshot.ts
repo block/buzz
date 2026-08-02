@@ -19,6 +19,7 @@ type UseDraftPersistLifecycleParams = {
     pendingImeta: ImetaMedia[],
     spoileredAttachmentUrls: string[],
     mentionRefs: DraftMentionRef[],
+    suppressedLinkPreviewUrls: string[],
   ) => void;
   /** Snapshot selected mention identities still present in current content. */
   getMentionRefs: (content: string) => DraftMentionRef[];
@@ -39,6 +40,8 @@ type UseDraftPersistLifecycleParams = {
    * so it always captures the latest value at cleanup time.
    */
   spoileredAttachmentUrlsRef: React.MutableRefObject<Set<string>>;
+  setSuppressedLinkPreviewUrls?: (urls: Set<string>) => void;
+  suppressedLinkPreviewUrlsRef?: React.MutableRefObject<Set<string>>;
   /**
    * Read the current editor content synchronously — called in the cleanup
    * closure to capture the latest text before the effect fires.
@@ -84,6 +87,8 @@ export function useDraftPersistLifecycle({
   clearContent,
   setSpoileredAttachmentUrls,
   spoileredAttachmentUrlsRef,
+  setSuppressedLinkPreviewUrls,
+  suppressedLinkPreviewUrlsRef,
   syncComposerContentFromEditor,
 }: UseDraftPersistLifecycleParams): void {
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
@@ -110,6 +115,9 @@ export function useDraftPersistLifecycle({
       pendingImetaForPersistRef.current = saved.pendingImeta;
       setPendingImeta(saved.pendingImeta);
       setSpoileredAttachmentUrls(new Set(saved.spoileredAttachmentUrls));
+      setSuppressedLinkPreviewUrls?.(
+        new Set(saved.suppressedLinkPreviewUrls ?? []),
+      );
     } else {
       clearContent();
       restoreMentionRefs([]);
@@ -117,6 +125,7 @@ export function useDraftPersistLifecycle({
       pendingImetaForPersistRef.current = [];
       setPendingImeta([]);
       setSpoileredAttachmentUrls(new Set());
+      setSuppressedLinkPreviewUrls?.(new Set());
     }
 
     return () => {
@@ -129,6 +138,7 @@ export function useDraftPersistLifecycle({
           [...pendingImetaForPersistRef.current],
           [...spoileredAttachmentUrlsRef.current],
           getMentionRefs(content),
+          [...(suppressedLinkPreviewUrlsRef?.current ?? [])],
         );
       }
     };

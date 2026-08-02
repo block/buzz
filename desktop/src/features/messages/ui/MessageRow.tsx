@@ -42,7 +42,7 @@ import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
-import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
+import { getLinkPreviewSuppression } from "@/shared/lib/linkPreviewSuppression.mjs";
 import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
@@ -154,7 +154,8 @@ export const MessageRow = React.memo(
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
     );
-    const linkPreviewsSuppressed = hasLinkPreviewSuppression(message.tags);
+    const linkPreviewSuppression = getLinkPreviewSuppression(message.tags);
+    const linkPreviewsSuppressed = linkPreviewSuppression.all;
     const removeLinkPreviewsForEveryone =
       channelId && onEdit && !message.pending && !linkPreviewsSuppressed
         ? async () => {
@@ -400,6 +401,7 @@ export const MessageRow = React.memo(
               content={message.body}
               messageId={message.id}
               linkPreviewsSuppressed={linkPreviewsSuppressed}
+              suppressedLinkPreviewUrls={linkPreviewSuppression.urls}
               onRemoveLinkPreviewsForEveryone={removeLinkPreviewsForEveryone}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}

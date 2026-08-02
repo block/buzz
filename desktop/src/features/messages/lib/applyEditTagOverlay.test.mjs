@@ -201,3 +201,28 @@ test("imeta and emoji are overlaid together from the edit", () => {
     ["rickroll"],
   );
 });
+
+test("URL-specific preview suppression is fully replaced by each edit", () => {
+  const original = [
+    ["h", "uuid"],
+    ["link-preview", "none"],
+    ["link-preview", "hide", "https://example.com/old"],
+  ];
+  const edit = [
+    ["h", "uuid"],
+    ["link-preview", "hide", "https://example.com/new"],
+  ];
+
+  const out = applyEditTagOverlay(original, edit);
+  assert.deepEqual(
+    out.filter((tag) => tag[0] === "link-preview"),
+    [
+      ["link-preview", "none"],
+      ["link-preview", "hide", "https://example.com/new"],
+    ],
+  );
+  assert.deepEqual(
+    applyEditTagOverlay(out, []).filter((tag) => tag[0] === "link-preview"),
+    [["link-preview", "none"]],
+  );
+});

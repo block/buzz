@@ -10,6 +10,7 @@ mod events;
 mod huddle;
 mod identity_storage;
 mod key_backup;
+mod link_preview_tags;
 mod linux_media;
 mod managed_agents;
 mod media_proxy;
@@ -72,7 +73,6 @@ use tauri::{Listener, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
-
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 

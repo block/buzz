@@ -488,8 +488,10 @@ type LinkPreviewCandidate = {
 /** Extract supported link previews from message text, preserving first-seen order. */
 export function extractSupportedLinkPreviews(
   content: string,
+  suppressedUrls: readonly string[] = [],
 ): SupportedLinkPreview[] {
   const previews: SupportedLinkPreview[] = [];
+  const suppressed = new Set(suppressedUrls);
   const seen = new Set<string>();
   const searchable = stripHiddenLinkPreviewContent(content);
   const candidates: LinkPreviewCandidate[] = [];
@@ -522,7 +524,8 @@ export function extractSupportedLinkPreviews(
 
   for (const candidate of candidates) {
     const preview = parseSupportedLinkPreview(candidate.href);
-    if (!preview || seen.has(preview.href)) continue;
+    if (!preview || seen.has(preview.href) || suppressed.has(preview.href))
+      continue;
 
     seen.add(preview.href);
     previews.push(

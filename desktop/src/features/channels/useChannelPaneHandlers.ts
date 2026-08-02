@@ -150,6 +150,7 @@ export function useChannelPaneHandlers({
       content: string,
       mediaTags?: string[][],
       mentionPubkeys?: string[],
+      suppressedLinkPreviewUrls?: string[],
     ) => {
       const eventId = editTargetIdRef.current;
       if (!eventId) {
@@ -177,6 +178,7 @@ export function useChannelPaneHandlers({
         content,
         mediaTags,
         mentionPubkeys,
+        suppressedLinkPreviewUrls,
       });
       setEditTargetId(null);
     },
@@ -271,11 +273,14 @@ export function useChannelPaneHandlers({
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
+      _threadContext?: unknown,
+      suppressedLinkPreviewUrls?: string[],
     ) => {
       await sendMutateRef.current({
         content,
         mentionPubkeys,
         mediaTags,
+        suppressedLinkPreviewUrls,
         channelId: channelId ?? undefined,
       });
     },
@@ -292,6 +297,7 @@ export function useChannelPaneHandlers({
         parentEventId: string | null;
         threadHeadId: string | null;
       } | null,
+      suppressedLinkPreviewUrls?: string[],
     ) => {
       // Resolve target using captured submit-time context (race-free) or live
       // refs (legacy path). When threadContext is supplied, no live-ref reads
@@ -323,6 +329,7 @@ export function useChannelPaneHandlers({
         mentionPubkeys,
         parentEventId,
         mediaTags,
+        suppressedLinkPreviewUrls,
         channelId: channelId ?? undefined,
       });
 

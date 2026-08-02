@@ -66,6 +66,8 @@ export type DraftState = {
   mentionRefs?: DraftMentionRef[];
   /** URLs of imeta attachments marked as spoilered. */
   spoileredAttachmentUrls: string[];
+  /** Canonical link-preview URLs hidden by the author before send. */
+  suppressedLinkPreviewUrls: string[];
   /**
    * Lifecycle status of this draft. Always `"active"` at runtime.
    * The `"sent"` value is not written by any production path; legacy `sent:`
@@ -219,6 +221,15 @@ function isValidDraftState(v: unknown): v is DraftState {
   ) {
     return false;
   }
+  // Migration: drafts written before per-preview controls have no suppression set.
+  if (d.suppressedLinkPreviewUrls === undefined) {
+    (d as DraftState).suppressedLinkPreviewUrls = [];
+  } else if (
+    !Array.isArray(d.suppressedLinkPreviewUrls) ||
+    d.suppressedLinkPreviewUrls.some((url) => typeof url !== "string")
+  ) {
+    return false;
+  }
   // Migration: drafts written before mention routing was persisted have no
   // mentionRefs. Preserve them as ordinary drafts with no selected identities.
   if (d.mentionRefs === undefined) {
@@ -323,7 +334,9 @@ function draftStatesEqual(a: DraftState, b: DraftState): boolean {
     a.status !== b.status ||
     a.pendingImeta.length !== b.pendingImeta.length ||
     (a.mentionRefs?.length ?? 0) !== (b.mentionRefs?.length ?? 0) ||
-    a.spoileredAttachmentUrls.length !== b.spoileredAttachmentUrls.length
+    a.spoileredAttachmentUrls.length !== b.spoileredAttachmentUrls.length ||
+    (a.suppressedLinkPreviewUrls?.length ?? 0) !==
+      (b.suppressedLinkPreviewUrls?.length ?? 0)
   ) {
     return false;
   }
@@ -362,6 +375,13 @@ function draftStatesEqual(a: DraftState, b: DraftState): boolean {
   }
   for (let i = 0; i < a.spoileredAttachmentUrls.length; i++) {
     if (a.spoileredAttachmentUrls[i] !== b.spoileredAttachmentUrls[i]) {
+      return false;
+    }
+  }
+  const aSuppressedPreviewUrls = a.suppressedLinkPreviewUrls ?? [];
+  const bSuppressedPreviewUrls = b.suppressedLinkPreviewUrls ?? [];
+  for (let i = 0; i < aSuppressedPreviewUrls.length; i++) {
+    if (aSuppressedPreviewUrls[i] !== bSuppressedPreviewUrls[i]) {
       return false;
     }
   }
@@ -428,6 +448,7 @@ export function persistDraftEntry(
   pendingImeta: ImetaMedia[],
   spoileredAttachmentUrls: string[],
   mentionRefs: DraftMentionRef[] = [],
+  suppressedLinkPreviewUrls: string[] = [],
 ): void {
   const hasContent = content.trim().length > 0 || pendingImeta.length > 0;
   if (hasContent) {
@@ -444,6 +465,7 @@ export function persistDraftEntry(
       pendingImeta,
       mentionRefs,
       spoileredAttachmentUrls,
+      suppressedLinkPreviewUrls,
       status: "active",
     });
   } else {
@@ -542,6 +564,7 @@ export function useDrafts() {
       pendingImeta: ImetaMedia[],
       spoileredAttachmentUrls: string[],
       mentionRefs: DraftMentionRef[] = [],
+      suppressedLinkPreviewUrls: string[] = [],
     ) =>
       persistDraftEntry(
         draftKey,
@@ -550,6 +573,7 @@ export function useDrafts() {
         pendingImeta,
         spoileredAttachmentUrls,
         mentionRefs,
+        suppressedLinkPreviewUrls,
       ),
     [],
   );

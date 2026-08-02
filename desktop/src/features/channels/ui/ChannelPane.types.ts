@@ -42,6 +42,7 @@ export type ChannelPaneProps = {
     body: string;
     id: string;
     imetaMedia?: ImetaMedia[];
+    suppressedLinkPreviewUrls?: string[];
   } | null;
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;

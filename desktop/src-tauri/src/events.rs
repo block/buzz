@@ -8,28 +8,20 @@
 //!
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
-
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
-
 // ── Constants ────────────────────────────────────────────────────────────────
-
 /// Maximum content size — matches buzz-sdk (64 KiB).
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
-
 /// Maximum mention count — matches buzz-sdk.
 const MAX_MENTIONS: usize = 50;
-
 /// Maximum emoji length in characters — matches buzz-sdk.
 const MAX_EMOJI_CHARS: usize = 64;
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
 fn tag(parts: Vec<&str>) -> Result<Tag, String> {
     Tag::parse(parts).map_err(|e| format!("invalid tag: {e}"))
 }
-
 fn check_content(content: &str) -> Result<(), String> {
     if content.len() > MAX_CONTENT_BYTES {
         return Err(format!(
@@ -40,13 +32,11 @@ fn check_content(content: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
 /// NIP-10 thread reference.
 pub struct ThreadRef {
     pub root_event_id: EventId,
     pub parent_event_id: EventId,
 }
-
 fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
     let root = tr.root_event_id.to_hex();
     let parent = tr.parent_event_id.to_hex();
@@ -59,7 +49,6 @@ fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
         ])
     }
 }
-
 fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
     if mentions.len() > MAX_MENTIONS {
         return Err(format!("too many mentions (max {MAX_MENTIONS})"));
@@ -75,7 +64,6 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
     }
     Ok(tags)
 }
-
 fn mention_reference_tags(mentions: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
     for mention in mentions {
         if mention.first().map(String::as_str) != Some("mention") {
@@ -294,6 +282,7 @@ pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<Even
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Kind 9 — stream message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -302,6 +291,7 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    link_preview_suppression_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -311,6 +301,7 @@ pub fn build_message(
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
+        link_preview_suppression_tags,
         &[],
     )
 }
@@ -329,6 +320,7 @@ pub fn build_message_with_client_tags(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    link_preview_suppression_tags: &[Vec<String>],
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
@@ -340,6 +332,7 @@ pub fn build_message_with_client_tags(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    crate::link_preview_tags::append(link_preview_suppression_tags, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -397,6 +390,7 @@ pub fn build_forum_comment(
 
 /// Kind 40003 — edit a message with full content, media, emoji, mentions,
 /// and optional monotonic link-preview suppression.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
@@ -405,6 +399,7 @@ pub fn build_message_edit(
     custom_emoji_tags: &[Vec<String>],
     mentions: &[&str],
     suppress_link_previews: bool,
+    suppressed_link_preview_urls: &[String],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![
@@ -417,6 +412,11 @@ pub fn build_message_edit(
     if suppress_link_previews {
         tags.push(tag(vec!["link-preview", "none"])?);
     }
+    let preview_tags = suppressed_link_preview_urls
+        .iter()
+        .map(|url| vec!["link-preview".to_string(), "hide".to_string(), url.clone()])
+        .collect::<Vec<_>>();
+    crate::link_preview_tags::append(&preview_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
 }
 
@@ -843,6 +843,7 @@ pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuild
 mod tests {
     use super::*;
     use nostr::Keys;
+
     #[test]
     fn channel_builders_reject_hash_only_names() {
         let channel_id = Uuid::new_v4();
@@ -942,7 +943,8 @@ mod tests {
             EventId::from_hex("d24da132115ca0a46233cf4c2ad8338fbf914250cbcaa9181a6dd59533cb5ac1")
                 .unwrap();
         let builder =
-            build_message_edit(channel, target, "hi @alice", &[], &[], mentions, false).unwrap();
+            build_message_edit(channel, target, "hi @alice", &[], &[], mentions, false, &[])
+                .unwrap();
         let secret = nostr::SecretKey::from_hex(
             "0000000000000000000000000000000000000000000000000000000000000003",
         )

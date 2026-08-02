@@ -48,6 +48,8 @@ export type MessageComposerProps = {
      * event; the receiver overlays it.
      */
     imetaMedia?: ImetaMedia[];
+    /** Persisted author-controlled preview suppression on the effective event. */
+    suppressedLinkPreviewUrls?: string[];
   } | null;
   isSending?: boolean;
   mediaController?: MediaUploadController;
@@ -66,6 +68,7 @@ export type MessageComposerProps = {
     content: string,
     mediaTags?: string[][],
     mentionPubkeys?: string[],
+    suppressedLinkPreviewUrls?: string[],
   ) => Promise<void>;
   /** Captures send context synchronously before awaits can change navigation. */
   onCaptureSendContext?: () => {
@@ -83,6 +86,7 @@ export type MessageComposerProps = {
       parentEventId: string | null;
       threadHeadId: string | null;
     } | null,
+    suppressedLinkPreviewUrls?: string[],
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;

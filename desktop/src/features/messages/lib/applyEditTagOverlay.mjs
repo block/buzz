@@ -31,13 +31,23 @@
 export function applyEditTagOverlay(originalTags, editTags) {
   if (!editTags) return originalTags;
   const editEmoji = editTags.filter((t) => t[0] === "emoji");
-  // imeta is always fully replaced by the edit. emoji is replaced only when
-  // the edit actually supplies emoji tags; otherwise the original's are kept.
+  const editPreview = editTags.filter(
+    (t) => t[0] === "link-preview" && t[1] === "hide",
+  );
   const droppedFromOriginal =
     editEmoji.length > 0
-      ? (t) => t[0] !== "imeta" && t[0] !== "emoji"
-      : (t) => t[0] !== "imeta";
+      ? (t) =>
+          t[0] !== "imeta" &&
+          t[0] !== "emoji" &&
+          !(t[0] === "link-preview" && t[1] === "hide")
+      : (t) =>
+          t[0] !== "imeta" && !(t[0] === "link-preview" && t[1] === "hide");
   const baseFromOriginal = originalTags.filter(droppedFromOriginal);
   const overlaidFromEdit = editTags.filter((t) => t[0] === "imeta");
-  return [...baseFromOriginal, ...overlaidFromEdit, ...editEmoji];
+  return [
+    ...baseFromOriginal,
+    ...overlaidFromEdit,
+    ...editEmoji,
+    ...editPreview,
+  ];
 }

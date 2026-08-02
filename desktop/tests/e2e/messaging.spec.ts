@@ -346,6 +346,52 @@ test("markdown tables overflow wide content and fill the message when narrow", a
     .toBeLessThanOrEqual(1);
 });
 
+test("composer previews links before send and removes one canonical URL", async ({
+  page,
+}) => {
+  const firstUrl = "https://github.com/block/buzz/pull/3246#discussion";
+  const secondUrl = "https://github.com/block/buzz/pull/3247";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`${firstUrl} ${firstUrl} ${secondUrl}`);
+
+  const previews = page.locator(
+    "[data-composer-link-previews] [data-link-preview]",
+  );
+  await expect(previews).toHaveCount(2);
+  if (process.env.BUZZ_COMPOSER_PREVIEW_SCREENSHOTS_DIR) {
+    await page
+      .getByTestId("message-input")
+      .locator("xpath=ancestor::form")
+      .screenshot({
+        path: `${process.env.BUZZ_COMPOSER_PREVIEW_SCREENSHOTS_DIR}/composer-compact.png`,
+      });
+  }
+  const firstPreviewWrapper = previews.first().locator("..");
+  await firstPreviewWrapper.hover();
+  await firstPreviewWrapper.getByLabel("Link display settings").click();
+  await page.getByRole("menuitem", { name: "Remove preview" }).click();
+  await expect(previews).toHaveCount(1);
+  await expect(previews.first().getByRole("link").first()).toHaveAttribute(
+    "href",
+    secondUrl,
+  );
+  await expect(page.getByTestId("message-input")).toContainText(firstUrl);
+  await firstPreviewWrapper.getByLabel("Link display settings").click();
+  await page.getByRole("menuitem", { name: "Display" }).hover();
+  await page.getByRole("menuitemradio", { name: "Rich" }).click();
+  if (process.env.BUZZ_COMPOSER_PREVIEW_SCREENSHOTS_DIR) {
+    await page
+      .getByTestId("message-input")
+      .locator("xpath=ancestor::form")
+      .screenshot({
+        path: `${process.env.BUZZ_COMPOSER_PREVIEW_SCREENSHOTS_DIR}/composer-rich.png`,
+      });
+  }
+});
+
 test("link preview style defaults to compact and Rich unfurls descriptions", async ({
   page,
 }) => {

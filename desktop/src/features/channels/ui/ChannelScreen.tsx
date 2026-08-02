@@ -1,4 +1,5 @@
 import * as React from "react";
+import { getLinkPreviewSuppression } from "@/shared/lib/linkPreviewSuppression.mjs";
 import { useAppShell } from "@/app/AppShellContext";
 import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -262,7 +263,6 @@ export function ChannelScreen({
     resolvedMessages,
     threadReplyEvents,
   );
-
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -688,7 +688,6 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
@@ -722,18 +721,15 @@ export function ChannelScreen({
     resetKey: activeChannelId,
     enabled: !isSinglePanelView,
   });
-
   const handleManageChannel = React.useCallback(() => {
     if (activeChannel?.channelType === "forum") {
       openGlobalChannelManagement();
       return;
     }
-
     if (channelManagementOpen) {
       setChannelManagementOpen(false);
       return;
     }
-
     setOpenThreadHeadId(null);
     setExpandedThreadReplyIds(new Set());
     setThreadScrollTargetId(null);
@@ -886,6 +882,9 @@ export function ChannelScreen({
                           imetaMedia: imetaMediaFromTags(
                             editTargetMessage.tags,
                           ),
+                          suppressedLinkPreviewUrls: getLinkPreviewSuppression(
+                            editTargetMessage.tags,
+                          ).urls,
                         }
                       : null
                   }

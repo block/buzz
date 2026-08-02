@@ -26,6 +26,7 @@ import {
 
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { buildLinkPreviewSuppressionTags } from "@/shared/lib/linkPreviewSuppression.mjs";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
 import {
   clearTimeoutState,
@@ -413,6 +414,7 @@ export function useSendMessageMutation(
       mentionPubkeys?: string[];
       parentEventId?: string | null;
       mediaTags?: string[][];
+      suppressedLinkPreviewUrls?: string[];
     },
     MessageQueryContext | undefined
   >({
@@ -423,6 +425,7 @@ export function useSendMessageMutation(
       mentionPubkeys,
       parentEventId,
       mediaTags,
+      suppressedLinkPreviewUrls,
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
@@ -458,7 +461,11 @@ export function useSendMessageMutation(
         mediaTags: imetaTags,
         emojiTags,
         mentionTags,
-      } = splitOutgoingTags(mediaTags);
+        linkPreviewTags,
+      } = splitOutgoingTags([
+        ...(mediaTags ?? []),
+        ...buildLinkPreviewSuppressionTags(suppressedLinkPreviewUrls),
+      ]);
       const recipientPubkeys = messageMentionPubkeys(
         effectiveChannel,
         identity.pubkey,
@@ -468,7 +475,12 @@ export function useSendMessageMutation(
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
-      if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
+      if (
+        parentEventId ||
+        imetaTags.length > 0 ||
+        emojiTags.length > 0 ||
+        linkPreviewTags.length > 0
+      ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
@@ -482,6 +494,7 @@ export function useSendMessageMutation(
           undefined,
           emojiTags,
           mentionTags,
+          linkPreviewTags,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -519,6 +532,7 @@ export function useSendMessageMutation(
             ...imetaTags,
             ...emojiTags,
             ...mentionTags,
+            ...linkPreviewTags,
           ],
           content: content.trim(),
           sig: "",
@@ -699,9 +713,16 @@ export function useEditMessageMutation(channel: Channel | null) {
       // Pubkeys of mentions *newly added* by this edit, diffed at the composer.
       // Only these receive a `p` tag so a typo-fix edit re-wakes nobody.
       mentionPubkeys?: string[];
+      suppressedLinkPreviewUrls?: string[];
     }
   >({
-    mutationFn: async ({ eventId, content, mediaTags, mentionPubkeys }) => {
+    mutationFn: async ({
+      eventId,
+      content,
+      mediaTags,
+      mentionPubkeys,
+      suppressedLinkPreviewUrls,
+    }) => {
       if (!channel) {
         throw new Error("No channel selected.");
       }
@@ -719,9 +740,14 @@ export function useEditMessageMutation(channel: Channel | null) {
         imetaTags,
         emojiTags,
         mentionPubkeys,
+        false,
+        suppressedLinkPreviewUrls,
       );
     },
-    onSuccess: (_data, { eventId, content, mediaTags }) => {
+    onSuccess: (
+      _data,
+      { eventId, content, mediaTags, suppressedLinkPreviewUrls },
+    ) => {
       if (!channel) {
         return;
       }
@@ -734,9 +760,11 @@ export function useEditMessageMutation(channel: Channel | null) {
       // only because the edit event round-trip can lag perceptibly.)
       const applyEdit = (message: RelayEvent): RelayEvent => {
         if (message.id !== eventId) return message;
-        const nextTags = mediaTags
-          ? applyEditTagOverlay(message.tags, mediaTags)
-          : message.tags;
+        const editTags = [
+          ...(mediaTags ?? []),
+          ...buildLinkPreviewSuppressionTags(suppressedLinkPreviewUrls),
+        ];
+        const nextTags = applyEditTagOverlay(message.tags, editTags);
         return { ...message, content, tags: nextTags };
       };
 

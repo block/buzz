@@ -42,6 +42,7 @@ import { formatTime } from "@/features/messages/lib/dateFormatters";
 // Pure overlay helper lives in a sibling .mjs so node:test (no TS loader)
 // can exercise the exact same source the renderer uses.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
+import { getLinkPreviewSuppression } from "@/shared/lib/linkPreviewSuppression.mjs";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const HEX_RE = /^[0-9a-f]+$/i;
@@ -184,12 +185,7 @@ function getAuthorAvatarUrl(input: {
 export function hasLinkPreviewSuppression(
   tags: string[][] | undefined,
 ): boolean {
-  return (
-    tags?.some(
-      (tag) =>
-        tag[0] === "link-preview" && tag[1] === "none" && tag.length === 2,
-    ) ?? false
-  );
+  return getLinkPreviewSuppression(tags).all;
 }
 
 function isAuthorizedMessageEdit(

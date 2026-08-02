@@ -485,6 +485,7 @@ pub async fn send_channel_message(
     media_tags: Option<Vec<Vec<String>>>,
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
+    link_preview_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -496,6 +497,7 @@ pub async fn send_channel_message(
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
+    let link_previews = link_preview_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
 
     let mut resolved_root: Option<String> = None;
@@ -540,6 +542,7 @@ pub async fn send_channel_message(
                 &media,
                 &emoji,
                 &mention_refs_only,
+                &link_previews,
             )?
         }
     };
@@ -703,6 +706,7 @@ fn build_managed_agent_channel_message(
         content,
         thread_ref,
         &mention_refs,
+        &[],
         &[],
         &[],
         &[],
@@ -885,6 +889,8 @@ pub struct EditMessageInput {
     mention_pubkeys: Vec<String>,
     #[serde(default)]
     suppress_link_previews: bool,
+    #[serde(default)]
+    suppressed_link_preview_urls: Vec<String>,
 }
 
 #[tauri::command]
@@ -911,6 +917,7 @@ pub async fn edit_message(
         &input.emoji_tags,
         &mention_refs,
         input.suppress_link_previews,
+        &input.suppressed_link_preview_urls,
     )?;
     submit_event(builder, &state).await?;
     Ok(())

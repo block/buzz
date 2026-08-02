@@ -20,10 +20,12 @@ import type { LinkPreviewImageLightboxComponent } from "@/shared/ui/rich-link-pr
 export function LinkPreviewList({
   ImageLightbox,
   onRemoveForEveryone,
+  onRemovePreview,
   previews,
 }: {
   ImageLightbox: LinkPreviewImageLightboxComponent;
   onRemoveForEveryone?: () => Promise<void>;
+  onRemovePreview?: (href: string) => void;
   previews: ResolvedLinkPreview[];
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -48,12 +50,14 @@ export function LinkPreviewList({
             key={preview.href}
             ImageLightbox={ImageLightbox}
             onRemove={
-              onRemoveForEveryone && index === controlsIndex
-                ? () => setDialogOpen(true)
-                : undefined
+              onRemovePreview
+                ? () => onRemovePreview(preview.href)
+                : onRemoveForEveryone && index === controlsIndex
+                  ? () => setDialogOpen(true)
+                  : undefined
             }
             preview={preview}
-            showControls={index === controlsIndex}
+            showControls={Boolean(onRemovePreview) || index === controlsIndex}
           />
         ))}
       </AttachmentGroup>
