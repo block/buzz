@@ -11,9 +11,12 @@
 //! no second chance later in the same process. This module therefore decides
 //! from cheap preflight signals instead of reacting to a crash:
 //!
-//! * an NVIDIA GPU, the driver family behind most upstream reports; and
+//! * an NVIDIA GPU, the driver family behind most upstream reports;
 //! * AppImage packaging, where linuxdeploy's AppRun hook pins `GDK_BACKEND=x11`
-//!   and the dmabuf renderer buys nothing on that XWayland path (#2338).
+//!   and the dmabuf renderer buys nothing on that XWayland path (#2338); and
+//! * the COSMIC desktop environment (Pop!_OS), where the compositor loses
+//!   synchronization with the dmabuf renderer even though rendering continues
+//!   in the background and revives on minimize/maximize (#4305).
 //!
 //! `--safe-rendering` is the manual escape hatch for a machine neither signal
 //! recognises; it also disables accelerated compositing, for that launch only.
@@ -140,6 +143,7 @@ fn plan(
     let signals = [
         (nvidia_gpu(drm_root), "NVIDIA GPU"),
         (env("APPIMAGE").is_some(), "AppImage"),
+        (cosmic_desktop(env), "COSMIC desktop"),
     ];
     let hits: Vec<&str> = signals
         .iter()
@@ -148,7 +152,7 @@ fn plan(
 
     match hits.is_empty() {
         true => Plan::Leave {
-            why: "no NVIDIA GPU and not an AppImage".to_string(),
+            why: "no NVIDIA GPU, AppImage, or COSMIC desktop signal".to_string(),
         },
         false => Plan::Apply {
             vars: &HEURISTIC,
@@ -175,6 +179,25 @@ fn describe(user_set: &[(&str, OsString)]) -> String {
         .map(|(key, value)| format!("{key}={}", value.to_string_lossy()))
         .collect();
     shown.join(", ")
+}
+
+/// Whether any session identity variable names COSMIC.
+///
+/// Pop!_OS's COSMIC compositor loses synchronization with the dmabuf renderer
+/// even though WebKit keeps rendering in the background; minimizing and
+/// maximizing forces a frame that proves the app is alive (#4305). Setting
+/// `WEBKIT_DISABLE_DMABUF_RENDERER=1` drops to the shared-memory path and
+/// restores continuous updates. Identity is read from the session variables
+/// a real COSMIC session sets — `XDG_CURRENT_DESKTOP` (standard),
+/// `COSMIC_SESSION` (first-party), and `DESKTOP_SESSION` (display manager
+/// fallback) — not from Wayland compositor introspection, which would
+/// misclassify nested or remote sessions.
+fn cosmic_desktop(env: EnvLookup<'_>) -> bool {
+    ["XDG_CURRENT_DESKTOP", "COSMIC_SESSION", "DESKTOP_SESSION"]
+        .iter()
+        .any(|key| {
+            env(key).is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("cosmic"))
+        })
 }
 
 /// Whether any DRM device reports NVIDIA's PCI vendor ID. An unreadable device

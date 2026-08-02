@@ -99,6 +99,61 @@ fn test_an_appimage_launch_disables_the_dmabuf_renderer() {
 }
 
 #[test]
+fn test_a_cosmic_desktop_disables_the_dmabuf_renderer() {
+    // #4305: `XDG_CURRENT_DESKTOP=COSMIC` is the standard session identity.
+    let drm = drm(&["0x8086"]);
+    let env = env_from(&[("XDG_CURRENT_DESKTOP", "COSMIC")]);
+    let plan = plan(NO_ARGS, &env, drm.path());
+
+    assert_eq!(
+        applied(&plan),
+        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+    );
+    let Plan::Apply { why, .. } = &plan else {
+        unreachable!()
+    };
+    assert!(why.contains("COSMIC"), "{why}");
+}
+
+#[test]
+fn test_cosmic_identity_is_case_insensitive_across_variables() {
+    // real cosmic-session emits the lowercase form; some early builds used the
+    // mixed-case form; display managers vary. All must count.
+    let drm = drm(&["0x8086"]);
+    for (key, value) in [
+        ("XDG_CURRENT_DESKTOP", "cosmic"),
+        ("COSMIC_SESSION", "Cosmic"),
+        ("DESKTOP_SESSION", "COSMIC"),
+    ] {
+        let env = env_from(&[(key, value)]);
+        assert_eq!(
+            applied(&plan(NO_ARGS, &env, drm.path())),
+            Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..]),
+            "{key}={value}"
+        );
+    }
+}
+
+#[test]
+fn test_a_non_cosmic_desktop_launch_changes_nothing() {
+    // GNOME/KDE/sway sessions with no NVIDIA GPU must not pick up the workaround.
+    let drm = drm(&["0x8086"]);
+    for (key, value) in [
+        ("XDG_CURRENT_DESKTOP", "GNOME"),
+        ("XDG_CURRENT_DESKTOP", "KDE"),
+        ("XDG_CURRENT_DESKTOP", "sway"),
+        ("COSMIC_SESSION", "0"),
+        ("DESKTOP_SESSION", "plasma"),
+    ] {
+        let env = env_from(&[(key, value)]);
+        assert!(
+            matches!(plan(NO_ARGS, &env, drm.path()), Plan::Leave { .. }),
+            "{key}={value}"
+        );
+    }
+}
+
+#[test]
 fn test_a_plain_non_nvidia_launch_changes_nothing() {
     let drm = drm(&["0x8086", "0x1002"]);
 
