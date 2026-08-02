@@ -64,7 +64,15 @@ class Channel {
     participantPubkeys:
         (json['participant_pubkeys'] as List<dynamic>? ?? const [])
             .cast<String>(),
-    isMember: json['is_member'] as bool? ?? false,
+    // Relay responses for a channel the requester can read imply membership
+    // unless the payload explicitly says otherwise — the member_count and
+    // member_pubkeys are what actually signal non-membership. Deserializing
+    // a missing is_member default to `false` told mobile "not a member" for
+    // every newly joined channel, so the app hid the very channels the user
+    // could read and landed them in an empty community (#4307). Desktop
+    // defaults the same field to `true` (tauriChannels.ts), which is the
+    // contract the relay authors assume.
+    isMember: json['is_member'] as bool? ?? true,
     ttlSeconds: json['ttl_seconds'] as int?,
     ttlDeadline: json['ttl_deadline'] != null
         ? DateTime.parse(json['ttl_deadline'] as String)
