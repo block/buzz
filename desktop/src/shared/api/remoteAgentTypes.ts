@@ -1,0 +1,93 @@
+/**
+ * Types for the remote-agent surface: enumerating the user's own SSH hosts and
+ * probing them for agent harnesses.
+ *
+ * A separate module rather than more lines in `types.ts`, which is already over
+ * the desktop 1000-line limit and carries a documented "queued to be split"
+ * override. Import these from here directly — `types.ts` deliberately does not
+ * re-export them, because a re-export block would put it back over the limit
+ * and defeat the point of the split.
+ */
+
+/** One `Host` stanza from the user's `~/.ssh/config`. */
+export type SshHost = {
+  /** The `Host` alias as written — this is what gets passed to `ssh`. */
+  host: string;
+  hostname?: string | null;
+  user?: string | null;
+  port?: string | null;
+  identityFile?: string | null;
+};
+
+/**
+ * Why a host probe failed, when the cause is actionable.
+ *
+ * `password_required` means the host offered only interactive auth. Buzz never
+ * collects or stores an SSH password, so this is a status to render with a
+ * remedy, not a prompt to raise.
+ *
+ * `host_key_problem` covers both an untrusted first-seen key and a changed one.
+ * Buzz probes with strict host-key checking and never writes to `known_hosts`,
+ * so granting trust is always something the user does outside the app.
+ *
+ * `truncated` means the probe started but its output stopped early, so the facts
+ * are an unknown fraction of the real ones and are withheld rather than shown as
+ * a complete answer.
+ */
+export type HostProbeErrorKind =
+  | "password_required"
+  | "host_key_problem"
+  | "unreachable"
+  | "timed_out"
+  | "truncated";
+
+/**
+ * One agent harness found on a probed host.
+ *
+ * Deliberately narrower than `AcpRuntime`: that type carries install and auth
+ * affordances that only apply to the local machine. Buzz does not install
+ * software on, or authenticate CLIs on, another host.
+ */
+export type RemoteHarness = {
+  id: string;
+  label: string;
+  source: "builtin" | "preset" | "custom";
+  acpCommand?: string | null;
+  acpCommandPath?: string | null;
+  version?: string | null;
+  underlyingCliPath?: string | null;
+  /**
+   * True when the harness is usable on this host: its ACP command resolved and,
+   * if it is an adapter, the vendor CLI it wraps resolved too. An adapter
+   * without its CLI starts and then fails at first use.
+   */
+  ready: boolean;
+  installHint: string;
+  installInstructionsUrl: string;
+};
+
+/**
+ * Result of probing one host for agent harnesses.
+ *
+ * A host-side problem comes back with `ok: false` and a classified
+ * `errorKind` rather than as a thrown error — the UI shows one row per host and
+ * needs a renderable status.
+ */
+export type HostProbeResult = {
+  /** The ssh alias probed, or `__localhost__` for this machine. */
+  host: string;
+  ok: boolean;
+  durationMs: number;
+  error?: string | null;
+  errorKind?: HostProbeErrorKind | null;
+  user?: string | null;
+  hostname?: string | null;
+  os?: string | null;
+  /** Path of the `buzz` CLI on the host; a connected agent needs it. */
+  buzzCliPath?: string | null;
+  buzzCliVersion?: string | null;
+  harnesses: RemoteHarness[];
+};
+
+/** Host id the backend uses for the local machine. */
+export const LOCALHOST_HOST_ID = "__localhost__";

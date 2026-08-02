@@ -24,7 +24,9 @@ mod process_lifecycle;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
 mod relay_mesh;
+pub mod remote_probe;
 mod repos;
+
 mod restore;
 pub mod retention;
 mod runtime;
@@ -32,6 +34,7 @@ mod runtime_commands;
 mod runtime_types;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_hash;
+pub mod ssh_config;
 pub(crate) mod storage;
 pub(crate) mod team_events;
 mod team_repair;
