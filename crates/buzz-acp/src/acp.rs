@@ -111,11 +111,21 @@ pub enum AcpError {
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
-/// detail (e.g. a `data` field) is not lost.
+/// detail (e.g. a `data` field) is not lost. When both `message` and a
+/// provider-attached `data` field are present, append the `data` payload
+/// so actionable detail (e.g. the Claude CLI's "unknown option '--tools'"
+/// stderr) reaches logs and user-facing error strings instead of being
+/// silently dropped. See #2422.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
+        Some(m) => {
+            if let Some(data) = error.get("data") {
+                format!("{m} (data: {})", data)
+            } else {
+                m.to_string()
+            }
+        }
         None => error.to_string(),
     };
     AcpError::AgentError { code, message }
@@ -4256,6 +4266,35 @@ mod tests {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32001);
                 assert_eq!(message, "auth denied");
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_appends_data_when_present() {
+        // Regression guard for #2422. The Claude CLI's `--tools` unknown-option
+        // incompatibility with the adapter surfaces to the user only via the
+        // JSON-RPC error's `data.details` field; discarding `data` reduces the
+        // user-facing notice to "code -32603: Internal error" with no clue.
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": "Claude Code process exited with code 1. stderr: error: unknown option '--tools'"
+            }
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32603);
+                assert!(
+                    message.contains("Internal error"),
+                    "message must retain the original: {message}"
+                );
+                assert!(
+                    message.contains("unknown option '--tools'"),
+                    "message must include the data payload: {message}"
+                );
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
