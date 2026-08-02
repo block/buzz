@@ -259,34 +259,42 @@ one.
   indefinite agents safe is *intent vs accident*: dying on purpose
   (`!shutdown`, inactivity reap) is final; dying by accident (node
   eviction, OOM) may restart the body — same key, same agent, the
-  resurrection story working *for* the owner. A bounded-lifetime agent
-  takes `restartPolicy: Never` (any restart machinery would resurrect what
-  the reaper terminates). An indefinite agent takes `restartPolicy:
-  OnFailure` — **but only after the exit-code contract lands**: the
-  supervisor can distinguish intent from accident only if the harness
-  formally promises *clean exit = exit code 0* on every intentional path
-  and nonzero otherwise, pinned by test. At `c1bca1b56` that property is
-  emergent, not defended (Known Defect 6); `OnFailure` before the pinned
-  contract is how a refactor silently converts every clean stop into a
-  restart loop with no failing test. Ordering is normative: exit-code
-  contract first, `OnFailure` second. (The systemd binding needs the
-  identical primitive for `Restart=on-failure` — independent confirmation
-  this is the real seam. `Restart=always` remains non-conforming at any
-  layer: it resurrects after a *clean* exit, defeating `!shutdown`.)
+  resurrection story working *for* the owner. Stated launcher-neutrally:
+  **if a supervisor exists, its restart policy MAY revive an abnormal
+  death and MUST NOT revive an intentional clean exit.** A launcher with
+  no supervisor at all — a hand-launched process on a VPS — satisfies
+  this vacuously: nothing restarts anything. How bounded vs indefinite
+  lifetime maps onto a concrete supervisor policy is binding policy
+  ([L3]), realized and documented by each binding — this binding's
+  mapping lives in §Pod shape; a systemd binding's in its unit
+  directives. Any revive-on-abnormal-death policy carries a universal
+  precondition: the supervisor can distinguish intent from accident only
+  if the harness formally promises *clean exit = exit code 0* on every
+  intentional path and nonzero otherwise, pinned by test. At `c1bca1b56`
+  that property is emergent, not defended (Known Defect 6);
+  restart-on-failure before the pinned contract is how a refactor
+  silently converts every clean stop into a restart loop with no failing
+  test. Ordering is normative: exit-code contract first,
+  restart-on-failure second — the identical seam in every supervisor that
+  offers the distinction. An always-restart policy remains non-conforming
+  at any layer: it resurrects after a *clean* exit, defeating
+  `!shutdown`.
 
   Enforcement: the self-stop lives *inside the harness* (the only place
-  that can see activity, per M1) (§Auto-Stop), and the binding makes it
-  effective on the substrate by requiring that a terminated harness
-  terminates its container (harness as the container's signal-receiving
-  PID 1) and that the substrate's restart policy respects intent as above.
+  that can see activity, per M1) (§Auto-Stop), and each binding makes it
+  effective on its substrate by requiring that harness exit terminates
+  the substrate's unit of execution (this binding's realization — the
+  harness as the container's signal-receiving process — is §Pod shape,
+  [L3]) and that any supervisor's restart policy respects intent as
+  above.
   Boundaries: (a) the guarantee is conditional on a live harness event
   loop — a wedged process that cannot run its reaper timer cannot reap
   itself, and M1 means nothing else will (the mitigation is the substrate
   operator's, e.g. a namespace-level TTL policy, out of scope per
   §Non-Goals); (b) restart policy prevents resurrection, it does not prove
-  process exit; (c) I5 bounds *agent* lifetime, not substrate residue — a
-  Completed pod object persists for forensics until the next deploy's GC
-  (§K8s GC).
+  process exit; (c) I5 bounds *agent* lifetime, not substrate residue —
+  residue (in this binding, a Completed pod object) persists for
+  forensics until the next deploy's GC (§K8s GC).
 
 ## Provider Protocol
 
@@ -846,18 +854,24 @@ can yield two live instances in one scope.
   (late-arriving reap `lib.rs:2664`, idle-slot reap loop `:2670`, respawn
   drain `:2684-2688`) runs *outside* the 30s drain timeout (opened at
   `:2636`, closed at `:2657`) and serially awaits a 5s post-SIGKILL wait
-  per occupied pool slot (`acp.rs:436`), so the worst-case tail is
-  `30 + 5×parallelism + 7` — **~87s at the desktop's default parallelism
+  per occupied pool slot (`acp.rs:436`). **That segment alone can reach
+  `30 + 5×parallelism + 7` — ~87s at the desktop's default parallelism
   of 10** (`DEFAULT_AGENT_PARALLELISM`, `types.rs:809`; lowered from 24 by
-  #3038), ~197s at the harness cap of 32 (`config.rs:293`), against a 60s
-  grace.
+  #3038), ~197s at the harness cap of 32 (`config.rs:293`) — already
+  exceeding a 60s grace. And it is a *lower* bound on the tail, not the
+  worst case: the same path runs earlier segments before the prompt drain
+  even opens — a separate 30s wake-task drain (`:2612`) followed by
+  serial shutdown of any awakened pools (`:2620-2624`), whose per-slot
+  `acp.shutdown()` loop (`:3747-3751`) has no timeout of its own. The
+  total tail is not bounded by today's segment timeouts at all.
   The requirement is therefore stated as a budget, not a sum (Known
   Defect 7): **the harness MUST bound its total shutdown tail — every
   post-signal segment, including per-slot reaping — under one shared
   deadline no greater than the declared grace budget**, and the budget
-  MUST include a **reserved finalization slice**: a tail portion held back
-  for presence `offline` publish and relay close, which child cleanup may
-  never consume — child reaping degrades first (skip remaining per-slot
+  MUST include a **reserved finalization slice** held back for presence
+  `offline` publish and relay close, **no smaller than those finalizers'
+  declared bounds — currently 2s + 5s = 7s** — which child cleanup may
+  never consume: child reaping degrades first (skip remaining per-slot
   waits, force-kill), because a shared deadline without the reservation
   can legally spend all 60s reaping children and hit SIGKILL before the
   one action the grace period exists to protect. The binding declares the
@@ -925,8 +939,9 @@ substrate half *and* the graceful-shutdown budget: the termination signal
 lands on the wrapper, the harness never learns to shut down, and the
 force-kill leaves presence stale-online — exactly the staleness window the
 grace period exists to close. See §K8s Entrypoint for the concrete rule.
-With the restart policy that matches the lifetime policy (bounded →
-`Never`, indefinite → `OnFailure` after the exit-code contract; I5),
+With the supervisor policy that matches the lifetime policy (this
+binding's [L3] mapping — bounded → `Never`, indefinite → `OnFailure`
+after both prerequisites, §Pod shape; the universal rule is I5's),
 harness exit completes the pod on every intentional path — turning
 agent-level I5 into substrate-level I5.
 
@@ -1152,14 +1167,16 @@ regardless of `HOME`.
   would SIGKILL the harness mid-drain, leaving presence stale-online — the
   avoidable half of I3's staleness window — so the binding declares 60s.
   But the shutdown tail is *variable*, not constant (§Stop: the post-drain
-  reap segment scales with occupied pool slots — ~87s worst case at
-  default parallelism at `b4f4ed1a6`), so no fixed grace can be proven
+  reap segment alone reaches ~87s at default parallelism at `b4f4ed1a6`,
+  and earlier untimed segments precede it — the total is not bounded by
+  today's segment timeouts), so no fixed grace can be proven
   sufficient by adding segment timeouts. The two halves of the requirement:
   the binding *declares* the budget here, and the harness *enforces* it —
   one shared deadline across the entire post-signal path, with a reserved
-  finalization slice for presence `offline` and relay close, child cleanup
+  finalization slice (≥ the finalizers' declared bounds, currently 7s) for
+  presence `offline` and relay close, child cleanup
   degrading first (§Stop, Known Defect 7). Until the harness enforcement
-  lands, 60s is an operational margin that the worst case can exceed.
+  lands, 60s is an operational margin that the tail can exceed.
 - **Hardening defaults (normative).** The workload is a prompted coding
   agent running repository and tool code while holding an nsec; the pod MUST
   NOT hand it ambient cluster credentials or kernel privilege on top:
@@ -1601,12 +1618,17 @@ Desktop- and harness-side, discovered during this design:
    reap segment
    (`lib.rs:2664-2688`) runs *after* the 30s drain timeout closes
    (`:2636,:2657`) and serially awaits a 5s post-SIGKILL wait per occupied
-   slot (`acp.rs:436`) — worst case ~87s at the desktop's default
-   parallelism of 10 (`types.rs:809`; #3038 lowered it from 24), ~197s at
-   the harness cap of 32
-   (`config.rs:293`), against the binding's
-   60s grace. The fix is one shared deadline across the entire post-signal
-   path with a reserved finalization slice for presence `offline` and
+   slot (`acp.rs:436`) — that segment alone reaches ~87s at the desktop's
+   default parallelism of 10 (`types.rs:809`; #3038 lowered it from 24),
+   ~197s at the harness cap of 32 (`config.rs:293`), against the binding's
+   60s grace; and it is not the whole tail — the wake-task drain
+   (`:2612`) and awakened-pool shutdown (`:2620-2624`, per-slot loop
+   `:3747-3751`, no timeout) precede it (§Stop), so the total is
+   unbounded by today's segment timeouts. The fix is one shared deadline
+   across the entire post-signal
+   path with a reserved finalization slice (≥ the finalizers' declared
+   bounds, currently 2s presence + 5s relay close = 7s) for presence
+   `offline` and
    relay close, child cleanup degrading first (§Stop); natural home is the
    same harness change as the I5 reaper (defect 4).
 8. **Cleared numeric config fields ship as strings** (desktop code
