@@ -20,6 +20,7 @@ import {
   useEncryptedBackupSession,
 } from "./EncryptedBackupCreator";
 import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
+import { IdentityRecoveryPairing } from "./IdentityRecoveryPairing";
 import { LandingBees } from "./LandingBees";
 import {
   NostrKeyImportForm,
@@ -289,6 +290,9 @@ export function MachineOnboardingFlow({
                 </p>
               </motion.div>
               <div className="buzz-onboarding-key-import-position w-full">
+                {identityLost && keyImportStage === "key-entry" ? (
+                  <IdentityRecoveryPairing onRecovered={loadFreshIdentity} />
+                ) : null}
                 <NostrKeyImportForm
                   backLabel={identityLost ? "Start new identity" : "Back"}
                   onBack={

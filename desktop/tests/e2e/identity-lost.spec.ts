@@ -66,6 +66,45 @@ test("lost boot opens onboarding gate directly on the key-import page", async ({
   ).toBeVisible();
 });
 
+test("lost boot offers phone recovery with a single-use QR", async ({
+  page,
+}, testInfo) => {
+  await installMockBridge(
+    page,
+    { identityLost: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await expect(page.getByTestId("identity-recovery-pairing")).toBeVisible();
+  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
+  await expect(
+    page.getByText("This code expires shortly and works once."),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/grant this desktop permanent access/i),
+  ).toBeVisible();
+  await page.waitForTimeout(1_000); // Let the onboarding entrance motion settle.
+  await page.screenshot({
+    path: testInfo.outputPath("desktop-phone-recovery-qr.png"),
+    fullPage: true,
+  });
+
+  const commands = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{ command: string }>;
+        }
+      ).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [],
+  );
+  expect(
+    commands.some(
+      (entry) => entry.command === "start_identity_recovery_pairing",
+    ),
+  ).toBe(true);
+});
+
 test("importing a key from lost mode shows the relaunch-required screen", async ({
   page,
 }) => {

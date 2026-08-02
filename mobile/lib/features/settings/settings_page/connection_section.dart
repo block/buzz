@@ -16,7 +16,23 @@ class _ConnectionSection extends ConsumerWidget {
           title: 'Connected to',
           subtitle: config.baseUrl,
         ),
-        if (nsec != null && nsec.isNotEmpty) _IdentityRow(nsec: nsec),
+        if (nsec != null && nsec.isNotEmpty) ...[
+          _IdentityRow(nsec: nsec),
+          AppListRow(
+            icon: LucideIcons.scanQrCode,
+            title: 'Send identity to desktop',
+            subtitle: 'Scan a recovery code shown by Buzz Desktop',
+            trailing: const _RowChevron(),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const PairingPage(
+                  addingCommunity: true,
+                  identityRecoveryOnly: true,
+                ),
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }

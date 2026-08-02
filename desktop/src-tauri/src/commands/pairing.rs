@@ -9,7 +9,7 @@ use buzz_core_pkg::pairing::types::{AbortReason, PayloadType};
 use futures_util::{SinkExt, StreamExt};
 use nostr::ToBech32;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
@@ -33,6 +33,19 @@ struct PairingErrorPayload {
     message: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairingMode {
+    SendIdentity,
+    RecoverIdentity,
+}
+
+#[derive(Clone)]
+struct PairingTaskContext {
+    mode: PairingMode,
+    generation: Arc<AtomicU64>,
+    task_generation: u64,
+}
+
 /// Managed Tauri state for an active pairing session.
 pub struct PairingHandle {
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
@@ -43,6 +56,7 @@ pub struct PairingHandle {
     /// Pre-built payload string (contains nsec) to send after SAS confirmation.
     /// Wrapped in Zeroizing so the nsec is cleared from memory on drop.
     payload: std::sync::Mutex<Option<Zeroizing<String>>>,
+    mode: Arc<std::sync::Mutex<PairingMode>>,
 }
 
 impl PairingHandle {
@@ -53,6 +67,7 @@ impl PairingHandle {
             cancel: std::sync::Mutex::new(None),
             outbound_tx: std::sync::Mutex::new(None),
             payload: std::sync::Mutex::new(None),
+            mode: Arc::new(std::sync::Mutex::new(PairingMode::SendIdentity)),
         }
     }
 
@@ -63,16 +78,32 @@ impl PairingHandle {
     }
 }
 
-/// Start a NIP-AB pairing session as the source device.
-///
-/// Creates a `PairingSession`, connects to the relay, and returns the
-/// `nostrpair://` QR URI for the frontend to display. The mobile peer will
-/// receive the desktop's nsec (NIP-OA auth — no token minting needed).
+/// Start a NIP-AB pairing session that sends this desktop identity to mobile.
 #[tauri::command]
 pub async fn start_pairing(
     app: AppHandle,
     state: State<'_, AppState>,
     pairing: State<'_, PairingHandle>,
+) -> Result<String, String> {
+    start_pairing_session(app, state, pairing, PairingMode::SendIdentity).await
+}
+
+/// Start a recovery session. The fresh desktop shows the QR and receives the
+/// full identity from an already-authorized phone after both users approve SAS.
+#[tauri::command]
+pub async fn start_identity_recovery_pairing(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pairing: State<'_, PairingHandle>,
+) -> Result<String, String> {
+    start_pairing_session(app, state, pairing, PairingMode::RecoverIdentity).await
+}
+
+async fn start_pairing_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pairing: State<'_, PairingHandle>,
+    mode: PairingMode,
 ) -> Result<String, String> {
     let task_generation = pairing
         .generation
@@ -86,54 +117,51 @@ pub async fn start_pairing(
         let mut session = pairing.session.lock().await;
         *session = None;
     }
-
-    let keys = state.signing_keys()?;
-    let nsec = keys
-        .secret_key()
-        .to_bech32()
-        .map_err(|e| format!("encode nsec: {e}"))?;
-    let pubkey_hex = keys.public_key().to_hex();
+    *pairing.mode.lock().map_err(|e| e.to_string())? = mode;
+    *pairing.payload.lock().map_err(|e| e.to_string())? = None;
 
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
-
-    // NIP-43 relays gate connections on membership, so an unpaired peer can't
-    // reach the main relay yet — it must go through the /pair sidecar. Open
-    // relays (no NIP-43) accept the peer directly. We key off the relay's
-    // own NIP-11 declaration of NIP-43 support rather than `auth_required`,
-    // which is also true for plain NIP-42 / NIP-OA relays where the main
-    // relay is reachable.
     let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
-
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
-    let qr_uri = encode_qr(&qr_payload);
+    let mut qr_uri = encode_qr(&qr_payload);
+    if mode == PairingMode::RecoverIdentity {
+        qr_uri.push_str("&mode=recover");
+    }
 
-    let payload_json = serde_json::json!({
-        "relayUrl": http_url,
-        "pubkey": pubkey_hex,
-        "nsec": nsec,
-    });
+    if mode == PairingMode::SendIdentity {
+        let keys = state.signing_keys()?;
+        let nsec = keys
+            .secret_key()
+            .to_bech32()
+            .map_err(|e| format!("encode nsec: {e}"))?;
+        let payload_json = serde_json::json!({
+            "relayUrl": http_url,
+            "pubkey": keys.public_key().to_hex(),
+            "nsec": nsec,
+        });
+        *pairing.payload.lock().map_err(|e| e.to_string())? =
+            Some(Zeroizing::new(payload_json.to_string()));
+    }
 
     {
-        let mut s = pairing.session.lock().await;
-        *s = Some(session);
+        let mut active = pairing.session.lock().await;
+        *active = Some(session);
     }
-    *pairing.payload.lock().map_err(|e| e.to_string())? =
-        Some(Zeroizing::new(payload_json.to_string()));
 
     let (outbound_tx, outbound_rx) = mpsc::channel::<String>(16);
     let cancel = CancellationToken::new();
-
     *pairing.outbound_tx.lock().map_err(|e| e.to_string())? = Some(outbound_tx);
     *pairing.cancel.lock().map_err(|e| e.to_string())? = Some(cancel.clone());
 
-    let session_arc = Arc::clone(&pairing.session);
-    let generation = Arc::clone(&pairing.generation);
     tauri::async_runtime::spawn(pairing_ws_task(
         pairing_relay_url,
-        session_arc,
-        generation,
-        task_generation,
+        Arc::clone(&pairing.session),
+        PairingTaskContext {
+            mode,
+            generation: Arc::clone(&pairing.generation),
+            task_generation,
+        },
         cancel,
         outbound_rx,
         app,
@@ -163,25 +191,28 @@ pub async fn confirm_pairing_sas(pairing: State<'_, PairingHandle>) -> Result<()
         .await
         .map_err(|_| "failed to send sas-confirm")?;
 
-    let payload = pairing
-        .payload
-        .lock()
-        .map_err(|e| e.to_string())?
-        .take()
-        .ok_or("no payload prepared")?;
+    let mode = *pairing.mode.lock().map_err(|e| e.to_string())?;
+    if mode == PairingMode::SendIdentity {
+        let payload = pairing
+            .payload
+            .lock()
+            .map_err(|e| e.to_string())?
+            .take()
+            .ok_or("no payload prepared")?;
 
-    let payload_json = {
-        let mut guard = pairing.session.lock().await;
-        let session = guard.as_mut().ok_or("no active pairing session")?;
-        let event = session
-            .send_payload(PayloadType::Custom, payload)
-            .map_err(|e| e.to_string())?;
-        event_to_relay_json(&event)
-    };
+        let payload_json = {
+            let mut guard = pairing.session.lock().await;
+            let session = guard.as_mut().ok_or("no active pairing session")?;
+            let event = session
+                .send_payload(PayloadType::Custom, payload)
+                .map_err(|e| e.to_string())?;
+            event_to_relay_json(&event)
+        };
 
-    tx.send(payload_json)
-        .await
-        .map_err(|_| "failed to send payload")?;
+        tx.send(payload_json)
+            .await
+            .map_err(|_| "failed to send payload")?;
+    }
 
     Ok(())
 }
@@ -231,8 +262,7 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
 async fn pairing_ws_task(
     relay_url: String,
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
-    generation: Arc<AtomicU64>,
-    task_generation: u64,
+    context: PairingTaskContext,
     cancel: CancellationToken,
     mut outbound_rx: mpsc::Receiver<String>,
     app: AppHandle,
@@ -240,26 +270,24 @@ async fn pairing_ws_task(
     if let Err(e) = pairing_ws_task_inner(
         &relay_url,
         &session,
-        &generation,
-        task_generation,
+        &context,
         &cancel,
         &mut outbound_rx,
         &app,
     )
     .await
     {
-        if pairing_task_is_current(&generation, task_generation) {
+        if pairing_task_is_current(&context.generation, context.task_generation) {
             let _ = app.emit("pairing-error", PairingErrorPayload { message: e });
         }
     }
-    clear_pairing_session_if_current(&session, &generation, task_generation).await;
+    clear_pairing_session_if_current(&session, &context.generation, context.task_generation).await;
 }
 
 async fn pairing_ws_task_inner(
     relay_url: &str,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
-    generation: &AtomicU64,
-    task_generation: u64,
+    context: &PairingTaskContext,
     cancel: &CancellationToken,
     outbound_rx: &mut mpsc::Receiver<String>,
     app: &AppHandle,
@@ -290,14 +318,14 @@ async fn pairing_ws_task_inner(
     tokio::pin!(hard_timeout);
 
     loop {
-        if !pairing_task_is_current(generation, task_generation) {
+        if !pairing_task_is_current(&context.generation, context.task_generation) {
             break;
         }
 
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = &mut hard_timeout => {
-                if pairing_task_is_current(generation, task_generation) {
+                if pairing_task_is_current(&context.generation, context.task_generation) {
                     let _ = app.emit("pairing-error", PairingErrorPayload {
                         message: "Session timed out".into(),
                     });
@@ -317,7 +345,7 @@ async fn pairing_ws_task_inner(
                 let Message::Text(text) = msg else { continue };
 
                 if let Some(event) = parse_relay_event(text.as_str(), "pair") {
-                    if !pairing_task_is_current(generation, task_generation) {
+                    if !pairing_task_is_current(&context.generation, context.task_generation) {
                         break;
                     }
 
@@ -325,7 +353,7 @@ async fn pairing_ws_task_inner(
                     let Some(s) = guard.as_mut() else { break };
 
                     if let Ok(reason) = s.handle_abort(&event) {
-                        if pairing_task_is_current(generation, task_generation) {
+                        if pairing_task_is_current(&context.generation, context.task_generation) {
                             let _ = app.emit("pairing-aborted", PairingAbortedPayload {
                                 reason: format!("{reason:?}"),
                             });
@@ -334,28 +362,55 @@ async fn pairing_ws_task_inner(
                     }
 
                     if let Ok(sas) = s.handle_offer(&event) {
-                        if pairing_task_is_current(generation, task_generation) {
+                        if pairing_task_is_current(&context.generation, context.task_generation) {
                             let _ = app.emit("pairing-sas-received", PairingSasPayload { sas });
                         }
                         continue;
                     }
 
-                    match s.handle_complete(&event) {
-                        Ok(()) => {
-                            if pairing_task_is_current(generation, task_generation) {
-                                let _ = app.emit("pairing-complete", serde_json::json!({}));
+                    if context.mode == PairingMode::RecoverIdentity {
+                        if let Ok((PayloadType::Nsec, payload)) = s.handle_return_payload(&event) {
+                            let imported = import_recovered_identity(app, payload).await;
+                            let success = imported.is_ok();
+                            let complete = s
+                                .send_source_complete(success)
+                                .map_err(|e| e.to_string())?;
+                            write
+                                .send(Message::Text(event_to_relay_json(&complete).into()))
+                                .await
+                                .map_err(|e| format!("publish complete failed: {e}"))?;
+                            match imported {
+                                Ok(()) => {
+                                    if pairing_task_is_current(&context.generation, context.task_generation) {
+                                        let _ = app.emit("pairing-complete", serde_json::json!({}));
+                                    }
+                                }
+                                Err(message) => {
+                                    if pairing_task_is_current(&context.generation, context.task_generation) {
+                                        let _ = app.emit("pairing-error", PairingErrorPayload { message });
+                                    }
+                                }
                             }
                             break;
                         }
-                        Err(ref e) if format!("{e}").contains("success=false") => {
-                            if pairing_task_is_current(generation, task_generation) {
-                                let _ = app.emit("pairing-error", PairingErrorPayload {
-                                    message: "Mobile device reported failure importing credentials".into(),
-                                });
+                    } else {
+                        match s.handle_complete(&event) {
+                            Ok(()) => {
+                                if pairing_task_is_current(&context.generation, context.task_generation) {
+                                    let _ = app.emit("pairing-complete", serde_json::json!({}));
+                                }
+                                break;
                             }
-                            break;
+                            Err(ref e) if format!("{e}").contains("success=false") => {
+                                if pairing_task_is_current(&context.generation, context.task_generation) {
+                                    let _ = app.emit("pairing-error", PairingErrorPayload {
+                                        message: "Mobile device reported failure importing credentials".into(),
+                                    });
+                                }
+                                break;
+                            }
+                            Err(_) => {}
                         }
-                        Err(_) => {}
                     }
                 }
             }
@@ -363,6 +418,30 @@ async fn pairing_ws_task_inner(
     }
 
     Ok(())
+}
+
+async fn import_recovered_identity(app: &AppHandle, nsec: Zeroizing<String>) -> Result<(), String> {
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let keys = nostr::Keys::parse(nsec.trim())
+            .map_err(|e| format!("Phone sent an invalid identity: {e}"))?;
+        let state = app.state::<AppState>();
+        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
+        let key_path = data_dir.join("identity.key");
+        crate::commands::identity::commit_imported_identity(&state, &data_dir, keys, |keys| {
+            let store =
+                crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
+            crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
+        })?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("identity recovery task failed: {e}"))?
 }
 
 fn pairing_task_is_current(generation: &AtomicU64, task_generation: u64) -> bool {
