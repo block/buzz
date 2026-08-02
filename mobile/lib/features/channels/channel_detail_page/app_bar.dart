@@ -107,13 +107,12 @@ class _DmAppBarTitle extends ConsumerWidget {
         (channel.participants.isNotEmpty
             ? channel.participants.first[0].toUpperCase()
             : '?');
-    final presence = otherPubkey != null
-        ? (presenceMap[otherPubkey] ?? 'offline')
-        : 'offline';
+    final presence = otherPubkey != null ? presenceMap[otherPubkey] : null;
     final presenceLabel = switch (presence) {
       'online' => 'Online',
       'away' => 'Away',
-      _ => 'Offline',
+      'offline' => 'Offline',
+      _ => 'Status unknown',
     };
 
     return Row(
@@ -146,7 +145,8 @@ class _DmAppBarTitle extends ConsumerWidget {
                     color: switch (presence) {
                       'online' => context.appColors.success,
                       'away' => context.appColors.warning,
-                      _ => context.colors.outline,
+                      'offline' => context.colors.outline,
+                      _ => context.colors.outlineVariant,
                     },
                     shape: BoxShape.circle,
                     border: Border.all(

@@ -386,9 +386,7 @@ class _DmAvatar extends ConsumerWidget {
         (channel.participants.isNotEmpty
             ? channel.participants.first[0].toUpperCase()
             : '?');
-    final presence = otherPubkey != null
-        ? (presenceMap[otherPubkey] ?? 'offline')
-        : 'offline';
+    final presence = otherPubkey != null ? presenceMap[otherPubkey] : null;
 
     return SizedBox(
       width: _kDmAvatarSize,
@@ -430,11 +428,12 @@ class _DmAvatar extends ConsumerWidget {
     );
   }
 
-  Color _presenceColor(BuildContext context, String presence) {
+  Color _presenceColor(BuildContext context, String? presence) {
     return switch (presence) {
       'online' => context.appColors.success,
       'away' => context.appColors.warning,
-      _ => context.colors.outline,
+      'offline' => context.colors.outline,
+      _ => context.colors.outlineVariant,
     };
   }
 }
