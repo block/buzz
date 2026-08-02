@@ -14,6 +14,40 @@ mod usage;
 
 pub use usage::TurnUsage;
 
+/// Process exit code for a relay rejection that retrying cannot fix.
+///
+/// The harness normally runs under a supervisor that restarts it on any exit —
+/// `Restart=always` in the SSH binding's systemd unit — because almost every
+/// way it can die is transient and an agent that stays down is worse than one
+/// that flaps. A relay auth *rejection* is the exception: `invalid:`,
+/// `auth-required:`, `restricted:` and `blocked:` are the relay refusing this
+/// identity or configuration (bad signature, ban, non-member, allowlist
+/// denial), and nothing about restarting changes the identity or the config it
+/// is refusing. Under a 5-second restart policy that becomes an indefinite
+/// reconnect loop against a relay that has already said no.
+///
+/// So terminal auth failure exits with a code no other path uses, and the unit
+/// pairs it with `RestartPreventExitStatus=` (see
+/// `crates/buzz-backend-ssh/assets/buzz-acp@.service`). The agent stops once,
+/// in `failed` state, where `systemctl --user status` shows the reason —
+/// instead of hiding it inside a restart loop. Every other exit still
+/// restarts.
+///
+/// `78` is `EX_CONFIG` from `sysexits.h`: "something was found in an
+/// unconfigured or misconfigured state", which is exactly this case. It is
+/// outside the range shells use for signals and clear of the 90–95 range the
+/// SSH provider's deploy script uses for host-preflight failures.
+pub const EXIT_TERMINAL_AUTH_FAILURE: i32 = 78;
+
+// The SSH binding's unit hard-codes this number in `RestartPreventExitStatus=`
+// (that crate does not link this one), so changing it here without changing
+// `crates/buzz-backend-ssh/assets/buzz-acp@.service` would silently restore the
+// restart loop. Both sides assert the literal; this is the reminder.
+const _: () = assert!(
+    EXIT_TERMINAL_AUTH_FAILURE == 78,
+    "update RestartPreventExitStatus= in buzz-backend-ssh/assets/buzz-acp@.service to match"
+);
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1339,9 +1373,26 @@ async fn tokio_main() -> Result<()> {
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
     let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
+        match HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
-            .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+        {
+            Ok(relay) => relay,
+            // The relay rejecting this identity is not a failure a restart can
+            // clear, and this process is normally supervised by something that
+            // restarts it every 5 seconds. Exit with the code the unit's
+            // `RestartPreventExitStatus=` names, so the agent stops once in
+            // `failed` state with the reason visible instead of looping against
+            // a relay that has already refused it.
+            Err(e) if relay::is_terminal_auth_rejection(&e) => {
+                tracing::error!(
+                    "relay rejected this agent's identity: {e}. This will not succeed on retry — \
+                     exiting {EXIT_TERMINAL_AUTH_FAILURE} so a supervisor does not restart it. \
+                     Check the agent's key, its community membership, and BUZZ_AUTH_TAG."
+                );
+                std::process::exit(EXIT_TERMINAL_AUTH_FAILURE);
+            }
+            Err(e) => return Err(anyhow::anyhow!("relay connect error: {e}")),
+        };
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.

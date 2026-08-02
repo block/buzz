@@ -11,7 +11,10 @@ import {
   type PersonaModelDiscoveryStatus,
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./agentConfigOptions";
-import { providerRequiresExplicitModel } from "./agentConfigOptions";
+import {
+  personaModelOptionDescription,
+  providerRequiresExplicitModel,
+} from "./agentConfigOptions";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -75,10 +78,16 @@ export function getDiscoveredPersonaModelOptions(
 
   return [
     ...defaultModelOption,
-    ...explicitModels.map((model) => ({
-      id: model.id,
-      label: model.name?.trim() || model.id,
-    })),
+    ...explicitModels.map((model) => {
+      const label = model.name?.trim() || model.id;
+      // Spread rather than assign: an option with no secondary line carries no
+      // `description` key at all, so it stays deep-equal to the plain shape.
+      const description = personaModelOptionDescription(
+        model.description,
+        label,
+      );
+      return { id: model.id, label, ...(description ? { description } : {}) };
+    }),
   ];
 }
 

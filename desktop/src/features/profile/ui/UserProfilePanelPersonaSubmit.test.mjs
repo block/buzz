@@ -114,6 +114,26 @@ test("validateLinkedAgentRuntimeEdit rejects unavailable linked-agent runtime ch
   );
 });
 
+test("validateLinkedAgentRuntimeEdit does not block a remote agent on local installs", () => {
+  // The block exists so a linked LOCAL agent is not left unable to start. A
+  // provider-backed record keeps its host pin through this save, so refusing it
+  // over a missing binary here withholds an edit for a machine nobody asked
+  // about — and "Install it" would be advice about the wrong computer.
+  assert.equal(
+    validateLinkedAgentRuntimeEdit({
+      input: updateInput({ runtime: "claude" }),
+      managedAgent: agent({
+        agentCommand: "hermes",
+        agentArgs: ["--profile", "marshall", "acp"],
+        backend: { type: "provider", id: "ssh", config: { ssh_host: "vps" } },
+      }),
+      previousPersona: persona({ runtime: "goose" }),
+      runtimes: [runtime({ availability: "cli_missing", command: null })],
+    }),
+    null,
+  );
+});
+
 test("validateLinkedAgentRuntimeEdit allows unchanged or unlinked runtime preferences", () => {
   assert.equal(
     validateLinkedAgentRuntimeEdit({

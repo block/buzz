@@ -608,7 +608,16 @@ export function AgentModelField({
         />
       ) : null}
       {showStatusMessage && statusMessage ? (
-        <p className="text-xs text-muted-foreground">{statusMessage}</p>
+        <p
+          className={cn(
+            "text-xs",
+            modelDiscoveryStatus?.tone === "warning"
+              ? "text-warning"
+              : "text-muted-foreground",
+          )}
+        >
+          {statusMessage}
+        </p>
       ) : null}
     </div>
   );

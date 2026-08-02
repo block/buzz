@@ -24,6 +24,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
+import { providerRecordHarness } from "@/features/agents/lib/pinnedHarness";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
@@ -401,11 +402,16 @@ function RuntimeBlock({
   agent: ManagedAgent;
   runtimeSource: string | null;
 }) {
+  // A provider-backed record's command runs on the HOST, where the args are
+  // part of the identity: `hermes --profile marshall acp` and
+  // `hermes --profile matt acp` are two different agents that both print
+  // "hermes" alone. A local row keeps showing exactly what it always did.
+  const pinnedHarness = providerRecordHarness(agent);
   return (
     <div className="space-y-1 lg:pt-0.5">
       <SubsectionLabel className="lg:hidden">Runtime</SubsectionLabel>
       <p className="truncate font-mono text-xs text-foreground">
-        {agent.agentCommand}
+        {pinnedHarness?.command ?? agent.agentCommand}
       </p>
       {runtimeSource || agent.model ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">

@@ -48,6 +48,16 @@ export function validateLinkedAgentRuntimeEdit({
     return null;
   }
 
+  // This gate exists because a linked LOCAL agent adopts the template's runtime
+  // on save, so an uninstalled one would leave it unable to start. A
+  // provider-backed record keeps its host pin either way
+  // (`personaManagedAgentUpdate` will not rewrite it), so blocking the save on
+  // what this computer has installed refuses an edit for a machine that was
+  // never asked — and "Install it" is advice about the wrong computer.
+  if (managedAgent.backend.type !== "local") {
+    return null;
+  }
+
   const previousRuntime = normalizeRuntimePreference(previousPersona.runtime);
   const nextRuntime = normalizeRuntimePreference(input.runtime);
   if (previousRuntime === nextRuntime) {

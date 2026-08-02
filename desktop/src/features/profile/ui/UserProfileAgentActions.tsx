@@ -304,7 +304,13 @@ function AgentDeleteConfirmDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
-  const isProviderAgent = agent.backend.type === "provider";
+  // Three cases, not two. A provider record with no backendAgentId was never
+  // deployed, so there is no remote unit to warn about — but there is no local
+  // process either, and telling the owner Buzz will "stop any local agent
+  // process" for a remote-backed agent is a claim about machinery that does
+  // not exist on this machine.
+  const isProviderBacked = agent.backend.type === "provider";
+  const deployedUnitId = isProviderBacked ? agent.backendAgentId : null;
 
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
@@ -322,10 +328,17 @@ function AgentDeleteConfirmDialog({
             Archives the agent&apos;s identity on the relay so it no longer
             appears in member lists or mention suggestions
           </li>
-          <li>
-            {isProviderAgent
-              ? "Requests remote deletion; if it is online, Buzz first sends a shutdown command when possible. If the deployment cannot be reached through a channel, the remote process may keep running without local management."
-              : "Stops any local agent process before deleting the record"}
+          {/* This bullet used to promise "requests remote deletion". Nothing
+              in the provider protocol does that — deploy has no counterpart —
+              so a delete that read as a teardown was silently leaving units
+              running. It now says what actually happens, for every case,
+              which is what lets this dialog stand as the sole confirmation. */}
+          <li data-testid="agent-delete-teardown-note">
+            {deployedUnitId
+              ? `Does NOT stop the remote deployment. Buzz sends a shutdown command first when the agent is online and reachable in a channel, but it cannot tear down a remote unit — ${deployedUnitId} keeps running until stopped on the host.`
+              : isProviderBacked
+                ? "This agent was never deployed, so nothing is running to stop"
+                : "Stops any local agent process before deleting the record"}
           </li>
         </ul>
         <p className="text-sm text-muted-foreground">

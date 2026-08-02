@@ -8,8 +8,10 @@ import {
   resetAgentWorkingSignal,
 } from "../../agents/agentWorkingSignal.ts";
 import { resetActiveAgentTurnsStore } from "../../agents/activeAgentTurnsStore.ts";
+import { PRESET_LOGOS } from "../../onboarding/ui/RuntimeIcon.tsx";
 import {
   channelScopedBotTypingPubkeyKey,
+  mergeAgentNamesIntoProfiles,
   mergeMemberAgentFlagsIntoProfiles,
 } from "./useChannelActivityTyping.ts";
 
@@ -74,6 +76,62 @@ describe("thread-only bot typing regression", () => {
     const state = getAgentWorkingState(AGENT, "chan-1");
     assert.equal(state.working, true);
     assert.equal(state.source, "typing");
+  });
+});
+
+describe("mergeAgentNamesIntoProfiles", () => {
+  function managedAgent(overrides = {}) {
+    return {
+      pubkey: AGENT,
+      name: "Marshall",
+      avatarUrl: null,
+      backend: { type: "provider", id: "ssh", config: { ssh_host: "vps" } },
+      agentCommand: "hermes",
+      agentArgs: ["--profile", "marshall", "acp"],
+      ...overrides,
+    };
+  }
+
+  it("gives a remote agent its harness mark in the timeline", () => {
+    // The host's catalog entry carries no image on purpose, so nothing ever
+    // stamped this record and every message it sent rendered blank initials.
+    const merged = mergeAgentNamesIntoProfiles({}, [managedAgent()], []);
+
+    assert.equal(merged[AGENT]?.avatarUrl, PRESET_LOGOS.hermes);
+  });
+
+  it("leaves a local agent's stamped avatar exactly as it was", () => {
+    const merged = mergeAgentNamesIntoProfiles(
+      {},
+      [
+        managedAgent({
+          avatarUrl: "app-avatar://claude",
+          backend: { type: "local" },
+          agentCommand: "claude-agent-acp",
+          agentArgs: [],
+        }),
+      ],
+      [],
+    );
+
+    assert.equal(merged[AGENT]?.avatarUrl, "app-avatar://claude");
+  });
+
+  it("keeps a published profile avatar ahead of the harness mark", () => {
+    const merged = mergeAgentNamesIntoProfiles(
+      {
+        [AGENT]: {
+          displayName: "Marshall",
+          avatarUrl: "https://example.com/published.png",
+          nip05Handle: null,
+          ownerPubkey: null,
+        },
+      },
+      [managedAgent()],
+      [],
+    );
+
+    assert.equal(merged[AGENT]?.avatarUrl, "https://example.com/published.png");
   });
 });
 

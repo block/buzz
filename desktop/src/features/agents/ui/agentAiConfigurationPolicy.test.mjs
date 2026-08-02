@@ -5,6 +5,8 @@ import {
   agentAiConfigurationModeSatisfied,
   agentAiConfigurationPairForMode,
   initialAgentAiConfigurationMode,
+  modelFieldStatus,
+  typedModelCatalogError,
 } from "./agentAiConfigurationPolicy.ts";
 
 test("existing one-sided and complete overrides open in Customize", () => {
@@ -149,4 +151,100 @@ test("entering Customize pins unresolved fields from the inherited pair", () => 
     }),
     { provider: "anthropic", model: "llama" },
   );
+});
+
+const CATALOG = [{ id: "" }, { id: "fable" }, { id: "opus" }];
+
+test("a typed model the harness offers submits", () => {
+  assert.equal(
+    typedModelCatalogError({
+      catalog: CATALOG,
+      isTypedEntry: true,
+      model: "fable",
+    }),
+    null,
+  );
+});
+
+test("a typed model the harness never offered is blocked, and named", () => {
+  // The runtime matches byte-exactly, so this near miss would otherwise
+  // resolve to the adapter's default and run the wrong model silently.
+  const error = typedModelCatalogError({
+    catalog: CATALOG,
+    isTypedEntry: true,
+    model: "claude-fable-5",
+  });
+  assert.match(error, /claude-fable-5/);
+  // The message names what the harness DOES offer — the empty-id "Default
+  // model" row is not a model, so it is not offered as one.
+  assert.match(error, /fable, opus/);
+});
+
+test("no catalog means no gate — free text still works for a BYOH harness", () => {
+  for (const catalog of [null, [], [{ id: "" }]]) {
+    assert.equal(
+      typedModelCatalogError({
+        catalog,
+        isTypedEntry: true,
+        model: "some-private-model",
+      }),
+      null,
+    );
+  }
+});
+
+test("the field wrapper blocks and speaks with one voice", () => {
+  const discovery = { message: "Loading models...", tone: "muted" };
+  // A miss owns the status line: the discovery message would otherwise explain
+  // everything except why Save is dead.
+  const blocked = modelFieldStatus({
+    catalog: CATALOG,
+    discoveryStatus: discovery,
+    isTypedEntry: true,
+    model: "claude-fable-5",
+  });
+  assert.equal(blocked.blocked, true);
+  assert.match(blocked.status.message, /claude-fable-5/);
+  assert.equal(blocked.status.tone, "warning");
+
+  // Otherwise the discovery status passes through untouched.
+  assert.deepEqual(
+    modelFieldStatus({
+      catalog: CATALOG,
+      discoveryStatus: discovery,
+      isTypedEntry: true,
+      model: "fable",
+    }),
+    { blocked: false, status: discovery },
+  );
+});
+
+test("an already-saved off-catalog model does not block an unrelated edit", () => {
+  // Opening a dialog to rename an agent whose saved model predates the current
+  // catalog must not kill Save on a field the user never touched. Callers pass
+  // "is typing right now" (isCustomModelEditing), never "is outside the
+  // catalog" — the latter is exactly the state every such agent opens in.
+  assert.deepEqual(
+    modelFieldStatus({
+      catalog: CATALOG,
+      discoveryStatus: null,
+      isTypedEntry: false,
+      model: "retired-model-id",
+    }),
+    { blocked: false, status: null },
+  );
+});
+
+test("a long catalog is truncated rather than dumped into the message", () => {
+  const catalog = Array.from({ length: 15 }, (_, index) => ({
+    id: `m${index}`,
+  }));
+  const { status } = modelFieldStatus({
+    catalog,
+    discoveryStatus: null,
+    isTypedEntry: true,
+    model: "nope",
+  });
+  assert.match(status.message, /m0, m1, .*m11, and 3 more\.$/);
+  assert.doesNotMatch(status.message, /m12/);
 });

@@ -314,12 +314,11 @@ pub fn record_agent_command(
     }
 
     if let Some(id) = record.runtime.as_deref() {
-        // Check static builtins first.
+        // Static builtins first, then the loaded preset/custom registry.
         if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
         {
             return command.to_string();
         }
-        // Fall back to loaded registry for preset/custom harnesses.
         if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
         {
             return def.command.clone();
@@ -336,7 +335,7 @@ pub fn record_agent_command(
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
 ///   2. the linked persona's `runtime` id mapped to its primary command
-///      (checks builtins then loaded preset/custom registry);
+///      (builtins, then the loaded preset/custom registry);
 ///   3. `default_agent_command()` — no persona/runtime, or persona deleted.
 pub fn effective_agent_command(
     persona_id: Option<&str>,
@@ -355,12 +354,11 @@ pub fn effective_agent_command(
         .and_then(|persona| persona.runtime.as_deref());
 
     if let Some(id) = runtime_id {
-        // Check static builtins first.
+        // Static builtins first, then the loaded preset/custom registry.
         if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
         {
             return command.to_string();
         }
-        // Check loaded preset/custom registry.
         if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
         {
             return def.command.clone();
@@ -371,7 +369,9 @@ pub fn effective_agent_command(
 }
 
 mod overrides;
-pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
+pub use overrides::{
+    apply_agent_command_update, create_time_agent_args, create_time_agent_command_override,
+};
 
 /// Prefix of the typed dangling-harness error produced by
 /// `try_record_agent_command` / `resolve_effective_harness_descriptor`.

@@ -1,7 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
 import { Bot } from "lucide-react";
 import * as React from "react";
 
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import { huddleAgentPicks } from "@/features/huddle/lib/huddleAgentPicks";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -10,12 +12,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-
-type ManagedAgentSummary = {
-  pubkey: string;
-  name: string;
-  status: string;
-};
 
 type AgentAddResult = {
   ephemeral_added: boolean;
@@ -34,25 +30,30 @@ export function AddAgentDialog({
   onAdd,
   currentAgentPubkeys,
 }: AddAgentDialogProps) {
-  const [agents, setAgents] = React.useState<ManagedAgentSummary[]>([]);
-  const [loading, setLoading] = React.useState(true);
   const [adding, setAdding] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [warning, setWarning] = React.useState<string | null>(null);
 
-  React.useEffect(() => {
-    invoke<ManagedAgentSummary[]>("list_managed_agents")
-      .then(setAgents)
-      .catch((e: unknown) => {
-        console.error("Failed to load agents:", e);
-        setError("Could not load agents.");
-      })
-      .finally(() => setLoading(false));
-  }, []);
+  const agentsQuery = useManagedAgentsQuery();
+  const agents = React.useMemo(
+    () => agentsQuery.data ?? [],
+    [agentsQuery.data],
+  );
+  const presenceQuery = usePresenceQuery(agents.map((a) => a.pubkey));
+  // Presence decides eligibility for remote records, so a list rendered before
+  // it lands would flash "no online agents" at a live fleet. The query is
+  // disabled (never loading) when there are no pubkeys to look up.
+  const loading = agentsQuery.isLoading || presenceQuery.isLoading;
+  const loadError = agentsQuery.error ? "Could not load agents." : null;
 
-  // Only show running agents that aren't already in the huddle.
-  const runningAgents = agents.filter(
-    (a) => a.status === "running" && !currentAgentPubkeys.includes(a.pubkey),
+  const { picks, emptyMessage } = React.useMemo(
+    () =>
+      huddleAgentPicks({
+        agents,
+        presenceLookup: presenceQuery.data,
+        currentAgentPubkeys,
+      }),
+    [agents, presenceQuery.data, currentAgentPubkeys],
   );
 
   async function handleAdd(pubkey: string) {
@@ -91,14 +92,14 @@ export function AddAgentDialog({
         <DialogHeader className="border-b px-6 py-4">
           <DialogTitle>Add Agent to Huddle</DialogTitle>
           <DialogDescription>
-            Select a running agent to join the huddle.
+            Select an online agent to join the huddle.
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
-          {error && (
+          {(error ?? loadError) && (
             <p className="mb-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
+              {error ?? loadError}
             </p>
           )}
 
@@ -119,15 +120,13 @@ export function AddAgentDialog({
             <p className="py-4 text-center text-sm text-muted-foreground">
               Loading agents…
             </p>
-          ) : runningAgents.length === 0 ? (
+          ) : picks.length === 0 ? (
             <p className="py-4 text-center text-sm text-muted-foreground">
-              {agents.filter((a) => a.status === "running").length > 0
-                ? "All running agents are already in this huddle."
-                : "No running agents found."}
+              {emptyMessage}
             </p>
           ) : (
             <ul className="flex flex-col gap-1">
-              {runningAgents.map((agent) => (
+              {picks.map((agent) => (
                 <li key={agent.pubkey}>
                   <button
                     className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
@@ -140,7 +139,7 @@ export function AddAgentDialog({
                       {agent.name}
                     </span>
                     <span className="shrink-0 text-xs text-muted-foreground">
-                      {agent.status}
+                      {agent.presence}
                     </span>
                   </button>
                 </li>

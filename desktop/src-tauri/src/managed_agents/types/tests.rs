@@ -583,6 +583,52 @@ fn empty_prompt_folds_to_none() {
     assert_eq!(persona.into_agent_record().system_prompt, None);
 }
 
+/// A provider record's definition view carries no harness — the frontend's
+/// harness auto-seed guard depends on this projection staying lossy.
+///
+/// `AgentDefinition` has no slot for `backend` or `agent_command`, and
+/// `runtime` on a provider record names a harness chosen from the HOST's
+/// catalog, which `apply_persona_snapshot` deliberately refuses to mirror. So
+/// the view's `runtime` is whatever the record holds, and for a provider record
+/// created through the remote path that is `None`. The definition dialog reads
+/// that blank as "no preference" and used to fill it with THIS computer's
+/// default; the guard in `createRuntimeSeedAction` exists because the blank is
+/// deliberate, not an absence.
+#[test]
+fn provider_record_definition_view_carries_no_harness() {
+    let mut record = sample_persona().into_agent_record();
+    record.backend = super::BackendKind::Provider {
+        id: "ssh".to_string(),
+        config: serde_json::json!({}),
+    };
+    record.runtime = None;
+    record.agent_command = "/opt/homebrew/bin/goose".to_string();
+
+    let view = record
+        .to_definition_view()
+        .expect("slugged record must present a definition view");
+    assert_eq!(
+        view.runtime, None,
+        "the host's harness must not reach the definition dialog as a local preference"
+    );
+    assert_eq!(
+        serde_json::to_value(&view)
+            .unwrap()
+            .get("agent_command")
+            .map(ToString::to_string),
+        None,
+        "AgentDefinition has no agent_command slot; the host's command is dropped"
+    );
+    assert_eq!(
+        serde_json::to_value(&view)
+            .unwrap()
+            .get("backend")
+            .map(ToString::to_string),
+        None,
+        "AgentDefinition has no backend slot; a round-trip would revert it to Local"
+    );
+}
+
 // ── Mint-time behavioral defaults (B5 quad activation) ──────────────────────
 
 use super::resolve_mint_behavioral_defaults;

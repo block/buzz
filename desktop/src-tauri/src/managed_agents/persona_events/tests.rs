@@ -764,6 +764,8 @@ fn definition_provider_set_model_blank_produces_none_model() {
     );
 }
 
+mod harness_pin;
+
 // Gated off Windows for the same reason as `archive::real_relay`:
 // `build_app_state()` pulls native DLLs unavailable in the Windows CI
 // runner. This stub-relay test is hermetic (localhost axum) otherwise.

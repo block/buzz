@@ -5,6 +5,7 @@ import {
   getModelSelectValue,
   hasPersonaModelOption,
   type PersonaDropdownOption,
+  personaModelDropdownOption,
   type PersonaModelOption,
 } from "./agentConfigOptions";
 
@@ -78,10 +79,7 @@ export function modelDropdownOptions({
 }): PersonaDropdownOption[] {
   const modelOptions =
     globalModel === undefined
-      ? options.map((option) => ({
-          label: option.label,
-          value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-        }))
+      ? options.map((option) => personaModelDropdownOption(option))
       : buildTemplateModelDropdownOptions(
           options,
           globalModel,

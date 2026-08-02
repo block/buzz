@@ -312,3 +312,29 @@ test("isSuccessfulEmptyDiscovery_stillPending_isFalse", () => {
     false,
   );
 });
+
+test("a version-carrying description becomes the option's secondary line", () => {
+  // claude-agent-acp reports name "Opus" for two entries of DIFFERENT major
+  // versions; only the description tells them apart, so it has to survive the
+  // trip into the option row.
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        {
+          id: "opus",
+          name: "Opus",
+          description: "Opus 4.7 · Best for everyday tasks",
+        },
+        { id: "opus[1m]", name: "Opus", description: "Opus 4.8 · 1M context" },
+        { id: "sonnet", name: "Sonnet", description: null },
+      ],
+    }),
+    "",
+  );
+
+  const byId = Object.fromEntries(options.map((option) => [option.id, option]));
+  assert.equal(byId.opus.description, "Opus 4.7 · Best for everyday tasks");
+  assert.equal(byId["opus[1m]"].description, "Opus 4.8 · 1M context");
+  // No description reported → no key at all, not an undefined one.
+  assert.equal("description" in byId.sonnet, false);
+});

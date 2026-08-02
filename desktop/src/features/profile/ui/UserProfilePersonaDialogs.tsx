@@ -4,6 +4,7 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import type { PersonaRemoteCascadeInstance } from "@/features/agents/lib/personaCascade";
 import { AgentCardMintDialog } from "@/features/agents/ui/AgentCardMintDialog";
 import { PersonaDeleteDialog } from "@/features/agents/ui/PersonaDeleteDialog";
 import { AgentDialog } from "@/features/agents/ui/AgentDialog";
@@ -20,12 +21,14 @@ export type CardMintTarget = {
 export function UserProfilePersonaDialogs({
   cardMintTarget,
   createError,
+  editsProviderRecord = false,
   instanceCount,
   isPending,
   linkedAgentPubkey,
   personaDialogState,
   personaToDelete,
   personaToExportSnapshot,
+  remoteInstances = [],
   resolvedPersona,
   runtimes,
   runtimesLoading,
@@ -40,6 +43,12 @@ export function UserProfilePersonaDialogs({
 }: {
   cardMintTarget: CardMintTarget | null;
   createError: Error | null;
+  /**
+   * The persona in this panel backs a provider record, so its blank runtime is
+   * the host's harness being deliberately withheld — never a local default to
+   * seed. See `createRuntimeSeedAction`.
+   */
+  editsProviderRecord?: boolean;
   /** Number of managed-agent instances backed by the persona being deleted. */
   instanceCount: number;
   isPending: boolean;
@@ -47,6 +56,8 @@ export function UserProfilePersonaDialogs({
   personaDialogState: PersonaDialogState | null;
   personaToDelete: AgentPersona | null;
   personaToExportSnapshot: AgentPersona | null;
+  /** Cascade instances whose remote deployment survives the delete. */
+  remoteInstances?: readonly PersonaRemoteCascadeInstance[];
   resolvedPersona: AgentPersona | undefined;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading: boolean;
@@ -63,6 +74,7 @@ export function UserProfilePersonaDialogs({
     <>
       <AgentDialog
         description={personaDialogState?.description ?? ""}
+        editsProviderRecord={editsProviderRecord}
         error={updateError ?? createError}
         initialValues={personaDialogState?.initialValues ?? null}
         isPending={isPending}
@@ -89,6 +101,7 @@ export function UserProfilePersonaDialogs({
         }}
         open={personaToDelete !== null}
         persona={personaToDelete}
+        remoteInstances={remoteInstances}
       />
       {personaToExportSnapshot ? (
         <UserProfileSnapshotExportDialog

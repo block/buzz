@@ -162,6 +162,11 @@ impl ManagedAgentRecord {
     /// [`AgentDefinition`] shape — the compatibility view the persona command
     /// surface serves until Phase 1B unifies the UI. Inverse of
     /// [`AgentDefinition::into_agent_record`] for the fields personas carry.
+    ///
+    /// LOSSY: `AgentDefinition` has no slot for `backend`, `team_id`,
+    /// `agent_command`, `idle_timeout_seconds`, `relay_mesh`, `respond_to` or
+    /// `parallelism`, so a round-trip resets each — safe only while no
+    /// definition carries a non-default value there.
     pub fn to_definition_view(&self) -> Option<AgentDefinition> {
         let slug = self.slug.clone()?;
         Some(AgentDefinition {

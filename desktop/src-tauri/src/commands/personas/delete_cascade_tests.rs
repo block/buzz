@@ -6,7 +6,10 @@
 //! helper that identifies the agents to cascade-delete, using plain
 //! in-memory data structures (no `AppHandle` required).
 
-use super::{collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents};
+use super::{
+    collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents,
+    preflight_remote_deployed_cascade,
+};
 use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -169,6 +172,24 @@ fn failing_save_is_retry_safe() {
 /// never-deployed provider agents must not block.
 #[test]
 fn remote_deployed_cascade_target_blocks_delete() {
+    let agents = mixed_cascade_agents();
+    let cascade: HashSet<String> = collect_cascade_pubkeys(&agents, PERSONA_ID)
+        .into_iter()
+        .collect();
+    assert_eq!(cascade.len(), 3, "all three agents are cascade targets");
+
+    let blockers = collect_remote_deployed(&agents, &cascade);
+
+    assert_eq!(
+        blockers,
+        vec!["Deployed Agent".to_string()],
+        "only the deployed provider agent blocks the cascade"
+    );
+}
+
+/// A local agent, a deployed provider agent, and a provider agent that never
+/// deployed — all linked to `PERSONA_ID`.
+fn mixed_cascade_agents() -> Vec<ManagedAgentRecord> {
     let mut deployed = make_agent("pk-deployed", Some(PERSONA_ID), None);
     deployed.name = "Deployed Agent".to_string();
     deployed.backend = BackendKind::Provider {
@@ -184,21 +205,86 @@ fn remote_deployed_cascade_target_blocks_delete() {
         config: serde_json::Value::Null,
     };
 
-    let agents = vec![
+    vec![
         make_agent("pk-local", Some(PERSONA_ID), None),
         deployed,
         undeployed,
-    ];
-    let cascade: HashSet<String> = collect_cascade_pubkeys(&agents, PERSONA_ID)
+    ]
+}
+
+fn cascade_of(agents: &[ManagedAgentRecord]) -> HashSet<String> {
+    collect_cascade_pubkeys(agents, PERSONA_ID)
         .into_iter()
-        .collect();
-    assert_eq!(cascade.len(), 3, "all three agents are cascade targets");
+        .collect()
+}
 
-    let blockers = collect_remote_deployed(&agents, &cascade);
+/// Without the opt-in, a cascade containing a provider-deployed instance is
+/// refused — the pre-existing contract, unchanged, so an IPC caller that never
+/// learned about the flag sees exactly the error it saw before.
+#[test]
+fn preflight_refuses_remote_cascade_without_opt_in() {
+    let agents = mixed_cascade_agents();
+    let cascade = cascade_of(&agents);
 
-    assert_eq!(
-        blockers,
-        vec!["Deployed Agent".to_string()],
-        "only the deployed provider agent blocks the cascade"
+    let result = preflight_remote_deployed_cascade(&agents, &cascade, PERSONA_ID, false);
+
+    let error = result.expect_err("deployed provider instance must refuse the cascade");
+    assert!(
+        error.contains("Deployed Agent"),
+        "error names the blocking instance: {error}"
+    );
+    assert!(
+        error.contains("delete those agent instances first"),
+        "error keeps its original wording: {error}"
+    );
+}
+
+/// With the opt-in, the same cascade is allowed through. The caller has
+/// acknowledged that the remote units keep running; the desktop cannot stop
+/// them either way, so refusing only strands the records.
+#[test]
+fn preflight_allows_remote_cascade_with_opt_in() {
+    let agents = mixed_cascade_agents();
+    let cascade = cascade_of(&agents);
+
+    assert!(
+        preflight_remote_deployed_cascade(&agents, &cascade, PERSONA_ID, true).is_ok(),
+        "opt-in admits the provider-backed cascade"
+    );
+}
+
+/// A local-only cascade never consults the flag: it passes the pre-flight with
+/// or without the opt-in, so ordinary persona deletes are untouched by this.
+#[test]
+fn preflight_ignores_opt_in_for_local_only_cascade() {
+    let agents = vec![
+        make_agent("pk-local-a", Some(PERSONA_ID), None),
+        make_agent("pk-local-b", Some(PERSONA_ID), Some(4242)),
+    ];
+    let cascade = cascade_of(&agents);
+
+    for force in [false, true] {
+        assert!(
+            preflight_remote_deployed_cascade(&agents, &cascade, PERSONA_ID, force).is_ok(),
+            "local-only cascade passes with force_remote_delete={force}"
+        );
+    }
+}
+
+/// A provider agent that never completed a deploy has no remote unit to
+/// orphan, so it must not require the opt-in.
+#[test]
+fn preflight_allows_never_deployed_provider_without_opt_in() {
+    let mut undeployed = make_agent("pk-undeployed", Some(PERSONA_ID), None);
+    undeployed.backend = BackendKind::Provider {
+        id: "blox".to_string(),
+        config: serde_json::Value::Null,
+    };
+    let agents = vec![undeployed];
+    let cascade = cascade_of(&agents);
+
+    assert!(
+        preflight_remote_deployed_cascade(&agents, &cascade, PERSONA_ID, false).is_ok(),
+        "never-deployed provider agent needs no acknowledgement"
     );
 }

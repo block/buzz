@@ -211,6 +211,117 @@ test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape",
   );
 });
 
+// ── fromRawRemoteHarness: the remote catalog wire boundary ───────────────────
+//
+// The provider emits `exclusive: true` only for entries that name a persistent
+// identity on the host. Absent must stay absent: the desktop reads "no field"
+// as "deploy as many as you like", and inventing a `false` would have the app
+// asserting something the provider never said.
+
+const { fromRawRemoteHarness } = await import("./tauri.ts");
+
+test("fromRawRemoteHarness carries an asserted exclusive flag", () => {
+  const harness = fromRawRemoteHarness({
+    id: "hermes-default",
+    label: "Hermes (default)",
+    command: "hermes",
+    args: ["--profile", "default", "acp"],
+    available: true,
+    binaryPath: "/usr/local/bin/hermes",
+    exclusive: true,
+  });
+  assert.equal(harness.exclusive, true);
+  assert.deepStrictEqual(harness.args, ["--profile", "default", "acp"]);
+});
+
+test("fromRawRemoteHarness leaves exclusive absent when the provider is silent", () => {
+  const harness = fromRawRemoteHarness({
+    id: "claude",
+    label: "Claude Code",
+    command: "claude-code-acp",
+    available: true,
+  });
+  assert.equal(
+    Object.hasOwn(harness, "exclusive"),
+    false,
+    "an absent flag must not become a claim the provider never made",
+  );
+  // Everything else still degrades to today's defaults.
+  assert.deepStrictEqual(harness.args, []);
+  assert.deepStrictEqual(harness.env, {});
+  assert.equal(harness.binaryPath, null);
+  assert.equal(harness.version, null);
+});
+
+test("fromRawRemoteHarness treats a false or null exclusive as not exclusive", () => {
+  for (const exclusive of [false, null]) {
+    const harness = fromRawRemoteHarness({
+      id: "codex",
+      command: "codex",
+      available: true,
+      exclusive,
+    });
+    assert.equal(Object.hasOwn(harness, "exclusive"), false);
+    assert.equal(
+      harness.label,
+      "codex",
+      "a missing label falls back to the id",
+    );
+  }
+});
+
+// ── providerRecoveryOf: the actionable half of a provider failure ────────────
+
+const { providerRecoveryOf, TauriInvokeError } = await import("./tauri.ts");
+
+/** A provider command rejection as `invokeTauri` produces it. */
+function rejection(payload) {
+  return new TauriInvokeError(payload.message ?? "failed", payload);
+}
+
+test("providerRecoveryOf reads the recovery off a structured provider failure", () => {
+  const recovery = providerRecoveryOf(
+    rejection({
+      message: "this host requires Tailscale SSH authentication in a browser",
+      recovery: {
+        action: "open_url",
+        url: "https://login.tailscale.com/a/1a2b3c4d",
+      },
+    }),
+  );
+  assert.deepEqual(recovery, {
+    action: "open_url",
+    url: "https://login.tailscale.com/a/1a2b3c4d",
+  });
+});
+
+test("providerRecoveryOf returns null for an ordinary failure", () => {
+  // The overwhelmingly common case: a failure with no recovery renders as its
+  // message alone, with no button.
+  assert.equal(providerRecoveryOf(rejection({ message: "exit 255" })), null);
+  assert.equal(providerRecoveryOf(new Error("ssh failed")), null);
+  assert.equal(providerRecoveryOf("a bare string"), null);
+  assert.equal(providerRecoveryOf(null), null);
+  assert.equal(providerRecoveryOf(undefined), null);
+});
+
+test("providerRecoveryOf ignores a malformed or unknown recovery", () => {
+  for (const recovery of [
+    null,
+    "https://login.tailscale.com/a/tok",
+    { action: "run_command", command: "rm -rf /" },
+    { action: "open_url" },
+    { action: "open_url", url: "" },
+    { action: "open_url", url: 42 },
+  ]) {
+    assert.equal(
+      providerRecoveryOf(rejection({ message: "failed", recovery })),
+      null,
+      JSON.stringify(recovery),
+    );
+  }
+});
+
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
 test("teardown — restore Date.now", () => {

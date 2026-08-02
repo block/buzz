@@ -14,6 +14,7 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
 } from "./agentConfigOptions";
+import { PersonaOptionRow } from "./PersonaOptionRow";
 
 export function PersonaDropdownField({
   contentClassName,
@@ -88,7 +89,7 @@ export function PersonaDropdownField({
                   key={option.value}
                   value={option.value}
                 >
-                  <span className="truncate">{option.label}</span>
+                  <PersonaOptionRow option={option} />
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>

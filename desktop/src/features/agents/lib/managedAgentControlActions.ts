@@ -3,6 +3,7 @@ import type {
   Channel,
   ManagedAgent,
   PresenceLookup,
+  PresenceStatus,
   RelayAgent,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -33,6 +34,33 @@ export type ManagedAgentActionResult = {
 
 export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
+}
+
+/**
+ * The presence a surface should show for an agent the control plane calls
+ * active — `isManagedAgentActive` says what this desktop DID to the agent, not
+ * whether it is alive right now, and for a remote deployment those two facts
+ * diverge permanently.
+ *
+ * A local record's `"running"` is this machine's own process table, so the
+ * control plane is the liveness answer for it and stays authoritative: the
+ * relay may not retain ephemeral kind:20001 presence at all, and a relay blip
+ * must not make a process we are supervising read as dead.
+ *
+ * A provider-backed record's `"deployed"` says only that the deploy
+ * succeeded. `backend_agent_id` is written once, on that success, and nothing
+ * clears it — the provider protocol has no undeploy — so a remote agent that
+ * died hours ago is still `"deployed"` forever. The relay is the only channel
+ * that knows, which is exactly what `deleteManagedAgentWithRules` already
+ * trusts before it warns about orphaning a deployment. Silence there means
+ * "not known to be alive", so it reads offline rather than claiming otherwise.
+ */
+export function managedAgentPresenceStatus(
+  agent: Pick<ManagedAgent, "backend" | "pubkey">,
+  presenceLookup: PresenceLookup | null | undefined,
+): PresenceStatus {
+  if (agent.backend.type === "local") return "online";
+  return presenceLookup?.[normalizePubkey(agent.pubkey)] ?? "offline";
 }
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
@@ -141,6 +169,23 @@ export async function stopManagedAgentWithRules({
   return {};
 }
 
+/**
+ * Delete a managed-agent record, sending `!shutdown` first when the agent is a
+ * live provider deployment that can still be reached through a channel.
+ *
+ * `remoteOrphanDisclosedByCaller` asserts that the caller has ALREADY shown the
+ * user a confirmation naming this agent's remote unit and stating that the
+ * delete does not stop it. It suppresses this function's fallback
+ * `window.confirm` only — it never suppresses `!shutdown`, and it is not a
+ * "delete quietly" switch.
+ *
+ * It exists because two surfaces would otherwise stack two dialogs on one
+ * click: the profile panel's `AgentDeleteConfirmDialog` already carries the
+ * full disclosure. The name is deliberately a claim about the caller rather
+ * than a `skip…` verb, because the previous spelling let that caller's copy
+ * drift into promising a remote teardown that the provider protocol has never
+ * implemented, with nothing tying the two together.
+ */
 export async function deleteManagedAgentWithRules({
   agent,
   channels,
@@ -148,11 +193,11 @@ export async function deleteManagedAgentWithRules({
   preferredChannelId,
   presenceLookup,
   relayAgents,
-  skipRemoteDeleteConfirm = false,
+  remoteOrphanDisclosedByCaller = false,
 }: {
   agent: ManagedAgent;
   deleteManagedAgent: DeleteManagedAgent;
-  skipRemoteDeleteConfirm?: boolean;
+  remoteOrphanDisclosedByCaller?: boolean;
 } & ManagedAgentActionContext): Promise<ManagedAgentActionResult> {
   if (agent.backend.type === "provider" && agent.backendAgentId) {
     const presence = presenceLookup?.[normalizePubkey(agent.pubkey)];
@@ -161,43 +206,35 @@ export async function deleteManagedAgentWithRules({
       preferredChannelId,
       relayAgents,
     });
+    const reachable =
+      channelId !== null && (presence === "online" || presence === "away");
 
-    if (channelId) {
-      if (presence === "online" || presence === "away") {
-        await sendChannelMessage(channelId, "!shutdown", undefined, undefined, [
-          agent.pubkey,
-        ]);
+    // Best-effort graceful stop. Only possible while the agent is both online
+    // and addressable in a channel — the shutdown travels as a mention, so
+    // there is no out-of-band path to it. Sent regardless of whether the
+    // caller already confirmed: it is a courtesy to the agent, not a prompt.
+    if (reachable && channelId) {
+      await sendChannelMessage(channelId, "!shutdown", undefined, undefined, [
+        agent.pubkey,
+      ]);
+    }
 
-        if (!skipRemoteDeleteConfirm) {
-          const confirmed = window.confirm(
-            "Shutdown command sent, but the agent may still be running. " +
-              "Deleting now removes the local record — the remote deployment " +
-              "will be orphaned if shutdown hasn't completed. Continue?",
-          );
-          if (!confirmed) {
-            return { cancelled: true };
-          }
-        }
-      } else {
-        if (!skipRemoteDeleteConfirm) {
-          const confirmed = window.confirm(
-            "This agent is offline but the remote deployment may still exist. " +
-              "Deleting removes the local management record. Continue?",
-          );
-          if (!confirmed) {
-            return { cancelled: true };
-          }
-        }
-      }
-    } else {
-      if (!skipRemoteDeleteConfirm) {
-        const confirmed = window.confirm(
-          "This agent is deployed but not in any channel. " +
-            "Deleting will orphan the remote deployment (it will keep running). Continue?",
-        );
-        if (!confirmed) {
-          return { cancelled: true };
-        }
+    if (!remoteOrphanDisclosedByCaller) {
+      // Every branch says the same thing, because the same thing is true in
+      // every branch: this app cannot tear down a remote deployment. Only the
+      // reason it cannot promise a clean stop differs.
+      const situation = reachable
+        ? "A shutdown command was sent, but it may not have completed."
+        : channelId
+          ? "This agent is not responding, so no shutdown could be delivered."
+          : "This agent is not in any channel, so no shutdown could be delivered.";
+      const confirmed = window.confirm(
+        `${situation} Deleting removes the local record but does not stop the ` +
+          `remote deployment — ${agent.backendAgentId} keeps running until ` +
+          `stopped on the host. Continue?`,
+      );
+      if (!confirmed) {
+        return { cancelled: true };
       }
     }
   }

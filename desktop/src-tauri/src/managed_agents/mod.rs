@@ -21,6 +21,8 @@ pub(crate) mod persona_events;
 mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
+mod provider_discovery;
+mod provider_recovery;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
 mod relay_mesh;
@@ -62,6 +64,8 @@ pub use nest::*;
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;
+pub use provider_discovery::*;
+pub use provider_recovery::*;
 pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, resolve_effective_harness_descriptor,
     AgentReadiness, Requirement,

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
+  resolveCreateRuntimeForDefinition,
   resolveStartRuntimeForDefinition,
 } from "./instanceInputForDefinition.ts";
 
@@ -197,12 +198,29 @@ test("Buzz shared compute definition carries native provider and auto model", as
   assert.equal(input.startOnAppLaunch, true);
 });
 
-test("provider intent forces startOnAppLaunch off and omits local commands", async () => {
+const remoteHarness = {
+  id: "goose",
+  command: "/opt/host/bin/goose",
+  args: ["acp"],
+  env: { GOOSE_MODE: "auto" },
+};
+
+function providerIntent(overrides = {}) {
+  return {
+    type: "provider",
+    id: "blox",
+    config: { region: "us" },
+    harness: remoteHarness,
+    ...overrides,
+  };
+}
+
+test("provider intent forces startOnAppLaunch off and spawns no local ACP", async () => {
   const input = await buildInstanceInputForDefinition(
     persona(),
     gooseRuntime,
     undefined,
-    { type: "provider", id: "blox", config: { region: "us" } },
+    providerIntent(),
   );
   assert.deepEqual(input.backend, {
     type: "provider",
@@ -211,23 +229,109 @@ test("provider intent forces startOnAppLaunch off and omits local commands", asy
   });
   assert.equal(input.startOnAppLaunch, false, "remote agents never auto-start");
   assert.equal(input.spawnAfterCreate, true);
-  assert.equal(input.harnessOverride, false);
-  // Provider agents spawn no local ACP — the legacy provider branch omitted
-  // all local commands and model/provider, and so does the intent path.
-  for (const key of [
-    "acpCommand",
-    "agentCommand",
-    "agentArgs",
-    "mcpCommand",
-    "model",
-    "provider",
-    "envVars",
-    "relayMesh",
-  ]) {
+  // Provider agents spawn no local ACP or MCP sidecar.
+  for (const key of ["acpCommand", "mcpCommand", "relayMesh"]) {
     assert.equal(key in input, false, `provider intent must omit ${key}`);
   }
   assert.equal(input.personaId, "p-1", "definition link is kept");
   assert.equal(input.systemPrompt, "prompt");
+});
+
+// ── Correction C1: the remote harness pin ───────────────────────────────────
+//
+// The create-time agentCommand is the ONLY channel by which the harness choice
+// reaches the host: `create_time_agent_command_override` drops a divergent
+// command when harnessOverride is false, `effective_agent_command` then
+// resolves against the LOCAL registry and falls through to
+// `default_agent_command()`, and the deploy ships that. So a provider create
+// without a true override + remote command silently provisions "buzz-agent".
+
+test("C1: provider intent pins the REMOTE harness command, not the local runtime", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    providerIntent(),
+  );
+  assert.equal(input.agentCommand, "/opt/host/bin/goose");
+  assert.notEqual(
+    input.agentCommand,
+    gooseRuntime.command,
+    "the local runtime's command describes the wrong machine",
+  );
+  assert.equal(
+    input.harnessOverride,
+    true,
+    "without the override flag the backend discards the pin and falls back to buzz-agent",
+  );
+});
+
+test("C1: remote args and env are pinned (nothing re-resolves them)", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    null,
+    undefined,
+    providerIntent(),
+  );
+  assert.deepEqual(input.agentArgs, ["acp"]);
+  assert.deepEqual(input.envVars, { GOOSE_MODE: "auto" });
+});
+
+test("C1: a provider create with no remote harness is refused", async () => {
+  await assert.rejects(
+    () =>
+      buildInstanceInputForDefinition(
+        persona(),
+        gooseRuntime,
+        undefined,
+        providerIntent({ harness: undefined }),
+      ),
+    /remote host/i,
+    "must refuse rather than silently deploy the locally-resolved default",
+  );
+});
+
+test("C1: a blank remote harness command is refused", async () => {
+  await assert.rejects(
+    () =>
+      buildInstanceInputForDefinition(persona(), gooseRuntime, undefined, {
+        ...providerIntent(),
+        harness: { ...remoteHarness, command: "   " },
+      }),
+    /remote host/i,
+  );
+});
+
+test("provider create needs no locally-installed runtime", () => {
+  const { runtime } = resolveCreateRuntimeForDefinition([], "goose", true);
+  assert.equal(
+    runtime,
+    null,
+    "the harness lives on the host; the local catalog is a different machine",
+  );
+});
+
+test("local create still refuses an unavailable runtime", () => {
+  assert.throws(
+    () => resolveCreateRuntimeForDefinition([], "goose", false),
+    /Choose an available runtime/,
+  );
+});
+
+test("create runtime resolves locally when it happens to exist", () => {
+  const { runtime } = resolveCreateRuntimeForDefinition(
+    [gooseRuntime, claudeRuntime],
+    "claude",
+    true,
+  );
+  assert.equal(runtime?.id, "claude", "used for the avatar fallback");
+});
+
+test("a local create with no runtime is refused at the mapping too", async () => {
+  await assert.rejects(
+    () => buildInstanceInputForDefinition(persona(), null),
+    /Choose an available runtime/,
+  );
 });
 
 test("row 1: refuses when the configured runtime is not available", () => {

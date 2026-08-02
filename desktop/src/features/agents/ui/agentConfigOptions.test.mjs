@@ -5,6 +5,7 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  personaModelOptionDescription,
   resetConfigForHarnessChange,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
@@ -245,4 +246,26 @@ test("formatModelDiscoveryErrorStatus returns a non-null status for runtime unav
     assert.ok(typeof status?.message === "string", "status has a message");
     assert.ok(typeof status?.tone === "string", "status has a tone");
   }
+});
+
+// ── personaModelOptionDescription ────────────────────────────────────────────
+//
+// Adapters carry the identifying detail in `description`, not `name`:
+// claude-agent-acp reports name "Opus" for both Opus 4.7 and Opus 4.7 [1m],
+// which are different major versions. The secondary line is what tells the
+// two rows apart, so it is shown verbatim — nothing here parses it.
+
+test("personaModelOptionDescription keeps the adapter's own sentence", () => {
+  assert.equal(
+    personaModelOptionDescription("Opus 4.7 · Best for everyday tasks", "Opus"),
+    "Opus 4.7 · Best for everyday tasks",
+  );
+});
+
+test("personaModelOptionDescription drops empty and label-repeating text", () => {
+  assert.equal(personaModelOptionDescription(null, "Opus"), undefined);
+  assert.equal(personaModelOptionDescription(undefined, "Opus"), undefined);
+  assert.equal(personaModelOptionDescription("   ", "Opus"), undefined);
+  // A description that only echoes the label is noise, not a second fact.
+  assert.equal(personaModelOptionDescription(" opus ", "Opus"), undefined);
 });

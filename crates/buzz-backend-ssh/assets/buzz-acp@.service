@@ -1,0 +1,52 @@
+[Unit]
+Description=Buzz agent %i
+After=network-online.target
+Wants=network-online.target
+# A long-running agent must never be rate-limited into staying down: a unit
+# held by the start limiter looks exactly like an agent that silently died,
+# and only `systemctl reset-failed` clears it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The agent runs arbitrary code by design, so the SSH user's own privileges are
+# the intended ceiling — but without this the harness can climb past them
+# through any setuid/setgid binary on the host, or through passwordless sudo
+# granted to that user. A VPS pilot exercised the harness, the Buzz CLI,
+# NIP-OA owner-reviewed draft creation and repository branch pushes with this
+# set; all remained functional.
+#
+# Deliberately the whole hardening delta. ProtectSystem/ProtectHome would also
+# apply here, but the agent has no modeled workspace yet (see the REPOS /
+# working-directory limitation in docs/remote-agents-ssh.md) — so until writable
+# paths are something the protocol states, those directives would be guessing
+# at which of the user's home an agent legitimately needs.
+NoNewPrivileges=true
+# Holds the agent's minted nsec. Written by the provider with umask 077 and
+# chmod 600; systemd reads it as the owning user.
+EnvironmentFile=%h/.config/buzz-acp/%i.env
+# Absolute path, substituted at install time from the host's resolved
+# `buzz-acp` and double-quoted there — systemd splits an unquoted value on
+# whitespace, and the configurable `buzz-acp path on the server` may name a
+# directory that contains some. systemd does not expand environment variables
+# in the program position, and the shell indirection that would work around
+# that is not worth adding to a unit whose environment carries a private key.
+ExecStart=@BUZZ_ACP_BIN@
+Restart=always
+RestartSec=5
+# The one exit that must not restart. `buzz-acp` exits 78 when the relay
+# rejects this agent's identity outright — a bad signature, a ban, a
+# non-member, an allowlist denial (buzz_acp::EXIT_TERMINAL_AUTH_FAILURE). The
+# relay has already given its standing answer for this key, so `Restart=always`
+# would reconnect every 5 seconds forever against a "no", burning host and
+# relay resources and hiding the reason inside a restart loop. Preventing
+# restart for exactly this code leaves the unit in `failed` state, where
+# `systemctl --user status` shows the cause.
+#
+# Everything else still restarts. A crash, an OOM kill, a dropped link, a
+# harness that exits on its own — all transient, and an agent that stays down
+# is worse than one that flaps.
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=default.target

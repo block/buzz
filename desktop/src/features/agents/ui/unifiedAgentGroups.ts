@@ -34,11 +34,25 @@ export function buildUnifiedGroups(
   return { groups, ungrouped, unknown };
 }
 
+/**
+ * The agent whose config the group's card and actions menu describe.
+ *
+ * Active first, then provider-backed. The backend rank matters because the two
+ * records disagree about where the agent runs: a local record's harness comes
+ * from this computer's catalog, a provider-backed one's from the host. Picking
+ * the local record for a group that also has a remote agent makes the card and
+ * its edit dialog describe a machine the user is not looking at. Name is the
+ * final tiebreak, so the choice stays stable across renders.
+ */
 export function pickProfileAgent(agents: ManagedAgent[]) {
   return [...agents].sort((left, right) => {
     const activeDiff =
       Number(isManagedAgentActive(right)) - Number(isManagedAgentActive(left));
     if (activeDiff !== 0) return activeDiff;
+    const backendDiff =
+      Number(right.backend.type === "provider") -
+      Number(left.backend.type === "provider");
+    if (backendDiff !== 0) return backendDiff;
     return left.name.localeCompare(right.name);
   })[0];
 }
