@@ -82,8 +82,16 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
+    ///
+    /// Prefer BUZZ_PRIVATE_KEY env or --private-key-file. Passing the key
+    /// on argv leaks it into shell history and `ps` output — see #4032.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    /// Read the private key from a mode-0600 file. Safer than argv: the
+    /// path (not the key) lands in shell history and `ps`.
+    #[arg(long, value_name = "PATH", conflicts_with = "private_key")]
+    private_key_file: Option<std::path::PathBuf>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -1816,9 +1824,31 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
+    // Resolution order: argv --private-key → --private-key-file → BUZZ_PRIVATE_KEY env.
+    // argv and env both work; file is preferred when both argv sources are absent.
+    // See #4032 for the shell-history justification for the file form.
+    let private_key_str = match (cli.private_key, cli.private_key_file) {
+        (Some(key), None) => {
+            eprintln!(
+                "warning: --private-key on argv leaks the key to shell history and `ps`; \
+                 prefer BUZZ_PRIVATE_KEY or --private-key-file (see #4032)"
+            );
+            key
+        }
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(&path).map_err(|e| {
+                CliError::Auth(format!("could not read --private-key-file {path:?}: {e}"))
+            })?;
+            raw.trim().to_owned()
+        }
+        (None, None) => {
+            return Err(CliError::Auth(
+                "BUZZ_PRIVATE_KEY is required (set env var, or pass --private-key-file / --private-key)"
+                    .into(),
+            ));
+        }
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with enforces mutual exclusion"),
+    };
     let keys = Keys::parse(&private_key_str)
         .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
 
