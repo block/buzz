@@ -7130,6 +7130,7 @@ function withMockRuntimeConfigMetadata(
     ...runtime,
     node_required: runtime.node_required ?? false,
     auth_status: runtime.auth_status ?? { status: "unknown" },
+    supports_account_connection: runtime.supports_account_connection ?? false,
     model_env_var:
       "model_env_var" in runtime
         ? runtime.model_env_var

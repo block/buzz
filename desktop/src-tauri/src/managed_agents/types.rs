@@ -657,6 +657,7 @@ pub struct AcpRuntimeCatalogEntry {
     pub node_required: bool,
     /// Login/authentication status for CLI-based runtimes.
     pub auth_status: AuthStatus,
+    pub supports_account_connection: bool,
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,
@@ -664,7 +665,6 @@ pub struct AcpRuntimeCatalogEntry {
     /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
     pub source: HarnessSource,
     /// Definition-level environment variables for `source: custom` entries.
-    ///
     /// Populated from `HarnessDefinition.env` so the edit form can read them
     /// back and the user doesn't silently lose env vars when saving.  Always
     /// empty for `builtin` and `preset` entries (those env values come from the

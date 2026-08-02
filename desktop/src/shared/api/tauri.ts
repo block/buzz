@@ -197,12 +197,10 @@ export type RawAcpRuntimeCatalogEntry = {
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
+  supports_account_connection?: boolean;
   login_hint?: string;
   source: "builtin" | "preset" | "custom";
-  /**
-   * Definition-level env vars for `source: custom` entries.
-   * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
-   */
+  /** Custom definition env; absent for builtin/preset and empty custom maps. */
   definition_env?: Record<string, string>;
 };
 
@@ -756,6 +754,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
+    supportsAccountConnection: entry.supports_account_connection ?? false,
     loginHint: entry.login_hint ?? null,
     source: entry.source,
     // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).

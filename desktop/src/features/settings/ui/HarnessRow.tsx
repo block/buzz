@@ -37,6 +37,7 @@ import { Spinner } from "@/shared/ui/spinner";
 import { CustomHarnessForm } from "./CustomHarnessForm";
 import {
   adapterUpdateWarning,
+  canConnectRuntimeAccount,
   entryStatusLabel,
   isDownloadPageUrl,
 } from "./harnessCatalogLogic";
@@ -363,9 +364,7 @@ export function HarnessRow({
     });
   }
 
-  const canConnectAccount =
-    runtime.availability === "available" &&
-    runtime.authStatus.status === "logged_out";
+  const canConnectAccount = canConnectRuntimeAccount(runtime);
   const authMethodsQuery = useAcpAuthMethodsQuery(runtime.id, {
     enabled: canConnectAccount,
   });

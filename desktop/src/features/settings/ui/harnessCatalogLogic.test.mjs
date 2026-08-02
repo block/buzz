@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   adapterUpdateWarning,
+  canConnectRuntimeAccount,
   catalogDialogEntries,
   catalogPrimaryAction,
   entryStatusLabel,
@@ -36,10 +37,50 @@ function entry(overrides = {}) {
     underlyingCliPath: null,
     nodeRequired: false,
     authStatus: { status: "not_applicable" },
+    supportsAccountConnection: false,
     loginHint: null,
     ...overrides,
   };
 }
+
+describe("canConnectRuntimeAccount", () => {
+  it("offers optional account connection for an available runtime", () => {
+    assert.equal(
+      canConnectRuntimeAccount(
+        entry({
+          availability: "available",
+          authStatus: { status: "not_applicable" },
+          supportsAccountConnection: true,
+        }),
+      ),
+      true,
+    );
+  });
+
+  it("keeps probe-driven logged-out runtimes connectable", () => {
+    assert.equal(
+      canConnectRuntimeAccount(
+        entry({
+          availability: "available",
+          authStatus: { status: "logged_out" },
+        }),
+      ),
+      true,
+    );
+  });
+
+  it("does not offer connection before the runtime is installed", () => {
+    assert.equal(
+      canConnectRuntimeAccount(
+        entry({
+          availability: "not_installed",
+          supportsAccountConnection: true,
+        }),
+      ),
+      false,
+    );
+  });
+});
 
 // ── isYourHarnessEntry / yourHarnessEntries ──────────────────────────────────
 

@@ -15,7 +15,9 @@ mod runtime_metadata;
 
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use runtime_metadata::{
+    known_acp_runtime_exact, known_skill_dirs, KnownAcpRuntime, OPENCODE_RUNTIME,
+};
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -93,6 +95,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "",
         skill_dir: Some(".goose/skills"),
         supports_acp_model_switching: false,
+        supports_account_connection: false,
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
@@ -125,6 +128,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
+        supports_account_connection: false,
         model_env_var: None,
         provider_env_var: None,
         provider_locked: true,
@@ -157,6 +161,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
         skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
+        supports_account_connection: false,
         model_env_var: None,
         provider_env_var: None,
         provider_locked: false,
@@ -172,6 +177,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
+    OPENCODE_RUNTIME,
     KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
@@ -190,6 +196,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: true,
+        supports_account_connection: false,
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
@@ -205,11 +212,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         auth_probe_args: None,
     },
 ];
-
-/// Skill discovery directories declared by known runtimes.
-pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
-    KNOWN_ACP_RUNTIMES.iter().filter_map(|p| p.skill_dir)
-}
 
 fn workspace_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -269,10 +271,6 @@ pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntim
                 .any(|command| normalized == normalize_command_identity(command))
             || runtime.aliases.iter().any(|alias| normalized == *alias)
     })
-}
-
-pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
-    KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
 }
 
 /// The agent command a freshly-created agent defaults to when the create
@@ -465,7 +463,7 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "opencode" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1421,6 +1419,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             node_required,
             // Filled in by the auth-probe phase in full catalog discovery.
             auth_status: AuthStatus::Unknown,
+            supports_account_connection: runtime.supports_account_connection,
             login_hint: None,
             source: HarnessSource::Builtin,
             // Builtin entries have no user-editable env; definition_env is empty.
@@ -1580,6 +1579,7 @@ pub fn discover_acp_runtimes_from(
                 node_required: false,
                 // No auth probe for custom harnesses.
                 auth_status: AuthStatus::NotApplicable,
+                supports_account_connection: false,
                 login_hint: None,
                 source: HarnessSource::Custom,
                 // Carry definition env into the catalog so the edit form can
