@@ -22,6 +22,7 @@
 
 mod deploy;
 mod discover;
+mod identity;
 mod install;
 mod protocol;
 mod ssh;

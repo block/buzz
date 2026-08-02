@@ -384,7 +384,11 @@ These are properties of the code, not conventions to uphold.
   a damaged or interrupted push leaves nothing runnable behind.
 - **A deploy without the minted nsec fails closed.** An agent that mints its own key on the host
   looks deployed and is permanently unreachable: presence, mentions, `!shutdown`, badges and the
-  NIP-OA auth tag all key off the pubkey the desktop minted.
+  NIP-OA auth tag all key off the pubkey the desktop minted. The same is true of an nsec that
+  cannot be decoded: the identity is derived from it (spec §Deploy Step 0), so an unusable key
+  leaves nothing to key the deploy on.
+- **The identity is derived, not asserted.** Every host-side name comes from the pubkey computed
+  from the nsec; a payload `pubkey` that disagrees with it is refused rather than believed.
 - **A deploy without the harness pin fails closed.** The pin is the only channel by which the
   harness choice reaches the host. A blank one would fall through to `buzz-agent`, silently
   provisioning a harness the user never chose, so it is refused rather than substituted.
@@ -448,12 +452,28 @@ WantedBy=default.target
   are escaped on the way in, since systemd unquotes C-style escapes inside double quotes.
 
 The instance name is the agent name made unit-safe — lowercased, non-alphanumerics collapsed to `-`,
-truncated to 32 characters — followed by the first 12 hex characters of the agent's `pubkey`. The
+truncated to 32 characters — followed by the first 12 hex characters of the agent's pubkey. The
 name is the readable half; **the pubkey fragment is the identity**. A display name is not unique:
 two agents called "Research Bot" on one SSH account keyed on the name alone shared one unit, one env
 file and one `agent_id`, so the second deploy overwrote the first agent's minted nsec and starting
-either record drove whichever identity was written last. `deploy` therefore refuses a payload whose
-`agent.pubkey` is absent or is not a 64-character hex key, rather than falling back to the name.
+either record drove whichever identity was written last.
+
+**That fragment comes from a pubkey this provider derives, never one the payload asserts.** Spec
+§Deploy Step 0 is explicit — "the provider MUST parse `private_key_nsec` and derive the public key
+from it ... Every selector, name, and comparison below uses the *derived* pubkey — never a
+caller-supplied one" — and `identity::derive_pubkey` implements exactly that: bech32-decode the
+nsec, reject anything that is not a 32-byte `nsec1…`, and take the secp256k1 x-only public key. An
+undecodable key is an immediate in-band `{"ok": false, …}`, because with no derivable identity
+there is nothing left to name the unit after.
+
+The payload still carries `agent.pubkey`, but it is demoted from identity to **assertion**. When
+present it is shape-checked and reconciled against the derived value, and a well-formed pubkey for
+a *different* key is fatal rather than authoritative: honoring it would name the unit, the env file
+and `backend_agent_id` for one identity while the harness authenticated to the relay as another —
+the same permanently-unreachable agent the fail-closed nsec check already refuses to create. When
+absent it costs nothing; the nsec alone is sufficient. Neither the derived nor the asserted key is
+ever printed in full in an error — both are truncated to a 12-character fragment, since the whole
+response is persisted in the desktop's `last_error`.
 
 **A host provisioned before this rule keeps its old units.** The instance name changed, so a
 redeploy provisions a new unit alongside the name-keyed one rather than replacing it, and the old

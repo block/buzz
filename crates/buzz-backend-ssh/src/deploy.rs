@@ -48,8 +48,11 @@ const RESERVED_ENV_KEYS: &[&str] = &[
 /// `Debug` would put provider credentials one `{:?}` away from a log line.
 pub struct Agent {
     pub name: String,
-    /// The agent's minted Nostr pubkey — the desktop record's own primary key,
-    /// and the only stable identifier in the payload. See [`Agent::slug`].
+    /// The agent's Nostr pubkey — the desktop record's own primary key, and the
+    /// only stable identifier this deploy has. **Derived from
+    /// `private_key_nsec`, never read from the payload's `pubkey` field**, per
+    /// `docs/remote-agents.md` §Deploy Step 0. See [`Agent::slug`] and
+    /// [`crate::identity`].
     pub pubkey: String,
     pub relay_url: String,
     pub private_key_nsec: Secret,
@@ -123,27 +126,33 @@ impl Agent {
              reached the host (see instanceInputForDefinition provider branch)",
         )?;
 
-        // The one stable identifier in the payload, and what every host-side
-        // name is keyed on. Refused rather than defaulted for the same reason
-        // the minted key is: without it two agents that merely share a display
-        // name would share one unit, one env file and one `backend_agent_id`,
-        // and the second deploy would overwrite the first agent's identity.
+        // Step 0 of the reconciliation loop (docs/remote-agents.md §Deploy):
+        // "the payload carries the nsec, not the pubkey ... the provider MUST
+        // parse `private_key_nsec` and derive the public key from it ... Every
+        // selector, name, and comparison below uses the *derived* pubkey —
+        // never a caller-supplied one."
         //
-        // Validated to the shape the desktop always mints (`to_hex()` of a
-        // Nostr public key) because the fragment taken from it becomes a
-        // filename and a systemd instance name. Anything else is a payload bug,
-        // and sanitizing it would trade a loud failure for a silent collision.
-        let pubkey = string("pubkey").ok_or(
-            "deploy payload carries no 'pubkey': the remote unit would be keyed on the agent's \
-             display name, which two agents can share",
-        )?;
-        if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!(
-                "'pubkey' is not a 64-character hex Nostr public key: {} characters",
-                pubkey.len()
-            ));
+        // This is the one stable identifier, and every host-side name is keyed
+        // on it: the unit instance, the env file, `backend_agent_id`. Deriving
+        // rather than trusting is what guarantees the name and the identity the
+        // harness actually authenticates as cannot come apart. The payload's
+        // own `pubkey` is still read, but only as an assertion to reconcile
+        // against — see `identity::reconcile`, where a mismatch is fatal.
+        let asserted_pubkey = string("pubkey");
+        if let Some(claimed) = asserted_pubkey.as_deref() {
+            // Shape-check the assertion before comparing, so a payload bug
+            // reports as a malformed field rather than as an identity mismatch.
+            if claimed.len() != 64 || !claimed.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "'pubkey' is not a 64-character hex Nostr public key: {} characters",
+                    claimed.len()
+                ));
+            }
         }
-        let pubkey = pubkey.to_lowercase();
+        let pubkey = crate::identity::reconcile(
+            crate::identity::derive_pubkey(&private_key_nsec)?,
+            asserted_pubkey.as_deref(),
+        )?;
 
         Ok(Self {
             name: string("name").ok_or("'name' is required")?,
@@ -713,11 +722,19 @@ pub fn deploy(
 mod tests {
     use super::*;
 
-    const NSEC: &str = "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
-    /// A 64-hex Nostr pubkey, in the shape `record.pubkey` always carries.
-    const PUBKEY: &str = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+    /// The fixture key pair, and it must be a *real* pair: since Step 0 derives
+    /// the identity from the nsec rather than reading `pubkey`, an arbitrary
+    /// pubkey next to an unrelated nsec no longer parses at all.
+    const NSEC: &str = "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl";
+    /// A 64-hex Nostr pubkey, in the shape `record.pubkey` always carries — and
+    /// here, the one [`NSEC`] actually derives to.
+    const PUBKEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     /// The fragment of [`PUBKEY`] every host-side name is keyed on.
-    const PUBKEY_SLUG: &str = "3bf0c63fcb93";
+    const PUBKEY_SLUG: &str = "79be667ef9dc";
+
+    /// A second real pair, for the tests that need two distinct identities.
+    const OTHER_NSEC: &str = "nsec1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqstywftw";
+    const OTHER_PUBKEY: &str = "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
 
     fn request() -> serde_json::Value {
         serde_json::json!({
@@ -1086,15 +1103,18 @@ mod tests {
     /// file and an `agent_id`, so the second deploy overwrote the first's nsec.
     #[test]
     fn two_agents_with_one_name_get_distinct_units() {
-        let deployed = |pubkey: &str| {
+        // Two agents are two *keys*, which is now the only way to be two agents:
+        // the identity comes from the nsec, so the distinguishing input is the
+        // minted key rather than the pubkey field beside it.
+        let deployed = |nsec: &str, pubkey: &str| {
             let mut request = request();
+            request["agent"]["private_key_nsec"] = serde_json::json!(nsec);
             request["agent"]["pubkey"] = serde_json::json!(pubkey);
             let agent = Agent::from_request(&request).unwrap();
             (agent.slug(), agent.agent_id())
         };
-        let other = "e88a691e98d9987c964521dff60025f60700378a4879180dcbbb4a5027850411";
-        let (first_slug, first_id) = deployed(PUBKEY);
-        let (second_slug, second_id) = deployed(other);
+        let (first_slug, first_id) = deployed(NSEC, PUBKEY);
+        let (second_slug, second_id) = deployed(OTHER_NSEC, OTHER_PUBKEY);
         assert_ne!(first_slug, second_slug);
         assert_ne!(first_id, second_id);
         // Both still name the agent a human recognizes.
@@ -1110,29 +1130,60 @@ mod tests {
         assert_eq!(slug, format!("agent-{PUBKEY_SLUG}"));
     }
 
-    /// The identity is refused rather than defaulted: a payload without it
-    /// would silently fall back to name-keyed units, which is the collision.
+    /// Step 0 (`docs/remote-agents.md` §Deploy): the identity comes from the
+    /// nsec, so the key is the thing that cannot be missing. The `pubkey` field
+    /// is now an assertion — absent it costs nothing, malformed it is a payload
+    /// bug, and disagreeing with the key it travels beside it is fatal.
     #[test]
-    fn deploy_refuses_a_payload_with_no_usable_agent_identity() {
+    fn deploy_derives_the_identity_and_refuses_a_payload_that_contradicts_it() {
+        // No pubkey at all still deploys, keyed on the derived identity: the
+        // nsec is sufficient, which is precisely the spec's point.
         let mut request = request();
         request["agent"].as_object_mut().unwrap().remove("pubkey");
-        assert!(rejection(&request).contains("no 'pubkey'"));
+        let derived = Agent::from_request(&request).unwrap();
+        assert_eq!(derived.pubkey, PUBKEY);
+        assert_eq!(derived.slug(), format!("research-bot-{PUBKEY_SLUG}"));
 
-        for bad in ["", "abc123", &"z".repeat(64)] {
+        // A malformed assertion reports as a malformed field, not as a mismatch.
+        for bad in ["abc123", &"z".repeat(64)] {
             request["agent"]["pubkey"] = serde_json::json!(bad);
             let error = rejection(&request);
             assert!(
-                error.contains("pubkey"),
+                error.contains("not a 64-character hex"),
                 "accepted {bad:?} with error {error}"
             );
         }
 
-        // Case is normalized, so the same key never yields two units.
+        // A well-formed assertion for a *different* key is fatal: the unit would
+        // be named for one identity and the harness would authenticate as the
+        // other.
+        request["agent"]["pubkey"] = serde_json::json!(OTHER_PUBKEY);
+        let error = rejection(&request);
+        assert!(error.contains("does not match"), "{error}");
+
+        // Case is not identity, and the derived value is what the slug uses, so
+        // an uppercase assertion still yields exactly one unit.
         request["agent"]["pubkey"] = serde_json::json!(PUBKEY.to_uppercase());
         assert_eq!(
             Agent::from_request(&request).unwrap().slug(),
             Agent::from_request(&self::request()).unwrap().slug()
         );
+    }
+
+    /// The key is the identity, so an undecodable one has no fallback: there is
+    /// nothing left to name the unit after.
+    #[test]
+    fn deploy_refuses_a_key_it_cannot_derive_an_identity_from() {
+        let mut request = request();
+        for bad in ["not-an-nsec", "nsec1clearlynotvalid"] {
+            request["agent"]["private_key_nsec"] = serde_json::json!(bad);
+            let error = rejection(&request);
+            assert!(
+                error.contains("private_key_nsec"),
+                "accepted {bad:?} with error {error}"
+            );
+            assert!(!error.contains(bad), "error echoed the key: {error}");
+        }
     }
 
     #[test]

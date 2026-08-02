@@ -969,7 +969,9 @@ dependencies = [
 name = "buzz-backend-ssh"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
+ "bech32",
+ "secp256k1 0.31.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",
