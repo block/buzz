@@ -99,6 +99,40 @@ test("tag helpers drop malformed value-less tags", () => {
   assert.equal(issue.title, "Something is broken");
 });
 
+test("preserves advisory issue origin tags with stable valid selection", () => {
+  const issue = eventToProjectIssue(
+    issueEvent({
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["h"],
+        ["h", "  source-channel-id  "],
+        ["h", "later-channel-id"],
+        ["i", "bad\nexternal-id"],
+        ["i", "  github:issue:block/buzz#123  "],
+        ["i", "github:issue:block/buzz#456"],
+      ],
+    }),
+  );
+
+  assert.equal(issue.channelId, "source-channel-id");
+  assert.equal(issue.externalId, "github:issue:block/buzz#123");
+});
+
+test("drops malformed issue origin tags", () => {
+  const issue = eventToProjectIssue(
+    issueEvent({
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["h", "\u0000channel"],
+        ["i", "x".repeat(257)],
+      ],
+    }),
+  );
+
+  assert.equal(issue.channelId, null);
+  assert.equal(issue.externalId, null);
+});
+
 test("preserves root and comment tags for rich content rendering", () => {
   const root = issueEvent({
     tags: [

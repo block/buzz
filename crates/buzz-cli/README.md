@@ -98,6 +98,129 @@ buzz channels list | jq '.[].name'
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
 
+## Buzz-first delivery lifecycle
+
+Buzz and GitHub have deliberately narrow roles:
+
+- The Buzz issue owns intake and the durable work identity.
+- The Buzz PR owns human discussion, review, and lifecycle status.
+- The GitHub PR is a thin adapter for CI, protected-main checks, and merge.
+- The commit on GitHub's merged `main` is the shipped-code truth.
+
+Buzz is not a Git remote. Use one canonical GitHub remote (`origin`) and one
+GitHub branch for both the Buzz PR metadata and the thin GitHub PR.
+
+The recipe below uses the intended issue `--channel`/`--external-id` and PR
+`--channel`/`--issue`/`--external-id` flags. Choose opaque, stable external IDs
+before the first write. Never correlate records by title.
+
+```bash
+set -euo pipefail
+
+export CHANNEL_ID="<exact-channel-uuid>"
+export REPO_OWNER="<exact-64-hex-owner-pubkey>"
+export REPO_ID="<exact-repository-d-tag>"
+export WORK_EXTERNAL_ID="<stable-caller-issued-work-id>"
+export PR_EXTERNAL_ID="<stable-caller-issued-review-id>"
+export GH_REPO="<owner/repository>"
+export GH_CLONE_URL="<exact-GitHub-clone-url-for-origin>"
+
+WORK_STATE_KEY="$(printf '%s' "$WORK_EXTERNAL_ID" | sha256sum | cut -d' ' -f1)"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/buzz/lifecycles/$WORK_STATE_KEY"
+install -d -m 700 "$state_dir"
+umask 077
+
+buzz issues create \
+  --repo-owner "$REPO_OWNER" --repo-id "$REPO_ID" \
+  --channel "$CHANNEL_ID" --external-id "$WORK_EXTERNAL_ID" \
+  --title "Fix the specific failure" --content - \
+  < issue.md | tee "$state_dir/issue-create.json"
+ISSUE_EVENT_ID="$(jq -er '.event_id | select(test("^[0-9a-f]{64}$"))' \
+  "$state_dir/issue-create.json")"
+printf '%s\n' "$ISSUE_EVENT_ID"
+
+git fetch origin main
+BASE_SHA="$(git rev-parse 'origin/main^{commit}')"
+HEAD_SHA="$(git rev-parse 'HEAD^{commit}')"
+HEAD_BRANCH="buzz/$ISSUE_EVENT_ID"
+test "$(git branch --show-current)" != main
+test "$(git remote get-url origin)" = "$GH_CLONE_URL"
+git push origin "HEAD:refs/heads/$HEAD_BRANCH"
+REMOTE_HEAD_SHA="$(git ls-remote origin "refs/heads/$HEAD_BRANCH" | awk '{print $1}')"
+test "$REMOTE_HEAD_SHA" = "$HEAD_SHA"
+
+buzz pr open \
+  --repo-owner "$REPO_OWNER" --repo-id "$REPO_ID" \
+  --channel "$CHANNEL_ID" --issue "$ISSUE_EVENT_ID" \
+  --external-id "$PR_EXTERNAL_ID" \
+  --subject "Fix the specific failure" --body-file pr.md \
+  --commit "$HEAD_SHA" --merge-base "$BASE_SHA" \
+  --clone "$GH_CLONE_URL" --branch-name "$HEAD_BRANCH" \
+  | tee "$state_dir/pr-open.json"
+PR_EVENT_ID="$(jq -er '.event_id | select(test("^[0-9a-f]{64}$"))' \
+  "$state_dir/pr-open.json")"
+printf '%s\n' "$PR_EVENT_ID"
+
+# github-pr.md contains an exact machine-readable marker block with
+# ISSUE_EVENT_ID, PR_EVENT_ID, both external IDs, BASE_SHA, and HEAD_SHA.
+gh pr create --repo "$GH_REPO" --base main \
+  --head "$HEAD_BRANCH" --title "Fix the specific failure" \
+  --body-file github-pr.md | tee "$state_dir/github-pr-url"
+GH_PR_URL="$(cat "$state_dir/github-pr-url")"
+GH_PR_NUMBER="$(gh pr view "$GH_PR_URL" --json number --jq .number)"
+printf '%s\n' "$GH_PR_URL" "$GH_PR_NUMBER"
+```
+
+Create the GitHub PR only after the Buzz PR ID is durable. Put the exact Buzz
+issue ID, Buzz PR ID, external IDs, base SHA, and head SHA in a machine-readable
+marker block in its body. Persist the returned GitHub PR number and URL; address
+it by number or URL thereafter, never by title. Keep review discussion and
+status decisions on the Buzz PR. GitHub supplies only CI, protected-main
+enforcement, and merge.
+
+After GitHub merges, read back the exact merge commit and `main` SHA. Verify the
+merged commit is on `main`, then record Buzz PR `merged` and Buzz issue
+`resolved` status events with that exact SHA. The GitHub `main` readback, not a
+Buzz status assertion, determines what shipped.
+
+Sign both Buzz status events as the corresponding root author or the repository
+owner. Other signers may reach the relay, but trusted clients ignore their
+status assertions.
+
+```bash
+set -euo pipefail
+
+git fetch origin main
+MAIN_SHA="$(git rev-parse 'refs/remotes/origin/main^{commit}')"
+MERGE_SHA="$(gh pr view "$GH_PR_NUMBER" --repo "$GH_REPO" \
+  --json mergeCommit --jq '.mergeCommit.oid')"
+git merge-base --is-ancestor "$MERGE_SHA" "$MAIN_SHA"
+
+buzz pr status --pr "$PR_EVENT_ID" --status merged \
+  --repo-owner "$REPO_OWNER" --repo-id "$REPO_ID" \
+  --merge-commit "$MERGE_SHA" \
+  | tee "$state_dir/pr-merged.json"
+PR_STATUS_EVENT_ID="$(jq -er '.event_id | select(test("^[0-9a-f]{64}$"))' \
+  "$state_dir/pr-merged.json")"
+printf '%s\n' "$PR_STATUS_EVENT_ID"
+
+printf 'Resolved by GitHub main commit %s\n' "$MERGE_SHA" \
+  | buzz issues status --issue "$ISSUE_EVENT_ID" --status resolved \
+      --repo-owner "$REPO_OWNER" --repo-id "$REPO_ID" --content - \
+  | tee "$state_dir/issue-resolved.json"
+ISSUE_STATUS_EVENT_ID="$(jq -er '.event_id | select(test("^[0-9a-f]{64}$"))' \
+  "$state_dir/issue-resolved.json")"
+printf '%s\n' "$ISSUE_STATUS_EVENT_ID"
+```
+
+Each relay write, Git push, GitHub PR write, GitHub merge, and Buzz status write
+is a separate transaction. Print and persist every returned event ID privately
+before continuing. To resume, read the private checkpoint, fetch by exact event
+ID, PR number, or SHA, and verify the stable external-ID marker and links. If a
+retry finds a duplicate marker, missing link, or ID/SHA mismatch, stop without
+writing and reconcile it; do not create a second record. There is no lifecycle
+sync command and no cross-system rollback.
+
 ## Commands
 
 | Group | Subcommand | Description |
@@ -157,6 +280,15 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
+| `issues` | `create` | Create a repository issue |
+| | `get` | Get an issue by exact event ID |
+| | `list` | List repository issues |
+| | `status` | Publish issue status |
+| `pr` | `open` | Open a repository pull request |
+| | `update` | Publish a new PR tip |
+| | `get` | Get a PR by exact event ID |
+| | `list` | List repository PRs |
+| | `status` | Publish PR status |
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |

@@ -85,6 +85,26 @@ fn check_hex_exact(s: &str, len: usize, field: &str) -> Result<String, SdkError>
     Ok(s.to_ascii_lowercase())
 }
 
+fn check_external_id(s: &str) -> Result<(), SdkError> {
+    if s.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "external_id must not be empty".into(),
+        ));
+    }
+    if s.len() > 256 {
+        return Err(SdkError::InvalidInput(format!(
+            "external_id exceeds 256 bytes (got {})",
+            s.len()
+        )));
+    }
+    if s.chars().any(char::is_control) {
+        return Err(SdkError::InvalidInput(
+            "external_id must not contain control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dot,
 /// no `..`. Shared by `build_repo_announcement` and `GitRepoCoord` so a
 /// repo coordinate built directly through the SDK (bypassing CLI-side
@@ -1075,6 +1095,10 @@ pub struct GitIssueMeta {
     pub labels: Vec<String>,
     /// Additional pubkeys to `p`-tag besides the repo owner.
     pub recipients: Vec<String>,
+    /// NIP-29 channel where the issue originated (`h` tag).
+    pub channel_id: Option<String>,
+    /// Identifier in an external issue tracker (`i` tag).
+    pub external_id: Option<String>,
 }
 
 /// Build a git issue event (kind:1621, NIP-34). `content` is the markdown body.
@@ -1101,6 +1125,15 @@ pub fn build_git_issue(
     for recipient in &meta.recipients {
         let pk = check_pubkey_hex(recipient, "recipient")?;
         tags.push(tag(&["p", &pk])?);
+    }
+    if let Some(ref channel_id) = meta.channel_id {
+        let channel_id = Uuid::parse_str(channel_id)
+            .map_err(|e| SdkError::InvalidInput(format!("channel_id must be a valid UUID: {e}")))?;
+        tags.push(tag(&["h", &channel_id.to_string()])?);
+    }
+    if let Some(ref external_id) = meta.external_id {
+        check_external_id(external_id)?;
+        tags.push(tag(&["i", external_id])?);
     }
     tags.push(tag(&["subject", subject])?);
     for label in &meta.labels {
@@ -1308,6 +1341,10 @@ pub struct GitPullRequestMeta {
     pub recipients: Vec<String>,
     /// NIP-29 channel where the pull request originated (`h` tag).
     pub channel_id: Option<String>,
+    /// Issue event this pull request addresses (`e` tag with `issue` marker).
+    pub issue_id: Option<String>,
+    /// Identifier in an external issue tracker (`i` tag).
+    pub external_id: Option<String>,
     /// PR subject line (`subject` tag) — required, used as the header.
     pub subject: String,
     /// Labels (`t` tags).
@@ -1371,6 +1408,14 @@ pub fn build_git_pull_request(
         let channel_id = Uuid::parse_str(channel_id)
             .map_err(|e| SdkError::InvalidInput(format!("channel_id must be a valid UUID: {e}")))?;
         tags.push(tag(&["h", &channel_id.to_string()])?);
+    }
+    if let Some(ref issue_id) = meta.issue_id {
+        let issue_id = check_hex_exact(issue_id, 64, "issue_id")?;
+        tags.push(tag(&["e", &issue_id, "", "issue"])?);
+    }
+    if let Some(ref external_id) = meta.external_id {
+        check_external_id(external_id)?;
+        tags.push(tag(&["i", external_id])?);
     }
     let mut clone_tag = vec!["clone"];
     clone_tag.extend(meta.clone_urls.iter().map(String::as_str));
@@ -1883,6 +1928,15 @@ mod tests {
         event.tags.iter().any(|t| {
             let s = t.as_slice();
             s.first().map(|v| v.as_str()) == Some(key) && s.get(1).map(|v| v.as_str()) == Some(val)
+        })
+    }
+
+    fn has_exact_tag(event: &nostr::Event, expected: &[&str]) -> bool {
+        event.tags.iter().any(|tag| {
+            tag.as_slice()
+                .iter()
+                .map(|value| value.as_str())
+                .eq(expected.iter().copied())
         })
     }
 
@@ -3025,6 +3079,7 @@ mod tests {
         let meta = GitIssueMeta {
             labels: vec!["bug".to_string(), "p1".to_string()],
             recipients: vec![],
+            ..Default::default()
         };
         let ev =
             sign(build_git_issue(&repo, "Crashes on startup", "steps to repro", &meta).unwrap());
@@ -3034,6 +3089,46 @@ mod tests {
         assert!(has_tag(&ev, "subject", "Crashes on startup"));
         assert!(has_tag(&ev, "t", "bug"));
         assert!(has_tag(&ev, "t", "p1"));
+    }
+
+    #[test]
+    fn git_issue_emits_origin_channel_and_external_id_tags() {
+        let meta = GitIssueMeta {
+            channel_id: Some("AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE".to_string()),
+            external_id: Some("linear:BUZZ-42".to_string()),
+            ..Default::default()
+        };
+        let ev = sign(build_git_issue(&pr_repo(), "Origin links", "body", &meta).unwrap());
+
+        assert!(has_exact_tag(
+            &ev,
+            &["h", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"]
+        ));
+        assert!(has_exact_tag(&ev, &["i", "linear:BUZZ-42"]));
+    }
+
+    #[test]
+    fn git_issue_rejects_invalid_origin_channel() {
+        for channel_id in ["not-a-uuid", " 11111111-1111-4111-8111-111111111111 "] {
+            let meta = GitIssueMeta {
+                channel_id: Some(channel_id.to_string()),
+                ..Default::default()
+            };
+            let err = build_git_issue(&pr_repo(), "subject", "body", &meta).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
+    fn git_issue_rejects_invalid_external_id() {
+        for external_id in [String::new(), "x".repeat(257), "bad\nid".to_string()] {
+            let meta = GitIssueMeta {
+                external_id: Some(external_id),
+                ..Default::default()
+            };
+            let err = build_git_issue(&pr_repo(), "subject", "body", &meta).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
     }
 
     #[test]
@@ -3579,6 +3674,54 @@ mod tests {
     }
 
     #[test]
+    fn git_pr_emits_marked_issue_and_external_id_tags() {
+        let issue = event_id().to_hex();
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            issue_id: Some(issue.clone()),
+            external_id: Some("github:pull/42".to_string()),
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "", &meta).unwrap());
+
+        assert_eq!(tag_values(&ev, "e"), vec![issue.clone()]);
+        assert!(has_exact_tag(&ev, &["e", &issue, "", "issue"]));
+        assert!(has_exact_tag(&ev, &["i", "github:pull/42"]));
+    }
+
+    #[test]
+    fn git_pr_rejects_malformed_issue_event_id() {
+        for issue_id in [String::new(), "a".repeat(63), "g".repeat(64)] {
+            let meta = GitPullRequestMeta {
+                subject: "s".to_string(),
+                commit: "c".repeat(40),
+                clone_urls: vec!["https://example.com/repo.git".to_string()],
+                issue_id: Some(issue_id),
+                ..Default::default()
+            };
+            let err = build_git_pull_request(&pr_repo(), "", &meta).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
+    fn git_pr_rejects_invalid_external_id() {
+        for external_id in [String::new(), "x".repeat(257), "bad\nid".to_string()] {
+            let meta = GitPullRequestMeta {
+                subject: "s".to_string(),
+                commit: "c".repeat(40),
+                clone_urls: vec!["https://example.com/repo.git".to_string()],
+                external_id: Some(external_id),
+                ..Default::default()
+            };
+            let err = build_git_pull_request(&pr_repo(), "", &meta).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
     fn git_pr_revision_of_emits_e_tag() {
         let patch = event_id().to_hex();
         let meta = GitPullRequestMeta {
@@ -3589,7 +3732,9 @@ mod tests {
             ..Default::default()
         };
         let ev = sign(build_git_pull_request(&pr_repo(), "", &meta).unwrap());
-        assert!(has_tag(&ev, "e", &patch));
+        assert_eq!(tag_values(&ev, "e"), vec![patch.clone()]);
+        assert!(has_exact_tag(&ev, &["e", &patch]));
+        assert!(!has_exact_tag(&ev, &["e", &patch, "", "issue"]));
     }
 
     #[test]

@@ -11,6 +11,32 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
+function hasControlCharacter(value) {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint !== undefined &&
+      (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeAdvisoryId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > 256 ||
+    hasControlCharacter(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
 export function getTag(event, name) {
   const value = event.tags.find((tag) => tag[0] === name)?.[1];
   return isNonEmptyString(value) ? value : undefined;
@@ -24,6 +50,26 @@ export function getAllTags(event, name) {
 
 export function getImetaTags(event) {
   return event.tags.filter((tag) => tag[0] === "imeta");
+}
+
+/** Advisory transport-origin identifier. It is display metadata only and must
+ * never be used as authority for lifecycle changes. */
+export function getExternalId(event) {
+  for (const tag of event.tags) {
+    if (tag[0] !== "i") continue;
+    const value = normalizeAdvisoryId(tag[1]);
+    if (value) return value;
+  }
+  return null;
+}
+
+export function getAdvisoryLink(event, name) {
+  for (const tag of event.tags) {
+    if (tag[0] !== name) continue;
+    const value = normalizeAdvisoryId(tag[1]);
+    if (value) return value;
+  }
+  return null;
 }
 
 function repoOwnerFromAddress(repoAddress) {
@@ -110,6 +156,8 @@ export function eventToProjectIssue(
     author: issue.pubkey,
     createdAt: issue.created_at,
     repoAddress: getTag(issue, "a") ?? null,
+    channelId: getAdvisoryLink(issue, "h"),
+    externalId: getExternalId(issue),
     labels: getAllTags(issue, "t"),
     recipients: getAllTags(issue, "p"),
     status: statusFromEvent(issue, latestStatus),

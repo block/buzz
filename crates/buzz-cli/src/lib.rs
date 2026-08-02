@@ -1379,6 +1379,12 @@ pub enum PrCmd {
         /// Channel where this pull request originated (NIP-29 h-tag)
         #[arg(long)]
         channel: Option<String>,
+        /// Issue event id this pull request addresses
+        #[arg(long = "issue")]
+        issue_id: Option<String>,
+        /// Identifier in an external issue tracker
+        #[arg(long)]
+        external_id: Option<String>,
         /// Root patch event id this PR revises
         #[arg(long)]
         revision_of: Option<String>,
@@ -1499,6 +1505,12 @@ pub enum IssuesCmd {
         /// Additional recipient pubkey(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
+        /// Channel where this issue originated (NIP-29 h-tag)
+        #[arg(long = "channel")]
+        channel_id: Option<String>,
+        /// Identifier in an external issue tracker
+        #[arg(long)]
+        external_id: Option<String>,
     },
     /// Get an issue by event id
     Get {
@@ -1954,6 +1966,81 @@ mod tests {
             "--emoji alone must not imply a status"
         );
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
+    fn issue_create_parses_origin_link_flags() {
+        let owner = "a".repeat(64);
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "issues",
+            "create",
+            "--repo-owner",
+            &owner,
+            "--repo-id",
+            "repo",
+            "--title",
+            "bug",
+            "--content",
+            "body",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--external-id",
+            "linear:BUZZ-42",
+        ])
+        .expect("origin-link flags should parse");
+
+        let Cmd::Issues(IssuesCmd::Create {
+            channel_id,
+            external_id,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected issues create");
+        };
+        assert_eq!(
+            channel_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(external_id.as_deref(), Some("linear:BUZZ-42"));
+    }
+
+    #[test]
+    fn pr_open_parses_issue_and_external_id_flags() {
+        let owner = "a".repeat(64);
+        let commit = "c".repeat(40);
+        let issue_id = "b".repeat(64);
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "pr",
+            "open",
+            "--repo-owner",
+            &owner,
+            "--repo-id",
+            "repo",
+            "--subject",
+            "fix",
+            "--commit",
+            &commit,
+            "--clone",
+            "https://example.com/repo.git",
+            "--issue",
+            &issue_id,
+            "--external-id",
+            "github:pull/42",
+        ])
+        .expect("origin-link flags should parse");
+
+        let Cmd::Pr(PrCmd::Open {
+            issue_id: parsed_issue_id,
+            external_id,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected pr open");
+        };
+        assert_eq!(parsed_issue_id.as_deref(), Some(issue_id.as_str()));
+        assert_eq!(external_id.as_deref(), Some("github:pull/42"));
     }
 
     #[test]

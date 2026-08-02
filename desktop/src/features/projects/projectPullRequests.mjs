@@ -1,9 +1,24 @@
 import {
   allowedActorsForRoot,
+  getAdvisoryLink,
   getAllTags,
+  getExternalId,
   getImetaTags,
   getTag,
 } from "./projectIssues.mjs";
+
+function linkedIssueId(pullRequest) {
+  for (const tag of pullRequest.tags) {
+    if (
+      (tag[0] === "e" || tag[0] === "E") &&
+      /^[a-fA-F0-9]{64}$/.test(tag[1] ?? "") &&
+      tag[3] === "issue"
+    ) {
+      return tag[1].toLowerCase();
+    }
+  }
+  return null;
+}
 
 // Updates and status changes rewrite the PR's tip commit, clone URLs, and
 // lifecycle state, so they are only honored when signed by the PR author or
@@ -363,7 +378,9 @@ export function eventToProjectPullRequest(
     author: pullRequest.pubkey,
     createdAt: pullRequest.created_at,
     repoAddress: getTag(pullRequest, "a") ?? null,
-    channelId: getTag(pullRequest, "h") ?? null,
+    channelId: getAdvisoryLink(pullRequest, "h"),
+    linkedIssueId: linkedIssueId(pullRequest),
+    externalId: getExternalId(pullRequest),
     labels: getAllTags(pullRequest, "t"),
     recipients: getAllTags(pullRequest, "p"),
     reviewers,

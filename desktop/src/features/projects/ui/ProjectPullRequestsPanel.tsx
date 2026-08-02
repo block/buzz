@@ -42,6 +42,7 @@ import {
   ProjectFeedRowCluster,
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
+import { ProjectAdvisoryLinks } from "./ProjectAdvisoryLinks";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import type { OpenMergeRecoveryTerminal } from "./MergePullRequestButton";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
@@ -471,6 +472,11 @@ export function PullRequestMetaRail({
           </p>
         </div>
       </OverviewRailSection>
+      <ProjectAdvisoryLinks
+        primaryLabel="Issue"
+        primaryId={pullRequest.linkedIssueId}
+        externalId={pullRequest.externalId}
+      />
       <OverviewRailSection title="Activity">
         <dl className="space-y-1.5 text-xs text-muted-foreground">
           <div className="flex items-center justify-between gap-3">

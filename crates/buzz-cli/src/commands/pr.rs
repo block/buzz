@@ -32,6 +32,8 @@ pub async fn cmd_open_pr(
     labels: &[String],
     to: &[String],
     channel: Option<&str>,
+    issue_id: Option<&str>,
+    external_id: Option<&str>,
     revision_of: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
@@ -46,6 +48,8 @@ pub async fn cmd_open_pr(
         euc: euc.map(str::to_string),
         recipients: to.to_vec(),
         channel_id: channel.map(str::to_string),
+        issue_id: issue_id.map(str::to_string),
+        external_id: external_id.map(str::to_string),
         subject: subject.to_string(),
         labels: labels.to_vec(),
         commit: commit.to_string(),
@@ -230,6 +234,8 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
             label,
             to,
             channel,
+            issue_id,
+            external_id,
             revision_of,
         } => {
             cmd_open_pr(
@@ -247,6 +253,8 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
                 &label,
                 &to,
                 channel.as_deref(),
+                issue_id.as_deref(),
+                external_id.as_deref(),
                 revision_of.as_deref(),
             )
             .await

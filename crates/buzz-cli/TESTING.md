@@ -484,7 +484,57 @@ buzz notes rm --name does-not-exist   # exits non-zero
 
 ---
 
-## 7. Error Path Testing
+## 7. Buzz-first lifecycle read-only rehearsal
+
+This bounded chain validates an existing lifecycle without writing to the relay
+or GitHub. Supply exact fixture IDs and SHAs from a private checkpoint. Do not
+run `issues create`, `pr open`, either `status` command, `git push`,
+`gh pr create`, or `gh pr merge` during this rehearsal.
+
+```bash
+set -euo pipefail
+
+export ISSUE_EVENT_ID="<exact-64-hex-Buzz-issue-event-id>"
+export PR_EVENT_ID="<exact-64-hex-Buzz-pr-event-id>"
+export WORK_EXTERNAL_ID="<exact-stable-work-marker>"
+export PR_EXTERNAL_ID="<exact-stable-review-marker>"
+export HEAD_SHA="<exact-40-or-64-hex-head-commit>"
+export GH_REPO="<owner/repository>"
+export GH_PR_NUMBER="<exact-number>"
+
+# Confirm the intended correlation flags are present.
+cargo run -p buzz-cli -- issues create --help | rg -- '--channel|--external-id'
+cargo run -p buzz-cli -- pr open --help | rg -- '--channel|--issue|--external-id'
+
+# Query Buzz by exact IDs. Inspect each event's structured fields and require
+# exact channel, external-ID, issue-link, and head-SHA matches.
+buzz issues get --event "$ISSUE_EVENT_ID" | jq .
+buzz pr get --event "$PR_EVENT_ID" | jq .
+
+# Query GitHub by exact PR number and compare its marker block and head SHA.
+gh pr view "$GH_PR_NUMBER" --repo "$GH_REPO" \
+  --json number,url,state,body,headRefOid,baseRefOid,mergeCommit \
+  | jq --arg head "$HEAD_SHA" -e '.headRefOid == $head'
+
+# For a merged fixture, prove the exact merge commit is contained in main.
+git fetch origin main
+MAIN_SHA="$(git rev-parse 'refs/remotes/origin/main^{commit}')"
+MERGE_SHA="$(gh pr view "$GH_PR_NUMBER" --repo "$GH_REPO" \
+  --json mergeCommit --jq '.mergeCommit.oid')"
+git merge-base --is-ancestor "$MERGE_SHA" "$MAIN_SHA"
+printf 'main=%s merge=%s\n' "$MAIN_SHA" "$MERGE_SHA"
+```
+
+The chain passes only when each exact ID, external-ID marker, relationship, and
+SHA agrees. A missing record, duplicate marker, or mismatch fails closed; do not
+repair it by creating another issue or PR. Actual lifecycle writes are separate,
+non-transactional operations: privately persist every returned Buzz event ID,
+GitHub PR number/URL, and commit SHA before advancing, then resume from those
+stable values as described in `README.md`.
+
+---
+
+## 8. Error Path Testing
 
 Verify the CLI produces correct JSON on stderr and correct exit codes.
 
@@ -527,7 +577,7 @@ buzz channels get --channel "00000000-0000-0000-0000-000000000000"
 
 ---
 
-## 8. Auth Testing
+## 9. Auth Testing
 
 Test authentication.
 
@@ -545,7 +595,7 @@ env -u BUZZ_PRIVATE_KEY \
 
 ---
 
-## 9. Cleanup
+## 10. Cleanup
 
 ```bash
 # Delete test channels
@@ -555,7 +605,7 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 
 ---
 
-## 10. Checklist
+## 11. Checklist
 
 | # | Command | Tested | Notes |
 |---|---------|:------:|-------|
