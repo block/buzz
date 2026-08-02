@@ -4177,6 +4177,13 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    const COMMAND_ADVISER_SOURCE_ENV: &[&str] = &[
+        "COMMAND_ADVISER_PERSONA_ID",
+        "COMMAND_ADVISER_RAG_URL",
+        "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
+        "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
+        "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
+    ];
     if config.mcp_command.is_empty() {
         return vec![];
     }
@@ -4226,6 +4233,16 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         name: "BUZZ_ACP_DISPLAY_NAME".into(),
                         value: display_name,
                     });
+                }
+            }
+            for name in COMMAND_ADVISER_SOURCE_ENV {
+                if let Ok(value) = std::env::var(name) {
+                    if !value.is_empty() {
+                        env.push(EnvVar {
+                            name: (*name).into(),
+                            value,
+                        });
+                    }
                 }
             }
             env
@@ -5085,6 +5102,47 @@ mod build_mcp_servers_tests {
         let server = &servers[0];
         let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
+    }
+
+    #[test]
+    fn session_new_mcp_server_forwards_command_adviser_source_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let expected = [
+            ("COMMAND_ADVISER_PERSONA_ID", "builtin:command-intelligence"),
+            ("COMMAND_ADVISER_RAG_URL", "http://192.168.1.107:8005/mcp/"),
+            (
+                "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
+                "https://api.worldmonitor.app/mcp",
+            ),
+            (
+                "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
+                "/tmp/world-monitor-usage.json",
+            ),
+            (
+                "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
+                "/tmp/world-monitor-oauth.json",
+            ),
+        ];
+        for (name, value) in expected {
+            std::env::set_var(name, value);
+        }
+
+        let servers = build_mcp_servers(&test_config());
+
+        for (name, _) in expected {
+            std::env::remove_var(name);
+        }
+        for (name, value) in expected {
+            assert_eq!(
+                servers[0]
+                    .env
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .map(|entry| entry.value.as_str()),
+                Some(value),
+                "{name} should reach the MCP server verbatim"
+            );
+        }
     }
 
     #[test]
