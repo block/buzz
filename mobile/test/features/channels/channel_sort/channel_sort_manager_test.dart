@@ -91,6 +91,30 @@ void main() {
     subject.dispose();
   });
 
+  test(
+    'failed publish preflight retries without submitting stale state',
+    () async {
+      final relay = _FakeRelaySession();
+      final signed = _RecordingSignedEventRelay();
+      final subject = manager(relay, signed);
+      await subject.initialize();
+
+      relay.fetchFailures = 1;
+      subject.setSortModeFor('dms', ChannelSortMode.recent);
+      await Future<void>.delayed(const Duration(milliseconds: 8));
+      expect(signed.submitCount, 0);
+
+      final submitted = await signed.submitted.future.timeout(
+        const Duration(seconds: 1),
+      );
+      expect(relay.fetchCount, greaterThanOrEqualTo(4));
+      final payload =
+          jsonDecode(crypto.decrypt(submitted.content)) as Map<String, dynamic>;
+      expect(payload['groups'], {'dms': 'recent'});
+      subject.dispose();
+    },
+  );
+
   test('newer remote event cancels pending local whole-blob write', () async {
     final relay = _FakeRelaySession();
     final signed = _RecordingSignedEventRelay();
@@ -156,6 +180,7 @@ class _SubmittedEvent {
 
 class _RecordingSignedEventRelay implements SignedEventRelay {
   final submitted = Completer<_SubmittedEvent>();
+  int submitCount = 0;
 
   @override
   String? get pubkey => null;
@@ -168,6 +193,7 @@ class _RecordingSignedEventRelay implements SignedEventRelay {
     int? createdAt,
     void Function(NostrEvent event)? onSigned,
   }) async {
+    submitCount++;
     if (!submitted.isCompleted) {
       submitted.complete(_SubmittedEvent(content, tags));
     }

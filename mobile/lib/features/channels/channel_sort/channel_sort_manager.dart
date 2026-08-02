@@ -237,8 +237,12 @@ class ChannelSortManager {
     final generationAtStart = _generation;
     // A newer remote blob wins. If one arrives during this read, _generation
     // changes and we abort rather than overwriting it.
-    await _fetchAndApply();
+    final preflight = await _fetchAndApply();
     if (_disposed || _generation != generationAtStart) return;
+    if (preflight == null) {
+      _schedulePublish();
+      return;
+    }
     try {
       final now = currentUnixSeconds();
       final createdAt = max(now, _lastRemoteCreatedAt + 1);
