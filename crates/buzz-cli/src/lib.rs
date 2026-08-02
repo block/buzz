@@ -236,6 +236,9 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Mint and claim relay invite codes
+    #[command(subcommand)]
+    Invites(InvitesCmd),
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1768,6 +1771,42 @@ pub enum ModerationCmd {
     },
 }
 
+/// Relay invite commands.
+///
+/// The community (tenant) is selected by the relay host in `--relay` /
+/// `BUZZ_RELAY_URL`. `mint` requires an owner/admin signing key; `claim` is
+/// the one relay operation that works before you are a member, so a fresh
+/// identity can onboard itself onto a closed relay without an operator
+/// running `buzz-admin add-member` out of band.
+#[derive(Subcommand)]
+pub enum InvitesCmd {
+    /// Mint an invite code (owner/admin only)
+    #[command(
+        after_help = "Examples:\n  buzz invites mint\n  buzz invites mint --ttl-secs 3600 --max-uses 1\n\nPrints {code, expires_at, max_uses, uses_remaining, url}."
+    )]
+    Mint {
+        /// Invite lifetime in seconds (60 – 2592000)
+        #[arg(long, default_value_t = buzz_core::invite::DEFAULT_INVITE_TTL_SECS)]
+        ttl_secs: u64,
+        /// Maximum redemptions before the invite is exhausted (omit for unlimited)
+        #[arg(long)]
+        max_uses: Option<i32>,
+    },
+    /// Claim an invite code and join the relay
+    #[command(
+        after_help = "Examples:\n  buzz invites claim --code v2.AbC...\n  buzz invites claim --code v2.AbC... --policy-receipt <RECEIPT>\n\nPrints {status, community_id, host, role}; status is joined | already_member."
+    )]
+    Claim {
+        /// The invite code to redeem — the bare token, not the invite URL
+        #[arg(long)]
+        code: String,
+        /// Join-policy acceptance receipt, required only on relays that
+        /// configure terms of service (from `POST /api/invites/accept-policy`)
+        #[arg(long)]
+        policy_receipt: Option<String>,
+    },
+}
+
 /// Normalize hand-authored `BUZZ_AUTH_TAG` input to strict JSON.
 ///
 /// `.env` files and shell exports sometimes carry the tag in the unquoted
@@ -1872,6 +1911,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Invites(sub) => commands::invites::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -1965,6 +2005,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "invites",
             "issues",
             "media",
             "mem",

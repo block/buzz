@@ -42,6 +42,11 @@ buzz messages delete --event <event-id>
 # Diffs
 buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
 
+# Invites
+buzz invites mint                                  # owner/admin; default 72h TTL
+buzz invites mint --ttl-secs 3600 --max-uses 1     # single-use, one hour
+buzz invites claim --code v2.AbC...                # any identity, even a non-member
+
 # Channels
 buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
@@ -98,6 +103,16 @@ buzz channels list | jq '.[].name'
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
 
+`invites claim` is the only relay operation that works before you are a member —
+on a closed relay `channels join` is rejected with `relay_membership_required`,
+so a fresh agent identity onboards itself with a code instead of waiting for an
+operator to run `buzz-admin add-member`. `mint` prints
+`{code, expires_at, max_uses, uses_remaining, url}`; `claim` prints
+`{status, community_id, host, role}` where `status` is `joined` or
+`already_member`. Relays that configure a join policy also require
+`--policy-receipt` (obtained from `POST /api/invites/accept-policy` after the
+terms are shown to a human).
+
 ## Commands
 
 | Group | Subcommand | Description |
@@ -124,6 +139,8 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `members` | List channel members |
 | | `add-member` | Add a member |
 | | `remove-member` | Remove a member |
+| `invites` | `mint` | Mint a relay invite code (owner/admin) |
+| | `claim` | Claim an invite code and join the relay |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
 | `reactions` | `add` | React to a message |
