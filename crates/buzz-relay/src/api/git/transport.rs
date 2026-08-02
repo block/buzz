@@ -2097,6 +2097,74 @@ async fn finalize_push_inner(
     response
 }
 
+/// Admit Git's unauthenticated four-byte receive-pack compatibility probe.
+///
+/// Large smart-HTTP pushes first send a flush packet before Git retries with
+/// the real, authenticated chunked pack. This middleware is mounted only on
+/// the receive-pack POST route and deliberately matches the probe's complete
+/// wire shape before returning a path-independent empty result.
+async fn receive_pack_compatibility_probe(
+    request: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    fn has_single_exact_header(
+        headers: &axum::http::HeaderMap,
+        name: &axum::http::HeaderName,
+        expected: &[u8],
+    ) -> bool {
+        let mut values = headers.get_all(name).iter();
+        matches!(values.next(), Some(value) if value.as_bytes() == expected)
+            && values.next().is_none()
+    }
+
+    let headers = request.headers();
+    let is_candidate = request.method() == axum::http::Method::POST
+        && !headers.contains_key(header::AUTHORIZATION)
+        && !headers.contains_key(header::CONTENT_ENCODING)
+        && !headers.contains_key(header::TRANSFER_ENCODING)
+        && has_single_exact_header(
+            headers,
+            &header::CONTENT_TYPE,
+            b"application/x-git-receive-pack-request",
+        )
+        && has_single_exact_header(headers, &header::CONTENT_LENGTH, b"4");
+
+    if !is_candidate {
+        return next.run(request).await;
+    }
+
+    let (parts, body) = request.into_parts();
+    match axum::body::to_bytes(body, 4).await {
+        Ok(bytes) if bytes.as_ref() == b"0000" => {
+            // Git sends this unauthenticated flush packet before a large,
+            // authenticated chunked receive-pack request. The response is
+            // deliberately path-independent: do not resolve a tenant, inspect
+            // repository state, hydrate, run Git, or mutate anything here.
+            let mut response = Response::new(Body::empty());
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/x-git-receive-pack-result"),
+            );
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                axum::http::HeaderValue::from_static("0"),
+            );
+            response
+        }
+        Ok(bytes) => {
+            next.run(axum::http::Request::from_parts(parts, Body::from(bytes)))
+                .await
+        }
+        Err(_) => {
+            // The declared four-byte body exceeded the hard collection limit
+            // or failed to stream. Preserve the normal authentication path;
+            // an unauthenticated request is rejected before its body is read.
+            next.run(axum::http::Request::from_parts(parts, Body::empty()))
+                .await
+        }
+    }
+}
+
 /// Build the git sub-router with its own body limit.
 ///
 /// Mounted at `/git/{owner}/{repo}/...` with a configurable max pack size.
@@ -2106,7 +2174,11 @@ pub fn git_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
-        .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
+        .route(
+            "/git/{owner}/{repo}/git-receive-pack",
+            post(receive_pack)
+                .route_layer(axum::middleware::from_fn(receive_pack_compatibility_probe)),
+        )
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
 }
@@ -2122,6 +2194,120 @@ mod track_c_tests {
     use std::io::Write;
     use std::process::Output;
     use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    fn receive_pack_probe_test_router() -> Router {
+        Router::new().route(
+            "/git/{owner}/{repo}/git-receive-pack",
+            post(|| async {
+                Response::builder()
+                    .status(StatusCode::IM_A_TEAPOT)
+                    .header("x-probe-next", "reached")
+                    .body(Body::empty())
+                    .unwrap()
+            })
+            .route_layer(axum::middleware::from_fn(receive_pack_compatibility_probe)),
+        )
+    }
+
+    fn receive_pack_probe_request(
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &'static [u8],
+    ) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::builder().method("POST").uri(uri);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.body(Body::from(body)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn receive_pack_compatibility_probe_is_exact_and_path_independent() {
+        const CONTENT_TYPE: (&str, &str) =
+            ("content-type", "application/x-git-receive-pack-request");
+        const CONTENT_LENGTH: (&str, &str) = ("content-length", "4");
+        let exact_headers = [CONTENT_TYPE, CONTENT_LENGTH];
+
+        for uri in [
+            "/git/alice/repo/git-receive-pack",
+            "/git/not-a-real-owner/not-a-real-repo/git-receive-pack",
+        ] {
+            let response = receive_pack_probe_test_router()
+                .oneshot(receive_pack_probe_request(uri, &exact_headers, b"0000"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/x-git-receive-pack-result"
+            );
+            assert_eq!(response.headers().get(header::CONTENT_LENGTH).unwrap(), "0");
+            assert!(response.headers().get("x-probe-next").is_none());
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(body.is_empty());
+        }
+
+        type ProbeCase = (Vec<(&'static str, &'static str)>, &'static [u8]);
+        let near_misses: Vec<ProbeCase> = vec![
+            (exact_headers.to_vec(), b"0001"),
+            (exact_headers.to_vec(), b"00000"),
+            (vec![CONTENT_LENGTH], b"0000"),
+            (vec![CONTENT_TYPE], b"0000"),
+            (
+                vec![
+                    (
+                        "content-type",
+                        "application/x-git-rece-pack-request; charset=utf-8",
+                    ),
+                    CONTENT_LENGTH,
+                ],
+                b"0000",
+            ),
+            (vec![CONTENT_TYPE, ("content-length", "5")], b"0000"),
+            (
+                vec![
+                    CONTENT_TYPE,
+                    CONTENT_LENGTH,
+                    ("authorization", "Nostr invalid-but-present"),
+                ],
+                b"0000",
+            ),
+            (
+                vec![
+                    CONTENT_TYPE,
+                    CONTENT_LENGTH,
+                    ("content-encoding", "identity"),
+                ],
+                b"0000",
+            ),
+            (
+                vec![
+                    CONTENT_TYPE,
+                    CONTENT_LENGTH,
+                    ("transfer-encoding", "chunked"),
+                ],
+                b"0000",
+            ),
+            (vec![CONTENT_TYPE, CONTENT_TYPE, CONTENT_LENGTH], b"0000"),
+            (vec![CONTENT_TYPE, CONTENT_LENGTH, CONTENT_LENGTH], b"0000"),
+        ];
+
+        for (headers, body) in near_misses {
+            let response = receive_pack_probe_test_router()
+                .oneshot(receive_pack_probe_request(
+                    "/git/alice/repo/git-receive-pack",
+                    &headers,
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+            assert_eq!(response.headers().get("x-probe-next").unwrap(), "reached");
+        }
+    }
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
