@@ -23,7 +23,7 @@ pub(super) const RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
     cli_install_hint: "Buzz talks to Grok Build through the Grok CLI's native ACP mode. Authenticate with `grok login`.",
     adapter_install_hint: "",
     skill_dir: Some(".grok/skills"),
-    supports_acp_model_switching: false,
+    supports_acp_model_switching: true,
     model_env_var: None,
     provider_env_var: None,
     provider_locked: false,

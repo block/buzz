@@ -132,6 +132,7 @@ mod tests {
         );
         assert!(grok.adapter_install_commands.is_empty());
         assert!(grok.cli_install_hint.contains("native ACP"));
+        assert!(grok.supports_acp_model_switching);
         assert_eq!(grok.avatar_url, super::super::grok::GROK_BUILD_AVATAR_URL);
         assert_eq!(
             super::super::default_agent_args("grok"),
