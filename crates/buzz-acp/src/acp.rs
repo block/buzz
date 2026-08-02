@@ -20,6 +20,9 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Buzz stream-message content limit. Accumulation is capped here so an agent
+/// cannot grow harness memory without bound and the result remains publishable.
+const MAX_RESPONSE_TEXT_BYTES: usize = 64 * 1024;
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -211,6 +214,12 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text streamed as `agent_message_chunk` notifications for the current prompt.
+    /// Reset before every prompt and consumed by the harness after a successful turn.
+    response_text: String,
+    /// Latest event positively acknowledged by a non-cancelling native steer.
+    /// Reset with each prompt and consumed with the completed response.
+    response_anchor: Option<crate::queue::BatchEvent>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +559,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            response_text: String::new(),
+            response_anchor: None,
         })
     }
 
@@ -751,6 +762,8 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.response_text.clear();
+        self.response_anchor = None;
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -862,6 +875,17 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Consume the ACP text streamed for the most recently completed prompt.
+    pub fn take_response_text(&mut self) -> String {
+        std::mem::take(&mut self.response_text)
+    }
+
+    /// Consume the latest event successfully injected into this prompt by a
+    /// non-cancelling steer, if any.
+    pub fn take_response_anchor(&mut self) -> Option<crate::queue::BatchEvent> {
+        self.response_anchor.take()
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1302,6 +1326,7 @@ impl AcpClient {
             u64,
             SteerTransport,
             tokio::sync::oneshot::Sender<crate::pool::SteerAck>,
+            Option<crate::queue::BatchEvent>,
         )> = None;
 
         let now = Instant::now();
@@ -1327,7 +1352,7 @@ impl AcpClient {
             // exists). Check the classified deadline here so a steady-
             // stream agent is still bounded.
             if Instant::now() >= next_deadline {
-                if let Some((_, _, ack_tx)) = pending_steer.take() {
+                if let Some((_, _, ack_tx, _)) = pending_steer.take() {
                     // Prompt is timing out — release the withheld event via
                     // PromptCompletedNeutral (no fallback signal: there is
                     // no in-flight turn to signal once we return, and
@@ -1429,7 +1454,12 @@ impl AcpClient {
                             );
                             match self.write_ndjson(&msg).await {
                                 Ok(()) => {
-                                    pending_steer = Some((id, transport, req.ack_tx));
+                                    pending_steer = Some((
+                                        id,
+                                        transport,
+                                        req.ack_tx,
+                                        req.response_anchor,
+                                    ));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -1452,7 +1482,7 @@ impl AcpClient {
                     // would catch this anyway, but firing the deadline arm
                     // here makes the wakeup immediate (no extra reader poll
                     // round-trip when stdout is idle).
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, ack_tx, _)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     if idle_fires_first {
@@ -1476,13 +1506,13 @@ impl AcpClient {
 
             match read_result {
                 None => {
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, ack_tx, _)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::AgentExited);
                 }
                 Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, ack_tx, _)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::Protocol(
@@ -1490,7 +1520,7 @@ impl AcpClient {
                     ));
                 }
                 Some(Err(e)) => {
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, ack_tx, _)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::Io(std::io::Error::other(e)));
@@ -1533,13 +1563,13 @@ impl AcpClient {
                     // share the `no method` guard.
                     if let Some(id) = msg.get("id") {
                         if msg.get("method").is_none() {
-                            if let Some((steer_id, _, _)) = pending_steer.as_ref() {
+                            if let Some((steer_id, _, _, _)) = pending_steer.as_ref() {
                                 if *id == serde_json::json!(*steer_id) {
                                     // Take the ack_tx out and route the
                                     // response. We do not return — keep
                                     // reading until the prompt response
                                     // arrives.
-                                    let (_, transport, ack_tx) =
+                                    let (_, transport, ack_tx, response_anchor) =
                                         pending_steer.take().expect("just checked");
                                     let ack = if let Some(error) = msg.get("error") {
                                         let code = error
@@ -1629,19 +1659,22 @@ impl AcpClient {
                                             }
                                         }
                                     };
+                                    if matches!(ack, crate::pool::SteerAck::Success) {
+                                        self.response_anchor = response_anchor;
+                                    }
                                     let _ = ack_tx.send(ack);
                                     continue;
                                 }
                             }
                             if *id == serde_json::json!(expected_id) {
                                 if let Some(error) = msg.get("error") {
-                                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                                    if let Some((_, _, ack_tx, _)) = pending_steer.take() {
                                         let _ = ack_tx
                                             .send(crate::pool::SteerAck::PromptCompletedNeutral);
                                     }
                                     return Err(agent_error_from_json(error));
                                 }
-                                if let Some((_, _, ack_tx)) = pending_steer.take() {
+                                if let Some((_, _, ack_tx, _)) = pending_steer.take() {
                                     let _ =
                                         ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                                 }
@@ -1715,6 +1748,28 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    let remaining =
+                        MAX_RESPONSE_TEXT_BYTES.saturating_sub(self.response_text.len());
+                    if remaining > 0 {
+                        let end = text
+                            .char_indices()
+                            .map(|(index, _)| index)
+                            .take_while(|index| *index <= remaining)
+                            .last()
+                            .unwrap_or(0);
+                        let end = if text.len() <= remaining {
+                            text.len()
+                        } else {
+                            end
+                        };
+                        self.response_text.push_str(&text[..end]);
+                    }
+                    if text.len() > remaining {
+                        tracing::warn!(
+                            limit = MAX_RESPONSE_TEXT_BYTES,
+                            "ACP response text exceeded Buzz message limit and was truncated"
+                        );
+                    }
                 }
                 false
             }
@@ -3526,6 +3581,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn successful_prompt_accumulates_agent_message_chunks_in_order() {
+        let script = r#"
+            read -r _prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"Hello "}}}}'
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"Buzz"}}}}'
+            echo '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+        "#;
+        let mut client = spawn_script(script).await;
+        let stop = client
+            .session_prompt_with_idle_timeout(
+                "session",
+                "prompt",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("prompt should complete");
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(client.take_response_text(), "Hello Buzz");
+        assert_eq!(client.take_response_text(), "");
+    }
+
+    #[tokio::test]
+    async fn each_prompt_resets_response_accumulation() {
+        let script = r#"
+            read -r _first
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"stale"}}}}'
+            echo '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+            read -r _second
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"fresh"}}}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+        "#;
+        let mut client = spawn_script(script).await;
+        for expected in ["stale", "fresh"] {
+            client
+                .session_prompt_with_idle_timeout(
+                    "session",
+                    "prompt",
+                    std::time::Duration::from_secs(2),
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .expect("prompt should complete");
+            assert_eq!(client.take_response_text(), expected);
+        }
+    }
+
     // ── Goose-native steer arm tests ──────────────────────────────────────
     //
     // These exercise the seam between `install_steer_rx` and the read
@@ -3561,11 +3665,19 @@ mod tests {
 
         // Fire-and-forget: send a SteerRequest from a separate task so
         // the read loop picks it up via the select! arm.
+        let response_anchor = crate::queue::BatchEvent {
+            event: nostr::EventBuilder::new(nostr::Kind::Custom(9), "undelivered steer")
+                .sign_with_keys(&nostr::Keys::generate())
+                .expect("anchor event"),
+            prompt_tag: "mentions".into(),
+            received_at: std::time::Instant::now(),
+        };
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
         let send_task = tokio::spawn(async move {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["test steer body".into()],
+                    response_anchor: Some(response_anchor),
                     ack_tx,
                 })
                 .await
@@ -3599,6 +3711,10 @@ mod tests {
             crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
             other => panic!("expected SteerAck::Err(ExpectedRunIdMissing), got {other:?}"),
         }
+        assert!(
+            client.take_response_anchor().is_none(),
+            "failed steer must not replace the response anchor"
+        );
     }
 
     /// Steer with `active_run_id` set writes the JSON-RPC request and
@@ -3630,11 +3746,22 @@ mod tests {
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
         client.install_steer_rx(steer_rx);
 
+        let anchor_keys = nostr::Keys::generate();
+        let anchor_event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "steered event")
+            .sign_with_keys(&anchor_keys)
+            .expect("anchor event");
+        let anchor_id = anchor_event.id;
+        let response_anchor = crate::queue::BatchEvent {
+            event: anchor_event,
+            prompt_tag: "mentions".into(),
+            received_at: std::time::Instant::now(),
+        };
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
         let send_task = tokio::spawn(async move {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["test steer body".into()],
+                    response_anchor: Some(response_anchor),
                     ack_tx,
                 })
                 .await
@@ -3673,6 +3800,14 @@ mod tests {
             crate::pool::SteerAck::Success => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
+        assert_eq!(
+            client
+                .take_response_anchor()
+                .expect("successful steer should retain response anchor")
+                .event
+                .id,
+            anchor_id
+        );
     }
 
     /// Steer-success renewal keeps the turn alive past the original hard
@@ -3707,6 +3842,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    response_anchor: None,
                     ack_tx,
                 })
                 .await
@@ -3781,6 +3917,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    response_anchor: None,
                     ack_tx,
                 })
                 .await
@@ -4031,6 +4168,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    response_anchor: None,
                     ack_tx,
                 })
                 .await
@@ -4084,6 +4222,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    response_anchor: None,
                     ack_tx,
                 })
                 .await
