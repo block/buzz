@@ -15,8 +15,7 @@ use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
 
-/// Default idle timeout (seconds) when neither `--idle-timeout` nor the
-/// deprecated `--turn-timeout` is set.
+/// Default idle timeout (seconds) when `--idle-timeout` is not set.
 ///
 /// Sized for slow turns where the agent may go silent on its outer ACP channel
 /// while running long sub-tools (e.g. a buzz-agent running another agent, or
@@ -269,10 +268,6 @@ pub struct CliArgs {
     /// Absolute wall-clock cap per turn (safety valve).
     #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
     pub max_turn_duration: u64,
-
-    /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
-    #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
-    pub turn_timeout: Option<u64>,
 
     #[arg(
         long,
@@ -939,27 +934,9 @@ impl Config {
             args.turn_liveness_secs
         };
 
-        // Resolve idle_timeout_secs with deprecation handling.
-        // Precedence: explicit --idle-timeout > --turn-timeout (deprecated) > `DEFAULT_IDLE_TIMEOUT_SECS`.
+        // Resolve idle_timeout_secs: explicit --idle-timeout > DEFAULT_IDLE_TIMEOUT_SECS.
         let idle_timeout_secs = {
-            let raw = match (args.idle_timeout, args.turn_timeout) {
-                (Some(idle), Some(_turn)) => {
-                    tracing::warn!(
-                        "--turn-timeout / BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored \
-                         when --idle-timeout / BUZZ_ACP_IDLE_TIMEOUT is also set"
-                    );
-                    idle
-                }
-                (Some(idle), None) => idle,
-                (None, Some(turn)) => {
-                    tracing::warn!(
-                        "--turn-timeout / BUZZ_ACP_TURN_TIMEOUT is deprecated; \
-                         use --idle-timeout / BUZZ_ACP_IDLE_TIMEOUT instead"
-                    );
-                    turn
-                }
-                (None, None) => DEFAULT_IDLE_TIMEOUT_SECS,
-            };
+            let raw = args.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);
             if raw == 0 {
                 tracing::warn!("idle timeout of 0 is invalid — using 1s minimum");
                 1
@@ -2342,15 +2319,9 @@ channels = "ALL"
         }
     }
 
-    /// Helper: resolve idle_timeout_secs using the same precedence logic as Config::from_args.
-    /// Precedence: explicit --idle-timeout > --turn-timeout (deprecated) > `DEFAULT_IDLE_TIMEOUT_SECS`.
-    fn resolve_idle_timeout(idle: Option<u64>, turn: Option<u64>) -> u64 {
-        let raw = match (idle, turn) {
-            (Some(idle), Some(_)) => idle,
-            (Some(idle), None) => idle,
-            (None, Some(turn)) => turn,
-            (None, None) => DEFAULT_IDLE_TIMEOUT_SECS,
-        };
+    /// Helper: resolve idle_timeout_secs using the same logic as Config::from_args.
+    fn resolve_idle_timeout(idle: Option<u64>) -> u64 {
+        let raw = idle.unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);
         if raw == 0 {
             1
         } else {
@@ -2359,28 +2330,18 @@ channels = "ALL"
     }
 
     #[test]
-    fn idle_timeout_explicit_wins_over_deprecated() {
-        assert_eq!(resolve_idle_timeout(Some(120), Some(600)), 120);
+    fn idle_timeout_explicit() {
+        assert_eq!(resolve_idle_timeout(Some(120)), 120);
     }
 
     #[test]
-    fn idle_timeout_falls_back_to_deprecated_turn_timeout() {
-        assert_eq!(resolve_idle_timeout(None, Some(600)), 600);
-    }
-
-    #[test]
-    fn idle_timeout_defaults_to_constant_when_neither_set() {
-        assert_eq!(resolve_idle_timeout(None, None), DEFAULT_IDLE_TIMEOUT_SECS);
+    fn idle_timeout_defaults_to_constant_when_not_set() {
+        assert_eq!(resolve_idle_timeout(None), DEFAULT_IDLE_TIMEOUT_SECS);
     }
 
     #[test]
     fn idle_timeout_zero_clamped_to_one() {
-        assert_eq!(resolve_idle_timeout(Some(0), None), 1);
-    }
-
-    #[test]
-    fn idle_timeout_zero_from_deprecated_clamped_to_one() {
-        assert_eq!(resolve_idle_timeout(None, Some(0)), 1);
+        assert_eq!(resolve_idle_timeout(Some(0)), 1);
     }
 
     #[test]
