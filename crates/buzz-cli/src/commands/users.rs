@@ -79,6 +79,11 @@ pub async fn cmd_get_users(
             serde_json::to_string(&compact).unwrap_or_default()
         }
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
+        crate::OutputFormat::Raw => {
+            return Err(CliError::Usage(
+                "--format raw is not supported by users get".into(),
+            ));
+        }
     };
     println!("{output}");
     Ok(())
@@ -351,6 +356,11 @@ async fn search_by_name(
             serde_json::to_string(&compact).unwrap_or_default()
         }
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
+        crate::OutputFormat::Raw => {
+            return Err(CliError::Usage(
+                "--format raw is not supported by users search".into(),
+            ));
+        }
     };
     println!("{output}");
     Ok(())
