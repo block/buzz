@@ -172,9 +172,9 @@ void main() {
       container.read(relaySessionProvider);
       session.debugAttachSocketForTest(socket);
 
-      final published = session.publish(_event());
+      final published = session.publish(_messageEvent());
       expect(socket.sent, [
-        ['EVENT', _event().toJson()],
+        ['EVENT', _messageEvent().toJson()],
       ]);
 
       session.debugHandleDisconnected(Exception('connection lost'));
@@ -182,11 +182,16 @@ void main() {
 
       session.debugHandleConnected();
       expect(socket.sent, [
-        ['EVENT', _event().toJson()],
-        ['EVENT', _event().toJson()],
+        ['EVENT', _messageEvent().toJson()],
+        ['EVENT', _messageEvent().toJson()],
       ]);
 
-      session.debugHandleMessage(['OK', _event().id, true, 'duplicate:']);
+      session.debugHandleMessage([
+        'OK',
+        _messageEvent().id,
+        true,
+        'duplicate:',
+      ]);
       await expectLater(published, completes);
     },
   );
@@ -210,15 +215,15 @@ void main() {
       session.debugAttachSocketForTest(socket);
       session.debugHandleDisconnected(Exception('connection lost'));
 
-      final published = session.publish(_event());
+      final published = session.publish(_messageEvent());
       expect(socket.sent, isEmpty);
 
       session.debugHandleConnected();
       expect(socket.sent, [
-        ['EVENT', _event().toJson()],
+        ['EVENT', _messageEvent().toJson()],
       ]);
 
-      session.debugHandleMessage(['OK', _event().id, true, '']);
+      session.debugHandleMessage(['OK', _messageEvent().id, true, '']);
       await expectLater(published, completes);
     },
   );
@@ -241,14 +246,14 @@ void main() {
       container.read(relaySessionProvider);
       session.debugAttachSocketForTest(socket);
 
-      final published = session.publish(_event());
-      session.debugHandleMessage(['OK', _event().id, true, '']);
+      final published = session.publish(_messageEvent());
+      session.debugHandleMessage(['OK', _messageEvent().id, true, '']);
       await published;
 
       session.debugHandleDisconnected(Exception('connection lost'));
       session.debugHandleConnected();
       expect(socket.sent, [
-        ['EVENT', _event().toJson()],
+        ['EVENT', _messageEvent().toJson()],
       ]);
     },
   );
@@ -271,7 +276,7 @@ void main() {
       container.read(relaySessionProvider);
       session.debugAttachSocketForTest(socket);
 
-      final published = session.publish(_event());
+      final published = session.publish(_messageEvent());
       session.debugHandleDisconnected(
         const RelayAuthRejectedException('restricted: access revoked'),
       );
@@ -279,10 +284,36 @@ void main() {
 
       session.debugHandleConnected();
       expect(socket.sent, [
-        ['EVENT', _event().toJson()],
+        ['EVENT', _messageEvent().toJson()],
       ]);
     },
   );
+
+  test('does not replay response-bearing events after disconnect', () async {
+    final session = RelaySessionNotifier();
+    final socket = _ControlledRelaySocket(
+      wsUrl: 'wss://relay.example',
+      nsec: null,
+      onMessage: (_) {},
+      onConnected: () {},
+      onDisconnected: (_) {},
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+    session.debugAttachSocketForTest(socket);
+
+    final published = session.publish(_event());
+    session.debugHandleDisconnected(Exception('connection lost'));
+    await expectLater(published, throwsException);
+
+    session.debugHandleConnected();
+    expect(socket.sent, [
+      ['EVENT', _event().toJson()],
+    ]);
+  });
 
   test('classifies relay internal auth errors as transient', () {
     expect(
@@ -581,6 +612,20 @@ NostrEvent _event() {
       ['h', _channelId],
     ],
     content: 'hello',
+    sig: 'sig',
+  );
+}
+
+NostrEvent _messageEvent() {
+  return const NostrEvent(
+    id: 'message-1',
+    pubkey: 'alice',
+    createdAt: 20,
+    kind: EventKind.streamMessage,
+    tags: [
+      ['h', _channelId],
+    ],
+    content: 'en di?',
     sig: 'sig',
   );
 }

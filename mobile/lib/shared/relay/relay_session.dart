@@ -53,12 +53,17 @@ class _PendingEvent {
   final NostrEvent event;
   final Completer<NostrEvent> completer;
   final Duration acknowledgementTimeout;
+  final DateTime deadline;
+  final bool retryOnReconnect;
+  bool wasSent = false;
   Timer? timeout;
 
   _PendingEvent({
     required this.event,
     required this.completer,
     required this.acknowledgementTimeout,
+    required this.deadline,
+    required this.retryOnReconnect,
   });
 }
 
@@ -112,6 +117,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _paused = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
+  RelayAuthRejectedException? _authRejectedError;
 
   @override
   SessionState build() {
@@ -121,6 +127,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // Reset disposed flag — build() may re-run on the same Notifier instance
     // after a provider dependency changes (e.g. auth completing).
     _disposed = false;
+    _authRejectedError = null;
 
     ref.onDispose(_dispose);
 
@@ -262,11 +269,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         Exception('Cannot publish while app is in background'),
       );
     }
+    final authRejectedError = _authRejectedError;
+    if (authRejectedError != null) return Future.error(authRejectedError);
+    final retryOnReconnect = event.kind == EventKind.streamMessage;
+    final deadline = DateTime.now().add(
+      retryOnReconnect ? _reconnectPublishTimeout : timeout,
+    );
     final completer = Completer<NostrEvent>();
     final pending = _PendingEvent(
       event: event,
       completer: completer,
       acknowledgementTimeout: timeout,
+      deadline: deadline,
+      retryOnReconnect: retryOnReconnect,
     );
     _pendingEvents[event.id] = pending;
 
@@ -324,6 +339,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
+    _authRejectedError = null;
     await _socket?.disconnect();
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
@@ -392,6 +408,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleConnected(int generation) {
     if (_disposed || generation != _connectionGeneration) return;
     _hasConnectedOnce = true;
+    _authRejectedError = null;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
     _replayPendingEvents();
@@ -406,9 +423,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _flushTimer = null;
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
+      _authRejectedError = error;
       _rejectAllPending(error);
       state = const SessionState(status: SessionStatus.disconnected);
       return;
+    }
+    final nonRetryable = [
+      for (final entry in _pendingEvents.entries)
+        if (entry.value.wasSent && !entry.value.retryOnReconnect) entry.key,
+    ];
+    for (final eventId in nonRetryable) {
+      _rejectPendingEvent(eventId, error ?? Exception('Connection lost'));
     }
     for (final eventId in _pendingEvents.keys) {
       _armPendingTimeout(
@@ -459,11 +484,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// lost with the connection.
   void _replayPendingEvents() {
     for (final pending in _pendingEvents.values) {
-      _sendPendingEvent(pending);
+      if (!pending.wasSent || pending.retryOnReconnect) {
+        _sendPendingEvent(pending);
+      }
     }
   }
 
   void _sendPendingEvent(_PendingEvent pending) {
+    pending.wasSent = true;
     _armPendingTimeout(
       pending.event.id,
       pending.acknowledgementTimeout,
@@ -476,13 +504,27 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _armPendingTimeout(String eventId, Duration timeout, String message) {
     final pending = _pendingEvents[eventId];
     if (pending == null) return;
+    final remaining = pending.deadline.difference(DateTime.now());
+    final boundedTimeout = remaining < timeout ? remaining : timeout;
     pending.timeout?.cancel();
-    pending.timeout = Timer(timeout, () {
-      final expired = _pendingEvents.remove(eventId);
-      if (expired != null && !expired.completer.isCompleted) {
-        expired.completer.completeError(TimeoutException(message));
-      }
-    });
+    pending.timeout = Timer(
+      boundedTimeout.isNegative ? Duration.zero : boundedTimeout,
+      () {
+        final expired = _pendingEvents.remove(eventId);
+        if (expired != null && !expired.completer.isCompleted) {
+          expired.completer.completeError(TimeoutException(message));
+        }
+      },
+    );
+  }
+
+  void _rejectPendingEvent(String eventId, Object error) {
+    final pending = _pendingEvents.remove(eventId);
+    if (pending == null) return;
+    pending.timeout?.cancel();
+    if (!pending.completer.isCompleted) {
+      pending.completer.completeError(error);
+    }
   }
 
   void _handleMessage(List<dynamic> data) {
