@@ -474,6 +474,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Publish the agent's final ACP response as one signed reply to the
+    /// triggering Buzz event. Disabled by default: this is intended for
+    /// constrained worker roles whose terminal sandbox cannot hold signing keys.
+    #[arg(long, env = "BUZZ_ACP_PUBLISH_FINAL_REPLY", default_value_t = false)]
+    pub publish_final_reply: bool,
+
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
@@ -550,6 +556,8 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// See [`CliArgs::publish_final_reply`].
+    pub publish_final_reply: bool,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
@@ -1098,6 +1106,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            publish_final_reply: args.publish_final_reply,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
@@ -1468,6 +1477,7 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            publish_final_reply: false,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,

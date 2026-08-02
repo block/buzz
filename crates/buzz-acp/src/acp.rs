@@ -211,6 +211,9 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Final visible agent output accumulated for the current prompt. Thoughts
+    /// and tool calls are deliberately excluded.
+    agent_message: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +553,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            agent_message: String::new(),
         })
     }
 
@@ -1715,6 +1719,17 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Keep a bounded, visible-only final response. The bound is
+                    // below Buzz's 64KiB message limit and preserves UTF-8.
+                    const MAX_AUTO_REPLY_BYTES: usize = 16 * 1024;
+                    let remaining = MAX_AUTO_REPLY_BYTES.saturating_sub(self.agent_message.len());
+                    if remaining > 0 {
+                        let mut end = text.len().min(remaining);
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        self.agent_message.push_str(&text[..end]);
+                    }
                 }
                 false
             }
@@ -1806,6 +1821,16 @@ impl AcpClient {
                 false
             }
         }
+    }
+
+    /// Start collecting the visible final response for one prompt.
+    pub fn clear_agent_message(&mut self) {
+        self.agent_message.clear();
+    }
+
+    /// Consume the visible final response collected for the completed prompt.
+    pub fn take_agent_message(&mut self) -> String {
+        std::mem::take(&mut self.agent_message)
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
