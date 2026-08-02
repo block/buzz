@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::DedupMode;
+use crate::config::ReplyAnchor;
 
 /// Maximum events queued per channel before oldest events are dropped.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
@@ -1146,14 +1147,21 @@ pub(crate) fn format_event_block(
 /// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
 /// while still allowing an explicit human request to post at the channel root or
 /// top level.
-fn append_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
-         If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
-         If the requested destination is ambiguous, ask before sending."
-    ));
+fn append_reply_instruction(s: &mut String, event_id: &str, reply_anchor_mode: ReplyAnchor) {
+    match reply_anchor_mode {
+        ReplyAnchor::Thread => s.push_str(&format!(
+            "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
+             on `buzz messages send` so the conversation stays threaded. \
+             If the human explicitly asks for a channel-root, top-level, \
+             or broadcast post, send that message without `--reply-to`. \
+             If the requested destination is ambiguous, ask before sending."
+        )),
+        ReplyAnchor::TopLevel => s.push_str(
+            "\nIMPORTANT: Post this reply at the channel root — do NOT use `--reply-to`. \
+             The operator has configured this deployment for channel-root replies \
+             to avoid threading misses.",
+        ),
+    }
 }
 
 /// Append a new-thread reply instruction for a human-facing top-level mention.
@@ -1161,14 +1169,21 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
 /// The triggering mention has no thread tags, so the agent's reply becomes the
 /// thread root. Anchoring to the triggering event (rather than leaving the
 /// choice open) prevents replying into a stale/unrelated prior thread.
-fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
-         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
-         (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
-    ));
+fn append_new_thread_reply_instruction(s: &mut String, event_id: &str, reply_anchor_mode: ReplyAnchor) {
+    match reply_anchor_mode {
+        ReplyAnchor::Thread => s.push_str(&format!(
+            "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
+             this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
+             triggering message is the thread root. Do NOT reply into any other \
+             (older) thread. If the human explicitly asks for a channel-root, \
+             top-level, or broadcast post, send that message without `--reply-to`."
+        )),
+        ReplyAnchor::TopLevel => s.push_str(
+            "\nIMPORTANT: Post this reply at the channel root — do NOT use `--reply-to`. \
+             The operator has configured this deployment for channel-root replies \
+             to avoid threading misses.",
+        ),
+    }
 }
 
 /// Decide whether a turn is human-facing for reply-anchor purposes.
@@ -1236,7 +1251,8 @@ fn format_context_hints(
     thread_tags: &ThreadTags,
     is_dm: bool,
     has_conversation_context: bool,
-    reply_anchor: Option<&str>,
+    anchor_id: Option<&str>,
+    reply_anchor_mode: ReplyAnchor,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
@@ -1272,8 +1288,8 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
+            if let Some(event_id) = anchor_id {
+                append_reply_instruction(&mut s, event_id, reply_anchor_mode);
             }
         }
         s
@@ -1295,8 +1311,8 @@ fn format_context_hints(
             }
         }
         s.push_str(&format!("\n{ctx_hint}"));
-        if let Some(event_id) = reply_anchor {
-            append_reply_instruction(&mut s, event_id);
+        if let Some(event_id) = anchor_id {
+            append_reply_instruction(&mut s, event_id, reply_anchor_mode);
         }
         s
     } else {
@@ -1306,8 +1322,8 @@ fn format_context_hints(
              Channel: {channel_display}\n\
              Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
         );
-        if let Some(event_id) = reply_anchor {
-            append_new_thread_reply_instruction(&mut s, event_id);
+        if let Some(event_id) = anchor_id {
+            append_new_thread_reply_instruction(&mut s, event_id, reply_anchor_mode);
         }
         s
     }
@@ -1372,6 +1388,8 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Reply placement for human-facing turns.
+    pub reply_anchor_mode: ReplyAnchor,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1485,6 +1503,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         is_dm,
         args.conversation_context.is_some(),
         reply_anchor.as_deref(),
+        args.reply_anchor_mode,
     ));
 
     // 3. Conversation context (thread or DM).
