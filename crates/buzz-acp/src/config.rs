@@ -234,7 +234,14 @@ pub struct AuthenticateArgs {
 #[derive(Debug, Parser)]
 #[command(
     name = "buzz-acp",
-    about = "ACP harness that bridges Buzz events to AI agents"
+    about = "ACP harness that bridges Buzz events to AI agents",
+    // `buzz-backend-ssh`'s host probe reads `<command> --version` for every
+    // binary it resolves, including this one, and reports it as
+    // `buzz_acp.version` in `discover_harnesses`. Without this the field came
+    // back empty and the desktop could not tell a current host from one still
+    // running a harness installed months ago. clap short-circuits `--version`
+    // before it enforces required arguments, so it answers without a key.
+    version
 )]
 pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
@@ -1428,6 +1435,34 @@ mod tests {
     use super::*;
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
+
+    /// `buzz-backend-ssh`'s host probe runs `buzz-acp --version` with no
+    /// environment and no key, and reports the first line as
+    /// `buzz_acp.version`. Two properties make that work, and both are easy to
+    /// break: the flag must exist, and clap must answer it *before* enforcing
+    /// the required `--private-key`, or the probe gets a usage error on stderr
+    /// and records an empty version.
+    #[test]
+    fn version_is_answerable_without_a_private_key() {
+        let error = CliArgs::try_parse_from(["buzz-acp", "--version"])
+            .expect_err("--version short-circuits parsing, so it surfaces as an Err");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("buzz-acp "), "{rendered}");
+        assert!(
+            rendered.contains(env!("CARGO_PKG_VERSION")),
+            "{rendered} should carry the crate version"
+        );
+        // The probe reads one line and would otherwise record a fragment.
+        assert_eq!(rendered.trim().lines().count(), 1, "{rendered}");
+
+        // Without the flag, a missing key is still a hard error — --version is
+        // an exemption for exactly one argument-free query, not a relaxation.
+        let missing = CliArgs::try_parse_from(["buzz-acp"])
+            .expect_err("--private-key is required")
+            .kind();
+        assert_ne!(missing, clap::error::ErrorKind::DisplayVersion);
+    }
 
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {

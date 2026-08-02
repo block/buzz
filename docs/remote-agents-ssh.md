@@ -103,6 +103,13 @@ but `selectedRemoteHarness` filters the pin on `available`, so an entry a re-che
 unavailable stops being the pin rather than deploying a command the host says is not installed.
 `buzz_acp: null` with `ok: true` is likewise deliberate.
 
+`buzz_acp.version` is the host's `buzz-acp --version`, read by the same probe that versions every
+harness. The harness gained that flag *for* this probe — before it, the field came back empty and
+the desktop could not distinguish a current host from one still running a binary installed months
+ago, which is the first thing worth knowing when a deployed agent misbehaves. clap answers
+`--version` before it enforces the required `--private-key`, so the probe gets a version rather
+than a usage error from a binary it invokes with no environment.
+
 The `command` reported is the one that actually resolved on the host, not the first candidate:
 `claude` resolves through `claude-agent-acp` or `claude-code-acp`, and the pin must name the binary
 that exists there. `env` carries the runtime's `default_env`, which local spawn applies from the
