@@ -1314,3 +1314,34 @@ fn restart_eligible_false_when_orphan_has_no_drift() {
 fn restart_eligible_false_when_non_orphan_has_no_drift() {
     assert!(!super::restart_eligible(false, false, false));
 }
+
+// ── git credential helper shell-quoting (#3298) ─────────────────────────
+
+#[test]
+fn git_credential_helper_value_quotes_spaced_path() {
+    let helper = super::git_credential_helper_value(std::path::Path::new(
+        "/opt/Buzz Tools/bin/git-credential-nostr",
+    ));
+    assert_eq!(helper, "'/opt/Buzz Tools/bin/git-credential-nostr'");
+}
+
+#[test]
+fn git_credential_helper_value_plain_path_passes_through() {
+    let helper =
+        super::git_credential_helper_value(std::path::Path::new("/usr/bin/git-credential-nostr"));
+    assert_eq!(helper, "/usr/bin/git-credential-nostr");
+}
+
+#[test]
+fn git_credential_helper_value_shell_snippet_not_rewrapped() {
+    let helper = super::git_credential_helper_value(std::path::Path::new("!f() { echo t; }; f"));
+    assert_eq!(helper, "!f() { echo t; }; f");
+}
+
+#[test]
+fn git_credential_helper_value_backslashes_forward_slashed() {
+    let helper = super::git_credential_helper_value(std::path::Path::new(
+        r"C:\Users\x\Buzz\git-credential-nostr.exe",
+    ));
+    assert_eq!(helper, "C:/Users/x/Buzz/git-credential-nostr.exe");
+}
