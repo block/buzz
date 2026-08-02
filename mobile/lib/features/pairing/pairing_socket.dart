@@ -5,6 +5,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
+import '../../shared/relay/onion_ws.dart';
 
 const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
 const _pairingAuthOkTimeout = Duration(seconds: 8);
@@ -46,8 +47,7 @@ class PairingSocket {
     required void Function(Object? error) onDisconnected,
     Duration authChallengeTimeout = _desktopPairingAuthChallengeGrace,
     Duration authResponseTimeout = _pairingAuthOkTimeout,
-    WebSocketChannel Function(Uri uri) channelFactory =
-        WebSocketChannel.connect,
+    WebSocketChannel Function(Uri uri) channelFactory = onionAwareChannel,
   }) : _wsUrl = wsUrl,
        _ephemeralPrivkey = ephemeralPrivkey,
        _onMessage = onMessage,
