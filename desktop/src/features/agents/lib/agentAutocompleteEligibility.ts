@@ -54,11 +54,22 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
-export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+/**
+ * Keep people and locally managed agent identities, plus authoritative bot-role
+ * channel members. The bot-role exception lets external bridge identities be
+ * mentioned without admitting arbitrary global profile-only agent records.
+ */
+export function passesManagedAgentIdentityGate(
+  candidate: {
+    isAgent?: boolean;
+    isMember?: boolean;
+    pubkey: string;
+    role?: string | null;
+  },
   managedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
+    (candidate.isMember === true && candidate.role === "bot") ||
     candidate.isAgent !== true ||
     managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
