@@ -70,6 +70,26 @@ const BAKED_STRUCTURED_KEYS = new Set([
   BUZZ_AGENT_THINKING_EFFORT,
   GUARDIAN_POLICY_ENV,
 ]);
+
+export function getGenericEnvVars(
+  envVars: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(envVars).filter(([key]) => !BAKED_STRUCTURED_KEYS.has(key)),
+  );
+}
+
+export function mergeGenericEnvVars(
+  current: Record<string, string>,
+  nextGeneric: Record<string, string>,
+): Record<string, string> {
+  const merged = { ...nextGeneric };
+  for (const key of BAKED_STRUCTURED_KEYS) {
+    const value = current[key];
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged;
+}
 const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],
@@ -574,14 +594,10 @@ export function AgentConfigFields({
   }
 
   function handleEnvVarsChange(next: Record<string, string>) {
-    const effort = effortPersistenceKey
-      ? config.env_vars[effortPersistenceKey]
-      : undefined;
-    const merged = { ...next };
-    if (effortPersistenceKey && effort !== undefined) {
-      merged[effortPersistenceKey] = effort;
-    }
-    onConfigChange({ ...config, env_vars: merged });
+    onConfigChange({
+      ...config,
+      env_vars: mergeGenericEnvVars(config.env_vars, next),
+    });
   }
 
   // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
@@ -918,11 +934,7 @@ export function AgentConfigFields({
                     label="Environment variables"
                     onChange={handleEnvVarsChange}
                     requiredKeys={advancedRequiredEnvKeys}
-                    value={Object.fromEntries(
-                      Object.entries(config.env_vars).filter(
-                        ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,
-                      ),
-                    )}
+                    value={getGenericEnvVars(config.env_vars)}
                   />
                 </motion.div>
               ) : null}
@@ -936,11 +948,7 @@ export function AgentConfigFields({
               label="Environment variables"
               onChange={handleEnvVarsChange}
               requiredKeys={advancedRequiredEnvKeys}
-              value={Object.fromEntries(
-                Object.entries(config.env_vars).filter(
-                  ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,
-                ),
-              )}
+              value={getGenericEnvVars(config.env_vars)}
             />
           ) : null}
         </div>

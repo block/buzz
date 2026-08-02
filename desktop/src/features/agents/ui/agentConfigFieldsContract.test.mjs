@@ -20,11 +20,32 @@ import test from "node:test";
 
 import {
   CANONICAL_CONFIG_BEHAVIORS,
+  getGenericEnvVars,
+  mergeGenericEnvVars,
   resolveDisclosure,
   shouldRevealDependentConfigFields,
   shouldRenderModelControl,
   shouldShowModelStatusMessage,
 } from "./AgentConfigFields.tsx";
+
+test("structured settings cannot be edited through the raw environment editor", () => {
+  const current = {
+    BUZZ_AGENT_PROVIDER: "openai",
+    BUZZ_AGENT_MODEL: "gpt-test",
+    BUZZ_AGENT_THINKING_EFFORT: "high",
+    BUZZ_ACP_PERMISSION_MODE: "dont-ask",
+    ORDINARY_KEY: "visible",
+  };
+
+  assert.deepEqual(getGenericEnvVars(current), { ORDINARY_KEY: "visible" });
+  assert.deepEqual(mergeGenericEnvVars(current, { ORDINARY_KEY: "changed" }), {
+    BUZZ_AGENT_PROVIDER: "openai",
+    BUZZ_AGENT_MODEL: "gpt-test",
+    BUZZ_AGENT_THINKING_EFFORT: "high",
+    BUZZ_ACP_PERMISSION_MODE: "dont-ask",
+    ORDINARY_KEY: "changed",
+  });
+});
 
 test("canonical behaviors: onboarding's values are the only behavior", () => {
   assert.deepEqual(CANONICAL_CONFIG_BEHAVIORS, {
