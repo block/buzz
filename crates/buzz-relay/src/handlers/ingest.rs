@@ -1729,6 +1729,45 @@ async fn author_type_label(
     }
 }
 
+/// Maximum seconds an event's `created_at` may deviate from server time,
+/// in either direction, before ingest rejects it.
+pub(crate) const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+
+/// Extra past-side allowance for NIP-59 gift wraps (kind 1059), whose
+/// `created_at` clients randomize up to two days into the past ("SHOULD be
+/// tweaked to thwart time-analysis attacks") — `nostr-tools`' `wrapEvent`
+/// backdates by default, so a uniform freshness window rejects essentially
+/// every spec-compliant NIP-17 DM (#4192). The future-side bound is NOT
+/// widened: a wrap stamped into the future is still bogus.
+///
+/// Two couplings to keep in mind when touching this:
+/// - Push wakes: this allowance exceeds `push_runtime`'s usefulness window,
+///   so gift-wrap wake deadlines key on relay receipt time, not `created_at`
+///   (see `push_runtime::wake_deadline_basis` and the test pinning the
+///   relationship).
+/// - Replica fence: `buzz_db::replica_fence::CREATED_AT_FLOOR_SECS` covers
+///   channel-bearing kinds only; gift wraps are stored channel-NULL, which
+///   the floor guard structurally exempts (behaviorally verified by
+///   `verify_floor_guard_behavior`, step 5).
+pub(crate) const GIFT_WRAP_MAX_BACKDATE_SECS: i64 = 2 * 24 * 60 * 60;
+
+/// Whether `event_ts` (unix seconds) falls inside the ingest freshness
+/// window: ±[`MAX_TIMESTAMP_DRIFT_SECS`] for every kind, with the past side
+/// extended by [`GIFT_WRAP_MAX_BACKDATE_SECS`] for kind 1059 only.
+fn timestamp_within_ingest_window(kind: u32, event_ts: i64, now: i64) -> bool {
+    let max_past_drift = if kind == KIND_GIFT_WRAP {
+        MAX_TIMESTAMP_DRIFT_SECS + GIFT_WRAP_MAX_BACKDATE_SECS
+    } else {
+        MAX_TIMESTAMP_DRIFT_SECS
+    };
+    // Saturating: `created_at` arrives as a u64 and is cast to i64, so a
+    // hostile value can land anywhere in i64 — including where plain
+    // subtraction overflows (panic in debug builds). Saturation keeps the
+    // comparison exact for every representable drift.
+    now.saturating_sub(event_ts) <= max_past_drift
+        && event_ts.saturating_sub(now) <= MAX_TIMESTAMP_DRIFT_SECS
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -1856,10 +1895,9 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if !timestamp_within_ingest_window(kind_u32, event_ts, now) {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -2044,6 +2082,11 @@ async fn ingest_event_inner(
             }
         }
     } else if is_gift_wrap {
+        // Load-bearing beyond DM semantics: channel-NULL is what exempts
+        // gift wraps from the replica fence's commit-time `created_at` floor
+        // (see `buzz_db::replica_fence`), which their NIP-59-backdated
+        // timestamps would otherwise violate. Verified behaviorally by
+        // `verify_floor_guard_behavior` step 5.
         None
     } else if kind_u32 == KIND_DELETION {
         // Standard deletion (kind:5): derive channel from the target event.
@@ -2915,6 +2958,88 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    /// The uniform ±15-minute envelope is pre-existing behavior for every
+    /// ordinary kind — pinned at the exact boundary so the gift-wrap
+    /// carve-out (#4192) cannot silently widen it.
+    #[test]
+    fn ingest_window_keeps_uniform_bounds_for_ordinary_kinds() {
+        let now = 1_700_000_000;
+        assert!(timestamp_within_ingest_window(
+            KIND_STREAM_MESSAGE,
+            now - 900,
+            now
+        ));
+        assert!(timestamp_within_ingest_window(
+            KIND_STREAM_MESSAGE,
+            now + 900,
+            now
+        ));
+        assert!(!timestamp_within_ingest_window(
+            KIND_STREAM_MESSAGE,
+            now - 901,
+            now
+        ));
+        assert!(!timestamp_within_ingest_window(
+            KIND_STREAM_MESSAGE,
+            now + 901,
+            now
+        ));
+    }
+
+    /// NIP-59 wraps randomize `created_at` up to two days into the past
+    /// (nostr-tools `wrapEvent` default); the relay must accept the whole
+    /// randomization range plus ordinary skew, and nothing older (#4192).
+    #[test]
+    fn gift_wraps_accept_nip59_backdated_timestamps() {
+        let now = 1_700_000_000;
+        let two_days = 2 * 24 * 60 * 60;
+        assert!(timestamp_within_ingest_window(
+            KIND_GIFT_WRAP,
+            now - two_days,
+            now
+        ));
+        assert!(timestamp_within_ingest_window(
+            KIND_GIFT_WRAP,
+            now - two_days - 900,
+            now
+        ));
+        assert!(!timestamp_within_ingest_window(
+            KIND_GIFT_WRAP,
+            now - two_days - 901,
+            now
+        ));
+    }
+
+    /// The carve-out is past-side only: a future-stamped wrap is as bogus as
+    /// any other future-stamped event.
+    #[test]
+    fn gift_wraps_get_no_future_allowance() {
+        let now = 1_700_000_000;
+        assert!(timestamp_within_ingest_window(
+            KIND_GIFT_WRAP,
+            now + 900,
+            now
+        ));
+        assert!(!timestamp_within_ingest_window(
+            KIND_GIFT_WRAP,
+            now + 901,
+            now
+        ));
+    }
+
+    /// Hostile timestamps: a u64 `created_at` at or above 2^63 wraps negative
+    /// through `as i64`, landing where plain subtraction would overflow. The
+    /// saturating window must reject every such extreme for every kind.
+    #[test]
+    fn ingest_window_rejects_extreme_timestamps() {
+        let now = 1_700_000_000;
+        for kind in [KIND_STREAM_MESSAGE, KIND_GIFT_WRAP] {
+            assert!(!timestamp_within_ingest_window(kind, i64::MIN, now));
+            assert!(!timestamp_within_ingest_window(kind, i64::MAX, now));
+            assert!(!timestamp_within_ingest_window(kind, 0, now));
+        }
+    }
 
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:

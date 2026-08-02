@@ -65,10 +65,18 @@ use uuid::Uuid;
 
 /// Seconds of `created_at` history the commit-time floor guard tolerates.
 ///
-/// Must exceed the relay's ingest envelope (±900 s) by enough slack that a
-/// legitimately accepted event still commits within the floor even under
-/// slow validation/lock waits. The writer pool arms the guard with this value
-/// and the fence subtracts it; the two uses must never diverge.
+/// Must exceed the relay's ingest envelope for **channel-bearing** kinds
+/// (±900 s) by enough slack that a legitimately accepted event still commits
+/// within the floor even under slow validation/lock waits. The writer pool
+/// arms the guard with this value and the fence subtracts it; the two uses
+/// must never diverge.
+///
+/// The floor deliberately does not cover NIP-59 gift wraps (kind 1059),
+/// which ingest accepts up to two days in the past: they are always stored
+/// `channel_id = NULL`, and the guard's trigger fires only for channel-
+/// bearing rows — the structural exemption [`verify_floor_guard_behavior`]
+/// pins in step 5. Channel-NULL rows are never keyset-paged by channel, so
+/// they sit outside the fence proof's read-window obligations.
 pub const CREATED_AT_FLOOR_SECS: i64 = 960;
 
 /// Safety margin subtracted from the fence on top of the floor.
