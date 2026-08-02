@@ -217,9 +217,8 @@ pub struct AcpClient {
 ///
 /// Hermes intentionally strips messaging credentials from model-authored shell
 /// commands. Its `_HERMES_FORCE_` host bridge restores an explicitly supplied
-/// variable after that scrub. Without these aliases, a wrapper or other local
-/// fallback can supply stale global Buzz credentials and publish a turn on a
-/// different relay from the one that delivered it.
+/// variable after that scrub, keeping terminal tools on the relay and identity
+/// resolved by the harness that received the turn.
 pub(crate) fn forced_buzz_env_for_hermes(
     command: &str,
     relay_url: &str,

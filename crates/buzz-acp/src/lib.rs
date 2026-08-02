@@ -4048,6 +4048,7 @@ async fn spawn_and_init(
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
+    // Auth discovery never publishes Buzz events, so it needs no forced routing env.
     AcpClient::spawn(&agent.agent_command, &agent_args, &[], &[], false).await
 }
 
@@ -4176,7 +4177,8 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         .to_string();
 
     // Spawn outside the timeout so we always own the child for cleanup.
-    // `models` subcommand doesn't use persona packs — no extra env, no codex config.
+    // `models` does not publish Buzz events, so it needs no forced routing env;
+    // it also uses no persona packs or generated Codex config.
     let mut client =
         match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], &[], false).await {
             Ok(c) => c,
@@ -5185,14 +5187,10 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
-    fn hermes_spawn_env_uses_resolved_config_after_persona_overrides() {
+    fn hermes_spawn_env_uses_resolved_config_values() {
         let mut config = test_config();
         config.agent_command = "/opt/bin/hermes-acp".into();
         config.relay_url = "wss://source-community.example".into();
-        config.persona_env_vars.push((
-            "_HERMES_FORCE_BUZZ_RELAY_URL".into(),
-            "wss://stale-global.example".into(),
-        ));
         let expected_private_key = config.keys.secret_key().to_secret_hex();
 
         let env = forced_agent_spawn_env(&config);
