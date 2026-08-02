@@ -187,7 +187,10 @@ pub(super) fn deploy_payload_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managed_agents::{readiness::EffectiveHarnessDescriptor, RespondTo, TeamRecord};
+    use crate::managed_agents::{
+        readiness::{EffectiveHarnessDescriptor, GuardianPermissionPolicy},
+        RespondTo, TeamRecord,
+    };
 
     fn record() -> ManagedAgentRecord {
         serde_json::from_value(serde_json::json!({
@@ -223,6 +226,7 @@ mod tests {
                 ("GOOSE_MODE".into(), "custom".into()),
                 ("SECRET_FROM_PERSONA".into(), "secret".into()),
             ]),
+            guardian_policy: GuardianPermissionPolicy::Monitor,
         };
         let teams: Vec<TeamRecord> = serde_json::from_value(serde_json::json!([{
             "id": "team-1", "name": "Team", "instructions": "Coordinate", "persona_ids": [], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
