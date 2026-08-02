@@ -177,6 +177,10 @@ HOOKS_DIR="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common
 git -C "${REPO_ROOT}" config --local core.hooksPath "$HOOKS_DIR"
 if command -v lefthook &>/dev/null; then
   lefthook install --force
+elif command -v pnpm &>/dev/null; then
+  pnpm dlx lefthook install --force
+elif command -v npx &>/dev/null; then
+  npx -y lefthook install --force
 else
   # On Windows without core.symlinks, bin/lefthook is a text file.
   # Use bash 'exec -a' to invoke hermit pretending to be lefthook.

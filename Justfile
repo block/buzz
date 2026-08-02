@@ -53,16 +53,21 @@ setup: bootstrap
 hooks:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Use the Hermit-pinned lefthook (bin/lefthook self-downloads on first use):
-    # works with no pre-installed lefthook and guarantees the pinned version
-    # rather than whatever happens to be on PATH.
-    export PATH="{{justfile_directory()}}/bin:$PATH"
     # --path-format=absolute guarantees an absolute path from every invocation context:
     # without it, --git-common-dir returns ".git" from the main checkout and a
     # relative hooksPath would break linked-worktree dispatch just like .hooks did.
     HOOKS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
     git config --local core.hooksPath "$HOOKS_DIR"
-    lefthook install --force
+    if command -v lefthook &>/dev/null; then
+        lefthook install --force
+    elif command -v pnpm &>/dev/null; then
+        pnpm dlx lefthook install --force
+    elif command -v npx &>/dev/null; then
+        npx -y lefthook install --force
+    else
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+        lefthook install --force
+    fi
 
 # Wipe development state and recreate a clean environment. Installed Buzz is preserved.
 [confirm("This will DELETE all development data and preserve installed Buzz. Continue? (y/N)")]
