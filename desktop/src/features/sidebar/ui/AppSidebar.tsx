@@ -37,6 +37,7 @@ import {
 } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
 import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
+import { BoardRail } from "@/features/kanban/ui/BoardRail";
 import {
   ChannelGroupSection,
   CustomChannelSection,
@@ -847,6 +848,10 @@ export function AppSidebar({
                 </>
               ) : null}
 
+              <BoardRail
+                isCollapsed={Boolean(collapsedSections.boards)}
+                onToggleCollapsed={() => toggleCollapsedSection("boards")}
+              />
               {errorMessage && !relayConnectionCard.hasRelayUnreachableError ? (
                 <div className="px-3 py-2 text-sm text-destructive">
                   {errorMessage}
