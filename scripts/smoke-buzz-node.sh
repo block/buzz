@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Start buzz-node against an already-running local relay and verify its
 # process health and relay readiness contract.
-relay_url="${1:-ws://127.0.0.1:3000}"
+relay_url="${1:-ws://localhost:3000}"
 health_addr="${BUZZ_NODE_SMOKE_HEALTH_ADDR:-127.0.0.1:18081}"
 health_url="http://${health_addr}"
 data_dir="$(mktemp -d "${TMPDIR:-/tmp}/buzz-node-smoke.XXXXXX")"

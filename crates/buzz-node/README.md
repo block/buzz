@@ -45,8 +45,11 @@ and relay failures through `tracing`, and exits cleanly on Ctrl-C or SIGTERM.
 With a local relay already running, verify the standalone contract with:
 
 ```bash
-./scripts/smoke-buzz-node.sh ws://127.0.0.1:3000
+./scripts/smoke-buzz-node.sh ws://localhost:3000
 ```
+
+Use the same relay hostname as Desktop. Local relay tenants are host-scoped,
+so `localhost:3000` and `127.0.0.1:3000` are separate communities.
 
 Pair an owner with `buzz-node pair --qr <desktop-qr-uri>` before running the
 node. Command payloads contain only safe workload data and credential
