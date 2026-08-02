@@ -39,6 +39,66 @@ pub struct EnvVar {
     pub value: String,
 }
 
+/// Placeholder substituted for MCP-server env values in logged/observed copies
+/// of wire messages.
+const REDACTED_PLACEHOLDER: &str = "<redacted>";
+
+/// Copy of a wire message with every MCP-server env *value* masked, safe to log
+/// or publish to the observer feed.
+///
+/// The harness injects the agent's Nostr secret key as `BUZZ_PRIVATE_KEY` in the
+/// `session/new` MCP config; it must never hit the `acp::wire` log or the observer
+/// stream in cleartext. Every `env[].value` is masked wherever it appears in the
+/// tree — this covers the outbound config (`params.mcpServers`) and any inbound
+/// message that echoes the request back. Env names and all other fields are
+/// preserved, and the input (the message delivered to the agent) is never mutated.
+///
+/// Borrows when there is no env to mask (the common case — only `session/new`
+/// carries env), so per-turn prompts and notifications aren't cloned just to be
+/// logged.
+fn redact_wire(value: &serde_json::Value) -> std::borrow::Cow<'_, serde_json::Value> {
+    if contains_env(value) {
+        let mut redacted = value.clone();
+        redact_env_values(&mut redacted);
+        std::borrow::Cow::Owned(redacted)
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
+/// Whether any `env` array appears anywhere in the tree.
+fn contains_env(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| (k == "env" && v.is_array()) || contains_env(v)),
+        serde_json::Value::Array(items) => items.iter().any(contains_env),
+        _ => false,
+    }
+}
+
+/// Recursively mask the `value` of every entry in any `env` array, in place.
+fn redact_env_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if key == "env" {
+                    if let Some(env) = child.as_array_mut() {
+                        for var in env {
+                            if let Some(v) = var.get_mut("value") {
+                                *v = serde_json::Value::String(REDACTED_PLACEHOLDER.to_owned());
+                            }
+                        }
+                    }
+                }
+                redact_env_values(child);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_env_values),
+        _ => {}
+    }
+}
+
 /// Stop reason returned by `session/prompt` when the agent finishes a turn.
 ///
 /// Maps to the `stopReason` field in the `SessionPromptResponse`.
@@ -771,7 +831,7 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(target: "acp::wire", "→ {}", serde_json::to_string(redact_wire(&msg).as_ref()).unwrap_or_default());
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
@@ -1028,6 +1088,9 @@ impl AcpClient {
     ///
     /// Bounded by a 30-second write timeout. If the agent stops reading stdin
     /// (e.g., it's stuck or dead), the write would otherwise block forever.
+    ///
+    /// Delivers the unredacted message — the agent needs the real MCP env values
+    /// (e.g. `BUZZ_PRIVATE_KEY`). Logged/observed copies go through [`redact_wire`].
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let line = serde_json::to_string(value)?;
@@ -1040,7 +1103,7 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        self.observe("acp_write", redact_wire(value).into_owned());
         Ok(())
     }
 
@@ -1071,7 +1134,7 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(target: "acp::wire", "→ {}", serde_json::to_string(redact_wire(&msg).as_ref()).unwrap_or_default());
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -1136,7 +1199,7 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ (notification) {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(target: "acp::wire", "→ (notification) {}", serde_json::to_string(redact_wire(&msg).as_ref()).unwrap_or_default());
         self.write_ndjson(&msg).await?;
         Ok(())
     }
@@ -1177,16 +1240,16 @@ impl AcpClient {
                 continue;
             }
 
-            // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
-
             let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(e) => {
+                    // A line that failed to parse can't be structurally redacted
+                    // and could be a malformed echo of the mcpServers config, so
+                    // publish only its length — never its raw content.
                     self.observe(
                         "acp_parse_error",
                         serde_json::json!({
-                            "line": trimmed,
+                            "len": trimmed.len(),
                             "error": e.to_string(),
                         }),
                     );
@@ -1197,7 +1260,12 @@ impl AcpClient {
                     continue;
                 }
             };
-            self.observe("acp_read", msg.clone());
+            // Log and observe a redacted copy: an agent can echo its injected
+            // mcpServers config (with BUZZ_PRIVATE_KEY) back in a reply. Dispatch
+            // below still uses the original `msg`.
+            let redacted = redact_wire(&msg);
+            tracing::debug!(target: "acp::wire", "← {}", serde_json::to_string(redacted.as_ref()).unwrap_or_default());
+            self.observe("acp_read", redacted.into_owned());
 
             // Check if this is a response to our expected request (has matching id
             // AND no `method` field — a `method` field means it's an agent-initiated
@@ -1425,7 +1493,7 @@ impl AcpClient {
                             tracing::debug!(
                                 target: "acp::wire",
                                 "→ {}",
-                                serde_json::to_string(&msg).unwrap_or_default()
+                                serde_json::to_string(redact_wire(&msg).as_ref()).unwrap_or_default()
                             );
                             match self.write_ndjson(&msg).await {
                                 Ok(()) => {
@@ -1501,15 +1569,16 @@ impl AcpClient {
                         continue;
                     }
 
-                    tracing::debug!(target: "acp::wire", "← {trimmed}");
-
                     let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                         Ok(v) => v,
                         Err(e) => {
+                            // A line that failed to parse can't be structurally
+                            // redacted and could be a malformed echo of the
+                            // mcpServers config, so publish only its length.
                             self.observe(
                                 "acp_parse_error",
                                 serde_json::json!({
-                                    "line": trimmed,
+                                    "len": trimmed.len(),
                                     "error": e.to_string(),
                                 }),
                             );
@@ -1520,7 +1589,12 @@ impl AcpClient {
                             continue;
                         }
                     };
-                    self.observe("acp_read", msg.clone());
+                    // Log and observe a redacted copy: an agent can echo its
+                    // injected mcpServers config (with BUZZ_PRIVATE_KEY) back in a
+                    // reply. Dispatch below still uses the original `msg`.
+                    let redacted = redact_wire(&msg);
+                    tracing::debug!(target: "acp::wire", "← {}", serde_json::to_string(redacted.as_ref()).unwrap_or_default());
+                    self.observe("acp_read", redacted.into_owned());
 
                     let activity_now = Instant::now();
                     idle_deadline = activity_now + idle_timeout;
@@ -3421,6 +3495,205 @@ mod tests {
             received["params"].get("_meta").is_none(),
             "_meta should be absent entirely, not an empty object or null"
         );
+    }
+
+    /// `BUZZ_PRIVATE_KEY` must reach the agent intact but never appear in the
+    /// observer feed or the `acp::wire` log. Drives the real write path and
+    /// asserts both halves.
+    #[tokio::test]
+    async fn session_new_redacts_mcp_env_secrets_from_observer_feed() {
+        const SECRET: &str = "nsec1fake0secret0testkey00000000000000000000000000000000000000";
+
+        // Respond to initialize, then echo back session/new so we can inspect
+        // what was delivered.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let mcp_servers = vec![McpServer {
+            name: "buzz".into(),
+            command: "buzz".into(),
+            args: vec![],
+            env: vec![
+                EnvVar {
+                    name: "BUZZ_RELAY_URL".into(),
+                    value: "wss://relay.example".into(),
+                },
+                EnvVar {
+                    name: "BUZZ_PRIVATE_KEY".into(),
+                    value: SECRET.into(),
+                },
+            ],
+        }];
+        let resp = client
+            .session_new_full("/tmp", mcp_servers, None, None)
+            .await
+            .expect("session_new_full should succeed");
+
+        // 1) Agent must still receive the real key (redaction is display-only).
+        let delivered =
+            serde_json::to_string(&resp.raw["_receivedRequest"]["params"]["mcpServers"]).unwrap();
+        assert!(
+            delivered.contains(SECRET),
+            "agent must receive the real key; delivered params were: {delivered}"
+        );
+
+        // 2) No event may carry the raw secret — both the outbound config
+        //    (acp_write) and the agent's echo of it (acp_read).
+        let events = observer.snapshot();
+        for e in &events {
+            let payload = serde_json::to_string(&e.payload).unwrap();
+            assert!(
+                !payload.contains(SECRET),
+                "observer feed leaked the secret via a {} event: {payload}",
+                e.kind
+            );
+        }
+
+        // Outbound session/new config is masked.
+        let write = events
+            .iter()
+            .find(|e| e.kind == "acp_write" && e.payload["method"] == "session/new")
+            .expect("observer should record the session/new write");
+        assert!(
+            serde_json::to_string(&write.payload)
+                .unwrap()
+                .contains("<redacted>"),
+            "outbound session/new env must be masked: {:?}",
+            write.payload
+        );
+
+        // The agent's echo of that config (a read) is masked too.
+        let read = events
+            .iter()
+            .find(|e| e.kind == "acp_read" && !e.payload["result"]["_receivedRequest"].is_null())
+            .expect("observer should record the echoed session/new response");
+        assert!(
+            serde_json::to_string(&read.payload)
+                .unwrap()
+                .contains("<redacted>"),
+            "echoed session/new env must be masked: {:?}",
+            read.payload
+        );
+    }
+
+    /// A malformed line that echoes the secret must not reach the observer feed
+    /// via the parse-error path either — that line can't be structurally redacted,
+    /// so its content is never published.
+    #[tokio::test]
+    async fn parse_error_does_not_leak_secret_to_observer_feed() {
+        const SECRET: &str = "nsec1fake0secret0testkey00000000000000000000000000000000000000";
+
+        // Emit a malformed (non-JSON) line carrying the secret before the valid
+        // session/new response, so the read loop hits the parse-error arm.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 _req
+            echo 'not json {"env":[{"value":"__SECRET__"}]} trailing garbage'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test"}}'
+            sleep 1
+        "#
+        .replace("__SECRET__", SECRET);
+
+        let mut client = spawn_script(&script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        client
+            .session_new_full("/tmp", vec![], None, None)
+            .await
+            .expect("session_new_full should succeed");
+
+        let events = observer.snapshot();
+        // The malformed line was recorded as a parse error (path exercised)...
+        assert!(
+            events.iter().any(|e| e.kind == "acp_parse_error"),
+            "expected a parse-error event for the malformed line"
+        );
+        // ...but no event may carry the raw secret.
+        for e in &events {
+            let payload = serde_json::to_string(&e.payload).unwrap();
+            assert!(
+                !payload.contains(SECRET),
+                "observer feed leaked the secret via a {} event: {payload}",
+                e.kind
+            );
+        }
+    }
+
+    #[test]
+    fn redact_wire_masks_env_values_but_preserves_shape() {
+        const SECRET: &str = "nsec1supersecret";
+        // Build from the real structs and serialize through serde so a rename of
+        // the `env`/`value` fields (which redact_wire keys on) breaks this test
+        // rather than silently disabling redaction.
+        let servers = vec![McpServer {
+            name: "buzz".into(),
+            command: "buzz".into(),
+            args: vec!["--flag".into()],
+            env: vec![
+                EnvVar {
+                    name: "BUZZ_RELAY_URL".into(),
+                    value: "wss://relay.example".into(),
+                },
+                EnvVar {
+                    name: "BUZZ_PRIVATE_KEY".into(),
+                    value: SECRET.into(),
+                },
+            ],
+        }];
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "cwd": "/tmp",
+                "mcpServers": serde_json::to_value(&servers).unwrap(),
+            }
+        });
+
+        let out = redact_wire(&msg).into_owned();
+        let env = &out["params"]["mcpServers"][0]["env"];
+        // Values masked, names + other fields intact.
+        assert_eq!(env[0]["value"], REDACTED_PLACEHOLDER);
+        assert_eq!(env[1]["value"], REDACTED_PLACEHOLDER);
+        assert_eq!(env[0]["name"], "BUZZ_RELAY_URL");
+        assert_eq!(env[1]["name"], "BUZZ_PRIVATE_KEY");
+        assert_eq!(out["params"]["mcpServers"][0]["command"], "buzz");
+        assert_eq!(out["params"]["mcpServers"][0]["args"][0], "--flag");
+        assert_eq!(out["method"], "session/new");
+        assert!(!serde_json::to_string(&out).unwrap().contains(SECRET));
+        // The input is never mutated.
+        assert_eq!(msg["params"]["mcpServers"][0]["env"][1]["value"], SECRET);
+    }
+
+    #[test]
+    fn redact_wire_is_noop_without_mcp_servers() {
+        // Prompts/notifications have no mcpServers — pass through unchanged and
+        // without cloning.
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/prompt",
+            "params": {"sessionId": "ses_1", "prompt": [{"type": "text", "text": "hi"}]}
+        });
+        let out = redact_wire(&msg);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(*out, msg);
     }
 
     // ── Goose-native steer scaffold (PR follow-up to #1160) ──────────────
