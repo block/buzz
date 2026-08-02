@@ -67,6 +67,46 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
   });
 }
 
+async function readOutgoingMentionPubkeys(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  return page.evaluate((expectedContent) => {
+    const entries =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+
+    for (const entry of entries) {
+      if (entry.command !== "plugin:websocket|send") continue;
+      const data = (
+        entry.payload as { message?: { data?: string } } | undefined
+      )?.message?.data;
+      if (!data) continue;
+
+      try {
+        const frame = JSON.parse(data) as [
+          string,
+          { content?: string; tags?: string[][] },
+        ];
+        if (frame[0] !== "EVENT" || frame[1]?.content !== expectedContent) {
+          continue;
+        }
+        return (frame[1].tags ?? [])
+          .filter((tag) => tag[0] === "p" && tag[1])
+          .map((tag) => tag[1]);
+      } catch {}
+    }
+
+    return null;
+  }, content);
+}
+
 function commandCount(commands: string[], command: string) {
   return commands.filter((entry) => entry === command).length;
 }
@@ -209,7 +249,7 @@ test("@ trigger prioritizes channel members before runnable personas and other m
 
   const dropdown = autocomplete(page);
   await expect(dropdown).toBeVisible();
-  await expect(dropdown.getByText("alice")).toHaveCount(0);
+  await expect(dropdown.getByText("alice")).toBeVisible();
   await expect(dropdown.getByText("bob")).toBeVisible();
   await expect(dropdown.getByText("Fizz")).toBeVisible();
   await expect(dropdown.getByText("charlie")).toBeVisible();
@@ -226,6 +266,7 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   const suggestions = dropdown.locator("button");
   const suggestionText = await suggestions.allInnerTexts();
   const fizzIndex = suggestionText.findIndex((text) => text.includes("Fizz"));
+  const aliceIndex = suggestionText.findIndex((text) => text.includes("alice"));
   const bobIndex = suggestionText.findIndex((text) => text.includes("bob"));
   const charlieIndex = suggestionText.findIndex((text) =>
     text.includes("charlie"),
@@ -234,9 +275,11 @@ test("@ trigger prioritizes channel members before runnable personas and other m
     text.includes("outsider"),
   );
   expect(fizzIndex).toBeGreaterThanOrEqual(0);
+  expect(aliceIndex).toBeGreaterThanOrEqual(0);
   expect(bobIndex).toBeGreaterThanOrEqual(0);
   expect(charlieIndex).toBeGreaterThanOrEqual(0);
   expect(outsiderIndex).toEqual(-1);
+  expect(aliceIndex).toBeLessThan(fizzIndex);
   expect(bobIndex).toBeLessThan(fizzIndex);
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
@@ -427,6 +470,19 @@ test("defers agent mentions until DM members finish loading", async ({
   );
   await expect(input).toBeEmpty();
   await expect(threadPanel).toContainText("before members resolve");
+});
+
+test("relay-only shared agents stay hidden from DM mentions", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@ali");
+
+  await expect(autocomplete(page).getByText("alice")).toHaveCount(0);
 });
 
 test("autocomplete filters managed-agent suggestions as user types", async ({
@@ -819,14 +875,24 @@ test("managed relay agents are visible in channel mentions regardless of relay p
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("@quinn");
+  await input.fill("Ask @quinn");
 
   const dropdown = autocomplete(page);
   await expect(dropdown.getByText("quinn")).toBeVisible();
   await expect(dropdown.getByText("agent")).toBeVisible();
+  await dropdown.getByText("quinn").click();
+  await page.keyboard.type("please reply");
+
+  const content = "Ask @quinn please reply";
+  await expect(input).toHaveText(content);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 
-test("relay-only agents stay hidden from channel mentions even when allowlisted", async ({
+test("relay-only agents are visible in channel mentions when allowlisted", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -846,7 +912,9 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("quinn")).toBeVisible();
+  await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({
