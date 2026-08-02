@@ -225,6 +225,7 @@ export function AgentsView() {
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
               startingAgentPubkey={agents.startingAgentPubkey}
+              stoppingAgentPubkey={agents.stoppingAgentPubkey}
               startingPersonaIds={agents.startingPersonaIds}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
@@ -234,6 +235,9 @@ export function AgentsView() {
               }}
               onStartAgent={(pubkey) => {
                 void agents.handleStart(pubkey);
+              }}
+              onStopAgent={(pubkey) => {
+                void agents.handleStop(pubkey);
               }}
               onStartPersona={(persona) => {
                 void agents.handleStartPersona(persona);
