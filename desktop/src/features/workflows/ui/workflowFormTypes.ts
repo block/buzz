@@ -43,6 +43,7 @@ export type StepFormState = {
   duration?: string;
   text?: string;
   channel?: string;
+  replyTo?: string;
   to?: string;
   url?: string;
   method?: string;
@@ -141,6 +142,7 @@ function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
     case "send_message":
       if (step.text) fields.text = step.text;
       if (step.channel) fields.channel = step.channel;
+      if (step.replyTo) fields.reply_to = step.replyTo;
       break;
     case "send_dm":
       if (step.to) fields.to = step.to;
@@ -274,6 +276,7 @@ export function yamlToFormState(
         duration: step.duration as string | undefined,
         text: step.text as string | undefined,
         channel: step.channel as string | undefined,
+        replyTo: step.reply_to as string | undefined,
         to: step.to as string | undefined,
         url: step.url as string | undefined,
         method: step.method as string | undefined,

@@ -17,7 +17,32 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::handlers::event::dispatch_persistent_event;
+use crate::handlers::ingest::resolve_nip10_thread_meta;
 use crate::state::AppState;
+
+/// Recover a legacy parent event's effective thread root when materialized
+/// thread metadata is absent.
+fn legacy_thread_root(event: &nostr::Event) -> Option<Vec<u8>> {
+    event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.len() >= 4 && parts[0] == "e" && parts[3] == "root")
+                .then(|| hex::decode(&parts[1]).ok())
+                .flatten()
+                .filter(|bytes| bytes.len() == 32)
+        })
+        .or_else(|| {
+            event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() >= 4 && parts[0] == "e" && parts[3] == "reply")
+                    .then(|| hex::decode(&parts[1]).ok())
+                    .flatten()
+                    .filter(|bytes| bytes.len() == 32)
+            })
+        })
+}
 
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
 /// channel members they name, so the emitted kind:9 carries the `p` tags that
@@ -177,9 +202,21 @@ impl ActionSink for RelayActionSink {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        self.send_message_with_reply(community_id, channel_id, text, author_pubkey, None)
+    }
+
+    fn send_message_with_reply(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        text: &str,
+        author_pubkey: &str,
+        reply_to: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
+        let reply_to = reply_to.map(str::to_owned);
 
         Box::pin(async move {
             // 0. Upgrade weak reference — fails only during shutdown.
@@ -266,6 +303,69 @@ impl ActionSink for RelayActionSink {
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
             ];
 
+            if let Some(reply_to) = reply_to.as_deref() {
+                if reply_to.len() != 64 || !reply_to.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(ActionSinkError::InvalidInput(
+                        "reply_to must be a 64-character hex event ID".into(),
+                    ));
+                }
+                let parent_bytes = hex::decode(reply_to).map_err(|_| {
+                    ActionSinkError::InvalidInput("reply_to contains invalid hex".into())
+                })?;
+                let parent = state
+                    .db
+                    .get_event_by_id(tenant.community(), &parent_bytes)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        ActionSinkError::InvalidInput("reply_to event was not found".into())
+                    })?;
+                if parent.channel_id != Some(channel_uuid) {
+                    return Err(ActionSinkError::InvalidInput(
+                        "reply_to event belongs to a different channel".into(),
+                    ));
+                }
+
+                let parent_meta = state
+                    .db
+                    .get_thread_metadata_by_event(tenant.community(), &parent_bytes)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                let root_bytes = parent_meta
+                    .and_then(|meta| meta.root_event_id)
+                    .or_else(|| legacy_thread_root(&parent.event))
+                    .unwrap_or_else(|| parent_bytes.clone());
+                if root_bytes != parent_bytes {
+                    let root = state
+                        .db
+                        .get_event_by_id(tenant.community(), &root_bytes)
+                        .await
+                        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                        .ok_or_else(|| {
+                            ActionSinkError::InvalidInput(
+                                "reply_to thread root was not found".into(),
+                            )
+                        })?;
+                    if root.channel_id != Some(channel_uuid) {
+                        return Err(ActionSinkError::InvalidInput(
+                            "reply_to thread root belongs to a different channel".into(),
+                        ));
+                    }
+                }
+                let root_hex = hex::encode(root_bytes);
+
+                tags.push(
+                    Tag::parse(["e", &root_hex, "", "root"]).map_err(|e| {
+                        ActionSinkError::EventBuild(format!("thread root tag: {e}"))
+                    })?,
+                );
+                tags.push(
+                    Tag::parse(["e", reply_to, "", "reply"]).map_err(|e| {
+                        ActionSinkError::EventBuild(format!("thread reply tag: {e}"))
+                    })?,
+                );
+            }
+
             // Resolve `@Name` mentions to channel-member pubkeys and append a
             // `p` tag for each (skipping the author, already tagged above). A
             // resolution failure must not drop the message, so log and proceed
@@ -321,8 +421,11 @@ impl ActionSink for RelayActionSink {
             );
 
             // 4. Persist event with thread metadata (matches REST handler path).
-            //    Workflow messages are always top-level: depth=0, no parent/root.
-            let thread_meta = Some(buzz_db::event::ThreadMetadataParams {
+            let resolved_thread_meta =
+                resolve_nip10_thread_meta(tenant.community(), &event, channel_uuid, &state)
+                    .await
+                    .map_err(ActionSinkError::InvalidInput)?;
+            let top_level_thread_meta = buzz_db::event::ThreadMetadataParams {
                 event_id: &event_id_bytes,
                 event_created_at,
                 channel_id: channel_uuid,
@@ -332,7 +435,11 @@ impl ActionSink for RelayActionSink {
                 root_event_created_at: None,
                 depth: 0,
                 broadcast: false,
-            });
+            };
+            let thread_meta = resolved_thread_meta
+                .as_ref()
+                .map(|meta| meta.as_params())
+                .or(Some(top_level_thread_meta));
 
             let (stored_event, was_inserted) = state
                 .db
@@ -375,6 +482,37 @@ mod tests {
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
     fn pk(nibble: char) -> String {
         std::iter::repeat_n(nibble, 64).collect()
+    }
+
+    #[test]
+    fn legacy_thread_root_prefers_root_marker_then_reply_marker() {
+        let keys = nostr::Keys::generate();
+        let root = pk('a');
+        let reply = pk('b');
+        let event = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "legacy reply")
+            .tags([
+                Tag::parse(["e", &reply, "", "reply"]).expect("reply tag"),
+                Tag::parse(["e", &root, "", "root"]).expect("root tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        assert_eq!(legacy_thread_root(&event), Some(hex::decode(root).unwrap()));
+    }
+
+    #[test]
+    fn legacy_thread_root_falls_back_to_reply_marker() {
+        let keys = nostr::Keys::generate();
+        let reply = pk('b');
+        let event = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "legacy reply")
+            .tags([Tag::parse(["e", &reply, "", "reply"]).expect("reply tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        assert_eq!(
+            legacy_thread_root(&event),
+            Some(hex::decode(reply).unwrap())
+        );
     }
 
     #[test]
@@ -707,5 +845,196 @@ mod integration_tests {
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_message_can_reply_to_prior_step_event() {
+        let state = test_state().await;
+        let author = nostr::Keys::generate();
+        let author_hex = author.public_key().to_hex();
+        let host = format!("wf-reply-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &author_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-reply",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &author.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        let sink = RelayActionSink::new(&state);
+
+        let parent_id = sink
+            .send_message(
+                community,
+                &channel.id.to_string(),
+                "PR #123 is ready",
+                &author_hex,
+            )
+            .await
+            .expect("send parent");
+        let reply_id = sink
+            .send_message_with_reply(
+                community,
+                &channel.id.to_string(),
+                "🚦 Review · ✅ Approve · ⛔ Block · 🚀 Merge",
+                &author_hex,
+                Some(&parent_id),
+            )
+            .await
+            .expect("send reply");
+
+        let parent_bytes = hex::decode(&parent_id).expect("parent id hex");
+        let reply_bytes = hex::decode(&reply_id).expect("reply id hex");
+        let metadata = state
+            .db
+            .get_thread_metadata_by_event(community, &reply_bytes)
+            .await
+            .expect("query metadata")
+            .expect("reply metadata");
+
+        assert_eq!(
+            metadata.parent_event_id.as_deref(),
+            Some(parent_bytes.as_slice())
+        );
+        assert_eq!(
+            metadata.root_event_id.as_deref(),
+            Some(parent_bytes.as_slice())
+        );
+        assert_eq!(metadata.depth, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_message_rejects_invalid_legacy_thread_roots() {
+        let state = test_state().await;
+        let author = nostr::Keys::generate();
+        let author_hex = author.public_key().to_hex();
+        let host = format!("wf-legacy-root-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &author_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-legacy-parent",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &author.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create parent channel");
+        let other_channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-legacy-root",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &author.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create root channel");
+
+        let cross_channel_root =
+            EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "cross-channel root")
+                .tags([Tag::parse(["h", &other_channel.id.to_string()]).expect("root h tag")])
+                .sign_with_keys(&author)
+                .expect("sign root");
+        state
+            .db
+            .insert_event(community, &cross_channel_root, Some(other_channel.id))
+            .await
+            .expect("insert root");
+
+        let legacy_parent =
+            EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "legacy parent")
+                .tags([
+                    Tag::parse(["h", &channel.id.to_string()]).expect("parent h tag"),
+                    Tag::parse(["e", &cross_channel_root.id.to_hex(), "", "root"])
+                        .expect("legacy root tag"),
+                ])
+                .sign_with_keys(&author)
+                .expect("sign parent");
+        state
+            .db
+            .insert_event(community, &legacy_parent, Some(channel.id))
+            .await
+            .expect("insert parent");
+
+        let sink = RelayActionSink::new(&state);
+        let cross_channel_error = sink
+            .send_message_with_reply(
+                community,
+                &channel.id.to_string(),
+                "reply",
+                &author_hex,
+                Some(&legacy_parent.id.to_hex()),
+            )
+            .await
+            .expect_err("cross-channel legacy root must fail");
+        assert!(matches!(
+            cross_channel_error,
+            ActionSinkError::InvalidInput(ref message)
+                if message == "reply_to thread root belongs to a different channel"
+        ));
+
+        let missing_root_id = nostr::EventId::from_byte_array([0x42; 32]).to_hex();
+        let missing_root_parent = EventBuilder::new(
+            Kind::from(KIND_STREAM_MESSAGE as u16),
+            "missing-root parent",
+        )
+        .tags([
+            Tag::parse(["h", &channel.id.to_string()]).expect("missing parent h tag"),
+            Tag::parse(["e", &missing_root_id, "", "root"]).expect("missing root tag"),
+        ])
+        .sign_with_keys(&author)
+        .expect("sign missing-root parent");
+        state
+            .db
+            .insert_event(community, &missing_root_parent, Some(channel.id))
+            .await
+            .expect("insert missing-root parent");
+
+        let missing_error = sink
+            .send_message_with_reply(
+                community,
+                &channel.id.to_string(),
+                "reply",
+                &author_hex,
+                Some(&missing_root_parent.id.to_hex()),
+            )
+            .await
+            .expect_err("missing legacy root must fail");
+        assert!(matches!(
+            missing_error,
+            ActionSinkError::InvalidInput(ref message)
+                if message == "reply_to thread root was not found"
+        ));
     }
 }

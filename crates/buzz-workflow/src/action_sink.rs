@@ -66,4 +66,27 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Post a message with an optional thread parent.
+    ///
+    /// The default preserves compatibility for sinks that only support
+    /// top-level messages. Relay sinks override this method to validate and
+    /// persist `reply_to` as NIP-10 thread metadata.
+    fn send_message_with_reply(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        text: &str,
+        author_pubkey: &str,
+        reply_to: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        match reply_to {
+            None => self.send_message(community_id, channel_id, text, author_pubkey),
+            Some(_) => Box::pin(async {
+                Err(ActionSinkError::InvalidInput(
+                    "this action sink does not support threaded workflow messages".into(),
+                ))
+            }),
+        }
+    }
 }
