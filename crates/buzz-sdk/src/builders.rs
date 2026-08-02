@@ -575,10 +575,17 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
+///
+/// `.allow_self_tagging()` is required: self-removal targets the signing key's
+/// own pubkey (`target == signer`), so nostr 0.44 would otherwise strip the
+/// matching `p` tag before signing and the relay would fail with
+/// `400 invalid: missing p tag`. See #4326.
 pub fn build_remove_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -588,7 +595,9 @@ pub fn build_remove_member(
         tag(&["h", &channel_id.to_string()])?,
         tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9001), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 leave-request event (kind 9022).
@@ -2749,6 +2758,38 @@ mod tests {
         let ev = sign(build_remove_member(cid, pubkey).unwrap());
         assert_eq!(ev.kind.as_u16(), 9001);
         assert!(has_tag(&ev, "p", pubkey));
+    }
+
+    #[test]
+    fn remove_member_self_tag_survives_signing() {
+        // Regression test for #4326: the `p` tag whose value equals the signing
+        // key's own pubkey must survive nostr 0.44's self-tag stripping. Before
+        // `.allow_self_tagging()` this event reached the relay as
+        // `[["h",<uuid>]]` and the relay rejected it with `400 invalid: missing p tag`.
+        let cid = uuid();
+        let signer_keys = Keys::generate();
+        let self_hex = signer_keys.public_key().to_hex();
+        let ev = build_remove_member(cid, &self_hex)
+            .unwrap()
+            .sign_with_keys(&signer_keys)
+            .expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9001);
+        assert!(has_tag(&ev, "p", &self_hex));
+    }
+
+    #[test]
+    fn add_member_self_tag_survives_signing() {
+        // Regression test for #4326: same mechanism as remove, kind 9000.
+        let cid = uuid();
+        let signer_keys = Keys::generate();
+        let self_hex = signer_keys.public_key().to_hex();
+        let ev = build_add_member(cid, &self_hex, Some(MemberRole::Member))
+            .unwrap()
+            .sign_with_keys(&signer_keys)
+            .expect("sign");
+        assert_eq!(ev.kind.as_u16(), 9000);
+        assert!(has_tag(&ev, "p", &self_hex));
+        assert!(has_tag(&ev, "role", "member"));
     }
 
     #[test]
