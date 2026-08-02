@@ -992,6 +992,10 @@ async fn create_session_and_apply_model(
         }),
     );
 
+    // Keep a harness-side enforcement fallback when an adapter cannot apply
+    // its native mode.
+    agent.acp.set_permission_mode(ctx.permission_mode.clone());
+
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
@@ -3974,6 +3978,65 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn unsupported_native_lockdown_still_rejects_permission_requests() {
+        let script = r#"
+            IFS= read -r session_new
+            case "$session_new" in
+              *'"method":"session/new"'*) ;;
+              *) exit 10 ;;
+            esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"fallback-session","modes":{"availableModes":[{"id":"default"}]}}}'
+
+            IFS= read -r prompt
+            case "$prompt" in
+              *'"method":"session/prompt"'*) ;;
+              *) exit 11 ;;
+            esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":99,"method":"session/request_permission","params":{"options":[{"optionId":"allow","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}]}}'
+
+            IFS= read -r decision
+            case "$decision" in
+              *'"id":99'*'"optionId":"reject"'*) ;;
+              *) exit 12 ;;
+            esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+        "#;
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script.to_string()], &[], false)
+            .await
+            .expect("failed to spawn fake ACP agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "fake-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.permission_mode = PermissionMode::DontAsk;
+
+        let session_id = create_session_and_apply_model(&mut agent, &ctx, None, None, None)
+            .await
+            .expect("session creation should succeed without native dontAsk support");
+        assert_eq!(session_id, "fallback-session");
+
+        let stop = agent
+            .acp
+            .session_prompt_with_idle_timeout(
+                &session_id,
+                "exercise fallback",
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("harness fallback should reject and let the turn complete");
+        assert_eq!(stop, StopReason::EndTurn);
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user

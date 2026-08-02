@@ -110,6 +110,7 @@ export function AgentConfigTextInput({
 }
 
 export function AgentDropdownSelect({
+  ariaDescribedBy,
   ariaRequired,
   className,
   disabled = false,
@@ -125,6 +126,7 @@ export function AgentDropdownSelect({
   testId,
   value,
 }: {
+  ariaDescribedBy?: string;
   ariaRequired?: boolean;
   className?: string;
   disabled?: boolean;
@@ -172,6 +174,7 @@ export function AgentDropdownSelect({
       <PopoverTrigger asChild>
         <button
           aria-controls={`${id}-listbox`}
+          aria-describedby={ariaDescribedBy}
           aria-expanded={open}
           aria-haspopup="listbox"
           aria-required={ariaRequired}

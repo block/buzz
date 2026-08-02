@@ -906,16 +906,27 @@ fn handle_cancel_turn_control(
         return;
     };
 
-    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
-    let status = if fired { "sent" } else { "no_active_turn" };
+    let Some(expected_session_id) = payload.get("sessionId").and_then(|value| value.as_str())
+    else {
+        tracing::warn!("observer cancel_turn control frame missing sessionId");
+        return;
+    };
+    let Some(expected_turn_id) = payload.get("turnId").and_then(|value| value.as_str()) else {
+        tracing::warn!("observer cancel_turn control frame missing turnId");
+        return;
+    };
+
+    let fired =
+        signal_expected_in_flight_task(pool, channel_id, expected_turn_id, ControlSignal::Cancel);
+    let status = if fired { "sent" } else { "context_mismatch" };
     if let Some(observer) = observer {
         observer.emit(
             "control_result",
             None,
             &observer::ObserverContext {
                 channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
+                session_id: Some(expected_session_id.to_string()),
+                turn_id: Some(expected_turn_id.to_string()),
                 started_at: None,
             },
             serde_json::json!({
@@ -2797,6 +2808,28 @@ fn signal_in_flight_task(
     false
 }
 
+/// Send a control signal only when the signed observer context still names
+/// the exact in-flight turn. A delayed control frame cannot cancel its successor.
+fn signal_expected_in_flight_task(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    expected_turn_id: &str,
+    mode: ControlSignal,
+) -> bool {
+    let entry = pool
+        .task_map_mut()
+        .values_mut()
+        .find(|meta| meta.channel_id == Some(channel_id) && meta.turn_id == expected_turn_id);
+    if let Some(meta) = entry {
+        if let Some(tx) = meta.control_tx.take() {
+            tracing::info!(channel = %channel_id, turn = expected_turn_id, ?mode, "context-bound control signal sent");
+            let _ = tx.send(mode);
+            return true;
+        }
+    }
+    false
+}
+
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
 ///
 /// Caller invariants:
@@ -4177,10 +4210,37 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let browser = std::env::var("BUZZ_ACP_BROWSER_MCP_COMMAND")
+        .ok()
+        .filter(|command| !command.is_empty())
+        .map(|command| {
+            let args = std::env::var("BUZZ_ACP_BROWSER_MCP_ARGS")
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                .unwrap_or_default();
+            (command, args)
+        });
+    build_mcp_servers_with_browser(config, browser)
+}
+
+fn build_mcp_servers_with_browser(
+    config: &Config,
+    browser: Option<(String, Vec<String>)>,
+) -> Vec<McpServer> {
+    let mut servers = Vec::new();
+    if let Some((command, args)) = browser {
+        servers.push(McpServer {
+            name: "playwright".into(),
+            command,
+            args,
+            env: vec![],
+        });
     }
-    vec![McpServer {
+
+    if config.mcp_command.is_empty() {
+        return servers;
+    }
+    servers.push(McpServer {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -4230,7 +4290,8 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             }
             env
         },
-    }]
+    });
+    servers
 }
 
 #[cfg(test)]
@@ -4390,6 +4451,39 @@ mod owner_control_command_tests {
             channel_id,
             ControlSignal::Rotate
         ));
+    }
+
+    #[tokio::test]
+    async fn expected_turn_signal_rejects_stale_turn_without_consuming_control() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "current-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: None,
+            },
+        );
+
+        assert!(!signal_expected_in_flight_task(
+            &mut pool,
+            channel_id,
+            "stale-turn",
+            ControlSignal::Cancel,
+        ));
+        assert!(signal_expected_in_flight_task(
+            &mut pool,
+            channel_id,
+            "current-turn",
+            ControlSignal::Cancel,
+        ));
+        assert_eq!(control_rx.await.unwrap(), ControlSignal::Cancel);
     }
 }
 
@@ -5183,6 +5277,43 @@ mod build_mcp_servers_tests {
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+
+    #[test]
+    fn browser_mcp_is_added_alongside_dev_mcp() {
+        let config = test_config();
+        let servers = build_mcp_servers_with_browser(
+            &config,
+            Some((
+                "/opt/homebrew/bin/npx".into(),
+                vec![
+                    "--yes".into(),
+                    "@playwright/mcp@0.0.78".into(),
+                    "--browser".into(),
+                    "chrome".into(),
+                    "--isolated".into(),
+                ],
+            )),
+        );
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "playwright");
+        assert_eq!(servers[0].command, "/opt/homebrew/bin/npx");
+        assert_eq!(servers[0].args[1], "@playwright/mcp@0.0.78");
+        assert_eq!(servers[1].name, "test-mcp-server");
+    }
+
+    #[test]
+    fn browser_mcp_works_without_dev_mcp() {
+        let mut config = test_config();
+        config.mcp_command.clear();
+        let servers = build_mcp_servers_with_browser(
+            &config,
+            Some(("npx".into(), vec!["@playwright/mcp@0.0.78".into()])),
+        );
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "playwright");
     }
 }
 
