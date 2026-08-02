@@ -38,13 +38,12 @@ function AuthorNameButton({
   pubkey: string;
 }) {
   return (
-    <UserProfilePopover pubkey={pubkey} triggerElement="span">
-      <button
-        className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-        type="button"
-      >
-        {label}
-      </button>
+    <UserProfilePopover
+      pubkey={pubkey}
+      triggerElement="span"
+      triggerClassName="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+    >
+      {label}
     </UserProfilePopover>
   );
 }

@@ -327,14 +327,9 @@ function SystemMessageAvatar({
           botIdenticonValue={isSingleAgent ? actorLabel : undefined}
           pubkey={singlePubkey}
           role={isSingleAgent ? "bot" : undefined}
+          triggerClassName="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <button
-            className="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            data-testid="system-message-avatar"
-            type="button"
-          >
-            {avatar}
-          </button>
+          <span data-testid="system-message-avatar">{avatar}</span>
         </UserProfilePopover>
       );
     }

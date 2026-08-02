@@ -70,13 +70,12 @@ function IssueHeader({
         {project.name}
         {includeDate ? ` · created ${relativeTime(issue.createdAt)}` : null} ·
         by{" "}
-        <UserProfilePopover pubkey={issue.author} triggerElement="span">
-          <button
-            className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-            type="button"
-          >
-            {authorLabel}
-          </button>
+        <UserProfilePopover
+          pubkey={issue.author}
+          triggerElement="span"
+          triggerClassName="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          {authorLabel}
         </UserProfilePopover>
         {includeDate ? (
           ` · ${issue.status}`

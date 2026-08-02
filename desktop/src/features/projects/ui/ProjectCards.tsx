@@ -111,22 +111,21 @@ function ProjectPeopleStack({
             key={pubkey}
             style={{ zIndex: visible.length - index }}
           >
-            <UserProfilePopover pubkey={pubkey} triggerElement="span">
-              <button
-                aria-label={`View ${label}'s profile`}
-                className="inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                type="button"
-              >
-                <UserAvatar
-                  accent={
-                    normalizePubkey(pubkey) === normalizePubkey(workOwnerPubkey)
-                  }
-                  avatarUrl={profile?.avatarUrl ?? null}
-                  className="ring-2 ring-card"
-                  displayName={label}
-                  size="xs"
-                />
-              </button>
+            <UserProfilePopover
+              pubkey={pubkey}
+              triggerElement="span"
+              triggerAriaLabel={`View ${label}'s profile`}
+              triggerClassName="inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <UserAvatar
+                accent={
+                  normalizePubkey(pubkey) === normalizePubkey(workOwnerPubkey)
+                }
+                avatarUrl={profile?.avatarUrl ?? null}
+                className="ring-2 ring-card"
+                displayName={label}
+                size="xs"
+              />
             </UserProfilePopover>
           </span>
         );

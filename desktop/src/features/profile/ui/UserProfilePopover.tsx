@@ -58,6 +58,8 @@ type UserProfilePopoverProps = {
   triggerElement?: "div" | "span";
   /** Accessible name for interactive trigger content that is visually hidden. */
   triggerAriaLabel?: string;
+  /** Extra classes merged onto the trigger wrapper (focus rings, etc.). */
+  triggerClassName?: string;
   /** Set false when the trigger is inside another interactive control. */
   enableProfilePanel?: boolean;
   /** When set to "bot", a BotIdenticon badge renders next to the display name. */
@@ -173,6 +175,7 @@ export function UserProfilePopover({
   pubkey,
   triggerElement = "div",
   triggerAriaLabel,
+  triggerClassName,
   enableProfilePanel = true,
   role,
   botIdenticonValue,
@@ -582,6 +585,7 @@ export function UserProfilePopover({
           className={cn(
             "inline-flex",
             canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
+            triggerClassName,
           )}
         >
           {children}

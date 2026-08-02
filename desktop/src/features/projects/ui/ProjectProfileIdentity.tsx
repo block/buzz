@@ -78,10 +78,12 @@ export function ProfileIdentityButton({
   }
 
   return (
-    <UserProfilePopover pubkey={pubkey} triggerElement="span">
-      <button className={className} type="button">
-        {inner}
-      </button>
+    <UserProfilePopover
+      pubkey={pubkey}
+      triggerElement="span"
+      triggerClassName={className}
+    >
+      {inner}
     </UserProfilePopover>
   );
 }
@@ -98,13 +100,12 @@ export function ProfileAuthorName({
   }
 
   return (
-    <UserProfilePopover pubkey={pubkey} triggerElement="span">
-      <button
-        className="rounded-md font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-        type="button"
-      >
-        {children}
-      </button>
+    <UserProfilePopover
+      pubkey={pubkey}
+      triggerElement="span"
+      triggerClassName="rounded-md font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {children}
     </UserProfilePopover>
   );
 }

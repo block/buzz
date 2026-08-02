@@ -60,15 +60,11 @@ export function AgentActivityCard({
           botIdenticonValue={displayName}
           pubkey={group.pubkey}
           role={"bot" as const}
+          triggerAriaLabel={`Open profile for ${displayName}`}
+          triggerClassName="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <button
-            aria-label={`Open profile for ${displayName}`}
-            className="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            type="button"
-          >
-            <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
-            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
-          </button>
+          <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
+          <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
         </UserProfilePopover>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">

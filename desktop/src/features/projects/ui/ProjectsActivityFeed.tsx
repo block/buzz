@@ -270,19 +270,18 @@ function ActivityCard({
       />
       <div className="pointer-events-none relative flex min-w-0 items-start gap-3">
         {item.actorPubkey ? (
-          <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
-            <button
-              aria-label={`View ${actorLabel}'s profile`}
-              className="pointer-events-auto relative z-10 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              <UserAvatar
-                accent={profile?.isAgent === true}
-                avatarUrl={profile?.avatarUrl ?? null}
-                displayName={actorLabel}
-                size={compact ? "xs" : "md"}
-              />
-            </button>
+          <UserProfilePopover
+            pubkey={item.actorPubkey}
+            triggerElement="span"
+            triggerAriaLabel={`View ${actorLabel}'s profile`}
+            triggerClassName="pointer-events-auto relative z-10 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <UserAvatar
+              accent={profile?.isAgent === true}
+              avatarUrl={profile?.avatarUrl ?? null}
+              displayName={actorLabel}
+              size={compact ? "xs" : "md"}
+            />
           </UserProfilePopover>
         ) : (
           <UserAvatar
@@ -301,13 +300,9 @@ function ActivityCard({
                   <UserProfilePopover
                     pubkey={item.actorPubkey}
                     triggerElement="span"
+                    triggerClassName="pointer-events-auto relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                   >
-                    <button
-                      className="pointer-events-auto relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-                      type="button"
-                    >
-                      {actorLabel}
-                    </button>
+                    {actorLabel}
                   </UserProfilePopover>
                 ) : (
                   actorLabel

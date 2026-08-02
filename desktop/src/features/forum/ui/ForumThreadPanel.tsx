@@ -83,20 +83,18 @@ function ReplyRow({
       data-forum-event-id={reply.eventId}
     >
       <div className="flex items-center gap-2">
-        <UserProfilePopover pubkey={reply.pubkey}>
-          <button
-            className="flex items-center gap-2 rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            type="button"
-          >
-            <UserAvatar
-              avatarUrl={replyAvatarUrl}
-              displayName={replyAuthorLabel}
-              size="sm"
-            />
-            <span className="text-sm font-medium text-foreground hover:underline">
-              {replyAuthorLabel}
-            </span>
-          </button>
+        <UserProfilePopover
+          pubkey={reply.pubkey}
+          triggerClassName="flex items-center gap-2 rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <UserAvatar
+            avatarUrl={replyAvatarUrl}
+            displayName={replyAuthorLabel}
+            size="sm"
+          />
+          <span className="text-sm font-medium text-foreground hover:underline">
+            {replyAuthorLabel}
+          </span>
         </UserProfilePopover>
         <span className="text-xs text-muted-foreground">
           {formatRelativeTime(reply.createdAt)}
@@ -228,19 +226,17 @@ export function ForumThreadPanel({
           data-forum-event-id={post.eventId}
         >
           <div className="flex items-center gap-2">
-            <UserProfilePopover pubkey={post.pubkey}>
-              <button
-                className="flex items-center gap-2 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                type="button"
-              >
-                <UserAvatar
-                  avatarUrl={postAvatarUrl}
-                  displayName={postAuthorLabel}
-                />
-                <span className="text-sm font-semibold text-foreground hover:underline">
-                  {postAuthorLabel}
-                </span>
-              </button>
+            <UserProfilePopover
+              pubkey={post.pubkey}
+              triggerClassName="flex items-center gap-2 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <UserAvatar
+                avatarUrl={postAvatarUrl}
+                displayName={postAuthorLabel}
+              />
+              <span className="text-sm font-semibold text-foreground hover:underline">
+                {postAuthorLabel}
+              </span>
             </UserProfilePopover>
             <span className="text-xs text-muted-foreground">
               {formatRelativeTime(post.createdAt)}

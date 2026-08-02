@@ -77,29 +77,24 @@ function ReplyParentContext({
     <div className="mt-2 truncate rounded-xl border border-border/50 bg-muted/25 px-3 py-2 text-xs text-muted-foreground">
       {parentNote ? (
         <div className="flex min-w-0 items-center gap-1.5">
-          <UserProfilePopover pubkey={parentNote.pubkey} triggerElement="span">
-            <button
-              className="flex shrink-0 rounded-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              <UserAvatar
-                avatarUrl={parentAvatarUrl}
-                className="!h-4 !w-4 shrink-0"
-                displayName={parentDisplayName ?? "Parent note author"}
-              />
-            </button>
+          <UserProfilePopover
+            pubkey={parentNote.pubkey}
+            triggerElement="span"
+            triggerClassName="flex shrink-0 rounded-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <UserAvatar
+              avatarUrl={parentAvatarUrl}
+              className="!h-4 !w-4 shrink-0"
+              displayName={parentDisplayName ?? "Parent note author"}
+            />
           </UserProfilePopover>
           <span className="min-w-0 truncate">
             <UserProfilePopover
               pubkey={parentNote.pubkey}
               triggerElement="span"
+              triggerClassName="rounded font-medium text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <button
-                className="rounded font-medium text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                type="button"
-              >
-                {parentDisplayName}
-              </button>
+              {parentDisplayName}
             </UserProfilePopover>
             : {parentSnippet || "No text"}
           </span>
@@ -161,20 +156,16 @@ export function NoteCard({
         botIdenticonValue={displayName}
         pubkey={note.pubkey}
         role={isAgent ? "bot" : undefined}
+        triggerClassName="relative flex shrink-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <button
-          className="relative flex shrink-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          type="button"
-        >
-          <UserAvatar
-            avatarUrl={avatarUrl}
-            className="!h-9 !w-9 shrink-0"
-            displayName={displayName}
-          />
-          {isAgent ? (
-            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
-          ) : null}
-        </button>
+        <UserAvatar
+          avatarUrl={avatarUrl}
+          className="!h-9 !w-9 shrink-0"
+          displayName={displayName}
+        />
+        {isAgent ? (
+          <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
+        ) : null}
       </UserProfilePopover>
 
       <div className="min-w-0 flex-1">
@@ -183,13 +174,9 @@ export function NoteCard({
             botIdenticonValue={displayName}
             pubkey={note.pubkey}
             role={isAgent ? "bot" : undefined}
+            triggerClassName="truncate rounded text-sm font-semibold leading-none tracking-tight focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <button
-              className="truncate rounded text-sm font-semibold leading-none tracking-tight focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              {displayName}
-            </button>
+            {displayName}
           </UserProfilePopover>
           {isAgent ? (
             <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
