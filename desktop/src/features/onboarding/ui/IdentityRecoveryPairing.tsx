@@ -90,20 +90,15 @@ export function IdentityRecoveryPairing({
 
   return (
     <div
-      className="mb-8 flex w-full flex-col items-center rounded-3xl border border-foreground/15 bg-background/55 p-6"
+      className="mb-4 flex w-full max-w-[520px] flex-col items-center rounded-3xl border border-foreground/15 bg-background/55 p-4"
       data-testid="identity-recovery-pairing"
     >
-      <h2 className="text-xl font-medium">Scan with Buzz on your phone</h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-foreground/70">
-        On your signed-in phone, open Settings → Send identity to desktop. This
-        code expires shortly and works once.
-      </p>
-      <div className="mt-5 flex min-h-[252px] min-w-[252px] items-center justify-center rounded-2xl bg-white p-3">
+      <div className="flex min-h-[220px] min-w-[220px] items-center justify-center rounded-2xl bg-white p-3">
         {step === "qr" && qrUri ? (
           <StyledQrCode
             centerImageSrc="/app-icon@2x.png"
             data-testid="identity-recovery-qr"
-            size={228}
+            size={196}
             title="Desktop identity recovery QR code"
             value={qrUri}
           />
@@ -149,7 +144,11 @@ export function IdentityRecoveryPairing({
           </div>
         )}
       </div>
-      <p className="mt-4 max-w-md text-xs leading-5 text-foreground/65">
+      <p className="mt-3 max-w-md text-sm leading-5 text-foreground/75">
+        On your phone, open Settings → Send identity to desktop. This code
+        expires shortly and works once.
+      </p>
+      <p className="mt-1 max-w-md text-xs leading-4 text-foreground/65">
         Your phone will grant this desktop permanent access to your full Buzz
         identity. Only approve a desktop you trust and verify the six-digit code
         on both screens.

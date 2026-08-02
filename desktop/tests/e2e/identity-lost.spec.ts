@@ -62,7 +62,7 @@ test("lost boot opens onboarding gate directly on the key-import page", async ({
 
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Re-import your key" }),
+    page.getByRole("heading", { name: "Recover from your phone" }),
   ).toBeVisible();
 });
 
@@ -114,6 +114,9 @@ test("importing a key from lost mode shows the relaunch-required screen", async 
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page
+    .getByRole("button", { name: "Use a private key or backup instead" })
+    .click();
 
   await expect(
     page.getByRole("heading", { name: "Re-import your key" }),
@@ -136,6 +139,9 @@ test("start-new-identity from lost mode persists the ephemeral key after confirm
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page
+    .getByRole("button", { name: "Use a private key or backup instead" })
+    .click();
 
   await expect(
     page.getByRole("heading", { name: "Re-import your key" }),
@@ -170,6 +176,9 @@ test("cancelling start-new-identity in lost mode stays on the import screen", as
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page
+    .getByRole("button", { name: "Use a private key or backup instead" })
+    .click();
 
   await expect(
     page.getByRole("heading", { name: "Re-import your key" }),

@@ -126,8 +126,7 @@ class PairingPage extends HookConsumerWidget {
                   child: _SasVerificationView(
                     sasCode: pairingState.sasCode ?? '------',
                     confirmed: pairingState.userConfirmedSas,
-                    sendsIdentityToDesktop:
-                        pairingState.sendsIdentityToDesktop,
+                    sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
                     onConfirm: () =>
                         ref.read(pairingProvider.notifier).confirmSas(),
                     onDeny: () => ref.read(pairingProvider.notifier).denySas(),
@@ -160,7 +159,7 @@ class PairingPage extends HookConsumerWidget {
                     onConnect: () {
                       final code = codeController.text.trim();
                       if (code.isNotEmpty) {
-                        ref.read(pairingProvider.notifier).pair(code);
+                        unawaited(handleScannerResult(code));
                       }
                     },
                   ),

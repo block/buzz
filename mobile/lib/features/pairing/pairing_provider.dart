@@ -185,7 +185,8 @@ class PairingNotifier extends Notifier<PairingState> {
       final qr = parseNostrpairUri(uri);
       _sourcePubkey = qr.sourcePubkey;
       _sessionSecret = qr.sessionSecret;
-      _sendIdentityToSource = Uri.parse(uri).queryParameters['mode'] == 'recover';
+      _sendIdentityToSource =
+          Uri.parse(uri).queryParameters['mode'] == 'recover';
 
       final relayWsUrl = qr.relays.first;
 

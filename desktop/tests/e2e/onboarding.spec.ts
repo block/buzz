@@ -620,6 +620,32 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
+test("fresh existing-identity path leads with phone recovery", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Use your Buzz identity" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toHaveCount(0);
+
+  await page
+    .getByRole("button", { name: "Use a private key or backup instead" })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your private key" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await expect(page.getByTestId("identity-recovery-pairing")).toHaveCount(0);
+});
+
 test("first-launch key import continues to machine setup", async ({ page }) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
@@ -628,6 +654,9 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await page.goto("/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Use a private key or backup instead" })
+    .click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
   await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
   await page.getByTestId("nostr-import-submit").click();
@@ -648,6 +677,9 @@ test("first-launch encrypted backup import asks for a passphrase and continues",
   await page.goto("/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Use a private key or backup instead" })
+    .click();
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
   const mockNcryptsec =
     "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
@@ -702,6 +734,9 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   await page.goto("/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Use a private key or backup instead" })
+    .click();
 
   // The spotlight variant must expose a file path: a wiped user returns with
   // exactly the identity.ncryptsec our own save dialog produced. The accept

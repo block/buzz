@@ -80,6 +80,9 @@ export function MachineOnboardingFlow({
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
   const [keyImportStage, setKeyImportStage] =
     React.useState<NostrKeyImportStage>("key-entry");
+  const [keyImportMethod, setKeyImportMethod] = React.useState<"phone" | "key">(
+    "phone",
+  );
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
@@ -244,6 +247,7 @@ export function MachineOnboardingFlow({
                   className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
                   disabled={isPending}
                   onClick={() => {
+                    setKeyImportMethod("phone");
                     setKeyImportStage("key-entry");
                     setPage("key-import");
                   }}
@@ -277,33 +281,86 @@ export function MachineOnboardingFlow({
                 <h1 className="text-title font-normal text-foreground">
                   {keyImportStage === "backup-password"
                     ? "Unlock your account"
-                    : identityLost
-                      ? "Re-import your key"
-                      : "Enter your private key"}
+                    : keyImportMethod === "phone"
+                      ? identityLost
+                        ? "Recover from your phone"
+                        : "Use your Buzz identity"
+                      : identityLost
+                        ? "Re-import your key"
+                        : "Enter your private key"}
                 </h1>
                 <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
                   {keyImportStage === "backup-password"
                     ? "Enter your backup password to unlock your key and restore your identity."
-                    : identityLost
-                      ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                      : "If you already have a Buzz account, enter your private key below to get started."}
+                    : keyImportMethod === "phone"
+                      ? "Scan with a signed-in Buzz phone to securely bring this identity to your desktop."
+                      : identityLost
+                        ? "Re-import your nsec or encrypted backup to restore this identity."
+                        : "Enter your nsec or choose an encrypted backup file."}
                 </p>
               </motion.div>
-              <div className="buzz-onboarding-key-import-position w-full">
-                {identityLost && keyImportStage === "key-entry" ? (
-                  <IdentityRecoveryPairing onRecovered={loadFreshIdentity} />
-                ) : null}
-                <NostrKeyImportForm
-                  backLabel={identityLost ? "Start new identity" : "Back"}
-                  onBack={
-                    identityLost
-                      ? () => void replaceLostIdentity()
-                      : () => setPage("identity")
-                  }
-                  onImport={importExistingIdentity}
-                  onStageChange={setKeyImportStage}
-                  variant="spotlight"
-                />
+              <div
+                className={
+                  keyImportMethod === "phone"
+                    ? "mt-4 w-full"
+                    : "buzz-onboarding-key-import-position w-full"
+                }
+              >
+                {keyImportMethod === "phone" ? (
+                  <div className="flex flex-col items-center">
+                    <IdentityRecoveryPairing onRecovered={loadFreshIdentity} />
+                    <Button
+                      className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
+                      onClick={() => setKeyImportMethod("key")}
+                      type="button"
+                      variant="ghost"
+                    >
+                      Use a private key or backup instead
+                    </Button>
+                    {identityLost ? (
+                      <Button
+                        className={`${ONBOARDING_SECONDARY_CTA_CLASS} mt-2 px-5`}
+                        onClick={() => void replaceLostIdentity()}
+                        type="button"
+                        variant="ghost"
+                      >
+                        Start new identity
+                      </Button>
+                    ) : (
+                      <Button
+                        className={`${ONBOARDING_SECONDARY_CTA_CLASS} mt-2 px-5`}
+                        onClick={() => setPage("identity")}
+                        type="button"
+                        variant="ghost"
+                      >
+                        Back
+                      </Button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center">
+                    <NostrKeyImportForm
+                      backLabel="Back to phone recovery"
+                      onBack={() => {
+                        setKeyImportStage("key-entry");
+                        setKeyImportMethod("phone");
+                      }}
+                      onImport={importExistingIdentity}
+                      onStageChange={setKeyImportStage}
+                      variant="spotlight"
+                    />
+                    {identityLost && keyImportStage === "key-entry" ? (
+                      <Button
+                        className={`${ONBOARDING_SECONDARY_CTA_CLASS} mt-2 px-5`}
+                        onClick={() => void replaceLostIdentity()}
+                        type="button"
+                        variant="ghost"
+                      >
+                        Start new identity
+                      </Button>
+                    ) : null}
+                  </div>
+                )}
               </div>
             </OnboardingSlideTransition>
           ) : page === "backup" ? (
