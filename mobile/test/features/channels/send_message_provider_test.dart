@@ -66,9 +66,48 @@ void main() {
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
   });
+
+  test(
+    'publishes nested replies with the outer root and direct parent',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) async => const [],
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'en di?',
+        parentEventId: _parentEventId,
+        rootEventId: _rootEventId,
+      );
+      await session.published;
+
+      expect(session.event.tags, [
+        ['h', _channelId],
+        ['e', _rootEventId, '', 'root'],
+        ['e', _parentEventId, '', 'reply'],
+      ]);
+
+      session.accept();
+      await result;
+    },
+  );
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
+const _rootEventId =
+    '6bcca718f6849cc616e3e49c09e969391175bf5bacc4fc498d7d4d0d6aa8dc12';
+const _parentEventId =
+    '26c605599e18fc72af785bd74b7ad16cfa431b574102dccd9296f8d5b46dc022';
 
 class _PendingPublishRelaySession extends RelaySessionNotifier {
   final Completer<NostrEvent> _result = Completer<NostrEvent>();

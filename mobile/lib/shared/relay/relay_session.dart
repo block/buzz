@@ -50,10 +50,15 @@ class _LiveSubscription {
 }
 
 class _PendingEvent {
+  final NostrEvent event;
   final Completer<NostrEvent> completer;
   final Timer timeout;
 
-  _PendingEvent({required this.completer, required this.timeout});
+  _PendingEvent({
+    required this.event,
+    required this.completer,
+    required this.timeout,
+  });
 }
 
 class _BufferedEvent {
@@ -248,7 +253,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Publish an event and wait for the relay's OK confirmation.
   Future<NostrEvent> publish(
     NostrEvent event, {
-    Duration timeout = const Duration(seconds: 8),
+    Duration timeout = const Duration(seconds: 30),
   }) {
     final completer = Completer<NostrEvent>();
 
@@ -264,11 +269,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     });
 
     _pendingEvents[event.id] = _PendingEvent(
+      event: event,
       completer: completer,
       timeout: timer,
     );
 
-    _socket?.send(['EVENT', event.toJson()]);
+    if (state.status == SessionStatus.connected) {
+      _sendEvent(event);
+    } else if (!_paused && state.status == SessionStatus.disconnected) {
+      _reconnectTimer?.cancel();
+      _reconnectDelayMs = _baseReconnectDelayMs;
+      final config = ref.read(relayConfigProvider);
+      unawaited(_connect(config));
+    }
     return completer.future;
   }
 
@@ -377,18 +390,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
+    _replayPendingEvents();
     _replayLiveSubscriptions();
   }
 
   void _handleDisconnected(int generation, Object? error) {
     if (_disposed || generation != _connectionGeneration) return;
     _cancelAllHistory(error);
-    _rejectAllPending(error);
     _eventBuffer.clear();
     _flushTimer?.cancel();
     _flushTimer = null;
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
+      _rejectAllPending(error);
       state = const SessionState(status: SessionStatus.disconnected);
       return;
     }
@@ -423,6 +437,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           ? sub.filter.copyWithSince(since)
           : sub.filter;
       _sendReq(entry.key, filter);
+    }
+  }
+
+  /// Re-submit unacknowledged events after a transient reconnect.
+  ///
+  /// Events retain their original signed ID, so relay-side duplicate handling
+  /// makes this safe when the first publish was stored but its OK frame was
+  /// lost with the connection.
+  void _replayPendingEvents() {
+    for (final pending in _pendingEvents.values) {
+      _sendEvent(pending.event);
     }
   }
 
@@ -616,6 +641,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _sendClose(String subId) {
     _socket?.send(['CLOSE', subId]);
+  }
+
+  void _sendEvent(NostrEvent event) {
+    _socket?.send(['EVENT', event.toJson()]);
   }
 
   void _unsubscribe(String subId) {

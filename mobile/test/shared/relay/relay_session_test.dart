@@ -154,6 +154,43 @@ void main() {
     expect(session.state.reconnectAttempt, 1);
   });
 
+  test(
+    'replays an unacknowledged publish after a transient reconnect',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+
+      final published = session.publish(_event());
+      expect(socket.sent, [
+        ['EVENT', _event().toJson()],
+      ]);
+
+      session.debugHandleDisconnected(Exception('connection lost'));
+      expect(session.state.status, SessionStatus.reconnecting);
+
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _event().toJson()],
+        ['EVENT', _event().toJson()],
+      ]);
+
+      session.debugHandleMessage(['OK', _event().id, true, 'duplicate:']);
+      await expectLater(published, completes);
+    },
+  );
+
   test('classifies relay internal auth errors as transient', () {
     expect(
       classifyRelayAuthFailure(
@@ -402,6 +439,7 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 class _ControlledRelaySocket extends RelaySocket {
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
+  final List<List<dynamic>> sent = [];
 
   _ControlledRelaySocket({
     required super.wsUrl,
@@ -417,6 +455,9 @@ class _ControlledRelaySocket extends RelaySocket {
 
   @override
   void dispose() {}
+
+  @override
+  void send(List<dynamic> payload) => sent.add(payload);
 
   void connectSuccessfully() => _connected();
 
