@@ -257,6 +257,42 @@ async fn author_allowed(
     }
 }
 
+/// Resolve the sender used by the agent instruction gate.
+///
+/// Workflow messages are signed by the relay and carry their workflow owner in
+/// the `actor` tag. Trust that attribution only when the event signer matches
+/// the relay's NIP-11 `self` identity and the event is explicitly marked as a
+/// workflow side effect. Missing or malformed metadata fails closed to the
+/// event's actual signer.
+fn effective_instruction_author(
+    event: &nostr::Event,
+    trusted_relay_pubkey: Option<&nostr::PublicKey>,
+) -> String {
+    let signer = event.pubkey.to_hex();
+    if trusted_relay_pubkey != Some(&event.pubkey)
+        || !event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.first().map(String::as_str) == Some("buzz:workflow")
+                && parts.get(1).map(String::as_str) == Some("true")
+        })
+    {
+        return signer;
+    }
+
+    event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("actor"))
+                .then(|| parts.get(1))
+                .flatten()
+                .and_then(|value| nostr::PublicKey::from_hex(value).ok())
+                .map(|pubkey| pubkey.to_hex())
+        })
+        .unwrap_or(signer)
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -1342,6 +1378,7 @@ async fn tokio_main() -> Result<()> {
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    let trusted_relay_pubkey = relay.relay_signing_pubkey().cloned();
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -2143,7 +2180,10 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
+                                let author = effective_instruction_author(
+                                    &buzz_event.event,
+                                    trusted_relay_pubkey.as_ref(),
+                                );
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -4419,6 +4459,71 @@ mod owner_cache_tests {
 #[cfg(test)]
 mod author_gate_tests {
     use super::*;
+
+    fn workflow_event(
+        signer: &nostr::Keys,
+        actor: &nostr::PublicKey,
+        include_workflow_marker: bool,
+    ) -> nostr::Event {
+        let mut tags =
+            vec![nostr::Tag::parse(["actor", &actor.to_hex()]).expect("valid actor tag")];
+        if include_workflow_marker {
+            tags.push(nostr::Tag::parse(["buzz:workflow", "true"]).expect("valid workflow marker"));
+        }
+        nostr::EventBuilder::new(nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16), "test")
+            .tags(tags)
+            .sign_with_keys(signer)
+            .expect("event signs")
+    }
+
+    #[test]
+    fn trusted_relay_workflow_uses_attributed_owner_for_author_gate() {
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let event = workflow_event(&relay, &owner.public_key(), true);
+
+        assert_eq!(
+            effective_instruction_author(&event, Some(&relay.public_key())),
+            owner.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn forged_workflow_marker_cannot_replace_actual_signer() {
+        let relay = nostr::Keys::generate();
+        let attacker = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let event = workflow_event(&attacker, &owner.public_key(), true);
+
+        assert_eq!(
+            effective_instruction_author(&event, Some(&relay.public_key())),
+            attacker.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn relay_signed_non_workflow_event_cannot_replace_actual_signer() {
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let event = workflow_event(&relay, &owner.public_key(), false);
+
+        assert_eq!(
+            effective_instruction_author(&event, Some(&relay.public_key())),
+            relay.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn missing_trusted_relay_identity_fails_closed_to_actual_signer() {
+        let relay = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let event = workflow_event(&relay, &owner.public_key(), true);
+
+        assert_eq!(
+            effective_instruction_author(&event, None),
+            relay.public_key().to_hex()
+        );
+    }
 
     /// A `RestClient` for tests. The author-gate decisions exercised here all
     /// resolve from the owner pubkey or sibling cache before any HTTP call, so
