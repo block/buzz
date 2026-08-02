@@ -2415,7 +2415,7 @@ void main() {
       // Bottom-aligned within the list's own tail padding; anything further up
       // means a blank region below the newest reply (jumpTo-style misplacement).
       expect(newestBottom, lessThanOrEqualTo(listRect.bottom + 1));
-      expect(newestBottom, greaterThan(listRect.bottom - 120));
+      expect(newestBottom, greaterThan(listRect.bottom - 60));
     }
 
     testWidgets('initial thread hydration opens pinned to the newest reply', (
@@ -2485,13 +2485,47 @@ void main() {
         await pushThread(tester, threadHead: threadHead);
         expectPinnedToNewestReply(tester, 'thread-message-group-reply-29');
 
-        // Pop and re-push: replies resolve synchronously from cache this time.
+        // Pop and re-push: threadRepliesProvider is a keepAlive family and
+        // the ProviderScope outlives the route, so the second open reads the
+        // already-resolved value — fetchedReplies is non-null on the very
+        // first build, the path a real cached reopen takes.
         Navigator.of(tester.element(find.byType(ThreadDetailPage))).pop();
         await tester.pumpAndSettle();
         await pushThread(tester, threadHead: threadHead);
         expectPinnedToNewestReply(tester, 'thread-message-group-reply-29');
       },
     );
+
+    testWidgets('a head-only thread keeps the head visible without scrolling', (
+      tester,
+    ) async {
+      // Pins the empty-replies guard in the initial-pin effect.
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: const {'thread-root': []},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      await pushThread(tester, threadHead: threadHead);
+
+      expect(
+        find.byKey(const ValueKey('thread-message-group-thread-root')),
+        findsOneWidget,
+      );
+    });
 
     testWidgets('a short thread keeps the head visible at the top', (
       tester,

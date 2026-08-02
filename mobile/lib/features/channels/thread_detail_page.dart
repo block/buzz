@@ -160,15 +160,20 @@ class ThreadDetailPage extends HookConsumerWidget {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
         final positions = itemPositionsListener.itemPositions.value;
-        final fitsViewport =
+        // A head scrolled off the top means the user moved during a slow
+        // hydration (the deep-link jump is already suppressed above) — the
+        // pin is an open-position default, never a user override.
+        final atInitialPosition =
+            positions.isEmpty ||
             positions.any(
               (position) =>
                   position.index == headIndex && position.itemLeadingEdge >= 0,
-            ) &&
-            positions.any(
-              (position) =>
-                  position.index == lastIndex && position.itemTrailingEdge <= 1,
             );
+        if (!atInitialPosition) return;
+        final fitsViewport = positions.any(
+          (position) =>
+              position.index == lastIndex && position.itemTrailingEdge <= 1,
+        );
         if (fitsViewport) return;
         itemScrollController.scrollTo(
           index: lastIndex,
