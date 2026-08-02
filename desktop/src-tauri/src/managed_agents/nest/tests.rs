@@ -30,6 +30,18 @@ fn init_nest_dir_prod_sets_buzz() {
 }
 
 #[test]
+fn nest_skill_contains_safe_mention_workflow() {
+    assert!(BUZZ_CLI_SKILL_MD.contains("--mention <hex-or-npub>"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("every presentation-only name that should notify"));
+    assert!(BUZZ_CLI_SKILL_MD
+        .contains("permits unresolved or ambiguous `@Name` text as presentation-only"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("signed event's `mention_pubkeys`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("no follow-up verification command is needed"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Add membership separately only when authorized"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("never changes membership automatically"));
+}
+
+#[test]
 fn ensure_nest_creates_all_dirs_and_agents_md() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
@@ -422,8 +434,10 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
         name_pool: vec![],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -480,8 +494,10 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,

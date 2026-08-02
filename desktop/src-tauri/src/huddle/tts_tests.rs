@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+#[path = "tts_tests/token_split.rs"]
+mod token_split;
+
 // ── Remote interrupt tracker ──────────────────────────────────────────────
 //
 // Models the per-peer frame counting logic in the recv task of
@@ -785,16 +788,6 @@ fn apply_fade_out_single_sample() {
     assert_eq!(samples[0], 1.0);
 }
 
-/// Sanity-check the per-sentence cushion length: 20 ms at 24 kHz must
-/// land at exactly 480 samples. This is a const computation, so the
-/// real value of this test is documenting *why* 20 ms was chosen — it
-/// covers a typical CoreAudio buffer turnover (256–1024 samples)
-/// without being audible as user-facing latency.
-#[test]
-fn sentence_lead_in_is_sane() {
-    assert_eq!(SENTENCE_LEAD_IN_SAMPLES, 480, "20 ms × 24 kHz");
-}
-
 // ── build_sentence_append_buffer tests ───────────────────────────────────
 
 /// REGRESSION: every chunk needs an onset cushion; synthesized chunks
@@ -812,6 +805,8 @@ fn lead_in_pad_is_present_for_every_sentence_chunk() {
             &mut first,
             vec![0.5_f32; SENTENCE_AUDIO_LEN],
             SILENCE_BUF_LEN,
+            true,
+            true,
         );
 
         assert_eq!(buf.len(), SENTENCE_AUDIO_LEN + SILENCE_BUF_LEN);
@@ -840,11 +835,11 @@ fn lead_in_pad_is_present_for_every_sentence_chunk() {
 #[test]
 fn build_sentence_append_buffer_flips_first_append() {
     let mut first = true;
-    let _ = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let _ = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
     assert!(!first, "first call must flip the flag");
 
     // Subsequent call: still has a per-sentence lead-in, flag stays false.
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
     assert!(!first);
 }
@@ -853,7 +848,7 @@ fn build_sentence_append_buffer_flips_first_append() {
 #[test]
 fn first_sentence_leading_silence_is_exactly_lead_in() {
     let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
     assert_eq!(buf[SENTENCE_LEAD_IN_SAMPLES], 0.5);
 }
@@ -863,8 +858,10 @@ fn first_sentence_leading_silence_is_exactly_lead_in() {
 fn sentence_gap_budget_is_preserved() {
     let mut first = true;
     let silence_buf_len = 2400;
-    let first_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len);
-    let second_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len);
+    let first_buf =
+        build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len, true, true);
+    let second_buf =
+        build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len, true, true);
 
     let first_tail = &first_buf[SENTENCE_LEAD_IN_SAMPLES + 100..];
     let second_lead = &second_buf[..SENTENCE_LEAD_IN_SAMPLES];
@@ -877,7 +874,7 @@ fn sentence_gap_budget_is_preserved() {
 #[test]
 fn sentence_append_buffer_is_one_contiguous_source() {
     let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
 
     assert_eq!(buf.len(), 2400 + 100);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
@@ -949,9 +946,8 @@ fn chunk_grouping_packs_up_to_budget_then_spills() {
     assert_eq!(chunks[2], d);
 }
 
-/// A single sentence longer than the budget is passed through unsplit —
-/// long single sentences are fine (the LM cap bounds runaway); only seams
-/// are being minimized.
+/// A single sentence longer than the coarse budget is passed through here;
+/// the loaded April engine subsequently enforces its exact 50-token limit.
 #[test]
 fn chunk_grouping_oversized_sentence_passes_through() {
     let long = "word ".repeat(60).trim_end().to_string() + ".";

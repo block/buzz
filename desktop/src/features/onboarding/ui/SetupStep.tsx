@@ -8,6 +8,7 @@ import {
   useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
+import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -384,8 +385,11 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   if (runtime.availability === "adapter_outdated") {
     return "ACP adapter detected but outdated — reinstall required.";
   }
-  if (runtime.availability === "cli_missing") {
-    return "ACP adapter detected; CLI missing.";
+  if (
+    runtime.availability === "cli_missing" ||
+    runtime.availability === "not_installed"
+  ) {
+    return "CLI not detected.";
   }
   return "";
 }
@@ -480,6 +484,7 @@ function RuntimeCard({
   const installMutation = useInstallAcpRuntimeMutation();
   const installError = installResults[runtime.id]?.error ?? null;
   const isInstalling = installMutation.isPending;
+  const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
   const isAvailable = runtime.availability === "available";
   const isReady = runtimeIsReadyForOnboarding(runtime);
 
@@ -496,7 +501,7 @@ function RuntimeCard({
           [runtime.id]: result.success
             ? { error: null, success: true }
             : {
-                error: getInstallErrorMessage(result.steps),
+                error: getInstallErrorMessage(result),
                 success: false,
               },
         }));
@@ -539,7 +544,18 @@ function RuntimeCard({
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {!isAvailable && runtimeDetailText(runtime) ? (
+        {isInstalling && installOutputLine ? (
+          // Takes the detail text's slot rather than adding a row: the card is
+          // fixed-height, and during an install the live line is the more
+          // useful of the two.
+          <p
+            aria-live="polite"
+            className="max-w-[13rem] truncate font-mono text-2xs leading-4 text-muted-foreground"
+            data-testid={`onboarding-runtime-install-output-${runtime.id}`}
+          >
+            {installOutputLine}
+          </p>
+        ) : !isAvailable && runtimeDetailText(runtime) ? (
           <p
             aria-hidden={installError ? "true" : undefined}
             className={cn(
@@ -605,14 +621,14 @@ function RuntimeProvidersSection({
           Set up your agent harnesses
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz detected the harnesses available on this machine. Install or sign
-          in to at least one to continue.
+          Buzz checks for command-line harnesses on this machine. Install the
+          CLI or sign in to at least one to continue.
         </p>
       </div>
 
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
         {orderedItems.length > 0 ? (
-          <div className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid min-w-0 w-full max-w-[1200px] grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
             {orderedItems.map((runtime) => (
               <RuntimeCard
                 installResults={installResults}
@@ -629,8 +645,8 @@ function RuntimeProvidersSection({
             className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
             data-testid="onboarding-acp-empty"
           >
-            No supported agent harnesses were detected yet. Install Claude Code
-            or Codex, then check again.
+            No supported command-line harnesses were detected yet. Install a
+            supported CLI, then check again.
           </p>
         )}
 
@@ -682,25 +698,28 @@ function SetupStepContent({
       />
 
       <OnboardingFooter>
-        <Button
-          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
-          data-testid="onboarding-setup-next"
-          disabled={readyRuntimeIds.length === 0}
-          onClick={() => actions.next(readyRuntimeIds)}
-          type="button"
-        >
-          Next
-        </Button>
-
-        <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
-          data-testid="onboarding-setup-skip"
-          onClick={() => actions.next([])}
-          type="button"
-          variant="ghost"
-        >
-          Skip for now
-        </Button>
+        {/* Relative row keeps the primary CTA truly centered while Skip
+            hangs off its right edge without shifting the center. */}
+        <div className="relative flex items-center justify-center">
+          <Button
+            className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
+            data-testid="onboarding-setup-next"
+            disabled={readyRuntimeIds.length === 0}
+            onClick={() => actions.next(readyRuntimeIds)}
+            type="button"
+          >
+            Next
+          </Button>
+          <Button
+            className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 text-sm fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
+            data-testid="onboarding-setup-skip"
+            onClick={() => actions.next([])}
+            type="button"
+            variant="ghost"
+          >
+            Skip for now
+          </Button>
+        </div>
 
         <Button
           className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
@@ -711,6 +730,23 @@ function SetupStepContent({
         >
           Back
         </Button>
+
+        <p className="text-xs text-foreground/50">
+          More harnesses (Cursor, Grok, Amp&hellip;){" "}
+          {actions.navigateToAgentSettings ? (
+            <button
+              className="text-foreground/70 underline underline-offset-2 hover:text-foreground"
+              data-testid="onboarding-setup-more-harnesses"
+              onClick={actions.navigateToAgentSettings}
+              type="button"
+            >
+              Settings → Agents
+            </button>
+          ) : (
+            <span className="text-foreground/70">Settings → Agents</span>
+          )}{" "}
+          after setup.
+        </p>
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );

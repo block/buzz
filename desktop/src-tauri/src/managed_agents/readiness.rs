@@ -47,6 +47,7 @@ use crate::managed_agents::{
     discovery::{known_acp_runtime, KnownAcpRuntime},
     env_vars::merged_user_env,
     global_config::GlobalAgentConfig,
+    normalize_agent_args,
     types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
 };
 
@@ -77,6 +78,101 @@ pub(crate) struct EffectiveAgentEnv {
     pub effective_command: String,
 }
 
+// ── Typed effective-harness descriptor ───────────────────────────────────────
+//
+// A single owned type that fully describes what a spawn would run.  Produced
+// by `resolve_effective_harness_descriptor` and consumed by spawn_agent_child,
+// spawn_config_hash, build_managed_agent_summary, get_agent_models, and
+// agent_readiness — so the harness-definition lookup and arg/env resolution
+// happen exactly once, in one place.
+
+/// The complete effective description of a harness spawn: resolved command,
+/// args, and layered env.  This is the single source of truth for what will
+/// actually run — computed once and shared across every consumer that needs
+/// the effective values.
+#[derive(Debug, Clone)]
+pub(crate) struct EffectiveHarnessDescriptor {
+    /// The raw effective command string (e.g. `"buzz-agent"`, `"my-acp-agent"`).
+    /// Used for `known_acp_runtime` lookup and hashing.
+    pub command: String,
+    /// Normalized effective args.  Instance args win when non-empty; otherwise
+    /// the harness definition's args apply.
+    pub args: Vec<String>,
+    /// The full layered process env: baked floor → runtime metadata → definition
+    /// env → global → persona → agent.
+    pub env: BTreeMap<String, String>,
+}
+
+/// Resolve the complete harness descriptor from a record + context — the single
+/// authoritative path for command, args, and env.
+///
+/// This is the only place where harness-definition lookup and arg/env layering
+/// happen; spawn, hash, summary, and both model-probe paths all consume this.
+///
+/// Returns `Err("DANGLING_HARNESS_ID:<id>")` when the record (or its linked
+/// persona) references a runtime id that no longer exists in the registry —
+/// the same typed error produced by `try_record_agent_command`.  Callers that
+/// cannot meaningfully continue with a dangling id (e.g. `spawn_agent_child`)
+/// propagate the error; callers that degrade gracefully may use
+/// `.unwrap_or_else(|_| …)`.
+///
+/// Does NOT require an `AppHandle` so it is fully unit-testable.
+///
+/// # Arguments
+/// * `record` — the managed agent record
+/// * `personas` — all current personas (for command/env resolution)
+/// * `global` — global agent config defaults
+pub(crate) fn resolve_effective_harness_descriptor(
+    record: &ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::AgentDefinition],
+    global: &crate::managed_agents::GlobalAgentConfig,
+) -> Result<EffectiveHarnessDescriptor, String> {
+    let effective_command = crate::managed_agents::try_record_agent_command(record, personas)?;
+    let runtime_meta = known_acp_runtime(&effective_command);
+
+    // Look up the harness definition once — used for both args and env.
+    // Resolution order: record.runtime → persona.runtime → "".
+    let harness_def = {
+        let runtime_id = record
+            .runtime
+            .as_deref()
+            .or_else(|| {
+                record.persona_id.as_deref().and_then(|pid| {
+                    personas
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .and_then(|p| p.runtime.as_deref())
+                })
+            })
+            .unwrap_or("");
+        crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id)
+    };
+
+    // Args: explicit non-empty instance args win; otherwise use definition args.
+    let args = {
+        let record_args = record.agent_args.clone();
+        let instance_has_args = record_args.iter().any(|a| !a.trim().is_empty());
+        if instance_has_args {
+            normalize_agent_args(&effective_command, record_args)
+        } else if let Some(ref def) = harness_def {
+            normalize_agent_args(&effective_command, def.args.clone())
+        } else {
+            normalize_agent_args(&effective_command, record_args)
+        }
+    };
+
+    // Env: full layered resolution (same as resolve_effective_agent_env).
+    // Pass harness_def directly to avoid a second lookup.
+    let effective_env =
+        resolve_effective_agent_env_with_def(record, personas, runtime_meta, global, harness_def);
+
+    Ok(EffectiveHarnessDescriptor {
+        command: effective_command,
+        args,
+        env: effective_env.env,
+    })
+}
+
 /// Assemble the effective agent env from a record, personas, optional
 /// known-runtime metadata, and the global agent config defaults — without an
 /// `AppHandle` so it is fully unit-testable.
@@ -93,16 +189,43 @@ pub(crate) fn resolve_effective_agent_env(
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {
+    // Look up the harness definition for definition-level env (preset/custom).
+    // Same resolution logic as spawn_agent_child: record runtime id first, then
+    // persona runtime id, then nothing.
+    let harness_def = {
+        let runtime_id = record
+            .runtime
+            .as_deref()
+            .or_else(|| {
+                record.persona_id.as_deref().and_then(|pid| {
+                    personas
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .and_then(|p| p.runtime.as_deref())
+                })
+            })
+            .unwrap_or("");
+        crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id)
+    };
+
+    resolve_effective_agent_env_with_def(record, personas, runtime, global, harness_def)
+}
+
+/// Inner implementation that accepts a pre-fetched `harness_def` to avoid a
+/// second registry lookup when the caller (e.g. `resolve_effective_harness_descriptor`)
+/// already has the definition in hand.
+fn resolve_effective_agent_env_with_def(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    runtime: Option<&KnownAcpRuntime>,
+    global: &GlobalAgentConfig,
+    harness_def: Option<std::sync::Arc<crate::managed_agents::custom_harnesses::HarnessDefinition>>,
+) -> EffectiveAgentEnv {
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
 
     // Layer 1: baked build defaults (floor — internal builds only; OSS = empty).
     let mut env = baked_build_env();
 
-    // Layer 2: runtime metadata env vars (model / provider keys derived from
-    // the record's structured fields, with global as fallback).
-    //
-    // Uses the shared resolver to guarantee readiness and spawn agree on the
-    // effective model/provider: agent → persona → global → None.
     let (effective_model, effective_provider) =
         super::global_config::resolve_effective_model_provider(record, personas, global);
 
@@ -111,10 +234,21 @@ pub(crate) fn resolve_effective_agent_env(
             rt.model_env_var,
             rt.provider_env_var,
             rt.provider_locked,
-            effective_model,
-            effective_provider,
+            effective_model.as_deref(),
+            effective_provider.as_deref(),
         ) {
             env.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    // Layer 2b: definition env — the harness author's defaults (e.g. CURSOR_ACP=1).
+    // Applied as a floor below global so user env always wins on collision.
+    // Reserved keys are stripped by the shared `is_reserved_env_key` predicate.
+    if let Some(ref def) = harness_def {
+        for (key, value) in &def.env {
+            if !super::env_vars::is_reserved_env_key(key) {
+                env.insert(key.clone(), value.clone());
+            }
         }
     }
 
@@ -138,7 +272,11 @@ pub(crate) fn resolve_effective_agent_env(
     // Buzz shared compute is a native Buzz provider. Translate it to buzz-agent's
     // OpenAI-compatible transport only in the effective runtime environment.
     #[cfg(feature = "mesh-llm")]
-    super::apply_relay_mesh_env(&mut env, effective_provider, effective_model);
+    super::apply_relay_mesh_env(
+        &mut env,
+        effective_provider.as_deref(),
+        effective_model.as_deref(),
+    );
 
     EffectiveAgentEnv {
         env,
@@ -196,6 +334,14 @@ pub enum Requirement {
     /// Git for Windows is missing, so buzz-agent cannot launch buzz-dev-mcp's
     /// Bash-based shell tool. Doctor owns installation and re-checking.
     GitBash,
+    /// A custom harness command that cannot be resolved in the current PATH.
+    /// Displayed as a PATH badge in the harness card and a nudge in the agent
+    /// message stream.  No in-app action can fix this — the user must install
+    /// the binary or update their PATH.
+    MissingBinary {
+        /// The command name that was not found (e.g. `\"my-acp-agent\"`).
+        command: String,
+    },
 }
 
 // ── AgentReadiness ────────────────────────────────────────────────────────────
@@ -271,7 +417,13 @@ fn collect_missing_requirements(
     runtime: Option<&KnownAcpRuntime>,
 ) -> Vec<Requirement> {
     let Some(rt) = runtime else {
-        // Unknown/custom command — no requirements to check.
+        // Unknown/custom command — check that the binary is actually resolvable.
+        // No known requirement set beyond the PATH check.
+        if crate::managed_agents::resolve_command(&effective.effective_command).is_none() {
+            return vec![Requirement::MissingBinary {
+                command: effective.effective_command.clone(),
+            }];
+        }
         return vec![];
     };
 
@@ -329,6 +481,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         }
         Some("anthropic") => Some("ANTHROPIC_MODEL"),
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
+        Some("openrouter") => Some("OPENROUTER_MODEL"),
         _ => None,
     };
     let model_present = effective
@@ -369,6 +522,12 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
             if env_key_missing("DATABRICKS_HOST") => {
                 missing.push(Requirement::EnvKey {
                     key: "DATABRICKS_HOST".to_string(),
+                });
+            }
+        Some("openrouter")
+            if env_key_missing("OPENROUTER_API_KEY") => {
+                missing.push(Requirement::EnvKey {
+                    key: "OPENROUTER_API_KEY".to_string(),
                 });
             }
         _ => {
@@ -476,6 +635,13 @@ fn goose_requirements(
         {
             missing.push(Requirement::EnvKey {
                 key: "DATABRICKS_HOST".to_string(),
+            });
+        }
+        Some("openrouter")
+            if env_key_missing("OPENROUTER_API_KEY") && !file_key_present("OPENROUTER_API_KEY") =>
+        {
+            missing.push(Requirement::EnvKey {
+                key: "OPENROUTER_API_KEY".to_string(),
             });
         }
         _ => {}
@@ -869,7 +1035,8 @@ mod tests {
             cli_install_commands: &[],
             cli_install_commands_windows: &[],
             adapter_install_commands: &[],
-            install_instructions_url: "",
+            cli_install_instructions_url: "",
+            adapter_install_instructions_url: "",
             cli_install_hint: "",
             adapter_install_hint: "",
             skill_dir: None,
@@ -1063,7 +1230,8 @@ mod tests {
             cli_install_commands: &[],
             cli_install_commands_windows: &[],
             adapter_install_commands: &[],
-            install_instructions_url: "",
+            cli_install_instructions_url: "",
+            adapter_install_instructions_url: "",
             cli_install_hint: "",
             adapter_install_hint: "",
             skill_dir: None,
@@ -1205,10 +1373,30 @@ mod tests {
 
     #[test]
     fn unknown_command_is_always_ready() {
-        let env = make_env("my-custom-harness", BTreeMap::new());
+        // Since Phase B-7 (readiness exec-check), unknown/custom commands that are
+        // not resolvable in PATH produce a MissingBinary requirement rather than
+        // being unconditionally Ready.  A command that IS resolvable should be Ready.
+        // Use a known-present binary so the test is not environment-sensitive.
+        let env = make_env("sh", BTreeMap::new());
         assert!(
             agent_readiness(&env).is_ready(),
-            "unknown/custom command should always be Ready (no requirements)"
+            "unknown/custom command present in PATH should be Ready"
+        );
+    }
+
+    #[test]
+    fn unknown_command_missing_from_path_is_not_ready() {
+        let env = make_env("my-custom-harness-that-does-not-exist", BTreeMap::new());
+        let readiness = agent_readiness(&env);
+        assert!(
+            !readiness.is_ready(),
+            "unknown/custom command absent from PATH should be NotReady"
+        );
+        let reqs = readiness.requirements();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            matches!(&reqs[0], Requirement::MissingBinary { command } if command == "my-custom-harness-that-does-not-exist"),
+            "should surface MissingBinary requirement"
         );
     }
 
@@ -1336,8 +1524,10 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
@@ -1492,195 +1682,62 @@ mod tests {
                 field: "model".to_string()
             }));
     }
+
+    // ── OpenRouter readiness ─────────────────────────────────────────────
+
+    #[test]
+    fn buzz_agent_openrouter_with_all_fields_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "openrouter"),
+                ("BUZZ_AGENT_MODEL", "anthropic/claude-sonnet-4"),
+                ("OPENROUTER_API_KEY", "sk-or-test-key"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            result.is_ready(),
+            "openrouter with all fields should be ready"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_openrouter_missing_key_returns_not_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "openrouter"),
+                ("BUZZ_AGENT_MODEL", "anthropic/claude-sonnet-4"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(!result.is_ready());
+        assert!(result.requirements().contains(&Requirement::EnvKey {
+            key: "OPENROUTER_API_KEY".to_string()
+        }));
+    }
+
+    #[test]
+    fn buzz_agent_openrouter_with_provider_model_fallback_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "openrouter"),
+                ("OPENROUTER_MODEL", "google/gemini-2.5-flash"),
+                ("OPENROUTER_API_KEY", "sk-or-test-key"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            result.is_ready(),
+            "OPENROUTER_MODEL fallback should satisfy model requirement"
+        );
+    }
 }
 
-// ── goose file-config–aware requirement tests ─────────────────────────────
-//
-// These tests call `goose_requirements` directly, injecting a synthetic
-// `RuntimeFileConfig` so there is no disk I/O and tests are deterministic.
-
+// Goose file-config-aware requirement tests live in a sibling file so this
+// module stays under the desktop file-size ratchet.
 #[cfg(test)]
-mod goose_file_config_tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::managed_agents::config_bridge::RuntimeFileConfig;
-
-    fn empty_env() -> EffectiveAgentEnv {
-        EffectiveAgentEnv {
-            env: BTreeMap::new(),
-            config_file_path: Some("~/.config/goose/config.yaml"),
-            effective_command: "goose".to_string(),
-        }
-    }
-
-    fn env_with(pairs: &[(&str, &str)]) -> EffectiveAgentEnv {
-        EffectiveAgentEnv {
-            env: pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            config_file_path: Some("~/.config/goose/config.yaml"),
-            effective_command: "goose".to_string(),
-        }
-    }
-
-    fn databricks_file_config() -> RuntimeFileConfig {
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "DATABRICKS_HOST".to_string(),
-            "https://dbc.example.com".to_string(),
-        );
-        RuntimeFileConfig {
-            provider: Some("databricks_v2".to_string()),
-            model: Some("goose-claude-4-6-opus".to_string()),
-            extra,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn goose_file_config_silences_databricks_host_requirement() {
-        // File has provider, model, and DATABRICKS_HOST — all requirements silenced.
-        let env = empty_env();
-        let cfg = databricks_file_config();
-        let result = goose_requirements(&env, Some(&cfg));
-        assert!(
-            result.is_empty(),
-            "all requirements should be silenced by goose file config; \
-             got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn goose_env_empty_file_absent_still_not_ready() {
-        // No env, no file config → provider and model both required.
-        let env = empty_env();
-        let result = goose_requirements(&env, None);
-        assert!(
-            result.contains(&Requirement::NormalizedField {
-                field: "provider".to_string()
-            }),
-            "provider must be required when absent from both env and file"
-        );
-        assert!(
-            result.contains(&Requirement::NormalizedField {
-                field: "model".to_string()
-            }),
-            "model must be required when absent from both env and file"
-        );
-    }
-
-    #[test]
-    fn goose_file_config_silences_provider_and_model_but_not_anthropic_key() {
-        // File has provider=anthropic and model, but ANTHROPIC_API_KEY is not
-        // in the file's `extra` map — it must still be required.
-        let cfg = RuntimeFileConfig {
-            provider: Some("anthropic".to_string()),
-            model: Some("claude-opus-4-5".to_string()),
-            extra: BTreeMap::new(),
-            ..Default::default()
-        };
-        let env = empty_env();
-        let result = goose_requirements(&env, Some(&cfg));
-        // Provider and model silenced.
-        assert!(
-            !result.contains(&Requirement::NormalizedField {
-                field: "provider".to_string()
-            }),
-            "provider silenced by file config"
-        );
-        assert!(
-            !result.contains(&Requirement::NormalizedField {
-                field: "model".to_string()
-            }),
-            "model silenced by file config"
-        );
-        // ANTHROPIC_API_KEY not in file extra → still required.
-        assert!(
-            result.contains(&Requirement::EnvKey {
-                key: "ANTHROPIC_API_KEY".to_string()
-            }),
-            "ANTHROPIC_API_KEY must remain required when not in file extra"
-        );
-    }
-
-    #[test]
-    fn goose_env_provider_wins_over_file_provider_for_cred_check() {
-        // Env has GOOSE_PROVIDER=anthropic (different from file's databricks_v2).
-        // The env provider must win for credential checking.
-        let env = env_with(&[
-            ("GOOSE_PROVIDER", "anthropic"),
-            ("GOOSE_MODEL", "claude-opus-4-5"),
-        ]);
-        let cfg = databricks_file_config(); // has provider=databricks_v2
-        let result = goose_requirements(&env, Some(&cfg));
-        // anthropic requires ANTHROPIC_API_KEY, not DATABRICKS_HOST.
-        assert!(
-            result.contains(&Requirement::EnvKey {
-                key: "ANTHROPIC_API_KEY".to_string()
-            }),
-            "env provider=anthropic must require ANTHROPIC_API_KEY"
-        );
-        assert!(
-            !result.contains(&Requirement::EnvKey {
-                key: "DATABRICKS_HOST".to_string()
-            }),
-            "env provider=anthropic must NOT require DATABRICKS_HOST"
-        );
-    }
-
-    #[test]
-    fn goose_flat_databricks_host_in_file_config_silences_requirement() {
-        // Will's typical goose config: flat DATABRICKS_HOST at the top level,
-        // no active_provider — provider inferred as "databricks".
-        // The parser must store extra["DATABRICKS_HOST"] = value (canonical key),
-        // and goose_requirements must then silence the DATABRICKS_HOST requirement.
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "DATABRICKS_HOST".to_string(),
-            "https://block.cloud.databricks.com".to_string(),
-        );
-        let cfg = RuntimeFileConfig {
-            provider: Some("databricks".to_string()),
-            model: Some("goose-claude-4-5".to_string()),
-            extra,
-            ..Default::default()
-        };
-        let env = empty_env();
-        let result = goose_requirements(&env, Some(&cfg));
-        // All requirements silenced — provider (file), model (file), DATABRICKS_HOST (file).
-        assert!(
-            result.is_empty(),
-            "flat DATABRICKS_HOST in file config must silence all requirements; \
-             got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn goose_goose_provider_databricks_flat_host_silences_databricks_host() {
-        // GOOSE_PROVIDER=databricks (not active_provider) + flat DATABRICKS_HOST.
-        // The parser canonicalizes to extra["DATABRICKS_HOST"]; readiness must silence it.
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "DATABRICKS_HOST".to_string(),
-            "https://dbc.example.com".to_string(),
-        );
-        let cfg = RuntimeFileConfig {
-            provider: Some("databricks".to_string()),
-            model: Some("some-model".to_string()),
-            extra,
-            ..Default::default()
-        };
-        let env = empty_env();
-        let result = goose_requirements(&env, Some(&cfg));
-        assert!(
-            !result.contains(&Requirement::EnvKey {
-                key: "DATABRICKS_HOST".to_string()
-            }),
-            "DATABRICKS_HOST must be silenced when canonical key is in file extra"
-        );
-    }
-}
+#[path = "readiness_goose_file_config_tests.rs"]
+mod goose_file_config_tests;

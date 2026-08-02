@@ -276,6 +276,8 @@ test-unit:
     #!/usr/bin/env bash
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        cargo nextest run -p buzz-voice --lib
+        cargo nextest run -p buzz-cli
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
         # They guard the embedded-migrator invariant (exactly the consolidated
         # 0001; cutover/backfill stays an operator script, not startup state)
@@ -620,11 +622,17 @@ mobile-check:
 mobile-test:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
 
-# Compile an unsigned Android debug APK
+# Regenerate the emoji dataset asset from desktop's emoji-mart install.
+# Output is committed — rerun after bumping @emoji-mart/data.
+mobile-emoji-data:
+    node {{mobile_dir}}/scripts/generate-emoji-data.mjs
+
+# Compile an unsigned Android debug APK (worktree-aware debug identity)
 mobile-build-android:
+    ./scripts/mobile-worktree-overrides.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
 
-# Run the mobile app on iOS simulator
+# Run the mobile app on iOS simulator (worktree-aware debug identity)
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -632,9 +640,14 @@ mobile-dev:
         open -a Simulator
         sleep 3
     fi
+    ./scripts/mobile-worktree-overrides.sh
     cd {{mobile_dir}}
     unset GIT_DIR GIT_WORK_TREE
     flutter run
+
+# Uninstall stale worktree-suffixed Buzz debug installs (production apps kept)
+mobile-clean:
+    ./scripts/mobile-worktree-clean.sh
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
@@ -713,7 +726,7 @@ bump-relay-version version:
     cargo update -p buzz-relay
     echo "Bumped buzz-relay to {{ version }} and regenerated Cargo.lock"
 
-# Open or update the desktop release PR (signed desktop app)
+# Open or update the desktop release PR from an immutable origin/main snapshot
 release-desktop *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -723,7 +736,7 @@ release-desktop *ARGS:
     else
         VERSION="$ARG"
     fi
-    just _release-pr desktop "$VERSION"
+    scripts/prepare-desktop-release.sh "$VERSION"
 
 # Open or update the relay release PR (ghcr.io/block/buzz image)
 release-relay *ARGS:

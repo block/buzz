@@ -10,8 +10,10 @@ import {
 } from "@/features/profile/lib/identity";
 import type { ProjectRepoCommit, ProjectRepoDiff } from "@/shared/api/types";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectDiffFilesPanel } from "./ProjectPullRequestFilesChangedPanel";
+import { ProjectRichContent } from "./ProjectRichContent";
 
 function commitDateLabel(timestamp: number) {
   return new Date(timestamp * 1_000).toLocaleString(undefined, {
@@ -55,7 +57,10 @@ export function ProjectCommitDetailPanel({
 
   return (
     <div className="space-y-3">
-      <header className="space-y-2 rounded-xl border border-border/60 bg-card p-4">
+      <header
+        className={`space-y-2 p-4 ${PROJECT_DETAIL_PANEL_CLASS}`}
+        data-project-detail-panel
+      >
         <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <GitCommitHorizontal className="h-3.5 w-3.5" />
           Commit from {authorLabel}
@@ -98,6 +103,9 @@ export function ProjectCommitDetailPanel({
             </div>
           </div>
         </div>
+        {diff?.commitBody ? (
+          <ProjectRichContent content={diff.commitBody} />
+        ) : null}
       </header>
 
       <ProjectDiffFilesPanel

@@ -37,6 +37,12 @@ export function shouldScheduleReconnect(inputs: RelayReconnectInputs): boolean {
   return true;
 }
 
+export function shouldWaitForScheduledReconnect(inputs: {
+  hasPendingReconnect: boolean;
+}): boolean {
+  return inputs.hasPendingReconnect;
+}
+
 /** Whether `ensureConnected()` should refuse with a terminal error. */
 export function shouldRefuseConnect(inputs: { terminal: boolean }): boolean {
   return inputs.terminal;

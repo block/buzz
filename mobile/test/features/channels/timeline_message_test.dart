@@ -287,6 +287,53 @@ void main() {
       );
     });
 
+    // The relay reports a clear as a change carrying an empty string, so
+    // without the cleared branch this reads: changed the topic to "".
+    test('a blank topic or purpose reads as cleared', () {
+      for (final blank in [null, '', '   \n\t ']) {
+        expect(
+          SystemEvent(
+            type: SystemEventType.topicChanged,
+            actorPubkey: 'pk1',
+            topic: blank,
+          ).describe(resolve),
+          'Alice cleared the topic',
+        );
+        expect(
+          SystemEvent(
+            type: SystemEventType.purposeChanged,
+            actorPubkey: 'pk1',
+            purpose: blank,
+          ).describe(resolve),
+          'Alice cleared the purpose',
+        );
+      }
+    });
+
+    test('no caption announces empty quotes', () {
+      for (final value in [null, '', ' ', 'Real topic']) {
+        expect(
+          SystemEvent(
+            type: SystemEventType.topicChanged,
+            actorPubkey: 'pk1',
+            topic: value,
+          ).describe(resolve),
+          isNot(contains('""')),
+        );
+      }
+    });
+
+    test('surrounding whitespace is trimmed out of the quotes', () {
+      expect(
+        SystemEvent(
+          type: SystemEventType.topicChanged,
+          actorPubkey: 'pk1',
+          topic: '  Release v2  ',
+        ).describe(resolve),
+        'Alice changed the topic to "Release v2"',
+      );
+    });
+
     test('channel_created', () {
       final event = SystemEvent(
         type: SystemEventType.channelCreated,
