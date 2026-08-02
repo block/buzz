@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -260,10 +261,22 @@ fn start_pair(
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
+    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    {
+        let mut manual_stops = state
+            .managed_agent_manual_stops
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if expected_updated_at.is_some() && manual_stops.contains(&key) {
+            return Ok(status_for(&app, record, &key, None, None));
+        }
+        if expected_updated_at.is_none() {
+            manual_stops.remove(&key);
+        }
+    }
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
-    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -347,7 +360,7 @@ pub fn stop_managed_agent_runtime(
                 // Keep failed teardown visible/manageable instead of
                 // orphaning it: the child stays tracked and the receipt
                 // stays on disk until a stop actually succeeds.
-                runtimes.insert(key, runtime);
+                runtimes.insert(key.clone(), runtime);
                 return Err(error);
             }
         }
@@ -369,6 +382,11 @@ pub fn stop_managed_agent_runtime(
     record.runtime_pid = None;
     record.updated_at = crate::util::now_iso();
     record.last_stopped_at = Some(record.updated_at.clone());
+    state
+        .managed_agent_manual_stops
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(key.clone());
     let status = status_for(&app, record, &key, None, None);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
@@ -464,18 +482,13 @@ pub async fn reconcile_managed_agent_runtimes(
     use futures_util::{stream, StreamExt};
 
     let records = load_managed_agents(&app)?;
-    let mut jobs = Vec::new();
-    for community in communities {
-        for record in records
-            .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
-        // The legacy per-record relay pin is deliberately ignored here — see
-        // `effective_agent_relay_url`. Every local auto-start agent fans out
-        // to every configured community.
-        {
-            jobs.push((record.clone(), community.relay_url.clone()));
-        }
-    }
+    let state = app.state::<AppState>();
+    let manual_stops = state
+        .managed_agent_manual_stops
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let jobs = reconcile_runtime_jobs(&records, &communities, &manual_stops);
     let probes: Vec<_> = stream::iter(jobs)
         .map(|(record, requested)| {
             let state = app.state::<AppState>();
@@ -568,6 +581,32 @@ pub async fn reconcile_managed_agent_runtimes(
     .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
+fn reconcile_runtime_jobs(
+    records: &[super::ManagedAgentRecord],
+    communities: &[super::ManagedAgentCommunityTarget],
+    manual_stops: &HashSet<ManagedAgentRuntimeKey>,
+) -> Vec<(super::ManagedAgentRecord, String)> {
+    let mut jobs = Vec::new();
+    for community in communities {
+        for record in records
+            .iter()
+            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+        // The legacy per-record relay pin is deliberately ignored here — see
+        // `effective_agent_relay_url`. Every local auto-start agent fans out
+        // to every configured community unless the user stopped that exact
+        // pair during this Desktop session.
+        {
+            let manually_stopped =
+                ManagedAgentRuntimeKey::new(record.pubkey.clone(), &community.relay_url)
+                    .is_ok_and(|key| manual_stops.contains(&key));
+            if !manually_stopped {
+                jobs.push((record.clone(), community.relay_url.clone()));
+            }
+        }
+    }
+    jobs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +643,36 @@ mod tests {
             "aa".repeat(32)
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn manual_stop_suppresses_only_the_exact_reconcile_pair() {
+        let record = record_with_relay("");
+        assert!(record.start_on_app_launch);
+        let first = super::super::ManagedAgentCommunityTarget {
+            relay_url: "wss://one.example".into(),
+        };
+        let second = super::super::ManagedAgentCommunityTarget {
+            relay_url: "wss://two.example".into(),
+        };
+        let stopped = ManagedAgentRuntimeKey::new(&record.pubkey, &first.relay_url).unwrap();
+        let mut manual_stops = HashSet::from([stopped.clone()]);
+
+        let jobs = reconcile_runtime_jobs(
+            std::slice::from_ref(&record),
+            &[first.clone(), second.clone()],
+            &manual_stops,
+        );
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].1, second.relay_url);
+
+        manual_stops.remove(&stopped);
+        let jobs = reconcile_runtime_jobs(
+            std::slice::from_ref(&record),
+            &[first, second],
+            &manual_stops,
+        );
+        assert_eq!(jobs.len(), 2);
     }
 
     #[test]
