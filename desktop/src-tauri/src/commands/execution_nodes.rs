@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration as StdDuration;
 
 use buzz_core_pkg::execution::{
-    AgentWorkloadContext, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
-    ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt,
-    ProviderAuthResponse, ProviderAuthSession, WorkloadSpec, WorkloadStatus,
+    AgentRuntimeSettings, AgentWorkloadContext, ExecutionCapability, ExecutionCommand,
+    ExecutionCommandEnvelope, ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus,
+    ExecutionReceipt, ProviderAuthResponse, ProviderAuthSession, WorkloadSpec, WorkloadStatus,
 };
 use buzz_core_pkg::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
@@ -258,6 +258,18 @@ pub async fn deploy_managed_agent_to_execution_node(
             &global_config,
         )
         .require_resolved()?;
+        let effective_harness = crate::managed_agents::resolve_effective_harness_descriptor(
+            record,
+            &personas,
+            &global_config,
+        )?;
+        let runtime_settings = AgentRuntimeSettings::new(
+            effective_harness.args,
+            record.idle_timeout_seconds,
+            record.max_turn_duration_seconds,
+            record.parallelism,
+        )
+        .map_err(|error| format!("invalid managed-agent runtime settings: {error}"))?;
         let runtime = record
             .runtime
             .clone()
@@ -293,6 +305,8 @@ pub async fn deploy_managed_agent_to_execution_node(
                 input.channel_id.clone(),
             )
             .map_err(|error| format!("invalid managed-agent context: {error}"))?
+            .with_runtime_settings(runtime_settings)
+            .map_err(|error| format!("invalid managed-agent runtime settings: {error}"))?
             .with_private_key(record.private_key_nsec.clone())
             .map_err(|error| format!("managed-agent key is unavailable: {error}"))?,
         );

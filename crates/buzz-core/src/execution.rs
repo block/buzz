@@ -34,6 +34,10 @@ const MAX_AUTH_TAG_BYTES: usize = 1024;
 const MAX_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_RELAY_URL_BYTES: usize = 2048;
 const MAX_PRIVATE_KEY_BYTES: usize = 128;
+const MAX_AGENT_ARGS: usize = 128;
+const MAX_AGENT_ARG_BYTES: usize = 4096;
+const MAX_AGENT_ARGS_BYTES: usize = 64 * 1024;
+const MAX_AGENT_PARALLELISM: u32 = 32;
 
 /// Validation failures for execution protocol values.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -120,6 +124,12 @@ pub enum ExecutionValidationError {
     /// A managed-agent launch key was malformed or did not match its public identity.
     #[error("managed-agent launch key does not match its public identity")]
     InvalidAgentKey,
+    /// A managed-agent parallelism setting was outside the supported range.
+    #[error("managed-agent parallelism must be between 1 and {MAX_AGENT_PARALLELISM}")]
+    InvalidAgentParallelism,
+    /// A managed-agent launch contained too many arguments.
+    #[error("managed-agent contains too many launch arguments")]
+    TooManyAgentArgs,
 }
 
 /// Errors returned when decoding and validating a JSON command envelope.
@@ -391,6 +401,81 @@ impl CredentialRef {
     }
 }
 
+/// Non-secret runtime settings that must follow a managed agent to its body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRuntimeSettings {
+    /// Effective harness arguments for this managed agent.
+    #[serde(default)]
+    pub agent_args: Vec<String>,
+    /// ACP idle timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_seconds: Option<u64>,
+    /// Absolute per-turn wall-clock cap in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turn_duration_seconds: Option<u64>,
+    /// Maximum concurrent turns for the agent.
+    #[serde(default = "default_agent_parallelism")]
+    pub parallelism: u32,
+}
+
+fn default_agent_parallelism() -> u32 {
+    1
+}
+
+impl Default for AgentRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            agent_args: Vec::new(),
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: default_agent_parallelism(),
+        }
+    }
+}
+
+impl AgentRuntimeSettings {
+    /// Build and validate the portable, non-secret runtime settings.
+    pub fn new(
+        agent_args: Vec<String>,
+        idle_timeout_seconds: Option<u64>,
+        max_turn_duration_seconds: Option<u64>,
+        parallelism: u32,
+    ) -> Result<Self, ExecutionValidationError> {
+        let settings = Self {
+            agent_args,
+            idle_timeout_seconds,
+            max_turn_duration_seconds,
+            parallelism,
+        };
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    fn validate(&self) -> Result<(), ExecutionValidationError> {
+        if !(1..=MAX_AGENT_PARALLELISM).contains(&self.parallelism) {
+            return Err(ExecutionValidationError::InvalidAgentParallelism);
+        }
+        if self.agent_args.len() > MAX_AGENT_ARGS {
+            return Err(ExecutionValidationError::TooManyAgentArgs);
+        }
+        let mut total_bytes = 0;
+        for argument in &self.agent_args {
+            validate_text(
+                "managed-agent argument",
+                argument,
+                MAX_AGENT_ARG_BYTES,
+                true,
+            )?;
+            total_bytes += argument.len();
+        }
+        if total_bytes > MAX_AGENT_ARGS_BYTES {
+            return Err(ExecutionValidationError::TooManyAgentArgs);
+        }
+        Ok(())
+    }
+}
+
 /// Identity and behavior context for a managed agent workload.
 ///
 /// This is deliberately separate from runtime infrastructure and credential
@@ -425,6 +510,9 @@ pub struct AgentWorkloadContext {
     /// Channel context selected for this deployment, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
+    /// Effective non-secret runtime settings for the managed agent.
+    #[serde(default)]
+    pub runtime_settings: AgentRuntimeSettings,
 }
 
 impl fmt::Debug for AgentWorkloadContext {
@@ -442,6 +530,7 @@ impl fmt::Debug for AgentWorkloadContext {
             .field("response_mode", &self.response_mode)
             .field("response_allowlist", &self.response_allowlist)
             .field("channel_id", &self.channel_id)
+            .field("runtime_settings", &self.runtime_settings)
             .finish()
     }
 }
@@ -466,9 +555,21 @@ impl AgentWorkloadContext {
             response_mode,
             response_allowlist,
             channel_id,
+            runtime_settings: AgentRuntimeSettings::default(),
         };
         context.validate()?;
         Ok(context)
+    }
+
+    /// Attach the effective non-secret runtime settings for this identity.
+    pub fn with_runtime_settings(
+        mut self,
+        runtime_settings: AgentRuntimeSettings,
+    ) -> Result<Self, ExecutionValidationError> {
+        runtime_settings.validate()?;
+        self.runtime_settings = runtime_settings;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Attach and validate the private key required to launch this identity.
@@ -541,6 +642,7 @@ impl AgentWorkloadContext {
                 false,
             )?;
         }
+        self.runtime_settings.validate()?;
         Ok(())
     }
 }

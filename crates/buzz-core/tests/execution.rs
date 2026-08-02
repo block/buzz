@@ -1,9 +1,9 @@
 use buzz_core::execution::{
-    AgentWorkloadContext, CredentialRef, ExecutionCapability, ExecutionCommand,
-    ExecutionCommandEnvelope, ExecutionNodeAttestation, ExecutionNodeId, ExecutionNodeLifecycle,
-    ExecutionNodeStatus, ExecutionReceipt, ExecutionValidationError, ProviderAuthResponse,
-    ProviderAuthSession, ReceiptDetail, ReceiptOutcome, SafeErrorCode, WorkloadId,
-    WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
+    AgentRuntimeSettings, AgentWorkloadContext, CredentialRef, ExecutionCapability,
+    ExecutionCommand, ExecutionCommandEnvelope, ExecutionNodeAttestation, ExecutionNodeId,
+    ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, ExecutionValidationError,
+    ProviderAuthResponse, ProviderAuthSession, ReceiptDetail, ReceiptOutcome, SafeErrorCode,
+    WorkloadId, WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
 };
 use chrono::{Duration, TimeZone, Utc};
 use nostr::ToBech32;
@@ -56,6 +56,16 @@ fn managed_workload_round_trips_agent_identity_and_context() {
         Some("channel-123".into()),
     )
     .expect("valid agent context")
+    .with_runtime_settings(
+        AgentRuntimeSettings::new(
+            vec!["--acp".into(), "--profile=careful".into()],
+            Some(30),
+            Some(600),
+            4,
+        )
+        .expect("runtime settings"),
+    )
+    .expect("attach runtime settings")
     .with_private_key(owner.secret_key().to_bech32().expect("nsec"))
     .expect("valid launch key");
     workload.agent = Some(agent_context.clone());
@@ -67,6 +77,8 @@ fn managed_workload_round_trips_agent_identity_and_context() {
         "You are a careful coding agent."
     );
     assert_eq!(encoded["agent"]["channelId"], "channel-123");
+    assert_eq!(encoded["agent"]["runtimeSettings"]["parallelism"], 4);
+    assert_eq!(encoded["agent"]["runtimeSettings"]["agentArgs"][0], "--acp");
     assert!(encoded["agent"].get("privateKey").is_none());
     assert_eq!(
         encoded["agent"]["privateKeyNsec"],
@@ -81,6 +93,18 @@ fn managed_workload_round_trips_agent_identity_and_context() {
     );
     let debug = format!("{agent_context:?}");
     assert!(!debug.contains(&owner.secret_key().to_bech32().expect("nsec")));
+}
+
+#[test]
+fn managed_agent_runtime_settings_reject_unsafe_values() {
+    assert!(matches!(
+        AgentRuntimeSettings::new(vec![], None, None, 0),
+        Err(ExecutionValidationError::InvalidAgentParallelism)
+    ));
+    assert!(matches!(
+        AgentRuntimeSettings::new(vec!["x".repeat(4097)], None, None, 1),
+        Err(ExecutionValidationError::TooLong { .. })
+    ));
 }
 
 fn workload_id() -> WorkloadId {
