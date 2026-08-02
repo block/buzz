@@ -275,6 +275,7 @@ async fn restart_local_agent_on_config_change(
 
         // Sync process state so PID liveness reflects current reality.
         let (sync_changed, _) = sync_managed_agent_processes(
+            &app_for_stop,
             &mut records,
             &mut runtimes,
             &current_instance_id(&app_for_stop),

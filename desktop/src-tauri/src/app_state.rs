@@ -35,6 +35,12 @@ pub struct AppState {
     /// Workspace-provided relay URL override. Set by `apply_workspace` on app
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
+    /// Frontend community identifier paired with `relay_url_override`.
+    /// This is backend-session state only; it lets `apply_workspace`
+    /// distinguish editing one community's relay URL from merely switching
+    /// between two communities, so runtime pairs are never retargeted on
+    /// navigation.
+    pub active_workspace_id: Mutex<Option<String>>,
     /// Set during backend setup when managed agents are eligible for launch
     /// restore. `apply_workspace` consumes it after installing the workspace
     /// relay and identity, so agents never start against the fallback relay.
@@ -207,6 +213,7 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
+        active_workspace_id: Mutex::new(None),
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),

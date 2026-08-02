@@ -153,6 +153,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     .lock()
                     .map_err(|error| error.to_string())?;
                 let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
+                    &app,
                     &mut agents,
                     &mut runtimes,
                     &current_instance_id(&app),

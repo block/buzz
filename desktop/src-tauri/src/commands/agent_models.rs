@@ -49,8 +49,12 @@ pub async fn get_agent_models(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
+            &app,
+            &mut records,
+            &mut runtimes,
+            &current_instance_id(&app),
+        );
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
@@ -719,8 +723,12 @@ pub async fn update_managed_agent(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        let (_, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let (_, exited_pubkeys) = sync_managed_agent_processes(
+            &app,
+            &mut records,
+            &mut runtimes,
+            &current_instance_id(&app),
+        );
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }

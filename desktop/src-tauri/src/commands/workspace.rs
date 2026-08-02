@@ -89,6 +89,22 @@ pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspac
     })
 }
 
+fn managed_agent_relay_transition(
+    previous_workspace_id: Option<&str>,
+    previous_relay_url: Option<&str>,
+    next_workspace_id: &str,
+    next_relay_url: &str,
+) -> Option<(String, String)> {
+    match (previous_workspace_id, previous_relay_url) {
+        (Some(previous_id), Some(previous_relay))
+            if previous_id == next_workspace_id && previous_relay != next_relay_url =>
+        {
+            Some((previous_relay.to_string(), next_relay_url.to_string()))
+        }
+        _ => None,
+    }
+}
+
 /// Validate a candidate `repos_dir` without mutating the filesystem.
 ///
 /// The Add/Edit workspace dialogs call this on submit to block Save on a bad
@@ -125,6 +141,7 @@ pub async fn validate_repos_dir(dir: String) -> Result<(), String> {
 /// catches a value that went bad after save (deleted dir, unmounted volume).
 #[tauri::command]
 pub async fn apply_workspace(
+    community_id: String,
     relay_url: String,
     nsec: Option<String>,
     repos_dir: Option<String>,
@@ -132,7 +149,7 @@ pub async fn apply_workspace(
     app: AppHandle,
 ) -> Result<(), String> {
     let restore_app = app.clone();
-    tokio::task::spawn_blocking(move || {
+    let relay_transition = tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 
         // ── Validate before mutating ──────────────────────────────────────────
@@ -164,10 +181,22 @@ pub async fn apply_workspace(
         };
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
-        {
+        let relay_transition = {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
+            let mut workspace_guard = state
+                .active_workspace_id
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let transition = managed_agent_relay_transition(
+                workspace_guard.as_deref(),
+                override_guard.as_deref(),
+                &community_id,
+                &relay_url,
+            );
             *override_guard = Some(relay_url);
-        }
+            *workspace_guard = Some(community_id);
+            transition
+        };
         // Reset the Rust-side admission gate when switching workspace/community,
         // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).
         crate::relay_admission::reset_gate_for_workspace_change();
@@ -206,10 +235,26 @@ pub async fn apply_workspace(
 
         try_regenerate_nest(&app);
 
-        Ok::<(), String>(())
+        Ok::<_, String>(relay_transition)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    if let Some((old_relay_url, new_relay_url)) = relay_transition {
+        let transition_app = restore_app.clone();
+        let errors = tokio::task::spawn_blocking(move || {
+            crate::managed_agents::restart_managed_agent_pairs_for_relay_transition(
+                old_relay_url,
+                new_relay_url,
+                transition_app,
+            )
+        })
+        .await
+        .map_err(|e| format!("managed-agent relay transition task failed: {e}"))?;
+        for error in errors {
+            eprintln!("buzz-desktop: managed-agent relay transition: {error}");
+        }
+    }
 
     let state = restore_app.state::<AppState>();
     super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
@@ -283,4 +328,38 @@ pub async fn apply_workspace(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod relay_transition_tests {
+    use super::managed_agent_relay_transition;
+
+    #[test]
+    fn same_workspace_relay_edit_restarts_old_pairs() {
+        assert_eq!(
+            managed_agent_relay_transition(
+                Some("community-a"),
+                Some("ws://old.example"),
+                "community-a",
+                "ws://new.example",
+            ),
+            Some((
+                "ws://old.example".to_string(),
+                "ws://new.example".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn workspace_navigation_never_retargets_old_pairs() {
+        assert_eq!(
+            managed_agent_relay_transition(
+                Some("community-a"),
+                Some("ws://a.example"),
+                "community-b",
+                "ws://b.example",
+            ),
+            None
+        );
+    }
 }

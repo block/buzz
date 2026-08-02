@@ -138,6 +138,7 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
         .lock()
         .map_err(|error| error.to_string())?;
     let (mut changed, _exited) = sync_managed_agent_processes(
+        app,
         &mut records,
         &mut runtimes,
         &managed_agents::current_instance_id(app),

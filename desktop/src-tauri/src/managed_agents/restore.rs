@@ -119,6 +119,7 @@ pub async fn restore_managed_agents_on_launch(
             .lock()
             .map_err(|error| error.to_string())?;
         let (mut changed, _exited) = sync_managed_agent_processes(
+            app,
             &mut records,
             &mut runtimes,
             &super::current_instance_id(app),

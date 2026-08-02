@@ -261,8 +261,12 @@ pub async fn get_agent_config_surface(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
+            &app,
+            &mut records,
+            &mut runtimes,
+            &current_instance_id(&app),
+        );
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }

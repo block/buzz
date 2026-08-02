@@ -532,6 +532,14 @@ pub fn run() {
                     .store(true, Ordering::Release);
             }
 
+            // Process supervision belongs to the Rust backend, not the React
+            // renderer. Keep it alive for the full Desktop process lifetime so
+            // a closed window cannot strand an unexpectedly exited agent.
+            let supervisor_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                managed_agents::supervise_managed_agent_processes(supervisor_handle).await;
+            });
+
             // Periodic sweep: reap orphaned agents from dead instances every 60s.
             // Catches agents that escaped both the Justfile trap and boot-time
             // reaping (e.g. a `just staging` Ctrl+C leak that only gets collected

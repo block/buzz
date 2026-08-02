@@ -1119,6 +1119,7 @@ export async function cancelPairing(): Promise<void> {
 }
 
 export async function applyCommunity(
+  communityId: string,
   relayUrl: string,
   nsec?: string,
   token?: string,
@@ -1126,6 +1127,7 @@ export async function applyCommunity(
   agentManagedProfiles?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
+    communityId,
     relayUrl,
     nsec: nsec ?? null,
     token: token ?? null,

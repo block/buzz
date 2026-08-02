@@ -66,7 +66,9 @@ use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 mod lifecycle;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
-pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
+pub use lifecycle::{
+    kill_stale_tracked_processes, supervise_managed_agent_processes, sync_managed_agent_processes,
+};
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
