@@ -3,7 +3,7 @@ import * as React from "react";
 import { cn } from "@/shared/lib/cn";
 
 const IMAGE_CLASS =
-  "absolute inset-0 block h-full w-full rounded-2xl object-contain";
+  "absolute inset-0 block h-full w-full rounded-2xl object-scale-down";
 
 function isSameImageSource(
   left: string | undefined,
