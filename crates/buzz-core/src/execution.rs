@@ -13,6 +13,7 @@ use nostr::secp256k1::Message;
 use nostr::{Keys, PublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
@@ -31,6 +32,7 @@ const MAX_AUTH_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_AUTH_TAG_BYTES: usize = 1024;
 const MAX_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_RELAY_URL_BYTES: usize = 2048;
+const MAX_PRIVATE_KEY_BYTES: usize = 128;
 
 /// Validation failures for execution protocol values.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -108,9 +110,15 @@ pub enum ExecutionValidationError {
     /// An owner public key in an execution-node attestation was malformed.
     #[error("execution-node attestation owner identity is invalid")]
     InvalidAttestationOwner,
+    /// A managed-agent identity or audience key was malformed.
+    #[error("managed-agent identity is invalid")]
+    InvalidAgentIdentity,
     /// An execution-node attestation did not verify for the expected node and relay.
     #[error("execution-node attestation is invalid")]
     InvalidAttestation,
+    /// A managed-agent launch key was malformed or did not match its public identity.
+    #[error("managed-agent launch key does not match its public identity")]
+    InvalidAgentKey,
 }
 
 /// Errors returned when decoding and validating a JSON command envelope.
@@ -269,6 +277,20 @@ impl WorkloadId {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// Derive a stable workload identity for one managed agent.
+    pub fn stable_for_agent(pubkey: &str) -> Result<Self, ExecutionValidationError> {
+        let identity = PublicKey::from_hex(pubkey)
+            .map_err(|_| ExecutionValidationError::InvalidAgentIdentity)?;
+        let digest =
+            Sha256Hash::hash(format!("buzz-execution-workload:{}", identity.to_hex()).as_bytes())
+                .to_byte_array();
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Ok(Self(Uuid::from_bytes(bytes).to_string()))
+    }
+
     /// Return the canonical UUID string.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -371,13 +393,19 @@ impl CredentialRef {
 /// Identity and behavior context for a managed agent workload.
 ///
 /// This is deliberately separate from runtime infrastructure and credential
-/// references: the node receives the same agent contract as Desktop, while
-/// secrets and process-launch details remain node-local.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// references: the node receives the same agent contract as Desktop, with the
+/// identity key as an encrypted one-time launch handoff. Process-launch
+/// details remain node-local.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentWorkloadContext {
     /// Public identity of the managed agent.
     pub pubkey: String,
+    /// Private identity key handed over for this one encrypted launch payload.
+    /// The node must move it into its secure provider secret before persisting
+    /// workload state; it is not part of the durable Desktop record projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_nsec: Option<String>,
     /// System prompt belonging to the managed agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -398,6 +426,25 @@ pub struct AgentWorkloadContext {
     pub channel_id: Option<String>,
 }
 
+impl fmt::Debug for AgentWorkloadContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentWorkloadContext")
+            .field("pubkey", &self.pubkey)
+            .field(
+                "private_key_nsec",
+                &self.private_key_nsec.as_ref().map(|_| "[redacted]"),
+            )
+            .field("system_prompt", &self.system_prompt)
+            .field("relay_url", &self.relay_url)
+            .field("auth_tag", &self.auth_tag.as_ref().map(|_| "[redacted]"))
+            .field("response_mode", &self.response_mode)
+            .field("response_allowlist", &self.response_allowlist)
+            .field("channel_id", &self.channel_id)
+            .finish()
+    }
+}
+
 impl AgentWorkloadContext {
     /// Build and validate the managed-agent context carried by a workload.
     pub fn new(
@@ -411,6 +458,7 @@ impl AgentWorkloadContext {
     ) -> Result<Self, ExecutionValidationError> {
         let context = Self {
             pubkey: pubkey.into(),
+            private_key_nsec: None,
             system_prompt,
             relay_url,
             auth_tag,
@@ -422,9 +470,42 @@ impl AgentWorkloadContext {
         Ok(context)
     }
 
+    /// Attach and validate the private key required to launch this identity.
+    pub fn with_private_key(
+        mut self,
+        private_key_nsec: impl Into<String>,
+    ) -> Result<Self, ExecutionValidationError> {
+        self.private_key_nsec = Some(private_key_nsec.into());
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Return the context safe to retain in the fake node's durable state.
+    pub fn without_private_key(mut self) -> Self {
+        self.private_key_nsec = None;
+        self
+    }
+
     fn validate(&self) -> Result<(), ExecutionValidationError> {
         PublicKey::from_hex(&self.pubkey)
-            .map_err(|_| ExecutionValidationError::InvalidAttestationOwner)?;
+            .map_err(|_| ExecutionValidationError::InvalidAgentIdentity)?;
+        if let Some(private_key_nsec) = &self.private_key_nsec {
+            validate_text(
+                "managed-agent private key",
+                private_key_nsec,
+                MAX_PRIVATE_KEY_BYTES,
+                false,
+            )?;
+            let keys = Keys::parse(private_key_nsec)
+                .map_err(|_| ExecutionValidationError::InvalidAgentKey)?;
+            if !keys
+                .public_key()
+                .to_hex()
+                .eq_ignore_ascii_case(&self.pubkey)
+            {
+                return Err(ExecutionValidationError::InvalidAgentKey);
+            }
+        }
         if let Some(system_prompt) = &self.system_prompt {
             validate_text(
                 "workload system prompt",
@@ -449,7 +530,7 @@ impl AgentWorkloadContext {
         }
         for value in &self.response_allowlist {
             PublicKey::from_hex(value)
-                .map_err(|_| ExecutionValidationError::InvalidAttestationOwner)?;
+                .map_err(|_| ExecutionValidationError::InvalidAgentIdentity)?;
         }
         if let Some(channel_id) = &self.channel_id {
             validate_text(
@@ -463,10 +544,12 @@ impl AgentWorkloadContext {
     }
 }
 
-/// Safe workload projection sent in a deploy command.
+/// Workload projection sent inside an encrypted deploy command.
 ///
 /// Runtime-specific infrastructure such as Docker images, sockets, container
-/// contexts, and raw environment secrets is intentionally absent.
+/// contexts, and raw provider credentials is intentionally absent. A managed
+/// agent's launch key is carried only inside the encrypted `agent` context and
+/// must be removed before the node persists its durable workload projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkloadSpec {
@@ -536,6 +619,14 @@ impl WorkloadSpec {
             }
         }
         Ok(())
+    }
+
+    /// Return the safe projection retained by the fake runtime after launch.
+    pub fn without_private_key(mut self) -> Self {
+        if let Some(agent) = self.agent.take() {
+            self.agent = Some(agent.without_private_key());
+        }
+        self
     }
 }
 

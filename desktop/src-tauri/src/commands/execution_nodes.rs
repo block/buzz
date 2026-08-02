@@ -12,7 +12,7 @@ use buzz_core_pkg::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
 };
 use chrono::{Duration, Utc};
-use nostr::{nips::nip44, EventBuilder, Kind, PublicKey, Tag};
+use nostr::{nips::nip44, Event, EventBuilder, Kind, PublicKey, Tag};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
@@ -170,35 +170,10 @@ pub async fn list_execution_nodes(
     let now = Utc::now();
     let mut nodes: BTreeMap<String, (u64, String, ExecutionNodeTarget)> = BTreeMap::new();
     for event in events {
-        if event.kind.as_u16() as u32 != KIND_EXECUTION_NODE_ANNOUNCEMENT
-            || !event.verify_id()
-            || !event.verify_signature()
-        {
-            continue;
-        }
-        let Ok(status) = serde_json::from_str::<ExecutionNodeStatus>(&event.content) else {
-            continue;
-        };
-        if status.validate().is_err() {
-            continue;
-        }
-        let Ok(author_node_id) =
-            buzz_core_pkg::execution::ExecutionNodeId::new(event.pubkey.to_hex())
+        let Some(status) = trusted_execution_node_status(&event, &relay_authority, &owner_pubkey)
         else {
             continue;
         };
-        if status.node_id != author_node_id
-            || !announcement_d_tag_matches(&event, status.node_id.as_str())
-        {
-            continue;
-        }
-        if !status.owner_attestations.iter().any(|attestation| {
-            attestation
-                .verify(&status.node_id, &relay_authority, Some(&owner_pubkey))
-                .is_ok()
-        }) {
-            continue;
-        }
         let availability = if status.lifecycle != ExecutionNodeLifecycle::Ready {
             ExecutionNodeAvailability::Degraded
         } else if status.observed_at <= now && now - status.observed_at <= Duration::minutes(2) {
@@ -266,8 +241,20 @@ pub async fn deploy_managed_agent_to_execution_node(
             &record.relay_url,
             &relay_ws_url_with_override(&state),
         );
+        let workload_id = record
+            .backend_agent_id
+            .as_deref()
+            .map(|value| {
+                buzz_core_pkg::execution::WorkloadId::new(value.to_string())
+                    .map_err(|error| format!("invalid stored execution workload id: {error}"))
+            })
+            .transpose()?
+            .unwrap_or(
+                buzz_core_pkg::execution::WorkloadId::stable_for_agent(&record.pubkey)
+                    .map_err(|error| format!("invalid managed-agent identity: {error}"))?,
+            );
         let mut workload = WorkloadSpec::agent(
-            buzz_core_pkg::execution::WorkloadId::random(),
+            workload_id,
             record.name.clone(),
             input.runtime,
             record.model.clone(),
@@ -285,7 +272,9 @@ pub async fn deploy_managed_agent_to_execution_node(
                 record.respond_to_allowlist.clone(),
                 input.channel_id.clone(),
             )
-            .map_err(|error| format!("invalid managed-agent context: {error}"))?,
+            .map_err(|error| format!("invalid managed-agent context: {error}"))?
+            .with_private_key(record.private_key_nsec.clone())
+            .map_err(|error| format!("managed-agent key is unavailable: {error}"))?,
         );
         workload
             .validate()
@@ -605,33 +594,44 @@ async fn ensure_trusted_execution_node(
     )
     .await?;
     let trusted = events.into_iter().any(|event| {
-        if event.kind.as_u16() as u32 != KIND_EXECUTION_NODE_ANNOUNCEMENT
-            || !event.verify_id()
-            || !event.verify_signature()
-        {
-            return false;
-        }
-        let Ok(status) = serde_json::from_str::<ExecutionNodeStatus>(&event.content) else {
-            return false;
-        };
-        let Ok(author_node_id) = ExecutionNodeId::new(event.pubkey.to_hex()) else {
-            return false;
-        };
-        status.validate().is_ok()
-            && status.node_id == *expected_node_id
-            && status.node_id == author_node_id
-            && announcement_d_tag_matches(&event, status.node_id.as_str())
-            && status.owner_attestations.iter().any(|attestation| {
-                attestation
-                    .verify(&status.node_id, &relay_authority, Some(&owner_pubkey))
-                    .is_ok()
-            })
+        trusted_execution_node_status(&event, &relay_authority, &owner_pubkey)
+            .is_some_and(|status| status.node_id == *expected_node_id)
     });
     if trusted {
         Ok(())
     } else {
         Err("execution node is not paired with this workspace owner and relay".into())
     }
+}
+
+fn trusted_execution_node_status(
+    event: &Event,
+    relay_authority: &str,
+    owner_pubkey: &str,
+) -> Option<ExecutionNodeStatus> {
+    if event.kind.as_u16() as u32 != KIND_EXECUTION_NODE_ANNOUNCEMENT
+        || !event.verify_id()
+        || !event.verify_signature()
+    {
+        return None;
+    }
+    let status = serde_json::from_str::<ExecutionNodeStatus>(&event.content).ok()?;
+    status.validate().ok()?;
+    let author_node_id = ExecutionNodeId::new(event.pubkey.to_hex()).ok()?;
+    if status.node_id != author_node_id
+        || !announcement_d_tag_matches(event, status.node_id.as_str())
+    {
+        return None;
+    }
+    status
+        .owner_attestations
+        .iter()
+        .any(|attestation| {
+            attestation
+                .verify(&status.node_id, relay_authority, Some(owner_pubkey))
+                .is_ok()
+        })
+        .then_some(status)
 }
 
 async fn wait_for_execution_receipt(

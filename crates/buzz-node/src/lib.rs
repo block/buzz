@@ -443,6 +443,13 @@ struct RuntimeWorkload {
 }
 
 impl FakeWorkloadRuntime {
+    fn without_private_keys(mut self) -> Self {
+        for workload in self.workloads.values_mut() {
+            workload.spec = workload.spec.clone().without_private_key();
+        }
+        self
+    }
+
     /// Reconcile a deploy request into the fake runtime.
     pub fn deploy(&mut self, workload: &WorkloadSpec) -> Result<WorkloadLifecycle, SafeErrorCode> {
         if self.removed_workloads.contains(&workload.workload_id) {
@@ -452,7 +459,7 @@ impl FakeWorkloadRuntime {
         self.workloads.insert(
             workload.workload_id.clone(),
             RuntimeWorkload {
-                spec: workload.clone(),
+                spec: workload.clone().without_private_key(),
                 lifecycle: WorkloadLifecycle::Running,
             },
         );
@@ -1032,7 +1039,11 @@ fn command_fingerprint(envelope: &ExecutionCommandEnvelope) -> Result<String, No
 
 fn persisted_state(state: &ControllerState) -> PersistedExecutionState {
     PersistedExecutionState {
-        runtimes: state.runtimes.clone(),
+        runtimes: state
+            .runtimes
+            .iter()
+            .map(|(owner, runtime)| (owner.clone(), runtime.clone().without_private_keys()))
+            .collect(),
         runtime: None,
         credentials: state.credentials.clone(),
         processed: state
@@ -1169,14 +1180,18 @@ mod tests {
     use chrono::Duration;
     use nostr::nips::nip44;
     use nostr::EventBuilder;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir() -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock before epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("buzz-node-test-{suffix}"))
+        let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("buzz-node-test-{suffix}-{counter}"))
     }
 
     #[test]
@@ -1200,7 +1215,7 @@ mod tests {
     #[test]
     fn desktop_pairing_payload_ignores_legacy_private_key_field() {
         let payload = serde_json::json!({
-            "relayUrl": "ws://localhost:3000",
+            "relayUrl": "wss://relay.example",
             "pubkey": "a".repeat(64),
             "nsec": "must-not-be-persisted"
         });

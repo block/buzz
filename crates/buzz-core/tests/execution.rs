@@ -6,6 +6,7 @@ use buzz_core::execution::{
     WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
 };
 use chrono::{Duration, TimeZone, Utc};
+use nostr::ToBech32;
 use serde_json::json;
 
 fn node_id() -> ExecutionNodeId {
@@ -33,21 +34,31 @@ fn execution_node_attestation_binds_owner_node_and_relay() {
 }
 
 #[test]
+fn managed_workload_identity_is_stable_for_repeated_deploys() {
+    let agent = nostr::Keys::generate();
+    let first = WorkloadId::stable_for_agent(&agent.public_key().to_hex()).expect("workload id");
+    let second = WorkloadId::stable_for_agent(&agent.public_key().to_hex()).expect("workload id");
+
+    assert_eq!(first, second);
+}
+
+#[test]
 fn managed_workload_round_trips_agent_identity_and_context() {
     let owner = nostr::Keys::generate();
     let mut workload = workload();
-    workload.agent = Some(
-        AgentWorkloadContext::new(
-            owner.public_key().to_hex(),
-            Some("You are a careful coding agent.".into()),
-            Some("wss://relay.example/community".into()),
-            Some("[\"oa\",\"owner\"]".into()),
-            Some("allowlist".into()),
-            vec![owner.public_key().to_hex()],
-            Some("channel-123".into()),
-        )
-        .expect("valid agent context"),
-    );
+    let agent_context = AgentWorkloadContext::new(
+        owner.public_key().to_hex(),
+        Some("You are a careful coding agent.".into()),
+        Some("wss://relay.example/community".into()),
+        Some("[\"oa\",\"owner\"]".into()),
+        Some("allowlist".into()),
+        vec![owner.public_key().to_hex()],
+        Some("channel-123".into()),
+    )
+    .expect("valid agent context")
+    .with_private_key(owner.secret_key().to_bech32().expect("nsec"))
+    .expect("valid launch key");
+    workload.agent = Some(agent_context.clone());
 
     let encoded = serde_json::to_value(&workload).expect("serialize workload");
     assert_eq!(encoded["agent"]["pubkey"], owner.public_key().to_hex());
@@ -57,9 +68,19 @@ fn managed_workload_round_trips_agent_identity_and_context() {
     );
     assert_eq!(encoded["agent"]["channelId"], "channel-123");
     assert!(encoded["agent"].get("privateKey").is_none());
+    assert_eq!(
+        encoded["agent"]["privateKeyNsec"],
+        owner.secret_key().to_bech32().expect("nsec")
+    );
 
     let decoded: WorkloadSpec = serde_json::from_value(encoded).expect("decode workload");
     assert_eq!(decoded, workload);
+    assert_eq!(
+        agent_context.clone().without_private_key().private_key_nsec,
+        None
+    );
+    let debug = format!("{agent_context:?}");
+    assert!(!debug.contains(&owner.secret_key().to_bech32().expect("nsec")));
 }
 
 fn workload_id() -> WorkloadId {
@@ -325,7 +346,7 @@ fn receipts_correlate_and_enforce_sequence_and_terminal_outcomes() {
 fn status_projection_is_runtime_neutral_and_explicitly_capability_scoped() {
     let status = ExecutionNodeStatus::new(
         node_id(),
-        "Onnie server",
+        "Example execution node",
         ExecutionNodeLifecycle::Ready,
         [
             ExecutionCapability::Deploy,
