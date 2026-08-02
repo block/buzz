@@ -75,6 +75,12 @@ class ThreadDetailPage extends HookConsumerWidget {
     final liveChannelEvents =
         ref.watch(channelMessagesProvider(channelId)).value ??
         const <NostrEvent>[];
+    final isDmChannel =
+        ref
+            .watch(channelsProvider)
+            .value
+            ?.any((channel) => channel.id == channelId && channel.isDm) ??
+        false;
     final replyMessages = repliesState.whenData((events) {
       return formatTimeline(
         mergeThreadEvents(events, liveChannelEvents),
@@ -409,6 +415,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                         mentionPubkeys: mentionPubkeys,
                         parentEventId: threadHead.id,
                         rootEventId: effectiveRootId,
+                        isDm: isDmChannel,
                         mediaTags: mediaTags,
                       ),
             ),

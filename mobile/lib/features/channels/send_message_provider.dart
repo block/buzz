@@ -45,16 +45,30 @@ class SendMessage {
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    bool isDm = false,
     List<List<String>> mediaTags = const [],
   }) async {
     // Use explicitly passed pubkeys, or resolve @mentions against
     // channel members to avoid matching the wrong user.
-    final resolvedMentions =
-        mentionPubkeys ?? await _resolveMentions(content, channelId);
+    final resolvedMentions = <String>[
+      ...?mentionPubkeys,
+      if (mentionPubkeys == null) ...await _resolveMentions(content, channelId),
+    ];
+    if (isDm) {
+      try {
+        resolvedMentions.addAll(
+          (await _fetchMembers(channelId)).map((member) => member.pubkey),
+        );
+      } catch (_) {
+        // The server still resolves canonical owner DMs by membership. Keep
+        // sending if a transient member lookup fails.
+      }
+    }
     final authorPubkey = _signedEventRelay.pubkey;
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
-    // the desktop's normalizeMentionPubkeys).
+    // the desktop's normalizeMentionPubkeys). DMs tag every other participant
+    // so agent runtimes can address a root message without visible @text.
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
