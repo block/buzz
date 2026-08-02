@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use buzz_core::kind::{is_ephemeral, KIND_REACTION};
 use tracing::{error, warn};
 
 /// Errors that can occur during filter expression evaluation.
@@ -371,6 +372,16 @@ pub async fn match_event(
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
 ) -> Option<MatchedRule> {
+    // Kind-class guard (#4370): drop ephemeral events (typing indicators,
+    // presence, huddle bursts) and reactions before any rule matching.
+    // The harness is a producer of these kinds but has no inbound consumer
+    // for them, so dropping pre-wake costs nothing and avoids waking a full
+    // agent turn for every typing indicator or emoji burst.
+    let kind = event.kind.as_u16() as u32;
+    if is_ephemeral(kind) || kind == KIND_REACTION {
+        return None;
+    }
+
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
     for (index, rule) in rules.iter().enumerate() {
@@ -783,5 +794,71 @@ mod tests {
         let rules = vec![rule];
         let result = match_event(&event, channel_id, &rules, "").await;
         assert!(result.is_none(), "disabled rule must return None");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_skips_ephemeral_kinds() {
+        // #4370: typing indicators and other ephemeral events must not wake
+        // an agent turn, even when the subscription is "all" with no kinds filter.
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "catch-all",
+            ChannelScope::All("all".into()),
+            vec![],
+            false,
+            None,
+            Some("should-not-match"),
+        )];
+
+        // kind 20002 (typing indicator)
+        let event = make_event(20002, "");
+        let result = match_event(&event, channel_id, &rules, "").await;
+        assert!(result.is_none(), "ephemeral kind 20002 must not match");
+
+        // kind 20001 (presence update)
+        let event = make_event(20001, "online");
+        let result = match_event(&event, channel_id, &rules, "").await;
+        assert!(result.is_none(), "ephemeral kind 20001 must not match");
+
+        // kind 24200 (observer control frame)
+        let event = make_event(24200, "control");
+        let result = match_event(&event, channel_id, &rules, "").await;
+        assert!(result.is_none(), "ephemeral kind 24200 must not match");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_skips_reactions() {
+        // #4370: reactions (kind 7) must not wake an agent turn.
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "catch-all",
+            ChannelScope::All("all".into()),
+            vec![],
+            false,
+            None,
+            Some("should-not-match"),
+        )];
+
+        let event = make_event(7, "👍");
+        let result = match_event(&event, channel_id, &rules, "").await;
+        assert!(result.is_none(), "reaction kind 7 must not match");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_allows_regular_kinds_after_guard() {
+        // #4370: the kind-class guard must not block regular content.
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "catch-all",
+            ChannelScope::All("all".into()),
+            vec![],
+            false,
+            None,
+            Some("match-tag"),
+        )];
+
+        let event = make_event(9, "hello world");
+        let result = match_event(&event, channel_id, &rules, "").await;
+        assert!(result.is_some(), "regular kind 9 must still match");
     }
 }
