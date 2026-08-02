@@ -25,7 +25,17 @@ remotely-run agent must satisfy. It covers three layers:
 
 We state five invariants — **identity fail-closed**, **no secrets in
 configuration**, **presence-is-status**, **at-most-one-live-instance**, and
-**bounded idle lifetime** — and argue each from the protocol rules. As with the git
+**intentional-termination-is-final** — and argue each from the protocol
+rules.
+
+A scoping note that governs the whole document: the desktop is **one
+launcher among many**. What makes a process a live Buzz agent is a keypair,
+a NIP-OA auth tag, and a relay URL, handed as environment to the `buzz-acp`
+harness; anything that can set that environment and exec the harness — a
+bash script, a systemd unit, a CI job, or this document's provider protocol
+— is a conforming launcher. §Launchers states which obligations bind whom.
+
+As with the git
 specification (`git-on-object-storage.md`), naming the trust boundary is part
 of the claim: a provider binary is arbitrary code that is handed an agent's
 private key, and this document states exactly which properties hold *despite*
@@ -64,7 +74,8 @@ Five principals:
   the OS keyring), its configuration record, and the only UI. Trusted.
 - **Provider** `P` — an executable `buzz-backend-<id>` on `D`'s machine.
   Invoked one process per operation: JSON request on stdin, JSON response on
-  stdout, exit code meaningful. **Untrusted by `D`** for everything except
+  stdout, exit code carrying one bit (zero = output trustworthy, nonzero =
+  failure regardless of stdout — §Invocation). **Untrusted by `D`** for everything except
   the job it is explicitly given (deploying the agent, which requires the
   key). All of `P`'s output is treated as hostile (§Provider Output).
 - **Substrate** `S` — the remote compute environment `P` deploys into (a
@@ -101,6 +112,42 @@ effective `system_prompt`/`model`/`provider`, timeout and parallelism knobs,
 the `respond_to` gate, merged `env_vars`, and a `backend` discriminator:
 `Local` or `Provider { id, config }`.
 
+### Launchers {#launchers}
+
+The five principals above describe the **provider-managed** launch path.
+That path is not the definition of a remote agent, and this section states
+the actual layering, because the obligations in this document do not all
+bind at the same layer. Three contracts, nested:
+
+1. **The agent/harness contract — binds every launcher.** A live Buzz agent
+   is a `buzz-acp` process holding a keypair, a NIP-OA auth tag (or resolved
+   owner pubkey), and a relay URL, delivered as environment. The relay
+   authenticates the keypair and the auth tag — never the launcher. At this
+   layer live: fail-closed identity (I1's property, enforced wherever the
+   env is assembled), presence publication (I3), owner-verified `!shutdown`,
+   and **intentional clean exit is terminal to automatic supervisor
+   restart** (I5). A bash script that exports `BUZZ_PRIVATE_KEY`,
+   `BUZZ_RELAY_URL`, `BUZZ_AUTH_TAG` and execs the harness is a conforming
+   launcher at this layer — today, with no code change.
+2. **The provider/deployer contract — binds provider-managed launches
+   only.** The two operations (`info`/`deploy`), the reconciliation loop,
+   and at-most-one-live-instance *per deploy scope* (I4). Hand-launched
+   agents sit outside it by construction: a launcher that bypasses the
+   provider protocol takes on the uniqueness discipline itself, exactly as
+   the cross-scope boundary in I4 already states. The protocol cannot and
+   does not promise a global singleton across unrelated launchers of the
+   same nsec.
+3. **The binding policy — per substrate.** Fingerprints, fenced deletes and
+   409 discrimination, restart-policy selection, the default idle bound,
+   and the grace budget are Kubernetes-binding policy (§The Kubernetes
+   Binding). A different substrate (the systemd/SSH deployer of PR #3449 is
+   the live example) conforms to layers 1–2 and writes its own layer 3; it
+   is not "non-conforming" for lacking pods.
+
+The desktop is therefore one launcher among many, and the provider protocol
+is the *desktop's* door to substrates, not the only door. Conformance items
+below name their layer explicitly.
+
 ## Invariants
 
 The protocol maintains five invariants. Each is stated with the mechanism
@@ -134,7 +181,12 @@ one.
   schema-rendered, UI-visible settings object — MUST NOT carry secrets.
   Enforced by validation: flat object, scalar values only, ≤20 fields, ≤64KB,
   and any key whose word-split contains `secret|password|token|key|credential`
-  is rejected. Secrets flow exclusively inside the `deploy` payload
+  is rejected. The match is against key *names*, so it is a lint with false
+  positives: a field like `ssh_key_path` holds a path, not a credential,
+  and is refused anyway — a provider author hitting this MUST rename the
+  field (e.g. `identity_file`), not weaken the validator; the rule's job is
+  making "put the secret in config" fail closed, and cheap false positives
+  are the accepted price. Secrets flow exclusively inside the `deploy` payload
   (`private_key_nsec`, `auth_tag`, `env_vars`), which is never persisted by
   `D` and never rendered. Corollary for providers: cluster credentials MUST
   come from ambient substrate config (e.g. kubeconfig resolution), never from
@@ -146,10 +198,24 @@ one.
   deployment axis (`deployed`/`not_deployed`, from the stored
   `backend_agent_id`) is bookkeeping, not liveness. Staleness bound: presence
   can be wrong for the window between an abnormal agent death (SIGKILL, node
-  loss) and the relay's presence expiry — this is the accepted cost of M1.
+  loss) and the relay's presence expiry — **90 seconds**
+  (`PRESENCE_TTL_SECS`, `buzz-pubsub/src/presence.rs:16`; the vision's
+  "ninety seconds of a wrong dot, never an indefinite one"), the accepted
+  cost of M1.
   The Kubernetes binding minimizes the *avoidable* part of that window by
   sizing the termination grace period to the harness's full graceful-shutdown
-  path (§K8s Grace).
+  path (§K8s Grace). Two consequences the bound imposes: (a) the harness's
+  presence-suppression knob, `BUZZ_ACP_NO_PRESENCE`, MUST join
+  `RESERVED_ENV_KEYS` — locally the knob is cosmetic (the process and UI
+  remain visible), but remotely M1 makes presence the *only* signal, so an
+  unreserved user env var would convert "wrong for ≤90s" into "wrong
+  indefinitely" and silently disarm the one bound in print; (b) presence is
+  scoped to a **community**: the relay derives community from its host, so
+  the deploy-time `relay_url` binds the body to one community for its whole
+  life, and a workspace observing through a different community sees the
+  agent offline while a deploy against it correctly no-ops — a known UX
+  boundary (the cross-scope boundary I4 admits, seen from the status side),
+  stated here so the two honest-but-conflicting readouts are diagnosable.
 
 - **(I4) At most one live instance per agent key per deployment scope.**
   Within one provider's deployment scope (for Kubernetes: one namespace),
@@ -166,25 +232,56 @@ one.
   one key twice is user error with confusing-but-safe results (both instances
   answer), not a safety violation.
 
-- **(I5) Bounded idle lifetime.** No remote agent instance outlives its
-  usefulness *silently*: an instance whose harness is live terminates on
-  owner `!shutdown` or when inactivity exceeds a configured bound, and the
-  substrate never resurrects a terminated instance. This is inactivity
-  *reaping*, not an absolute TTL — a continuously active agent is
-  intentionally unbounded (that is the product), and the requirement being
-  satisfied is "stops after shutdown or 2h inactive", not "every instance
-  terminates". Enforced *inside the harness* (the only place that can see
-  activity, per M1) by the inactivity self-stop (§Auto-Stop), and made
-  effective on the substrate by the binding's requirement that a terminated
-  harness terminates its container (harness as the container's
-  signal-receiving PID 1, `restartPolicy: Never`). Boundaries: (a) the
-  guarantee is conditional on a live harness event loop — a wedged process
-  that cannot run its reaper timer cannot reap itself, and M1 means
-  nothing else will (the mitigation is the substrate operator's, e.g. a
-  namespace-level TTL policy, out of scope per §Non-Goals); (b)
-  `restartPolicy: Never` prevents resurrection, it does not prove process
-  exit; (c) I5 bounds *agent* lifetime, not substrate residue — a Completed
-  pod object persists for forensics until the next deploy's GC (§K8s GC).
+- **(I5) Intentional termination is final.** A remote agent **stops when
+  told, stays down when it stops, and is never silently resurrected**: an
+  instance whose harness is live terminates on owner `!shutdown` or when a
+  configured inactivity bound expires, and no supervisor restarts an
+  instance that exited *intentionally*. "Final" means **terminal to
+  automatic supervisor restart** — the owner may always issue a fresh
+  Start; that is resurrection working as designed, not a violation.
+
+  **Lifetime is owner policy, not law.** The inactivity bound is the
+  harness's opt-in self-stop (§Auto-Stop, default disabled); the Kubernetes
+  binding opts in with a 2h schema default because a pod is metered compute
+  with nobody watching it. An owner may configure `inactivity_seconds: 0` —
+  **no inactivity bound** — declaring an indefinitely-lived agent. That is
+  a legitimate, explicit choice, not a conformance failure: the invariant
+  was never "every instance terminates" (a continuously active agent is
+  intentionally unbounded — that is the product); it is "termination, once
+  intended, sticks".
+
+  **Restart policy follows lifetime policy.** The distinction that makes
+  indefinite agents safe is *intent vs accident*: dying on purpose
+  (`!shutdown`, inactivity reap) is final; dying by accident (node
+  eviction, OOM) may restart the body — same key, same agent, the
+  resurrection story working *for* the owner. A bounded-lifetime agent
+  takes `restartPolicy: Never` (any restart machinery would resurrect what
+  the reaper terminates). An indefinite agent takes `restartPolicy:
+  OnFailure` — **but only after the exit-code contract lands**: the
+  supervisor can distinguish intent from accident only if the harness
+  formally promises *clean exit = exit code 0* on every intentional path
+  and nonzero otherwise, pinned by test. At `c1bca1b56` that property is
+  emergent, not defended (Known Defect 6); `OnFailure` before the pinned
+  contract is how a refactor silently converts every clean stop into a
+  restart loop with no failing test. Ordering is normative: exit-code
+  contract first, `OnFailure` second. (The systemd binding needs the
+  identical primitive for `Restart=on-failure` — independent confirmation
+  this is the real seam. `Restart=always` remains non-conforming at any
+  layer: it resurrects after a *clean* exit, defeating `!shutdown`.)
+
+  Enforcement: the self-stop lives *inside the harness* (the only place
+  that can see activity, per M1) (§Auto-Stop), and the binding makes it
+  effective on the substrate by requiring that a terminated harness
+  terminates its container (harness as the container's signal-receiving
+  PID 1) and that the substrate's restart policy respects intent as above.
+  Boundaries: (a) the guarantee is conditional on a live harness event
+  loop — a wedged process that cannot run its reaper timer cannot reap
+  itself, and M1 means nothing else will (the mitigation is the substrate
+  operator's, e.g. a namespace-level TTL policy, out of scope per
+  §Non-Goals); (b) restart policy prevents resurrection, it does not prove
+  process exit; (c) I5 bounds *agent* lifetime, not substrate residue — a
+  Completed pod object persists for forensics until the next deploy's GC
+  (§K8s GC).
 
 ## Provider Protocol
 
@@ -537,6 +634,20 @@ no-op'd against, deleted, GC'd, or have its Secret touched; the provider
 MUST either ignore it or fail with an explicit collision error. Only
 annotation-verified objects proceed.
 
+**Auto-repair is fenced to Buzz-authored, positively identified residue
+(normative).** The destructive rows below (delete residue, replace a
+never-started body, GC a Secret) are legitimate *only because* every object
+they touch is one this protocol created and can prove it created — the
+identity label, the full-pubkey annotation, the create-intent fingerprint
+are ownership evidence, not decoration. The vision's rule that a
+never-started body is substrate-operator residue survives with one
+qualifier: *Buzz-authored* create-state (a Secret our provider wrote, a pod
+carrying our verified annotations) is the reconciler's to clear, because it
+is state the user cannot reasonably clear themselves; *substrate* wreckage —
+anything unowned, unannotated, or ambiguously identified — still fails
+closed to the operator. A provider that cannot positively identify an
+object as its own output does not repair around it; it reports it.
+
 **Step 2 — reconcile.** Ordered rules, evaluated against the verified
 observation; on any conflict, *re-enter from step 1* rather than fail:
 
@@ -692,8 +803,9 @@ under concurrency.
 running remote agent do not take effect until it next exits (unlike local
 agents, which re-resolve on every spawn). This is an accepted v1 tradeoff;
 a deliberate "recycle" affordance (stop-then-start) is the v2 path to
-immediate application. [DECISION — default is no-op; owner may overrule
-toward forcible recycle.] Note the asymmetry is deliberate and points the
+immediate application. [DECISION E, ruled: per-binding policy — this
+binding keeps no-op; the universal property is that no sequence of Starts
+yields two live instances in one scope.] Note the asymmetry is deliberate and points the
 right way: an edit *cannot* reach a started pod until it exits, but it
 *can* reach a never-started one immediately (fingerprint divergence) —
 the never-started pod is the one the user is editing *because* it did not
@@ -708,13 +820,28 @@ can yield two live instances in one scope.
 
 - **Stop** is not a provider operation. `D` publishes `!shutdown` mentioning
   the agent on `R`; the harness verifies the sender is the owner and exits
-  through its graceful path: agent-pool shutdown (unbounded in principle,
-  short in practice), then a bounded tail of drain in-flight turns ≤30s,
-  publish presence `offline` ≤2s, close relay connection ≤5s — **~37s is the
-  bounded tail, not a proven upper bound on the whole path**. §K8s Grace
-  sizes for this; anyone tuning a grace period downward from "37s" is
-  reading the number without its qualifier. The desktop's local stop command
-  rejects remote agents.
+  through its graceful path: agent-pool shutdown, drain of in-flight turns,
+  publish presence `offline`, close relay connection. **The spec does not
+  derive an upper bound for this path from its segment timeouts, because
+  review proved that arithmetic wrong twice**: the visible constants (30s
+  drain, 2s presence, 5s relay close) omit terms that are *variable*, not
+  constant — at `c1bca1b56` the post-drain reap segment (late-arriving
+  reap `lib.rs:2401`, idle-slot reap loop `:2407`, respawn drain `:2425`)
+  runs *outside* the 30s drain timeout (opened at `:2366`, closed at
+  `:2394`) and serially awaits a 5s post-SIGKILL wait per occupied pool
+  slot (`acp.rs:393`), so the worst-case tail is `30 + 5×parallelism + 7`
+  — **~157s at the desktop's default parallelism of 24**
+  (`DEFAULT_AGENT_PARALLELISM`, `types.rs:725`), ~197s at the harness cap
+  of 32 (`config.rs:292`), against a 60s grace.
+  The requirement is therefore stated as a budget, not a sum (Known
+  Defect 7): **the harness MUST bound its total shutdown tail — every
+  post-signal segment, including per-slot reaping — under one shared
+  deadline no greater than the declared grace budget**, degrading (skip
+  remaining per-slot waits, force-kill, best-effort presence `offline`,
+  close) rather than overrunning. The binding declares the budget
+  (§K8s Grace: 60s); anyone re-deriving "~37s" from the segment constants
+  is reading numbers without their variables. The desktop's local stop
+  command rejects remote agents.
 - **Delete** with a live `backend_agent_id` requires `force_remote_delete:
   true` from the UI's orphan-warning confirmation — a buggy IPC caller
   cannot silently orphan substrate objects.
@@ -731,6 +858,10 @@ I5's enforcement point. A new harness knob:
   agent also runs; a reaper bug must not be able to kill a laptop agent.
   Remote providers opt in (the Kubernetes binding's `inactivity_seconds`
   config field, schema default 7200 = 2h, feeds this env var directly).
+  **`inactivity_seconds: 0` is likewise a legal, blessed value meaning "no
+  inactivity bound"** — the explicit opt-in to an indefinitely-lived agent
+  (I5's lifetime-is-policy rule); it is not a misconfiguration and MUST NOT
+  be rejected by provider-side validation.
 - **"Inactivity" is defined as**: no events dispatched to the agent and no
   turns in flight. Raw relay traffic does not count — an agent lurking in a
   busy channel it never answers is exactly the waste this bounds.
@@ -749,11 +880,15 @@ I5's enforcement point. A new harness knob:
   evaluate. The reaper therefore runs on its own timer, independent of pool
   state (an idle-pool check needs no pool). Check granularity makes the
   effective bound `t ∈ [T, T+interval)`, immaterial at T=7200.
-- **Reserved key**: `BUZZ_ACP_EXIT_AFTER_INACTIVITY` MUST join
+- **Reserved keys**: `BUZZ_ACP_EXIT_AFTER_INACTIVITY` MUST join
   `RESERVED_ENV_KEYS` (`env_vars.rs`) when it lands — it is tier-3
   authoritative (§Launch data), and without reservation a user env var
   could disable the reaper and reopen unbounded lifetime through the front
-  door.
+  door. `BUZZ_ACP_NO_PRESENCE` (`config.rs:377`) MUST join in the same
+  change, for the same shape of reason at I3 instead of I5: unreserved, it
+  lets user env silently defeat the 90s presence bound (I3). One knob
+  guards "knows when to leave", the other "you can see that it left";
+  both are promises users must not be able to un-make by typo.
 - Distinctness note: this is a **fourth** timeout concept, deliberately named
   away from the existing three (`--idle-timeout` = per-turn ACP wire silence,
   900s; `turn_timeout`; `max_turn_duration` = 7200s — numerically equal to
@@ -768,7 +903,9 @@ substrate half *and* the graceful-shutdown budget: the termination signal
 lands on the wrapper, the harness never learns to shut down, and the
 force-kill leaves presence stale-online — exactly the staleness window the
 grace period exists to close. See §K8s Entrypoint for the concrete rule.
-With `restartPolicy: Never`, harness exit completes the pod — turning
+With the restart policy that matches the lifetime policy (bounded →
+`Never`, indefinite → `OnFailure` after the exit-code contract; I5),
+harness exit completes the pod on every intentional path — turning
 agent-level I5 into substrate-level I5.
 
 ## The Kubernetes Binding (`buzz-backend-kubernetes`)
@@ -902,10 +1039,34 @@ regardless of `HOME`.
 
 ### Pod shape
 
-- **Bare Pod, `restartPolicy: Never`.** Eviction → presence `offline` (I3)
-  → user hits Start → the reconciler's terminated arm re-creates. No Job, no
-  controller: a restart controller would resurrect what `!shutdown` and
-  auto-stop terminate, violating I5.
+- **Bare Pod; `restartPolicy` follows lifetime policy (I5).** No Job, no
+  controller — controller-grade restart machinery (`Restart=always`-shaped)
+  would resurrect what `!shutdown` and auto-stop terminate, violating I5.
+  Within the bare pod, the policy is selected from `inactivity_seconds`:
+  - **Bounded lifetime (`inactivity_seconds > 0`, the default): `Never`.**
+    The reaper's clean exit must complete the pod; any restart would undo
+    the reap. Accidental death is handled by *intent*, not machinery:
+    eviction → presence `offline` (I3) → user hits Start → the
+    reconciler's terminated arm re-creates. That sequence is
+    rescheduling-after-accident gated on a fresh owner intent — apt for an
+    agent whose owner already accepted "not running" as its default state.
+  - **Indefinite lifetime (`inactivity_seconds: 0`): `OnFailure`** — once
+    the harness exit-code contract is pinned (I5 ordering rule; until
+    then the provider MUST refuse the combination rather than ship
+    `OnFailure` against an undefended exit convention). An indefinite
+    agent's owner has declared continuous need; leaving it dead after its
+    first 3am crash until a human notices is exactly backwards.
+    `OnFailure` restarts the *in-place* abnormal deaths — process crash,
+    container OOM-kill — and honors the intentional ones (clean exit
+    completes the pod): resurrection-after-accident without
+    resurrection-after-intent. **Honest limit:** `restartPolicy` is
+    kubelet-level and cannot survive *node-level* loss — a drain or
+    API-initiated eviction deletes a bare pod outright, and no
+    restart policy reschedules a deleted pod. Full "continuous need"
+    across node loss requires controller-grade machinery this binding
+    deliberately does not use in v1 (the same machinery I5 distrusts);
+    the v1 promise for indefinite agents is restart-on-crash, with
+    node loss surfacing as presence `offline` awaiting a fresh Start.
 - **Naming/labeling — the exact contract** (63-char label-value limit; a hex
   pubkey is 64 chars, one over):
   - pod name: `buzz-agent-<first-12-hex-of-pubkey>` — also the returned
@@ -946,12 +1107,18 @@ regardless of `HOME`.
   zeroes the grace period and deletes immediately, so the normal restart
   path needs no meaningful wait — do not add a fixed sleep, and do not use
   zero-grace cleanup as a reason to skip the poll in the live-pod arm.
-- **`terminationGracePeriodSeconds: 60`.** The harness's graceful shutdown
-  has a ~37s **bounded tail** (30s drain + 2s presence + 5s relay close)
-  after an agent-pool shutdown that is not itself bounded; Kubernetes'
-  default 30s grace would SIGKILL it mid-drain, leaving presence
-  stale-online — the avoidable half of I3's staleness window. 60s is a
-  chosen operational margin over the bounded tail, not a proven upper bound.
+- **`terminationGracePeriodSeconds: 60` — a declared budget the harness
+  MUST honor, not a sum the spec derived.** Kubernetes' default 30s grace
+  would SIGKILL the harness mid-drain, leaving presence stale-online — the
+  avoidable half of I3's staleness window — so the binding declares 60s.
+  But the shutdown tail is *variable*, not constant (§Stop: the post-drain
+  reap segment scales with occupied pool slots — ~157s worst case at
+  default parallelism at `c1bca1b56`), so no fixed grace can be proven
+  sufficient by adding segment timeouts. The two halves of the requirement:
+  the binding *declares* the budget here, and the harness *enforces* it —
+  one shared deadline across the entire post-signal path, degrading rather
+  than overrunning (§Stop, Known Defect 7). Until the harness enforcement
+  lands, 60s is an operational margin that the worst case can exceed.
 - **Hardening defaults (normative).** The workload is a prompted coding
   agent running repository and tool code while holding an nsec; the pod MUST
   NOT hand it ambient cluster credentials or kernel privilege on top:
@@ -972,9 +1139,10 @@ regardless of `HOME`.
   unrealistic).
 - **Workspace**: `emptyDir`. Checkouts and scratch die with the pod; agent
   memory is relay-persisted (NIP-AE) and unaffected. PVC support is a
-  deferred knob. [DECISION A — whether the image entrypoint scaffolds the
-  nest workspace (AGENTS.md etc.), which local agents get from the desktop's
-  `ensure_nest` and remote pods currently would not.]
+  deferred knob. [DECISION A — how remote pods get the nest workspace
+  (AGENTS.md etc.) that local agents get from the desktop's `ensure_nest`;
+  current recommendation is a desktop-stated protocol field, not
+  image-side scaffolding — §Open Decisions.]
 
 ### Secrets {#k8s-secrets}
 
@@ -1137,40 +1305,64 @@ path). v1 ships no Windows binary [DECISION B]; desktop bundling into the
 
 ## Conformance
 
+Each item names its layer per §Launchers: **[L1]** agent/harness contract
+(every launcher), **[L2]** provider/deployer contract, **[L3]** binding
+policy. A non-provider launcher (bash script, systemd unit) owes only the
+[L1] items; a provider on a different substrate owes [L1] + [L2] and writes
+its own [L3] realization.
+
 A provider is conforming iff:
 
-1. `info` and `deploy` implement the wire contract (§Provider Protocol),
-   including one-JSON-in/one-JSON-out, meaningful exit codes, and in-band
-   `{"ok": false}` errors.
-2. It never requests or accepts credentials through `provider_config` (I2).
-3. It builds agent identity env from top-level payload fields, never from
-   `env_vars` (reserved-key rule), applies §Launch data mechanically —
+1. **[L2]** `info` and `deploy` implement the wire contract (§Provider
+   Protocol), including one-JSON-in/one-JSON-out and in-band
+   `{"ok": false}` errors. **Exit codes carry exactly one bit** — zero =
+   the operation's output is trustworthy, nonzero = failure regardless of
+   stdout (§Invocation's rule restated from the provider's side): a
+   provider MUST exit nonzero on any crash path and MUST NOT encode
+   structured meaning in nonzero values, because `D` discards partial
+   output rather than interpreting codes.
+2. **[L2]** It never requests or accepts credentials through
+   `provider_config` (I2).
+3. **[L2]** It builds agent identity env from top-level payload fields, never
+   from `env_vars` (reserved-key rule), applies §Launch data mechanically —
    three-tier precedence, host-resolved re-derivation, no re-merge of
    legacy `env_vars`, no provider-side model/provider mapping — and refuses
    a deploy that resolves neither `auth_tag` nor `launch.owner_pubkey`, or
    whose provider is `relay-mesh`.
-4. `deploy` implements the reconciliation loop (I4): identity derived from
-   the nsec before any mutation, candidates verified by full-identity
-   annotation before any action, live (= **started**, §Deploy State
-   Machine) → strict no-op (zero mutation), never-started states
-   classified by evidence not reason strings (provably-broken →
-   preconditioned delete-recreate; recoverable + same create-intent
-   fingerprint → observe, never delete, on this call or any later one;
-   recoverable + divergent fingerprint → preconditioned delete-recreate),
-   destructive reads consistent and
-   destructive deletes UID+resourceVersion-preconditioned (§Deploy State
-   Machine controlled-view rule), 409s discriminated by `Status.reason`,
-   success only on confirmed container
-   start, conflicts converge by re-entry, delete-not-found is success.
-5. The deployed harness invocation enables an inactivity bound (I5) and the
-   substrate does not resurrect terminated instances.
-6. The harness is the deployed container's **signal-receiving process**, and
-   the termination path delivers the termination signal to it with enough
-   grace for its full graceful shutdown before force-kill (I3 staleness
-   minimization). "Allows" is not enough — a wrapper that swallows the
-   signal conforms to nothing.
-7. It emits no secret material in any output (belt to `D`'s redaction
-   suspenders).
+4. **[L2]** `deploy` implements the reconciliation loop (I4), stated
+   substrate-neutrally: identity derived from the nsec before any
+   mutation; candidates verified by **full-identity evidence** before any
+   action; live (= **started**: the harness process confirmed running, not
+   merely the body accepted) → strict no-op (zero mutation); never-started
+   states classified by evidence, not by substrate status strings
+   (provably-broken → fenced replace; recoverable + same recorded create
+   intent → observe, never delete, on this call or any later one;
+   recoverable + divergent intent → fenced replace); every read that can
+   authorize a destruction uses most-recent semantics; every destructive
+   write is **fenced to the exact observation that authorized it**
+   (compare-and-delete — the write fails if the object changed since the
+   read); same-status-code conflicts discriminated by a **machine-readable
+   conflict discriminator**, never the status code alone; success only on
+   confirmed harness start; conflicts converge by re-entry;
+   delete-of-absent is success. The Kubernetes realization of each term —
+   full-pubkey annotation, container `state.running`,
+   `resourceVersion`-unset quorum reads, UID+`resourceVersion` delete
+   preconditions, `Status.reason` as the 409 discriminator — is specified
+   in §Deploy State Machine and is the binding's [L3]; a provider for
+   another substrate MUST supply equivalents, not skip the term.
+5. **[L3]** The deployed invocation realizes the lifetime policy the owner
+   chose (I5): a bounded-lifetime agent gets a working inactivity bound; an
+   indefinite agent (`inactivity_seconds: 0`) gets no bound and — only
+   under the pinned exit-code contract — accident-only restart. In both
+   cases the substrate never restarts an instance that exited
+   *intentionally*.
+6. **[L1]** The harness is the deployed container's **signal-receiving
+   process**, and the termination path delivers the termination signal to
+   it with enough grace for its full graceful shutdown before force-kill
+   (I3 staleness minimization). "Allows" is not enough — a wrapper that
+   swallows the signal conforms to nothing.
+7. **[L2]** It emits no secret material in any output (belt to `D`'s
+   redaction suspenders).
 
 Conformance is testable without mechanization: a fake-provider harness can
 exercise items 1–3 and 7 over the wire contract — including the pre-secret
@@ -1293,6 +1485,28 @@ Desktop- and harness-side, discovered during this design:
    description, until the deploy command performs
    resolve-once → stage-and-digest → `info` → explicit-version check →
    `deploy`, both invocations running the staged bytes.
+6. **The clean-exit contract is emergent, not defended** (harness code
+   prerequisite; gates `OnFailure`). The graceful path returns `Ok(())`
+   (`lib.rs:2460`), and owner `!shutdown` (`:1883`), Ctrl-C (`:1549`), and
+   SIGTERM (`:1558`) all route into the same shutdown channel — so clean
+   stops exit 0 *today*, but no distinguished exit code exists and no test
+   pins "intentional exit ⇒ 0"; every `process::exit(1)` in the crate is a
+   startup failure. Until a
+   pinned, tested exit-code contract lands, no supervisor restart policy
+   (`restartPolicy: OnFailure`, systemd `Restart=on-failure`) may be
+   deployed against the harness: a refactor returning `Err` from a drain
+   timeout would silently convert every clean stop into a restart loop —
+   I5 defeated with no failing test (I5 ordering rule).
+7. **The shutdown tail overruns the declared grace budget at default
+   config** (harness code prerequisite). The post-drain reap segment
+   (`lib.rs:2401-2430`) runs *after* the 30s drain timeout closes
+   (`:2366,:2394`) and serially awaits a 5s post-SIGKILL wait per occupied
+   slot (`acp.rs:393`) — worst case ~157s at the desktop's default
+   parallelism of 24 (`types.rs:725`), ~197s at the harness cap of 32
+   (`config.rs:292`), against the binding's
+   60s grace. The fix is one shared deadline across the entire post-signal
+   path, degrading rather than overrunning (§Stop); natural home is the
+   same harness change as the I5 reaper (defect 4).
 
 ## Implementation Correspondence
 
@@ -1310,7 +1524,8 @@ Desktop- and harness-side, discovered during this design:
 | Unconditional deploy on Start | `desktop/src-tauri/src/commands/agents.rs` (`start_managed_agent`) |
 | Presence publish / offline-on-exit | `crates/buzz-acp/src/lib.rs` (`publish_presence`, shutdown path) |
 | `!shutdown` owner check | `crates/buzz-acp/src/lib.rs` (main loop) |
-| Graceful shutdown bounded tail (~37s) | `crates/buzz-acp/src/lib.rs` (pool shutdown, then drain / presence / relay close) |
+| Graceful shutdown path (budget enforcement *to be added* — Known Defect 7) | `crates/buzz-acp/src/lib.rs` (pool shutdown, then drain / reap / presence / relay close) |
+| Clean-exit exit-code contract | *to be added*: `crates/buzz-acp` distinguished exit codes + pinning test (Known Defect 6; gates `OnFailure`) |
 | Auto-stop flag | *to be added*: `crates/buzz-acp/src/config.rs` + a pool-independent timer (NOT the `pool_ready`-gated maintenance tick — Known Defect 4) + `RESERVED_ENV_KEYS` entry |
 | Kubernetes binding | *to be added*: `crates/buzz-backend-kubernetes` |
 | Sprig image | *to be added*: `Dockerfile.sprig` + workflow |
@@ -1321,14 +1536,25 @@ Marked `[DECISION]` inline; consolidated:
 
 - **A. Nest scaffolding** — should the image entrypoint scaffold the agent
   workspace (AGENTS.md, RESEARCH/, …) that the desktop's `ensure_nest`
-  provides locally? Recommended: yes, via a shared template crate.
+  provides locally? Recommendation (revised): **workspace becomes a
+  protocol field the desktop states**, not an image-baked behavior — the
+  desktop resolves the nest content it would have written locally and
+  carries it in the launch data, so every substrate materializes the same
+  workspace from the same source of truth and the image stays
+  scaffold-free. An image-side template crate was the earlier
+  recommendation; it loses because it forks the nest definition into a
+  second implementation that drifts from `ensure_nest`.
 - **B. Windows scope** — fix the `.exe` discovery bug in the desktop now;
   ship Windows provider binaries only on demand. Recommended as stated.
 - **C. Config budget** — the 9-field v1 set above. Recommended as stated.
 - **D. Desktop bundling** — `~/.local/bin` install only for v1. Recommended
   as stated.
 - **E. Running-pod semantics** — no-op (recommended, both reviewers) vs
-  forcible recycle on Start.
+  forcible recycle on Start. Ruled: **per-binding policy**, with one
+  universal property every binding must preserve — no sequence of Starts
+  yields two live instances in one scope (I4). The Kubernetes binding
+  keeps strict no-op in v1; a recycle affordance, if a binding adds one,
+  is stop-then-start, never delete-under-a-live-agent.
 - **F. Mesh deployability** — the spec refuses relay-mesh agents
   pre-mutation in v1 (§Launch data: the transport is desktop loopback;
   serializing it fails identically but invisibly). Reviewer consensus is
@@ -1352,11 +1578,15 @@ Marked `[DECISION]` inline; consolidated:
   the intended cluster class?
 - **I. Never-started escape hatch** — the create-intent fingerprint
   (§Deploy State Machine) lets a config *change* replace a never-started
-  pod, closing the config wedge. The open ruling: is divergence-triggered
-  replacement enough, or does v1 owe users an explicit in-product "clear
-  this stuck deployment" affordance for a never-started pod whose config
-  they have *not* changed (a genuinely slow or broken cluster)? Both
-  reviewers agree on the mechanism; this is the remaining product
+  pod, closing the config wedge. Ruled on the vision-consistency half:
+  Start-time auto-repair of never-started bodies is legitimate, **fenced
+  to Buzz-authored, positively identified residue** (§Deploy State Machine
+  auto-repair rule) — the vision's "never-started body is operator
+  residue" line gains that qualifier rather than being waived. The
+  remaining product question: does v1 owe users an explicit in-product
+  "clear this stuck deployment" affordance for a never-started pod whose
+  config they have *not* changed (a genuinely slow or broken cluster)?
+  Both reviewers agree on the mechanism; this is the remaining product
   question layered on top of it.
 
 ## Summary
@@ -1365,6 +1595,9 @@ Remote agents extend Buzz's managed-agent model across a deliberately thin
 boundary: one untrusted binary, two JSON operations, and a relay. The
 desktop's obligations end at a well-formed, fail-closed deploy payload; the
 provider's obligations are convergence and honesty about state; the agent's
-obligation is to bound its own life. Everything else — status, control,
+obligation is to honor its owner's lifetime choice — bounded by default,
+indefinite by declaration, and in either case final when told to stop.
+Everything else — status, control,
 memory — was already on the relay, which is why the design holds: the relay
-was the management plane all along.
+was the management plane all along, and the desktop was only ever one of
+its doors.
