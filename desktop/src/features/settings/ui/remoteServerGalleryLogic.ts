@@ -33,7 +33,7 @@ export type RemoteServerEntry = {
    *
    * `"ready"` means "this binary answers the provider protocol", NOT "the
    * server is reachable". `info` is the one op that opens no connection (see
-   * docs/remote-agents.md) — reachability is a per-host question, and the host
+   * docs/remote-agents-ssh.md) — reachability is a per-host question, and the host
    * is chosen per-agent in the create dialog, so this surface cannot answer it.
    */
   status: "probing" | "ready" | "unavailable";

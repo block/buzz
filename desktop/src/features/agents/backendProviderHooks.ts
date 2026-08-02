@@ -43,7 +43,7 @@ export function useBackendProvidersQuery(options?: { enabled?: boolean }) {
  * the one surface whose entire subject IS the providers (Settings → Agents →
  * Remote servers), where the round-trip is the thing the user asked for.
  *
- * `info` is the only op that opens no connection (see docs/remote-agents.md):
+ * `info` is the only op that opens no connection (see docs/remote-agents-ssh.md):
  * it is a local spawn under a 10s desktop budget, not an SSH handshake, so N
  * of them cost N short-lived child processes and never block on a host.
  *

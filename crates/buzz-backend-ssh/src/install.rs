@@ -61,7 +61,7 @@
 //! would silently reinstall underneath a running fleet on every start, and a
 //! desktop pinned to an older artifact would *downgrade* the host. Refreshing
 //! an existing install is a deliberate act and belongs to a follow-up that
-//! fetches release artifacts by version; see `docs/remote-agents.md`.
+//! fetches release artifacts by version; see `docs/remote-agents-ssh.md`.
 
 use base64::Engine as _;
 use sha2::{Digest, Sha256};

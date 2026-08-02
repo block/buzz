@@ -26,7 +26,7 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
  *
  * SCOPE, v1: read-only. No add/edit/remove, and no host list. A provider is a
  * binary the user installs on PATH (`buzz-backend-*` — see
- * docs/remote-agents.md), so "adding" one is an install, not a form; and the
+ * docs/remote-agents.md §Discovery), so "adding" one is an install, not a form; and the
  * host is a per-agent decision that the create dialog owns and pins onto the
  * agent record verbatim at create time. Growing CRUD here would either edit
  * saved configs that deployed agents deliberately do not re-read — which reads

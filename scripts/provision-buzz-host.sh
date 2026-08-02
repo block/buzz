@@ -12,7 +12,7 @@
 # host that has it.
 #
 # Checks (and where it can, fixes) the host contract that `buzz-backend-ssh`
-# assumes: see docs/remote-agents.md, "Host prerequisites". Safe to re-run —
+# assumes: see docs/remote-agents-ssh.md, "Host prerequisites". Safe to re-run —
 # every action is idempotent, and a fully provisioned host is a no-op.
 #
 # It installs nothing itself. Harness CLIs have their own installers and their
@@ -20,7 +20,7 @@
 # and the `buzz` CLI — the deploy op resolves on the host's PATH or in
 # ~/.local/bin, and *installs* when it resolves none and the desktop supplied a
 # binary to push (`BUZZ_ACP_PUSH_BINARY` / `BUZZ_CLI_PUSH_BINARY`, see
-# docs/remote-agents.md). With no binary supplied, a missing `buzz-acp` fails
+# docs/remote-agents-ssh.md). With no binary supplied, a missing `buzz-acp` fails
 # the deploy with exit 90 — this preflight is what you run first — while a
 # missing `buzz` CLI only warns and the deploy continues.
 #

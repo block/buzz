@@ -308,7 +308,7 @@ with a TypeScript lookup table or an id comparison in a component.
     never said it would touch the harness.
 21. **A host failure the user can fix carries a typed recovery, and the URL is
     validated on entry.** A provider may answer a failed op with
-    `recovery: {action: "open_url", url}` (see `docs/remote-agents.md`); today
+    `recovery: {action: "open_url", url}` (see `docs/remote-agents-ssh.md`); today
     the only case is a tailnet ACL demanding browser re-auth. It reaches the UI
     as `ProviderFailure {message, recovery}` — there is deliberately no
     `From<ProviderFailure> for String`, which is the type-level guard against a

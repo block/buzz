@@ -234,7 +234,7 @@ export function WhereToRunSection({
       onDraftChange(next);
       if (!catalog.buzzAcp) {
         // Deploy installs buzz-acp only when this desktop has a binary to
-        // push (see docs/remote-agents.md); without one it fails with install
+        // push (see docs/remote-agents-ssh.md); without one it fails with install
         // guidance. The copy promises the union honestly rather than guessing
         // which case applies from here.
         setHarnessError({
