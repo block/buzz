@@ -301,3 +301,47 @@ export function envVarsEqual(
     aKeys.every((key) => a[key] === b[key])
   );
 }
+
+/**
+ * Compute the persona-definition patch needed when a linked agent's provider
+ * or model is edited in the Edit Agent dialog.
+ *
+ * For built-in linked personas (e.g. Honey, Bumble), the dialog deliberately
+ * drops `provider`/`model`/`systemPrompt` from the instance update because it
+ * defers to the persona definition. Built-in definitions ship with
+ * provider/model unset, so the edited values are silently discarded and the
+ * agent falls back to global defaults — surfacing as "needs configuration"
+ * after restart.
+ *
+ * Return `null` when no persona write is needed (all three below must hold):
+ * - hasLinkedPersona is false (unlinked instance, provider/model persist via
+ *   UpdateManagedAgentInput)
+ * - the local value is empty/whitespace (leave the definition's existing
+ *   value alone; never null out a persona field from the instance dialog)
+ * - the local value matches the persona's current value (no-op)
+ *
+ * Otherwise return the subset of `{ provider, model }` that differs, ready to
+ * spread into an `UpdatePersonaInput`.
+ */
+export function computeLinkedPersonaProviderModelPatch(input: {
+  hasLinkedPersona: boolean;
+  provider: string;
+  model: string;
+  personaProvider: string | null;
+  personaModel: string | null;
+}): { provider?: string; model?: string } | null {
+  if (!input.hasLinkedPersona) return null;
+
+  const patch: { provider?: string; model?: string } = {};
+  const localProvider = input.provider.trim();
+  const localModel = input.model.trim();
+
+  if (localProvider.length > 0 && localProvider !== (input.personaProvider ?? "")) {
+    patch.provider = localProvider;
+  }
+  if (localModel.length > 0 && localModel !== (input.personaModel ?? "")) {
+    patch.model = localModel;
+  }
+
+  return Object.keys(patch).length > 0 ? patch : null;
+}
