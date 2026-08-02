@@ -2361,33 +2361,118 @@ void main() {
       expect(oldestReplyY, lessThan(newestReplyY));
     });
 
+    // Shared fixtures for the open-at-latest contract: a head plus 30 replies
+    // (overflows the test viewport) or 2 replies (fits comfortably).
+    List<NostrEvent> longThreadReplies() => [
+      for (var i = 0; i < 30; i++)
+        _textMsg(
+          id: 'reply-$i',
+          pubkey: 'bob',
+          content: 'Reply $i',
+          createdAt: 1100 + i,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+    ];
+
+    Future<void> pushThread(
+      WidgetTester tester, {
+      required TimelineMessage threadHead,
+      String? initialMessageId,
+    }) async {
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: initialMessageId,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // Desktop-parity bottom-pin: the newest reply is built and sits at the
+    // bottom edge of the list viewport (no trailing blank region), and the
+    // head has scrolled out of the built window.
+    void expectPinnedToNewestReply(WidgetTester tester, String newestKey) {
+      expect(find.byKey(ValueKey(newestKey)), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('thread-message-group-thread-root')),
+        findsNothing,
+      );
+      final listRect = tester.getRect(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      final newestBottom = tester
+          .getBottomLeft(find.byKey(ValueKey(newestKey)))
+          .dy;
+      // Bottom-aligned within the list's own tail padding; anything further up
+      // means a blank region below the newest reply (jumpTo-style misplacement).
+      expect(newestBottom, lessThanOrEqualTo(listRect.bottom + 1));
+      expect(newestBottom, greaterThan(listRect.bottom - 60));
+    }
+
+    testWidgets('initial thread hydration opens pinned to the newest reply', (
+      tester,
+    ) async {
+      // Flipped from the pre-parity expectation (head kept visible): desktop's
+      // thread panel bottom-pins on open, and mobile now matches.
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final completer = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': completer.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      await pushThread(tester, threadHead: threadHead);
+      expect(
+        find.byKey(const ValueKey('thread-message-group-thread-root')),
+        findsOneWidget,
+      );
+
+      completer.complete(longThreadReplies());
+      await tester.pumpAndSettle();
+
+      expectPinnedToNewestReply(tester, 'thread-message-group-reply-29');
+    });
+
     testWidgets(
-      'initial thread hydration keeps the head visible instead of following the tail',
+      'reopening an already-hydrated thread pins to the newest reply',
       (tester) async {
+        // The replies provider is keepAlive-cached, so a reopened thread
+        // hydrates synchronously on first build — the pin must fire on that
+        // path too, not only after an async fetch.
         final rootEvent = _textMsg(
           id: 'thread-root',
           pubkey: 'alice',
           content: 'Thread root',
           createdAt: 1000,
         );
-        final replies = [
-          for (var i = 0; i < 30; i++)
-            _textMsg(
-              id: 'reply-$i',
-              pubkey: 'bob',
-              content: 'Reply $i',
-              createdAt: 1100 + i,
-              extraTags: const [
-                ['e', 'thread-root', '', 'reply'],
-              ],
-            ),
-        ];
-        final completer = Completer<List<NostrEvent>>();
 
         await tester.pumpWidget(
           _buildTestable(
             messages: [rootEvent],
-            pendingThreadReplies: {'thread-root': completer.future},
+            threadReplies: {'thread-root': longThreadReplies()},
             users: const {
               'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
               'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
@@ -2397,35 +2482,178 @@ void main() {
         await tester.pumpAndSettle();
 
         final threadHead = formatTimeline([rootEvent]).single;
-        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: threadHead,
-              allMessages: [threadHead],
-              channelId: _channelId,
-              currentPubkey: 'self',
-              isMember: true,
-              isArchived: false,
-            ),
+        await pushThread(tester, threadHead: threadHead);
+        expectPinnedToNewestReply(tester, 'thread-message-group-reply-29');
+
+        // Pop and re-push: threadRepliesProvider is a keepAlive family and
+        // the ProviderScope outlives the route, so the second open reads the
+        // already-resolved value — fetchedReplies is non-null on the very
+        // first build, the path a real cached reopen takes.
+        Navigator.of(tester.element(find.byType(ThreadDetailPage))).pop();
+        await tester.pumpAndSettle();
+        await pushThread(tester, threadHead: threadHead);
+        expectPinnedToNewestReply(tester, 'thread-message-group-reply-29');
+      },
+    );
+
+    testWidgets('a head-only thread keeps the head visible without scrolling', (
+      tester,
+    ) async {
+      // Pins the empty-replies guard in the initial-pin effect.
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: const {'thread-root': []},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      await pushThread(tester, threadHead: threadHead);
+
+      expect(
+        find.byKey(const ValueKey('thread-message-group-thread-root')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a short thread keeps the head visible at the top', (
+      tester,
+    ) async {
+      // Load-bearing for the #3485 rationale: when nothing overflows, the
+      // pin must not move the list.
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 2; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      await pushThread(tester, threadHead: threadHead);
+
+      final headFinder = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      expect(headFinder, findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-1')),
+        findsOneWidget,
+      );
+      final listRect = tester.getRect(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      expect(
+        tester.getTopLeft(headFinder).dy,
+        lessThan(listRect.top + listRect.height / 3),
+      );
+    });
+
+    testWidgets('a resolvable deep-link target beats the bottom-pin', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': longThreadReplies()},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      await pushThread(
+        tester,
+        threadHead: threadHead,
+        initialMessageId: 'reply-10',
+      );
+
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-10')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-29')),
+        findsNothing,
+      );
+    });
+
+    testWidgets(
+      'an unresolvable deep-link target falls back to the bottom-pin',
+      (tester) async {
+        // Desktop precedence: a missed target (deleted/unknown reply) falls
+        // back to pinToBottomOnMount rather than leaving the user at the head.
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': longThreadReplies()},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
           ),
         );
         await tester.pumpAndSettle();
-        expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
-          findsOneWidget,
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        await pushThread(
+          tester,
+          threadHead: threadHead,
+          initialMessageId: 'ghost-reply',
         );
 
-        completer.complete(replies);
-        await tester.pumpAndSettle();
-
-        expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('thread-message-group-reply-29')),
-          findsNothing,
-        );
+        expectPinnedToNewestReply(tester, 'thread-message-group-reply-29');
       },
     );
 
