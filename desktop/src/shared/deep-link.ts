@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { StartCommunityOnboardingInput } from "@/features/onboarding/communityOnboarding";
 
 export type AddCommunityDeepLinkPayload = {
@@ -84,6 +84,11 @@ function acceptPendingCommunityDeepLink(
 }
 
 async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
+  // The pending-deep-link queue is populated by the Rust backend and only
+  // exists in the native Tauri shell — invoke() throws without Tauri
+  // internals in a browser (web) runtime.
+  if (!isTauri()) return;
+
   while (true) {
     const pending = await invoke<PendingCommunityDeepLink | null>(
       "take_pending_community_deep_link",
@@ -134,6 +139,17 @@ export async function listenForDeepLinks(
     })();
   };
   const stopAvailabilityListener = deps.onAddCommunityAvailable(drain);
+
+  // OS-level deep links (`buzz://…`) only exist in the native Tauri shell —
+  // `listen()` throws without Tauri internals in a browser (web) runtime.
+  // The in-app "add community available" wiring above still applies.
+  if (!isTauri()) {
+    drain();
+    return () => {
+      stopAvailabilityListener();
+    };
+  }
+
   const connectPromise = listen<string>("deep-link-connect", drain);
   const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
   const addCommunityPromise = listen<AddCommunityDeepLinkPayload>(
@@ -160,6 +176,8 @@ export async function listenForDeepLinks(
 export function listenForMessageDeepLinks(
   onOpen: (payload: MessageDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
+  // OS-level deep link — no-op outside the native Tauri shell.
+  if (!isTauri()) return Promise.resolve(() => {});
   return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
     onOpen(event.payload);
   });
@@ -168,6 +186,8 @@ export function listenForMessageDeepLinks(
 export function listenForNostrBindDeepLinks(
   onOpen: (payload: NostrBindDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
+  // OS-level deep link — no-op outside the native Tauri shell.
+  if (!isTauri()) return Promise.resolve(() => {});
   return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
     onOpen(event.payload);
   });

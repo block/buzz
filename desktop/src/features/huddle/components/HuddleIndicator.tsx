@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Headphones } from "lucide-react";
 import * as React from "react";
@@ -190,6 +191,11 @@ export function HuddleIndicator({
   // waiting for the relay's 48103 event (which may arrive late or not at all
   // if the relay connection tears down first).
   React.useEffect(() => {
+    // Huddle state is emitted by the native Tauri audio pipeline — no such
+    // event exists in a browser (web) runtime, and `listen()` throws without
+    // Tauri internals.
+    if (!isTauri()) return;
+
     let unlisten: (() => void) | null = null;
     let cancelled = false;
 
