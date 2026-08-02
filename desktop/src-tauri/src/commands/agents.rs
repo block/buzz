@@ -7,7 +7,7 @@ use crate::{
         build_managed_agent_route_inventory, build_managed_agent_summary, current_instance_id,
         discover_provider_candidates, ensure_persona_is_active, find_managed_agent_mut,
         load_managed_agents, load_personas, load_teams, managed_agent_avatar_url,
-        normalize_agent_args, provider_deploy, require_route_inventory_owner,
+        normalize_agent_args, provider_deploy, require_signing_identity_available,
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
@@ -567,7 +567,7 @@ pub async fn export_managed_agent_route_inventory(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<ManagedAgentRouteInventoryEntry>, String> {
-    require_route_inventory_owner(state.signing_keys().map(|keys| keys.public_key()))?;
+    require_signing_identity_available(state.signing_keys().map(|keys| keys.public_key()))?;
 
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();

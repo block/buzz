@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use super::{
-    effective_config::{resolve_effective_config, ConfigSource},
+    effective_config::{resolve_effective_config, ConfigSource, EffectiveConfigResult},
     known_acp_runtime, resolve_effective_harness_descriptor, AgentDefinition, GlobalAgentConfig,
     ManagedAgentRecord,
 };
@@ -19,6 +19,7 @@ enum RouteSource {
     DefaultCommandUnmapped,
     NotInSpawnEffectiveConfig,
     NoSafeToolCatalog,
+    OrphanedInstance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -139,7 +140,20 @@ pub(crate) fn build_managed_agent_route_inventory(
     records
         .iter()
         .map(|record| {
-            let config = resolve_effective_config(record, personas, global).require_resolved()?;
+            let config = match resolve_effective_config(record, personas, global) {
+                EffectiveConfigResult::Resolved(config) => config,
+                EffectiveConfigResult::OrphanedInstance { .. } => {
+                    return Ok(ManagedAgentRouteInventoryEntry {
+                        identity: record.name.clone(),
+                        pubkey: record.pubkey.clone(),
+                        runtime: RouteField::unavailable(RouteSource::OrphanedInstance),
+                        provider: RouteField::unavailable(RouteSource::OrphanedInstance),
+                        model: RouteField::unavailable(RouteSource::OrphanedInstance),
+                        effort: RouteField::unavailable(RouteSource::OrphanedInstance),
+                        tools: RouteListField::unavailable(RouteSource::OrphanedInstance),
+                    });
+                }
+            };
             let descriptor = resolve_effective_harness_descriptor(record, personas, global)?;
             Ok(ManagedAgentRouteInventoryEntry {
                 identity: record.name.clone(),
@@ -154,10 +168,10 @@ pub(crate) fn build_managed_agent_route_inventory(
         .collect()
 }
 
-pub(crate) fn require_route_inventory_owner<T>(identity: Result<T, String>) -> Result<(), String> {
+pub(crate) fn require_signing_identity_available<T>(identity: Result<T, String>) -> Result<(), String> {
     identity
         .map(|_| ())
-        .map_err(|_| "route inventory requires the owner identity".to_string())
+        .map_err(|_| "route inventory requires an available signing identity".to_string())
 }
 
 #[cfg(test)]
@@ -356,8 +370,7 @@ mod tests {
         }
     }
 
-    // Independent fixture transcribed from the AGENTS.md active-agent table at
-    // SHA-256 afd9c0b1567f7fbdf5fa2dfdaebccf30fbccdf76bcfb98104e94260f34b271c7.
+    // Fixture used to verify identity pass-through and lack of deduplication.
     const EXPECTED_IDENTITIES: [&str; 58] = [
         "Ad Performance Analyst",
         "Analytics Lead",
@@ -420,7 +433,7 @@ mod tests {
     ];
 
     #[test]
-    fn independent_58_identity_fixture_is_complete_and_pubkeys_are_unique() {
+    fn identity_fixture_passes_through_without_deduplication() {
         let records = EXPECTED_IDENTITIES
             .iter()
             .enumerate()
@@ -471,18 +484,56 @@ mod tests {
     }
 
     #[test]
-    fn authorization_fails_closed_without_returning_or_building_a_payload() {
+    fn unavailable_signing_identity_fails_before_building_a_payload() {
         let build_calls = std::cell::Cell::new(0);
         let result =
-            require_route_inventory_owner::<()>(Err("identity_lost".into())).and_then(|_| {
+            require_signing_identity_available::<()>(Err("identity_lost".into())).and_then(|_| {
                 build_calls.set(build_calls.get() + 1);
                 Ok(vec!["payload"])
             });
         assert_eq!(
             result.unwrap_err(),
-            "route inventory requires the owner identity"
+            "route inventory requires an available signing identity"
         );
         assert_eq!(build_calls.get(), 0);
-        assert!(require_route_inventory_owner(Ok("owner-pubkey")).is_ok());
+        assert!(require_signing_identity_available(Ok("signing-pubkey")).is_ok());
+    }
+
+    #[test]
+    fn orphaned_instance_degrades_only_its_own_entry() {
+        let mut healthy = record("Healthy", "healthy-pk", None);
+        healthy.runtime = Some("goose".into());
+        let orphan = record("Orphan", "orphan-pk", Some("deleted-persona"));
+
+        let entries = build_managed_agent_route_inventory(
+            &[healthy, orphan],
+            &[],
+            &GlobalAgentConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].identity, "Healthy");
+        assert_eq!(entries[1].identity, "Orphan");
+        assert_eq!(
+            entries[1].runtime,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[1].provider,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[1].model,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[1].effort,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[1].tools,
+            RouteListField::unavailable(RouteSource::OrphanedInstance)
+        );
     }
 }

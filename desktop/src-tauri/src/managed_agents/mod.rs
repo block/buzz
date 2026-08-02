@@ -73,7 +73,7 @@ pub use repos::{
 };
 pub use restore::*;
 pub(crate) use route_inventory::{
-    build_managed_agent_route_inventory, require_route_inventory_owner,
+    build_managed_agent_route_inventory, require_signing_identity_available,
     ManagedAgentRouteInventoryEntry,
 };
 pub use runtime::*;
