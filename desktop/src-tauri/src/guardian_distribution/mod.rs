@@ -8,8 +8,8 @@ mod store;
 mod verifier;
 
 pub(crate) use activation::{
-    activate_receipt, deactivate, load_active_receipt, recover_activation, rollback,
-    rollback_available, uninstall_active,
+    activate_receipt, deactivate, load_active_receipt, prune_superseded_versions,
+    recover_activation, rollback, rollback_available, uninstall_active,
 };
 pub(crate) use archive::inspect_and_extract;
 pub(crate) use installer::install_current;

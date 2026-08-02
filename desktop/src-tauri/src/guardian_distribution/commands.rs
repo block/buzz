@@ -1,6 +1,6 @@
 use super::{
-    activate_receipt, builtin_manifest, deactivate, install_current, load_active_receipt, rollback,
-    rollback_available, uninstall_active,
+    activate_receipt, builtin_manifest, deactivate, install_current, load_active_receipt,
+    prune_superseded_versions, rollback, rollback_available, uninstall_active,
 };
 use crate::commands::numbat_findings::{
     reconcile_managed_numbat_hooks, uninstall_managed_numbat_hooks,
@@ -69,6 +69,7 @@ pub(crate) async fn activate_guardian_numbat(
     }
     activate_receipt(&root, &receipt_path)?;
     finish_activation(&app, &root, previous.as_deref())?;
+    prune_superseded_versions(&root)?;
     Ok(status_from_root(&root, target))
 }
 
@@ -110,6 +111,7 @@ pub(crate) async fn install_guardian_numbat(
         .take();
     install_result?;
     finish_activation(&app, &root, previous.as_deref())?;
+    prune_superseded_versions(&root)?;
     Ok(status_from_root(&root, target))
 }
 
@@ -159,6 +161,7 @@ pub(crate) async fn rollback_guardian_numbat(
         reconcile_managed_numbat_hooks(&app, &current_binary)?;
         return Err(format!("Guardian rollback hook reconciliation failed; restored the prior active version: {error}"));
     }
+    prune_superseded_versions(&root)?;
     Ok(status_from_root(&root, target))
 }
 

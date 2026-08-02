@@ -3,6 +3,7 @@ use crate::managed_agents::storage::atomic_write_json_restricted;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -181,6 +182,88 @@ pub(crate) fn rollback_available(component_root: &Path) -> Result<bool, String> 
     };
     let receipt = component_root.join(safe_relative_path(Path::new(&previous.receipt_path))?);
     load_verified_receipt(component_root, &receipt).map(|_| true)
+}
+
+pub(crate) fn prune_superseded_versions(component_root: &Path) -> Result<usize, String> {
+    let Some((active, active_receipt)) = read_active_pointer(component_root)? else {
+        return Ok(0);
+    };
+    load_verified_receipt(component_root, &active_receipt)?;
+
+    let mut retained = HashSet::from([active_receipt]);
+    if let Some(previous) = previous_pointer_for_generation(component_root, active.generation)? {
+        let receipt = component_root.join(safe_relative_path(Path::new(&previous.receipt_path))?);
+        load_verified_receipt(component_root, &receipt)?;
+        retained.insert(receipt);
+    }
+
+    let versions_root = component_root.join("versions");
+    if !versions_root.exists() {
+        return Ok(0);
+    }
+    ensure_real_directory(&versions_root, "version store")?;
+
+    let mut removed = 0usize;
+    for version_entry in read_real_directories(&versions_root, "version")? {
+        for target_entry in read_real_directories(&version_entry, "target")? {
+            let receipt = target_entry.join("receipt.json");
+            if retained.contains(&receipt) {
+                continue;
+            }
+            load_verified_receipt(component_root, &receipt)?;
+            fs::remove_dir_all(&target_entry)
+                .map_err(|error| format!("remove superseded Guardian version: {error}"))?;
+            removed = removed.saturating_add(1);
+        }
+        if fs::read_dir(&version_entry)
+            .map_err(|error| format!("inspect Guardian version directory: {error}"))?
+            .next()
+            .is_none()
+        {
+            fs::remove_dir(&version_entry)
+                .map_err(|error| format!("remove empty Guardian version directory: {error}"))?;
+        }
+    }
+    Ok(removed)
+}
+
+fn previous_pointer_for_generation(
+    component_root: &Path,
+    generation: u64,
+) -> Result<Option<ActivePointer>, String> {
+    Ok(read_journal(component_root)?
+        .into_iter()
+        .rev()
+        .find_map(|entry| match entry {
+            JournalEntry::Prepared {
+                generation: prepared_generation,
+                previous,
+                ..
+            } if prepared_generation == generation => previous,
+            _ => None,
+        }))
+}
+
+fn read_real_directories(root: &Path, label: &str) -> Result<Vec<PathBuf>, String> {
+    let mut directories = Vec::new();
+    for entry in
+        fs::read_dir(root).map_err(|error| format!("read Guardian {label} store: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("read Guardian {label} entry: {error}"))?;
+        let path = entry.path();
+        ensure_real_directory(&path, &format!("{label} entry"))?;
+        directories.push(path);
+    }
+    Ok(directories)
+}
+
+fn ensure_real_directory(path: &Path, label: &str) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("inspect Guardian {label}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("Guardian {label} is not a real directory"));
+    }
+    Ok(())
 }
 
 pub(crate) fn uninstall_active(component_root: &Path) -> Result<bool, String> {
@@ -476,5 +559,40 @@ mod tests {
             "0.1.1"
         );
         assert!(!recover_activation(root.path()).unwrap());
+    }
+
+    #[test]
+    fn pruning_keeps_only_active_and_last_known_good_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let first = installed(root.path(), "0.1.0", b"first");
+        activate_receipt(root.path(), &first).unwrap();
+        let second = installed(root.path(), "0.1.1", b"second");
+        activate_receipt(root.path(), &second).unwrap();
+        let third = installed(root.path(), "0.1.2", b"third");
+        activate_receipt(root.path(), &third).unwrap();
+
+        assert_eq!(prune_superseded_versions(root.path()).unwrap(), 1);
+        assert!(!first.parent().unwrap().exists());
+        assert!(second.parent().unwrap().exists());
+        assert!(third.parent().unwrap().exists());
+        assert!(rollback_available(root.path()).unwrap());
+        assert_eq!(rollback(root.path()).unwrap().version, "0.1.1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pruning_rejects_symlinked_version_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let receipt = installed(root.path(), "0.1.2", b"active");
+        activate_receipt(root.path(), &receipt).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("versions/0.1.1")).unwrap();
+
+        assert!(prune_superseded_versions(root.path())
+            .unwrap_err()
+            .contains("not a real directory"));
+        assert!(outside.path().exists());
     }
 }
