@@ -360,29 +360,48 @@ class _ChannelSection extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  final List<Channel> channels;
+
+  const _EmptyState({required this.channels});
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: MediaQuery.sizeOf(context).height * 0.55,
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        minHeight: MediaQuery.sizeOf(context).height * 0.55,
+      ),
       child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.messagesSquare,
-              size: Grid.xl,
-              color: context.colors.onSurfaceVariant,
-            ),
-            const SizedBox(height: Grid.xs),
-            Text(
-              'No conversations yet',
-              style: context.textTheme.bodyLarge?.copyWith(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                LucideIcons.messagesSquare,
+                size: Grid.xl,
                 color: context.colors.onSurfaceVariant,
               ),
-            ),
-          ],
+              const SizedBox(height: Grid.xs),
+              Text(
+                'No conversations yet',
+                style: context.textTheme.bodyLarge?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+              if (channels.isNotEmpty) ...[
+                const SizedBox(height: Grid.xs),
+                Text(
+                  'Join an open channel to start a conversation.',
+                  textAlign: TextAlign.center,
+                  style: context.textTheme.bodyMedium?.copyWith(
+                    color: context.colors.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: Grid.xs),
+                _JoinableChannelList(channels: channels),
+              ],
+            ],
+          ),
         ),
       ),
     );

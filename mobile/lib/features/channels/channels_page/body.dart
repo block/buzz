@@ -196,7 +196,9 @@ class _SliverChannelsList extends HookConsumerWidget {
       sliver: SliverList.list(
         children: [
           if (visibleChannels.isEmpty)
-            const _EmptyState()
+            _EmptyState(
+              channels: channels.where((channel) => channel.canJoin).toList(),
+            )
           else ...[
             // Starred channels (exclusive — pinned above all sections).
             if (starredStreamChannels.isNotEmpty)

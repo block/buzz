@@ -79,6 +79,8 @@ class Channel {
   bool get isPrivate => visibility == 'private';
   bool get isArchived => archivedAt != null;
 
+  bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;
+
   String displayLabel({String? currentPubkey}) {
     if (!isDm || participants.isEmpty) {
       return name;

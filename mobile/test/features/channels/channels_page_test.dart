@@ -723,8 +723,8 @@ void main() {
     }
     await tester.pumpAndSettle();
 
-    expect(largestHeight, greaterThan(160));
-    expect(tester.getSize(surface).height, closeTo(160, 0.01));
+    expect(largestHeight, greaterThan(216));
+    expect(tester.getSize(surface).height, closeTo(216, 0.01));
     final screenWidth = MediaQuery.sizeOf(tester.element(surface)).width;
     final surfaceRect = tester.getRect(surface);
     expect(surfaceRect.left, closeTo(20, 0.01));
@@ -737,15 +737,23 @@ void main() {
       const Key('quick-action-create-channel-card'),
     );
     final dmCard = find.byKey(const Key('quick-action-new-dm-card'));
+    final browseCard = find.byKey(
+      const Key('quick-action-browse-channels-card'),
+    );
     final createRect = tester.getRect(createCard);
     final dmRect = tester.getRect(dmCard);
+    final browseRect = tester.getRect(browseCard);
 
     expect(createRect.left - menuRect.left, closeTo(8, 0.01));
     expect(menuRect.right - createRect.right, closeTo(8, 0.01));
     expect(dmRect.left - menuRect.left, closeTo(8, 0.01));
     expect(menuRect.right - dmRect.right, closeTo(8, 0.01));
+    expect(browseRect.left - menuRect.left, closeTo(8, 0.01));
+    expect(menuRect.right - browseRect.right, closeTo(8, 0.01));
     expect(dmRect.top - createRect.bottom, closeTo(8, 0.01));
+    expect(browseRect.top - dmRect.bottom, closeTo(8, 0.01));
     expect(dmRect.width, createRect.width);
+    expect(browseRect.width, createRect.width);
     expect(dmRect.width, closeTo(menuRect.width - 16, 0.01));
 
     final cardScheme = Theme.of(tester.element(createCard)).colorScheme;
@@ -759,8 +767,12 @@ void main() {
     final dmMaterial = tester.widget<Material>(
       find.descendant(of: dmCard, matching: find.byType(Material)).first,
     );
+    final browseMaterial = tester.widget<Material>(
+      find.descendant(of: browseCard, matching: find.byType(Material)).first,
+    );
     expect(createMaterial.color, expectedCardColor);
     expect(dmMaterial.color, expectedCardColor);
+    expect(browseMaterial.color, expectedCardColor);
     expect(
       (createMaterial.borderRadius as BorderRadius).topLeft.x,
       closeTo(12, 0.01),
@@ -779,7 +791,96 @@ void main() {
       tester.widget<Text>(find.text('New direct message')).style?.fontSize,
       16,
     );
+    expect(
+      tester.widget<Text>(find.text('Browse channels')).style?.fontSize,
+      16,
+    );
     expect(find.text('Message one or more people'), findsNothing);
+  });
+
+  testWidgets('browse action lists only channels eligible to join', (
+    tester,
+  ) async {
+    final channels = [
+      ...testChannels,
+      Channel(
+        id: 'open-to-join',
+        name: 'announcements',
+        channelType: 'stream',
+        visibility: 'open',
+        description: 'Community announcements',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 8,
+      ),
+      Channel(
+        id: 'private-channel',
+        name: 'private-planning',
+        channelType: 'stream',
+        visibility: 'private',
+        description: 'Private planning',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 4,
+      ),
+      Channel(
+        id: 'archived-channel',
+        name: 'old-announcements',
+        channelType: 'stream',
+        visibility: 'open',
+        description: 'Archived announcements',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 3,
+        archivedAt: DateTime(2025, 1, 2),
+      ),
+      Channel(
+        id: 'unjoined-dm',
+        name: 'Hidden DM',
+        channelType: 'dm',
+        visibility: 'open',
+        description: 'Direct message',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+      ),
+    ];
+
+    await tester.pumpWidget(
+      buildTestable(
+        disableAnimations: true,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pump();
+    await tester.tap(
+      find.byKey(const Key('quick-action-browse-channels-card')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('browse-channel-open-to-join')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('browse-channel-join-open-to-join')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('browse-channel-1')), findsNothing);
+    expect(
+      find.byKey(const Key('browse-channel-private-channel')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const Key('browse-channel-archived-channel')),
+      findsNothing,
+    );
+    expect(find.byKey(const Key('browse-channel-unjoined-dm')), findsNothing);
   });
 
   testWidgets('create channel sheet lists type and visibility radio options', (
@@ -1173,6 +1274,127 @@ void main() {
     expect(find.text('archived-stream'), findsNothing);
   });
 
+  testWidgets('empty state lets stuck users join an open channel', (
+    tester,
+  ) async {
+    final discoveredChannel = Channel(
+      id: 'recovery-channel',
+      name: 'community-help',
+      channelType: 'stream',
+      visibility: 'open',
+      description: 'Get help from the community',
+      createdBy: 'abc',
+      createdAt: DateTime(2025),
+      memberCount: 7,
+    );
+    final channelsNotifier = _FakeNotifier([discoveredChannel]);
+    final joinedChannelIds = <String>[];
+
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => channelsNotifier),
+          channelActionsProvider.overrideWith(
+            (ref) => _FakeChannelActions(
+              ref,
+              onJoinChannel: (channelId) async {
+                joinedChannelIds.add(channelId);
+                channelsNotifier.setChannels([
+                  discoveredChannel.copyWith(isMember: true),
+                ]);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No conversations yet'), findsOneWidget);
+    expect(
+      find.byKey(const Key('browse-channel-recovery-channel')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('browse-channel-join-recovery-channel')),
+      findsOneWidget,
+    );
+    expect(find.text('community-help'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const Key('browse-channel-join-recovery-channel')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(joinedChannelIds, ['recovery-channel']);
+    expect(find.text('No conversations yet'), findsNothing);
+    expect(find.text('community-help'), findsOneWidget);
+  });
+
+  testWidgets('empty state lists every joinable channel without overflow', (
+    tester,
+  ) async {
+    final discoveredChannels = List.generate(
+      6,
+      (index) => Channel(
+        id: 'recovery-channel-$index',
+        name: 'community-channel-$index',
+        channelType: 'stream',
+        visibility: 'open',
+        description: 'Community channel $index',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: index + 1,
+      ),
+    );
+
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(discoveredChannels),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No conversations yet'), findsOneWidget);
+    for (final channel in discoveredChannels) {
+      expect(find.byKey(Key('browse-channel-${channel.id}')), findsOneWidget);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('empty state omits browse CTA without joinable channels', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier([
+              Channel(
+                id: 'private-only',
+                name: 'private-only',
+                channelType: 'stream',
+                visibility: 'private',
+                description: 'Private channel',
+                createdBy: 'abc',
+                createdAt: DateTime(2025),
+                memberCount: 2,
+              ),
+            ]),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No conversations yet'), findsOneWidget);
+    expect(find.byKey(const Key('browse-channel-private-only')), findsNothing);
+  });
+
   testWidgets('shows empty state when no channels', (tester) async {
     await tester.pumpWidget(
       buildTestable(
@@ -1414,7 +1636,7 @@ Widget _buildSettingsPage(BuildContext context) =>
     const Scaffold(body: Text('Injected settings'));
 
 class _FakeNotifier extends ChannelsNotifier {
-  final List<Channel> _channels;
+  List<Channel> _channels;
   final Map<String, Map<String, ObservedUnreadEvent>> _observedEventsByChannel;
 
   _FakeNotifier(
@@ -1428,6 +1650,11 @@ class _FakeNotifier extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => _channels;
 
+  void setChannels(List<Channel> channels) {
+    _channels = channels;
+    state = AsyncData(channels);
+  }
+
   @override
   Map<String, int> get latestObservedByChannel => {
     for (final entry in _observedEventsByChannel.entries)
@@ -1440,6 +1667,26 @@ class _FakeNotifier extends ChannelsNotifier {
   @override
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel => _observedEventsByChannel;
+}
+
+class _FakeChannelActions extends ChannelActions {
+  final Future<void> Function(String channelId)? onJoinChannel;
+
+  _FakeChannelActions(Ref ref, {this.onJoinChannel})
+    : super(
+        ref: ref,
+        session: ref.read(relaySessionProvider.notifier),
+        signedEventRelay: SignedEventRelay(
+          session: ref.read(relaySessionProvider.notifier),
+          nsec: null,
+        ),
+        currentPubkey: 'aabb',
+      );
+
+  @override
+  Future<void> joinChannel(String channelId) async {
+    await onJoinChannel?.call(channelId);
+  }
 }
 
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {

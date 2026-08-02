@@ -54,7 +54,7 @@ part 'channels_page/community.dart';
 part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 
-enum _QuickAction { createChannel, newDm }
+enum _QuickAction { createChannel, newDm, browseChannels }
 
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;

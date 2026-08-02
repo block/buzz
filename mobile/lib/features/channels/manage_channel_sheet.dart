@@ -34,11 +34,7 @@ class ManageChannelSheet extends HookConsumerWidget {
     final mutesState = ref.watch(channelMutesProvider);
     final isMuted = mutesState.store.channels[channel.id]?.muted == true;
 
-    final canJoin =
-        channel.visibility == 'open' &&
-        !channel.isArchived &&
-        !channel.isMember &&
-        !channel.isDm;
+    final canJoin = channel.canJoin;
     final canLeave = channel.isMember && !channel.isArchived && !channel.isDm;
     final canEditCanvas = channel.isMember && !channel.isArchived;
 

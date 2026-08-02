@@ -107,6 +107,8 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
           if (opened != null && context.mounted) {
             await openChannel(opened);
           }
+        case _QuickAction.browseChannels:
+          await _showBrowseChannelsSheet(context);
       }
     }
 
