@@ -203,7 +203,7 @@ class ChannelSortManager {
     final isNewer =
         event.createdAt > _lastRemoteCreatedAt ||
         (event.createdAt == _lastRemoteCreatedAt &&
-            event.id.compareTo(_lastRemoteEventId) > 0);
+            event.id.compareTo(_lastRemoteEventId) < 0);
     if (!isNewer) return;
     try {
       final parsed = jsonDecode(_crypto.decrypt(event.content));
@@ -248,6 +248,7 @@ class ChannelSortManager {
       final createdAt = max(now, _lastRemoteCreatedAt + 1);
       if (createdAt > now + _maxClockDriftSeconds) return;
       final ciphertext = _crypto.encrypt(jsonEncode(_store.toJson()));
+      String? submittedEventId;
       await _signedEventRelay.submit(
         kind: EventKind.readState,
         content: ciphertext,
@@ -256,9 +257,11 @@ class ChannelSortManager {
           ['t', _dTag],
         ],
         createdAt: createdAt,
+        onSigned: (event) => submittedEventId = event.id,
       );
       if (_disposed || _generation != generationAtStart) return;
       _lastRemoteCreatedAt = createdAt;
+      _lastRemoteEventId = submittedEventId ?? '';
     } catch (error) {
       debugPrint('[ChannelSortManager] publish failed: $error');
     }

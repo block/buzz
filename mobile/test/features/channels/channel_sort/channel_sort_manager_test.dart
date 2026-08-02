@@ -128,6 +128,40 @@ void main() {
     subject.dispose();
   });
 
+  test('lower event ID wins when remote timestamps tie', () async {
+    final relay = _FakeRelaySession()
+      ..historyEvents = [
+        event({'channels': 'recent'}, 200, id: 'f'),
+      ];
+    final subject = manager(relay, _RecordingSignedEventRelay());
+    await subject.initialize();
+
+    relay.emit(event({'dms': 'recent'}, 200, id: 'a'));
+    expect(subject.store.groups, {'dms': ChannelSortMode.recent});
+
+    relay.emit(event({'starred': 'recent'}, 200, id: 'z'));
+    expect(subject.store.groups, {'dms': ChannelSortMode.recent});
+    subject.dispose();
+  });
+
+  test(
+    'keeps a lower-ID same-second relay replacement after publishing',
+    () async {
+      final relay = _FakeRelaySession();
+      final signed = _RecordingSignedEventRelay();
+      final subject = manager(relay, signed);
+      await subject.initialize();
+
+      subject.setSortModeFor('channels', ChannelSortMode.recent);
+      final submitted = await signed.submitted.future.timeout(
+        const Duration(seconds: 1),
+      );
+      relay.emit(event({'dms': 'recent'}, submitted.createdAt!, id: 'a'));
+      expect(subject.store.groups, {'dms': ChannelSortMode.recent});
+      subject.dispose();
+    },
+  );
+
   test(
     'future-dated remote event is ignored and cannot wedge publishing',
     () async {
@@ -175,7 +209,8 @@ void main() {
 class _SubmittedEvent {
   final String content;
   final List<List<String>> tags;
-  const _SubmittedEvent(this.content, this.tags);
+  final int? createdAt;
+  const _SubmittedEvent(this.content, this.tags, this.createdAt);
 }
 
 class _RecordingSignedEventRelay implements SignedEventRelay {
@@ -194,8 +229,19 @@ class _RecordingSignedEventRelay implements SignedEventRelay {
     void Function(NostrEvent event)? onSigned,
   }) async {
     submitCount++;
+    onSigned?.call(
+      const NostrEvent(
+        id: 'signed-event',
+        pubkey: '',
+        createdAt: 0,
+        kind: 0,
+        tags: [],
+        content: '',
+        sig: '',
+      ),
+    );
     if (!submitted.isCompleted) {
-      submitted.complete(_SubmittedEvent(content, tags));
+      submitted.complete(_SubmittedEvent(content, tags, createdAt));
     }
     return const NostrEvent(
       id: 'ack',
