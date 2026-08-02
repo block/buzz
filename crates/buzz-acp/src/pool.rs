@@ -57,11 +57,17 @@ struct TrustedPublishTarget {
     parent_event_id: nostr::EventId,
 }
 
-fn trusted_publish_target(batch: &FlushBatch) -> Result<TrustedPublishTarget, &'static str> {
+fn trusted_publish_target(
+    batch: &FlushBatch,
+    owner_pubkey: &nostr::PublicKey,
+) -> Result<TrustedPublishTarget, &'static str> {
     let trigger = batch
         .events
         .last()
         .ok_or("flush batch had no trigger event")?;
+    if trigger.event.pubkey != *owner_pubkey {
+        return Err("trigger event author does not match the configured owner");
+    }
     let h_tags: Vec<&[String]> = trigger
         .event
         .tags
@@ -667,26 +673,54 @@ async fn event_confirmed_by_id(rest: &RestClient, event: &nostr::Event) -> bool 
     }
 }
 
-async fn submit_signed_agent_output(rest: &RestClient, event: &nostr::Event) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputPublishResult {
+    Accepted,
+    Rejected,
+    Ambiguous,
+}
+
+fn classify_output_publish_response(response: &serde_json::Value) -> OutputPublishResult {
+    match response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => OutputPublishResult::Accepted,
+        Some(false) => OutputPublishResult::Rejected,
+        None => OutputPublishResult::Ambiguous,
+    }
+}
+
+fn should_retain_pending_output(result: OutputPublishResult) -> bool {
+    matches!(result, OutputPublishResult::Ambiguous)
+}
+
+async fn submit_signed_agent_output(
+    rest: &RestClient,
+    event: &nostr::Event,
+) -> OutputPublishResult {
     const ATTEMPTS: u8 = 3;
     for attempt in 1..=ATTEMPTS {
         match rest.submit_event_once(event).await {
-            Ok(response)
-                if response
-                    .get("accepted")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true) =>
-            {
-                return true;
-            }
-            Ok(response) => {
-                tracing::warn!(
-                    event_id = %event.id.to_hex(),
-                    attempt,
-                    response = %response,
-                    "agent output publish was not accepted; confirming exact event before retry"
-                );
-            }
+            Ok(response) => match classify_output_publish_response(&response) {
+                OutputPublishResult::Accepted => return OutputPublishResult::Accepted,
+                OutputPublishResult::Rejected => {
+                    tracing::error!(
+                        event_id = %event.id.to_hex(),
+                        response = %response,
+                        "agent output publish was definitively rejected; not retrying"
+                    );
+                    return OutputPublishResult::Rejected;
+                }
+                OutputPublishResult::Ambiguous => {
+                    tracing::warn!(
+                        event_id = %event.id.to_hex(),
+                        attempt,
+                        response = %response,
+                        "agent output publish response was ambiguous; confirming exact event before retry"
+                    );
+                }
+            },
             Err(error) => {
                 tracing::warn!(
                     event_id = %event.id.to_hex(),
@@ -696,10 +730,10 @@ async fn submit_signed_agent_output(rest: &RestClient, event: &nostr::Event) -> 
             }
         }
         if event_confirmed_by_id(rest, event).await {
-            return true;
+            return OutputPublishResult::Accepted;
         }
     }
-    false
+    OutputPublishResult::Ambiguous
 }
 
 async fn publish_captured_agent_output(
@@ -715,7 +749,8 @@ async fn publish_captured_agent_output(
         }
     };
     if let Some(event) = pending {
-        if !submit_signed_agent_output(&ctx.rest_client, &event).await {
+        let result = submit_signed_agent_output(&ctx.rest_client, &event).await;
+        if should_retain_pending_output(result) {
             if let Ok(mut slot) = ctx.pending_agent_output.lock() {
                 *slot = Some(event);
             }
@@ -723,6 +758,9 @@ async fn publish_captured_agent_output(
                 "agent output pending event remains unconfirmed; refusing newer output"
             );
             return;
+        }
+        if matches!(result, OutputPublishResult::Rejected) {
+            tracing::error!("agent output pending event was definitively rejected; discarding it");
         }
     }
 
@@ -737,7 +775,16 @@ async fn publish_captured_agent_output(
             return;
         }
     };
-    let target = match trusted_publish_target(batch) {
+    let owner_pubkey = match ctx.agent_owner_pubkey.as_ref() {
+        Some(owner_pubkey) => owner_pubkey,
+        None => {
+            tracing::error!(
+                "agent output was discarded without publishing: configured owner is unavailable"
+            );
+            return;
+        }
+    };
+    let target = match trusted_publish_target(batch, owner_pubkey) {
         Ok(target) => target,
         Err(reason) => {
             tracing::error!(channel = %batch.channel_id, "agent output was discarded without publishing: {reason}");
@@ -751,14 +798,19 @@ async fn publish_captured_agent_output(
             return;
         }
     };
-    if !submit_signed_agent_output(&ctx.rest_client, &event).await {
+    let result = submit_signed_agent_output(&ctx.rest_client, &event).await;
+    if should_retain_pending_output(result) {
         match ctx.pending_agent_output.lock() {
             Ok(mut slot) => *slot = Some(event),
             Err(_) => tracing::error!(
                 "agent output pending-event lock poisoned; event could not be retained"
             ),
         }
-        tracing::error!("agent output could not be confirmed after retries; retained one identical pending event");
+        tracing::error!(
+            "agent output could not be confirmed after retries; retained one identical pending event"
+        );
+    } else if matches!(result, OutputPublishResult::Rejected) {
+        tracing::error!("agent output was definitively rejected; no pending event retained");
     }
 }
 
@@ -4226,7 +4278,8 @@ mod tests {
             cancel_reason: None,
         };
 
-        let target = trusted_publish_target(&batch).expect("last event is a trusted trigger");
+        let target = trusted_publish_target(&batch, &keys.public_key())
+            .expect("owner-authored last event is a trusted trigger");
         assert_eq!(target.channel_id, channel);
         assert_eq!(target.root_event_id.to_hex(), root);
         assert_eq!(target.parent_event_id.to_hex(), root);
@@ -4246,8 +4299,8 @@ mod tests {
             cancelled_events: vec![],
             cancel_reason: None,
         };
-        let top_level_target =
-            trusted_publish_target(&top_level_batch).expect("top-level trigger is trusted");
+        let top_level_target = trusted_publish_target(&top_level_batch, &keys.public_key())
+            .expect("owner-authored top-level trigger is trusted");
         assert_eq!(top_level_target.root_event_id, top_level_id);
         assert_eq!(top_level_target.parent_event_id, top_level_id);
 
@@ -4266,8 +4319,28 @@ mod tests {
             cancel_reason: None,
         };
         assert!(
-            trusted_publish_target(&bad_batch).is_err(),
+            trusted_publish_target(&bad_batch, &keys.public_key()).is_err(),
             "a mismatched h tag must not create a publish target"
+        );
+
+        let sibling_keys = Keys::generate();
+        let sibling_event = EventBuilder::new(Kind::Custom(9), "sibling trigger")
+            .tag(Tag::parse(["h", &channel.to_string()]).expect("valid channel tag"))
+            .sign_with_keys(&sibling_keys)
+            .expect("sign sibling trigger");
+        let sibling_batch = FlushBatch {
+            channel_id: channel,
+            events: vec![BatchEvent {
+                event: sibling_event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        assert!(
+            trusted_publish_target(&sibling_batch, &keys.public_key()).is_err(),
+            "a sibling agent must never become a trusted publish trigger"
         );
     }
 
@@ -4337,6 +4410,115 @@ mod tests {
             &PromptSource::Channel(Uuid::new_v4()),
             &StopReason::MaxTokens,
         ));
+    }
+
+    #[test]
+    fn output_publish_response_distinguishes_rejection_from_ambiguity() {
+        assert_eq!(
+            classify_output_publish_response(&serde_json::json!({"accepted": true})),
+            OutputPublishResult::Accepted
+        );
+        assert_eq!(
+            classify_output_publish_response(&serde_json::json!({"accepted": false})),
+            OutputPublishResult::Rejected
+        );
+        assert_eq!(
+            classify_output_publish_response(&serde_json::json!({"message": "missing accepted"})),
+            OutputPublishResult::Ambiguous
+        );
+    }
+
+    #[test]
+    fn only_ambiguous_publish_results_retain_a_pending_event() {
+        assert!(!should_retain_pending_output(OutputPublishResult::Accepted));
+        assert!(!should_retain_pending_output(OutputPublishResult::Rejected));
+        assert!(should_retain_pending_output(OutputPublishResult::Ambiguous));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_publish_confirms_then_retries_the_identical_event_id() {
+        async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
+            use tokio::io::AsyncReadExt;
+
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read HTTP request");
+                assert!(read > 0, "HTTP client closed before completing request");
+                bytes.extend_from_slice(&chunk[..read]);
+                let Some(headers_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&bytes[..headers_end]).expect("HTTP headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then_some(value.trim())
+                        })
+                    })
+                    .expect("request carries content length")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                if bytes.len() >= headers_end + 4 + content_length {
+                    return String::from_utf8(bytes).expect("request is UTF-8");
+                }
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("read test HTTP address");
+        let server = tokio::spawn(async move {
+            let responses = ["{}", "[]", r#"{"accepted":true}"#];
+            let mut submitted_ids = Vec::new();
+            for (index, body) in responses.iter().enumerate() {
+                let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
+                let request = read_http_request(&mut stream).await;
+                if index == 1 {
+                    assert!(request.starts_with("POST /query "));
+                } else {
+                    assert!(request.starts_with("POST /events "));
+                    let event: serde_json::Value = serde_json::from_str(
+                        request.split("\r\n\r\n").nth(1).expect("request body"),
+                    )
+                    .expect("event JSON");
+                    submitted_ids.push(event["id"].as_str().expect("event id").to_string());
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                use tokio::io::AsyncWriteExt;
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write HTTP response");
+            }
+            submitted_ids
+        });
+        let keys = Keys::generate();
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{address}"),
+            keys: keys.clone(),
+            auth_tag_json: None,
+        };
+        let event = EventBuilder::new(Kind::Custom(9), "reply")
+            .sign_with_keys(&keys)
+            .expect("sign test event");
+
+        assert_eq!(
+            submit_signed_agent_output(&rest, &event).await,
+            OutputPublishResult::Accepted
+        );
+        let submitted_ids = server.await.expect("join HTTP server");
+        assert_eq!(submitted_ids, vec![event.id.to_hex(), event.id.to_hex()]);
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):

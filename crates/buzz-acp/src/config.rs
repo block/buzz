@@ -706,6 +706,10 @@ fn validate_trigger_reply_publishing(
         .agent_owner
         .as_deref()
         .is_some_and(|owner| !owner.trim().is_empty());
+    let owner_is_valid = args
+        .agent_owner
+        .as_deref()
+        .is_some_and(|owner| nostr::PublicKey::from_hex(owner.trim()).is_ok());
     let kinds_are_messages = matches!(args.kinds.as_deref(), Some([9]));
 
     let valid = normalize_agent_command_identity(agent_command) == "buzz-agent"
@@ -715,6 +719,7 @@ fn validate_trigger_reply_publishing(
         && kinds_are_messages
         && args.respond_to == RespondTo::OwnerOnly
         && owner_configured
+        && owner_is_valid
         && args.mcp_command.trim().is_empty()
         && !args.no_ignore_self
         && args.heartbeat_interval == 0
@@ -2759,6 +2764,40 @@ channels = "ALL"
             )
             .is_err(),
             "trigger-reply must reject disabled self-loop protection"
+        );
+    }
+
+    #[test]
+    fn trigger_reply_publishing_rejects_an_unparseable_owner_pubkey() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--publish-agent-output",
+            "trigger-reply",
+            "--agent-command",
+            "buzz-agent",
+            "--agents",
+            "1",
+            "--channels",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "--subscribe",
+            "all",
+            "--kinds",
+            "9",
+            "--respond-to",
+            "owner-only",
+            "--agent-owner",
+            "not-a-pubkey",
+            "--dedup",
+            "queue",
+            "--multiple-event-handling",
+            "queue",
+        ])
+        .expect("CLI arguments should parse before configuration validation");
+        assert!(
+            Config::from_args(args).is_err(),
+            "trigger-reply publishing must fail startup when the configured owner is invalid"
         );
     }
 

@@ -10,7 +10,7 @@ Implementation commit: `1ab0721481bcc4d3ac19bcb8aab65ddacb0a3a1a`
 
 ## GREEN evidence
 
-- `cargo test -p buzz-acp --lib` — 669 unit tests passed.
+- Round-1 review fix: `cargo test -p buzz-acp --lib` — 673 unit tests passed.
 - `cargo fmt --check` passed.
 - `cargo clippy -p buzz-acp --all-targets -- -D warnings` passed.
 
@@ -21,6 +21,12 @@ Implementation commit: `1ab0721481bcc4d3ac19bcb8aab65ddacb0a3a1a`
 - `crates/buzz-acp/src/pool.rs` — trusted batch-last targeting, signing, terminal gating, exact-ID confirmation/retry, and one pending event.
 - `crates/buzz-acp/src/lib.rs` — public policy re-export and runtime wiring.
 - `crates/buzz-acp/src/relay.rs` — single-attempt durable submission, preventing an unconfirmed transport retry.
+
+## Round-1 review fixes
+
+- Only the exact configured owner may provide a trusted trigger; sibling-agent events are rejected even though inbound owner-only policy permits them.
+- Trigger-reply startup now rejects an owner value that cannot parse as a Nostr public key.
+- `accepted: false` is terminal: it is neither confirmed nor retried and never occupies the pending slot. Ambiguous responses are confirmed by exact ID before identical-ID retry; the regression test observes the same event ID on both writes.
 
 ## Concerns
 
