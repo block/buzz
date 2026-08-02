@@ -122,34 +122,14 @@ fn is_lowercase_hex(c: char) -> bool {
 }
 
 fn parse_json_array(s: &str) -> Result<Vec<Value>, SdkError> {
-    let trimmed = s.trim();
-    // Fast path: well-formed JSON array.
-    if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(trimmed) {
-        return Ok(arr);
+    let v: Value = serde_json::from_str(s)
+        .map_err(|e| SdkError::InvalidInput(format!("invalid JSON: {e}")))?;
+    match v {
+        Value::Array(arr) => Ok(arr),
+        _ => Err(SdkError::InvalidInput(
+            "auth tag must be a JSON array".into(),
+        )),
     }
-
-    // Fallback: the raw Nostr tag form, e.g. `[auth,deadbeef,,a1b2...]`.
-    //
-    // This is how an `auth` tag serializes inside a Nostr event (unquoted,
-    // comma-delimited) and how `.env` files and shell variables commonly
-    // carry `BUZZ_AUTH_TAG`. Accept it so consumers don't have to re-quote
-    // the value into JSON before calling `parse_auth_tag` / `verify_auth_tag`.
-    // An empty field (`,,`) parses to an empty string, matching the tag's
-    // JSON form `["auth","hex","","hex"]`.
-    if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        let arr: Vec<Value> = inner
-            .split(',')
-            .map(|part| Value::String(part.trim().to_owned()))
-            .collect();
-        if !arr.is_empty() {
-            return Ok(arr);
-        }
-    }
-
-    Err(SdkError::InvalidInput(format!(
-        "invalid JSON: expected array, got {trimmed:?}"
-    )))
 }
 
 /// Compute a NIP-OA `auth` tag authorizing `agent_pubkey` under `conditions`.
@@ -318,33 +298,6 @@ pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
         .map_err(|e| SdkError::InvalidInput(format!("failed to construct Tag: {e}")))
 }
 
-/// Normalize an `auth` tag into its canonical JSON serialization.
-///
-/// Accepts either the JSON array form `["auth","hex","","hex"]` or the raw
-/// Nostr tag form `[auth,hex,,hex]` (see [`parse_auth_tag`]) and returns the
-/// canonical JSON array string. This is the form that should be sent over the
-/// wire (e.g. as the CLI's `x-auth-tag` header) so that a relay's
-/// [`verify_auth_tag`] — which expects JSON — accepts it regardless of how the
-/// caller stored the tag locally.
-///
-/// # Errors
-///
-/// Returns [`SdkError::InvalidInput`] if the input is not a valid 4-element
-/// `auth` tag in either form.
-pub fn canonicalize_auth_tag(input: &str) -> Result<String, SdkError> {
-    let arr = parse_json_array(input)?;
-    if arr.len() != 4 {
-        return Err(SdkError::InvalidInput(format!(
-            "auth tag must have 4 elements, got {}",
-            arr.len()
-        )));
-    }
-    // Re-serialize as canonical JSON. parse_auth_tag / verify_auth_tag validate
-    // the contents; here we only normalize the container shape.
-    serde_json::to_string(&arr)
-        .map_err(|e| SdkError::InvalidInput(format!("canonical serialization failed: {e}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,69 +424,6 @@ mod tests {
         assert_eq!(slice[1], OWNER_PUBKEY_HEX);
         assert_eq!(slice[2], CONDITIONS);
         assert_eq!(slice[3], "a".repeat(128));
-    }
-
-    /// parse_auth_tag accepts the raw Nostr tag form `[auth,hex,,hex]`
-    /// (unquoted, comma-delimited), which is how an `auth` tag serializes
-    /// inside a Nostr event and how `.env` files commonly store it.
-    #[test]
-    fn test_parse_auth_tag_raw_nostr_form() {
-        let sig_hex = "a".repeat(128);
-
-        // Raw form with non-empty conditions.
-        let raw = format!("[auth,{OWNER_PUBKEY_HEX},{CONDITIONS},{sig_hex}]");
-        let tag = parse_auth_tag(&raw).expect("raw Nostr form must parse");
-        let slice = tag.as_slice();
-        assert_eq!(slice[0], "auth");
-        assert_eq!(slice[1], OWNER_PUBKEY_HEX);
-        assert_eq!(slice[2], CONDITIONS);
-        assert_eq!(slice[3], sig_hex);
-
-        // Raw form with empty conditions (`,,`).
-        let raw_empty = format!("[auth,{OWNER_PUBKEY_HEX},,{sig_hex}]");
-        let tag = parse_auth_tag(&raw_empty).expect("raw form with empty conditions must parse");
-        let slice = tag.as_slice();
-        assert_eq!(slice[0], "auth");
-        assert_eq!(slice[1], OWNER_PUBKEY_HEX);
-        assert_eq!(slice[2], ""); // empty conditions field
-        assert_eq!(slice[3], sig_hex);
-    }
-
-    /// parse_auth_tag accepts the raw form with surrounding whitespace
-    /// (common when read from shell variables / `.env`).
-    #[test]
-    fn test_parse_auth_tag_raw_form_with_whitespace() {
-        let sig_hex = "a".repeat(128);
-        let raw = format!("  [auth, {OWNER_PUBKEY_HEX} , {CONDITIONS}, {sig_hex}]  \n");
-        let tag = parse_auth_tag(&raw).expect("raw form with whitespace must parse");
-        let slice = tag.as_slice();
-        assert_eq!(slice[0], "auth");
-        assert_eq!(slice[1], OWNER_PUBKEY_HEX);
-    }
-
-    /// canonicalize_auth_tag normalizes the raw Nostr form to canonical JSON,
-    /// so the `x-auth-tag` header is valid JSON regardless of input form.
-    #[test]
-    fn test_canonicalize_auth_tag_raw_to_json() {
-        let sig_hex = "a".repeat(128);
-
-        // Raw form with empty conditions (`,,`) -> canonical JSON with "".
-        let raw = format!("[auth,{OWNER_PUBKEY_HEX},,{sig_hex}]");
-        let canonical = canonicalize_auth_tag(&raw).expect("raw form must canonicalize");
-        let reparsed: Vec<String> =
-            serde_json::from_str(&canonical).expect("canonical output must be valid JSON");
-        assert_eq!(reparsed, vec!["auth", OWNER_PUBKEY_HEX, "", &sig_hex]);
-
-        // JSON input passes through unchanged (modulo canonical spacing).
-        let json_in =
-            serde_json::json!(["auth", OWNER_PUBKEY_HEX, CONDITIONS, &sig_hex]).to_string();
-        let canonical = canonicalize_auth_tag(&json_in).expect("JSON form must canonicalize");
-        let reparsed: Vec<String> =
-            serde_json::from_str(&canonical).expect("canonical output must be valid JSON");
-        assert_eq!(
-            reparsed,
-            vec!["auth", OWNER_PUBKEY_HEX, CONDITIONS, &sig_hex]
-        );
     }
 
     /// Various malformed inputs to parse_auth_tag must return errors.
