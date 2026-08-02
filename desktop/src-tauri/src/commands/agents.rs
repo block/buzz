@@ -896,7 +896,7 @@ pub async fn create_managed_agent(
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             display_name: None,
             slug: None,
-            runtime: None,
+            runtime: input.runtime.clone(),
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

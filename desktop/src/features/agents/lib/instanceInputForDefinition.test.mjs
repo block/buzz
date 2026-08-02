@@ -230,6 +230,22 @@ test("provider intent forces startOnAppLaunch off and omits local commands", asy
   assert.equal(input.systemPrompt, "prompt");
 });
 
+test("execution-node intent persists the selected runtime for the remote body", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "execution-node", nodeId: "a".repeat(64) },
+  );
+  assert.equal(input.runtime, "goose");
+  assert.equal(input.spawnAfterCreate, false);
+  assert.equal(input.startOnAppLaunch, false);
+  assert.deepEqual(input.backend, {
+    type: "execution_node",
+    nodeId: "a".repeat(64),
+  });
+});
+
 test("row 1: refuses when the configured runtime is not available", () => {
   assert.throws(
     () =>

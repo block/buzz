@@ -147,6 +147,7 @@ export async function buildInstanceInputForDefinition(
   if (backendIntent?.type === "execution-node") {
     return {
       ...base,
+      runtime: runtime.id,
       systemPrompt: persona.systemPrompt,
       model: persona.model ?? undefined,
       provider: persona.provider ?? undefined,

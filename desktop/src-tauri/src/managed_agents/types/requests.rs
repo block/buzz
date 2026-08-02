@@ -167,6 +167,11 @@ pub struct CreateManagedAgentRequest {
     pub avatar_url: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Runtime selected for an execution-node body. The managed-agent record
+    /// is the source of truth after creation; remote deploy never accepts a
+    /// replacement runtime from a later IPC call.
+    #[serde(default)]
+    pub runtime: Option<String>,
     /// Environment variables for this agent. Layered on top of persona env.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,

@@ -27,7 +27,6 @@ export async function listExecutionNodes(): Promise<ExecutionNodeTarget[]> {
 export type DeployManagedAgentToExecutionNodeInput = {
   pubkey: string;
   nodeId: string;
-  runtime: string;
   channelId?: string;
 };
 
@@ -92,7 +91,6 @@ export function deployManagedAgentToExecutionNode(
       input: {
         pubkey: input.pubkey,
         nodeId: input.nodeId,
-        runtime: input.runtime,
         channelId: input.channelId,
       },
     },

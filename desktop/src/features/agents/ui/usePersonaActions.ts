@@ -253,7 +253,6 @@ export function usePersonaActions() {
           const deployment = await deployManagedAgentToExecutionNode({
             pubkey: created.agent.pubkey,
             nodeId: startIntent.nodeId,
-            runtime: runtime.id,
             channelId: targetChannel?.id,
           });
           const failure = executionReceiptFailure(deployment.receipt);

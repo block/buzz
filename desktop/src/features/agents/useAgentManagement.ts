@@ -222,7 +222,6 @@ export function useAgentManagement() {
           const deployment = await deployManagedAgentToExecutionNode({
             pubkey: created.agent.pubkey,
             nodeId: backendIntent.nodeId,
-            runtime: runtime.id,
             channelId: request.request.channelId,
           });
           const failure = executionReceiptFailure(deployment.receipt);

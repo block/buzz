@@ -19,7 +19,10 @@ use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
-    managed_agents::{load_managed_agents, save_managed_agents, BackendKind},
+    managed_agents::{
+        load_global_agent_config, load_managed_agents, load_personas, save_managed_agents,
+        BackendKind,
+    },
     relay::{query_relay, relay_ws_url_with_override, SubmitEventResponse},
 };
 use buzz_core_pkg::tenant::relay_url_authority;
@@ -67,8 +70,6 @@ pub struct DeployManagedAgentToExecutionNodeInput {
     pub pubkey: String,
     /// Target paired execution node.
     pub node_id: String,
-    /// Runtime identifier selected for this deployment.
-    pub runtime: String,
     /// Channel selected by the create flow, when one exists.
     pub channel_id: Option<String>,
 }
@@ -228,6 +229,18 @@ pub async fn deploy_managed_agent_to_execution_node(
             .iter()
             .find(|record| record.pubkey == input.pubkey)
             .ok_or_else(|| format!("managed agent {} not found", input.pubkey))?;
+        let personas = load_personas(&app).unwrap_or_default();
+        let global_config = load_global_agent_config(&app).unwrap_or_default();
+        let effective_config = crate::managed_agents::effective_config::resolve_effective_config(
+            record,
+            &personas,
+            &global_config,
+        )
+        .require_resolved()?;
+        let runtime = record
+            .runtime
+            .clone()
+            .ok_or_else(|| "managed agent has no persisted runtime".to_string())?;
         match &record.backend {
             BackendKind::ExecutionNode {
                 node_id: bound_node_id,
@@ -256,16 +269,16 @@ pub async fn deploy_managed_agent_to_execution_node(
         let mut workload = WorkloadSpec::agent(
             workload_id,
             record.name.clone(),
-            input.runtime,
-            record.model.clone(),
-            record.provider.clone(),
+            runtime,
+            effective_config.model.value,
+            effective_config.provider.value,
             Vec::new(),
         )
         .map_err(|error| format!("invalid managed-agent workload: {error}"))?;
         workload.agent = Some(
             AgentWorkloadContext::new(
                 record.pubkey.clone(),
-                record.system_prompt.clone(),
+                effective_config.system_prompt.value,
                 Some(relay_url),
                 record.auth_tag.clone(),
                 Some(record.respond_to.as_str().to_string()),
@@ -287,6 +300,20 @@ pub async fn deploy_managed_agent_to_execution_node(
         ExecutionCommand::Deploy { workload },
     )
     .await?;
+    match response.receipt.as_ref() {
+        Some(receipt)
+            if matches!(
+                receipt.outcome,
+                buzz_core_pkg::execution::ReceiptOutcome::Succeeded
+            ) => {}
+        Some(receipt) => {
+            return Err(format!(
+                "execution node did not deploy workload: {:?}",
+                receipt.outcome
+            ))
+        }
+        None => return Err("execution node did not confirm workload deployment".into()),
+    }
 
     let _store_guard = state
         .managed_agents_store_lock
@@ -359,6 +386,9 @@ pub(crate) async fn remove_execution_workload_for_managed_agent(
             if matches!(
                 receipt.outcome,
                 buzz_core_pkg::execution::ReceiptOutcome::Succeeded
+                    | buzz_core_pkg::execution::ReceiptOutcome::Failed {
+                        error: buzz_core_pkg::execution::SafeErrorCode::WorkloadNotFound,
+                    }
             ) =>
         {
             Ok(())
