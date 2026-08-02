@@ -506,9 +506,7 @@ pub fn agents_from_events(events: &[Event]) -> Value {
 /// The agent's pubkey comes from the event's `d` tag, not `event.pubkey`:
 /// kind:30177 is a parameterized-replaceable event published BY the agent's
 /// *owner*, so `event.pubkey` is the owner's identity, not the agent's.
-pub fn relay_agent_seed_from_managed_agent_event(
-    event: &Event,
-) -> Result<RelayAgentInfo, String> {
+pub fn relay_agent_seed_from_managed_agent_event(event: &Event) -> Result<RelayAgentInfo, String> {
     let pubkey = first_tag_value(event, "d")
         .ok_or_else(|| "kind:30177 missing required `d` tag".to_string())?
         .to_string();
@@ -1140,12 +1138,15 @@ mod tests {
         let general = ev(
             39002,
             "",
-            vec![vec!["d", "general"], vec!["p", &agent_a], vec!["p", &stranger]],
+            vec![
+                vec!["d", "general"],
+                vec!["p", &agent_a],
+                vec!["p", &stranger],
+            ],
         );
         let random = ev(39002, "", vec![vec!["d", "random"], vec!["p", &agent_b]]);
 
-        let map =
-            agent_channel_ids_from_member_events(&[general, random], &candidates);
+        let map = agent_channel_ids_from_member_events(&[general, random], &candidates);
 
         assert_eq!(map.get(&agent_a), Some(&vec!["general".to_string()]));
         assert_eq!(map.get(&agent_b), Some(&vec!["random".to_string()]));
@@ -1157,7 +1158,11 @@ mod tests {
 
     #[test]
     fn channel_names_by_id_maps_d_tag_to_name_tag() {
-        let e = ev(39000, "", vec![vec!["d", "general"], vec!["name", "general"]]);
+        let e = ev(
+            39000,
+            "",
+            vec![vec!["d", "general"], vec!["name", "general"]],
+        );
 
         let map = channel_names_by_id(std::slice::from_ref(&e));
 

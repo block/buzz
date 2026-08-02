@@ -3215,8 +3215,7 @@ function initializeMockHuddle(
 const openedExternalUrls: string[] = [];
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
-    pubkey:
-      "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    pubkey: "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
     name: "alice",
     agent_type: "goose",
     channels: ["general", "agents"],
@@ -3230,8 +3229,7 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     respond_to_allowlist: [],
   },
   {
-    pubkey:
-      "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+    pubkey: "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
     name: "charlie",
     agent_type: "codex",
     channels: ["general"],
