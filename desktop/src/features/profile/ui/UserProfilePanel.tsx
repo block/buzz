@@ -456,6 +456,7 @@ export function UserProfilePanel({
       channels: channelsQuery.data,
       managedAgent,
       relayAgents: relayAgentsQuery.data,
+      refreshManagedAgents: managedAgentsQuery.refetch,
       startManagedAgent: startAgentMutation.mutateAsync,
       stopManagedAgent: stopAgentMutation.mutateAsync,
     });

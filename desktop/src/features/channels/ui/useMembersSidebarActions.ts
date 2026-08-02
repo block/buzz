@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
+  managedAgentsQueryKey,
   useStartManagedAgentMutation,
   useStopManagedAgentMutation,
 } from "@/features/agents/hooks";
@@ -176,6 +177,8 @@ export function useMembersSidebarActions({
           ...EMPTY_AGENT_CONTEXT,
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
+          refreshManagedAgents: () =>
+            queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
         });
         if (agent.backend.type === "local") {
           clearActiveTurnsForAgentOnStop(agent.pubkey);
@@ -191,6 +194,8 @@ export function useMembersSidebarActions({
       await startManagedAgentWithRules({
         agent,
         startManagedAgent: startManagedAgentMutation.mutateAsync,
+        refreshManagedAgents: () =>
+          queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       });
       setActionNoticeMessage(getLifecycleSuccessMessage(agent));
     } catch (error) {
@@ -209,6 +214,8 @@ export function useMembersSidebarActions({
           agent,
           startManagedAgent: startManagedAgentMutation.mutateAsync,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
+          refreshManagedAgents: () =>
+            queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
           onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
         });
         return undefined;
@@ -229,6 +236,8 @@ export function useMembersSidebarActions({
           ...EMPTY_AGENT_CONTEXT,
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
+          refreshManagedAgents: () =>
+            queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
         });
         if (agent.backend.type === "local") {
           clearActiveTurnsForAgentOnStop(agent.pubkey);

@@ -97,6 +97,23 @@ fn collect_remote_deployed(
         .collect()
 }
 
+/// Return execution-node workloads that must be removed before the cascade.
+fn collect_execution_node_targets(
+    agents: &[ManagedAgentRecord],
+    cascade: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    agents
+        .iter()
+        .filter(|agent| cascade.contains(&agent.pubkey))
+        .filter_map(|agent| match (&agent.backend, &agent.backend_agent_id) {
+            (crate::managed_agents::BackendKind::ExecutionNode { node_id }, Some(workload_id)) => {
+                Some((node_id.clone(), workload_id.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Remove cascade agents from `agents` and persist via the injectable `save`.
 ///
 /// Extracted from `delete_persona` so unit tests can inject a failing save and
@@ -117,23 +134,44 @@ fn commit_cascade_agents(
 pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let state = app.state::<crate::app_state::AppState>();
-    let execution_targets = {
+    let preflight_id = id.clone();
+    let preflight_app = app.clone();
+    let execution_targets = tokio::task::spawn_blocking(move || {
+        let state = preflight_app.state::<AppState>();
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        load_managed_agents(&app)?
+        let personas = load_personas(&preflight_app)?;
+        let persona = personas
             .iter()
-            .filter(|agent| agent.persona_id.as_deref() == Some(id.as_str()))
-            .filter_map(|agent| match (&agent.backend, &agent.backend_agent_id) {
-                (
-                    crate::managed_agents::BackendKind::ExecutionNode { node_id },
-                    Some(workload_id),
-                ) => Some((node_id.clone(), workload_id.clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
+            .find(|record| record.id == preflight_id)
+            .ok_or_else(|| format!("persona {preflight_id} not found"))?;
+        let referenced_by_team = load_teams(&preflight_app)?.iter().any(|team| {
+            team.persona_ids
+                .iter()
+                .any(|persona_id| persona_id == preflight_id.as_str())
+        });
+        validate_persona_deletion(persona, referenced_by_team)?;
+
+        let agents = load_managed_agents(&preflight_app)?;
+        let cascade: std::collections::HashSet<String> = collect_cascade_pubkeys(
+            &agents,
+            &preflight_id,
+        )
+        .into_iter()
+        .collect();
+        let remote_deployed = collect_remote_deployed(&agents, &cascade);
+        if !remote_deployed.is_empty() {
+            return Err(format!(
+                "persona {preflight_id} has provider-deployed agent instances ({}); delete those agent instances first",
+                remote_deployed.join(", ")
+            ));
+        }
+        Ok(collect_execution_node_targets(&agents, &cascade))
+    })
+    .await
+    .map_err(|error| format!("persona deletion preflight failed: {error}"))??;
     for (node_id, workload_id) in execution_targets {
         remove_execution_workload_for_managed_agent(&state, &node_id, &workload_id).await?;
     }

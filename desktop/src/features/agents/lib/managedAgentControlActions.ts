@@ -26,6 +26,8 @@ type ManagedAgentChannelContext = {
   relayAgents: readonly RelayAgent[];
 };
 
+type RefreshManagedAgents = () => Promise<unknown>;
+
 type ManagedAgentActionContext = ManagedAgentChannelContext & {
   presenceLookup?: PresenceLookup | null;
 };
@@ -85,9 +87,11 @@ export function resolveManagedAgentChannelId(
 export async function startManagedAgentWithRules({
   agent,
   startManagedAgent,
+  refreshManagedAgents,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
+  refreshManagedAgents?: RefreshManagedAgents;
 }) {
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
@@ -100,6 +104,7 @@ export async function startManagedAgentWithRules({
       nodeId: agent.backend.nodeId,
       workloadId: agent.backendAgentId,
     });
+    await refreshManagedAgents?.();
     return;
   }
 
@@ -111,10 +116,12 @@ export async function respawnManagedAgentWithRules({
   startManagedAgent,
   stopManagedAgent,
   onStopped,
+  refreshManagedAgents,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
   stopManagedAgent: StopManagedAgent;
+  refreshManagedAgents?: RefreshManagedAgents;
   /** Called after a successful stop and before start begins — use this to
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
@@ -125,6 +132,9 @@ export async function respawnManagedAgentWithRules({
   }
 
   await startManagedAgent(agent.pubkey);
+  if (agent.backend.type === "execution_node") {
+    await refreshManagedAgents?.();
+  }
 }
 
 export async function stopManagedAgentWithRules({
@@ -133,9 +143,11 @@ export async function stopManagedAgentWithRules({
   preferredChannelId,
   relayAgents,
   stopManagedAgent,
+  refreshManagedAgents,
 }: {
   agent: ManagedAgent;
   stopManagedAgent: StopManagedAgent;
+  refreshManagedAgents?: RefreshManagedAgents;
 } & ManagedAgentChannelContext): Promise<ManagedAgentActionResult> {
   if (agent.backend.type === "provider") {
     const channelId = resolveManagedAgentChannelId(agent, {
@@ -163,6 +175,7 @@ export async function stopManagedAgentWithRules({
       nodeId: agent.backend.nodeId,
       workloadId: agent.backendAgentId,
     });
+    await refreshManagedAgents?.();
     return {};
   }
 

@@ -166,6 +166,7 @@ export function useManagedAgentActions() {
       await startManagedAgentWithRules({
         agent,
         startManagedAgent: startMutation.mutateAsync,
+        refreshManagedAgents: managedAgentsQuery.refetch,
       });
     } catch (error) {
       setActionErrorMessage(
@@ -248,6 +249,7 @@ export function useManagedAgentActions() {
         channels,
         relayAgents: relayAgentsQuery.data ?? [],
         stopManagedAgent: stopMutation.mutateAsync,
+        refreshManagedAgents: managedAgentsQuery.refetch,
       });
       if (agent.backend.type === "local") {
         clearActiveTurnsForAgentOnStop(pubkey);
@@ -378,6 +380,7 @@ export function useManagedAgentActions() {
           channels: channelsQuery.data ?? [],
           relayAgents: relayAgentsQuery.data ?? [],
           stopManagedAgent: stopMutation.mutateAsync,
+          refreshManagedAgents: managedAgentsQuery.refetch,
         });
         if (a.backend.type === "local") {
           clearActiveTurnsForAgentOnStop(a.pubkey);

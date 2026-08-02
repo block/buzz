@@ -76,7 +76,10 @@ export type ExecutionWorkloadCommandInput = {
 export function executionReceiptFailure(
   receipt: ExecutionReceipt | null,
 ): string | null {
-  return receipt && "error" in receipt.outcome ? receipt.outcome.error : null;
+  if (!receipt) {
+    return "execution node did not confirm the command";
+  }
+  return "error" in receipt.outcome ? receipt.outcome.error : null;
 }
 
 /** Deploy a managed agent while preserving its Desktop identity and config. */
@@ -100,10 +103,15 @@ async function sendExecutionWorkloadCommand(
   command: "start" | "stop" | "restart" | "remove",
   input: ExecutionWorkloadCommandInput,
 ): Promise<DeployExecutionWorkloadResponse> {
-  return invokeTauri<DeployExecutionWorkloadResponse>(
+  const response = await invokeTauri<DeployExecutionWorkloadResponse>(
     `${command}_execution_workload`,
     { input },
   );
+  const failure = executionReceiptFailure(response.receipt);
+  if (failure) {
+    throw new Error(failure);
+  }
+  return response;
 }
 
 /** Start a remote workload through its paired execution node. */

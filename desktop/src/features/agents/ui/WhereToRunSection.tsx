@@ -32,6 +32,9 @@ export function WhereToRunSection({
   const backendProviders =
     useBackendProvidersQuery({ enabled: legacyProviderPathEnabled }).data ?? [];
   const executionNodes = useExecutionNodesQuery().data ?? [];
+  const deployableExecutionNodes = executionNodes.filter((node) =>
+    node.capabilities.includes("deploy"),
+  );
   const [probeError, setProbeError] = React.useState<string | null>(null);
   const isExecutionNode = draft.runOn.startsWith("execution-node:");
   const isProviderMode =
@@ -84,7 +87,8 @@ export function WhereToRunSection({
     };
   }, [selectedBinaryPath]);
 
-  if (backendProviders.length === 0 && executionNodes.length === 0) return null;
+  if (backendProviders.length === 0 && deployableExecutionNodes.length === 0)
+    return null;
 
   return (
     <div className="space-y-4">
@@ -105,7 +109,7 @@ export function WhereToRunSection({
           value={draft.runOn}
         >
           <option value="local">This computer</option>
-          {executionNodes.map((node) => (
+          {deployableExecutionNodes.map((node) => (
             <option
               disabled={node.availability === "unavailable"}
               key={node.nodeId}
