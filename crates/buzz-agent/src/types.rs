@@ -67,6 +67,36 @@ pub enum HistoryItem {
     ToolResult(ToolResult),
 }
 
+/// One source consulted by OpenAI-hosted web search.
+#[derive(Debug, Clone)]
+pub struct WebSearchSource {
+    /// Exact provider URL, used for citation-to-source matching and dedupe.
+    pub url: String,
+    /// Canonical URL used only as a Markdown destination.
+    pub markdown_destination: String,
+    /// Provider-supplied source title, normalized only when rendered.
+    pub title: String,
+}
+
+/// One URL-citation range in an OpenAI Responses output-text item.
+#[derive(Debug, Clone)]
+pub struct WebSearchCitation {
+    /// Byte offsets into the parsed response text.
+    pub start: usize,
+    pub end: usize,
+    /// Exact provider URL, matched against the complete consulted-source list.
+    pub url: String,
+}
+
+/// Hosted-search metadata retained across every LLM response in an ACP turn.
+#[derive(Debug, Clone)]
+pub struct WebSearchResponse {
+    /// Consulted sources in provider order for this individual response.
+    pub sources: Vec<WebSearchSource>,
+    /// Citation ranges in the parsed response text.
+    pub citations: Vec<WebSearchCitation>,
+}
+
 impl HistoryItem {
     pub fn estimated_bytes(&self) -> usize {
         self.size_with(ToolResultContent::estimated_bytes)
@@ -202,6 +232,12 @@ pub struct LlmResponse {
     /// Replayed on subsequent turns so the model can continue its chain-of-thought.
     /// `None` for all non-OpenRouter providers.
     pub reasoning_details: Option<Value>,
+    /// OpenAI hosted-web-search metadata. Only populated when the explicit
+    /// web-search feature is enabled.
+    pub web_search: Option<WebSearchResponse>,
+    /// Raw hosted-tool/function-call output items retained in provider order
+    /// for Responses API replay. Empty outside hosted web search.
+    pub responses_output_items: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
