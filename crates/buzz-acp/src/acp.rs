@@ -232,6 +232,21 @@ pub struct AcpClient {
     /// lacks the publish acknowledgement) is discarded so the fallback stays
     /// armed. Reset at the start of every turn.
     turn_publish_candidates: std::collections::HashSet<String>,
+    /// Once-publish-per-trigger stop (Glitch B): set when the first channel
+    /// publish of this turn is **confirmed** delivered. The idle/simple read
+    /// loops send a single `session/cancel` so the model cannot multi-step
+    /// additional `buzz_messages_send` calls after tool success (Cipher
+    /// triple-post). Live agents often run `permission_mode=bypassPermissions`,
+    /// so a permission-reject gate is not available. Reset each turn.
+    once_publish_stop_pending: bool,
+    /// True after we have already sent `session/cancel` for once-publish this
+    /// turn (idempotent — avoid double cancel).
+    once_publish_stop_fired: bool,
+    /// True when the in-flight cancel was raised by once-publish. When the
+    /// agent returns `stopReason: cancelled`, we rewrite it to `end_turn` so
+    /// the pool treats the trigger batch as successfully processed (no
+    /// requeue). Reset each turn.
+    once_publish_stop_applied: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -574,6 +589,9 @@ impl AcpClient {
             turn_message_text: String::new(),
             turn_sent_message: false,
             turn_publish_candidates: std::collections::HashSet::new(),
+            once_publish_stop_pending: false,
+            once_publish_stop_fired: false,
+            once_publish_stop_applied: false,
         })
     }
 
@@ -788,6 +806,10 @@ impl AcpClient {
         self.turn_message_text.clear();
         self.turn_sent_message = false;
         self.turn_publish_candidates.clear();
+        // Reset once-publish-per-trigger stop (Glitch B) for this turn.
+        self.once_publish_stop_pending = false;
+        self.once_publish_stop_fired = false;
+        self.once_publish_stop_applied = false;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -1269,6 +1291,9 @@ impl AcpClient {
                 match method {
                     "session/update" => {
                         let _ = self.handle_session_update(&msg);
+                        // Once-publish stop needs a session_id; simple
+                        // read_until_response has none — fire only from the
+                        // idle-timeout prompt loop (session_prompt path).
                     }
                     "_goose/unstable/session/update" => {
                         self.handle_goose_usage_update(&msg);
@@ -1713,6 +1738,11 @@ impl AcpClient {
                                     last_activity_at = activity_now;
                                     tracing::debug!("idle clock reset: tool call started");
                                 }
+                                // Glitch B: after first confirmed channel
+                                // publish this turn, cancel so the model
+                                // cannot multi-step additional publishes.
+                                self.maybe_fire_once_publish_stop(session_id)
+                                    .await?;
                             }
                             "_goose/unstable/session/update" => {
                                 self.handle_goose_usage_update(&msg);
@@ -1803,7 +1833,7 @@ impl AcpClient {
                     // status (single-event shape). Handle it like an update.
                     if let Some(confirmed) = publish_outcome_confirms_delivery(update) {
                         if confirmed {
-                            self.turn_sent_message = true;
+                            self.mark_publish_confirmed(title);
                         }
                     }
                 }
@@ -1821,7 +1851,7 @@ impl AcpClient {
                     if let Some(confirmed) = publish_outcome_confirms_delivery(update) {
                         self.turn_publish_candidates.remove(tool_id);
                         if confirmed {
-                            self.turn_sent_message = true;
+                            self.mark_publish_confirmed(tool_id);
                             tracing::debug!(
                                 "publish confirmed (toolCallId={tool_id}); \
                                  content-delivery fallback stays dormant this turn"
@@ -2036,13 +2066,73 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Mark a channel/DM publish as confirmed delivered this turn and arm the
+    /// once-publish-per-trigger stop so the read loop will cancel further
+    /// multi-step agent work after the first successful send.
+    ///
+    /// Idempotent for the fallback flag (`turn_sent_message`); only the first
+    /// confirmation sets `once_publish_stop_pending` so a successful retry
+    /// after a failed attempt still cancels once (not zero times, not twice).
+    fn mark_publish_confirmed(&mut self, label: &str) {
+        let first = !self.turn_sent_message;
+        self.turn_sent_message = true;
+        if first {
+            self.once_publish_stop_pending = true;
+            tracing::info!(
+                target: "acp::once_publish",
+                "once-publish stop armed after first confirmed publish ({label}); \
+                 will cancel turn to prevent multi-step re-publish"
+            );
+        }
+    }
+
+    /// If once-publish stop is pending and we have not already cancelled,
+    /// send `session/cancel` for the in-flight prompt. Called from the
+    /// session/update read loops immediately after a confirmed publish.
+    async fn maybe_fire_once_publish_stop(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), AcpError> {
+        if !self.once_publish_stop_pending || self.once_publish_stop_fired {
+            return Ok(());
+        }
+        if !self.has_in_flight_prompt() {
+            // Turn already completed (race): nothing to cancel.
+            self.once_publish_stop_pending = false;
+            return Ok(());
+        }
+        self.session_cancel(session_id).await?;
+        self.once_publish_stop_fired = true;
+        self.once_publish_stop_applied = true;
+        self.once_publish_stop_pending = false;
+        tracing::info!(
+            target: "acp::once_publish",
+            "once-publish stop: sent session/cancel after first confirmed channel publish"
+        );
+        Ok(())
+    }
+
     /// Parse `stopReason` from a `session/prompt` result value.
-    fn parse_stop_reason(&self, result: &serde_json::Value) -> Result<StopReason, AcpError> {
+    ///
+    /// When the cancel was raised by once-publish-per-trigger, rewrite
+    /// `cancelled` → `end_turn` so the pool does not requeue the trigger batch
+    /// (Cancelled fate) after a successful first publish.
+    fn parse_stop_reason(&mut self, result: &serde_json::Value) -> Result<StopReason, AcpError> {
         let raw = result["stopReason"].as_str().ok_or_else(|| {
             AcpError::Protocol("session/prompt response missing stopReason".into())
         })?;
-        StopReason::from_str(raw)
-            .ok_or_else(|| AcpError::Protocol(format!("unknown stopReason: {raw:?}")))
+        let reason = StopReason::from_str(raw)
+            .ok_or_else(|| AcpError::Protocol(format!("unknown stopReason: {raw:?}")))?;
+        if matches!(reason, StopReason::Cancelled) && self.once_publish_stop_applied {
+            tracing::info!(
+                target: "acp::once_publish",
+                "once-publish stop: rewriting stopReason cancelled → end_turn \
+                 (first publish already delivered; do not requeue trigger)"
+            );
+            self.once_publish_stop_applied = false;
+            return Ok(StopReason::EndTurn);
+        }
+        Ok(reason)
     }
 }
 
@@ -2819,6 +2909,102 @@ mod tests {
             "retry succeeded — delivery confirmed"
         );
         assert_eq!(client.take_undelivered_turn_message(), None);
+    }
+
+    /// Once-publish stop arms only on first *confirmed* publish, not on fail.
+    #[tokio::test]
+    async fn once_publish_stop_arms_on_first_confirmed_only() {
+        let mut client = spawn_inert_client().await;
+        assert!(!client.once_publish_stop_pending);
+        // Failed publish: no stop.
+        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc-op-fail",
+            "title": "buzz_publish__buzz_messages_send",
+            "status": "pending",
+            "rawInput": { "content": "hi" }
+        })));
+        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc-op-fail",
+            "status": "failed"
+        })));
+        assert!(!client.turn_sent_message);
+        assert!(!client.once_publish_stop_pending);
+
+        // Successful publish: arm stop.
+        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc-op-ok",
+            "title": "buzz_publish__buzz_messages_send",
+            "status": "pending",
+            "rawInput": { "content": "hi" }
+        })));
+        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc-op-ok",
+            "status": "completed",
+            "rawOutput": { "stdout": "{\"accepted\":true,\"event_id\":\"e-op\"}" }
+        })));
+        assert!(client.turn_sent_message);
+        assert!(
+            client.once_publish_stop_pending,
+            "first confirmed publish must arm once-publish stop"
+        );
+
+        // Second confirmed publish does not re-arm (still pending or already fired).
+        client.once_publish_stop_pending = false; // simulate fire consumed pending
+        client.once_publish_stop_fired = true;
+        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc-op-2",
+            "title": "buzz_publish__buzz_messages_send",
+            "status": "pending",
+            "rawInput": { "content": "again" }
+        })));
+        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc-op-2",
+            "status": "completed",
+            "rawOutput": { "stdout": "{\"accepted\":true}" }
+        })));
+        assert!(
+            !client.once_publish_stop_pending,
+            "second confirm must not re-arm pending (first already counted)"
+        );
+    }
+
+    /// Intentional once-publish cancel rewrites Cancelled → EndTurn.
+    #[test]
+    fn once_publish_stop_rewrites_cancelled_to_end_turn() {
+        // Build a minimal client via Default-less path: parse_stop_reason needs
+        // only the once_publish_stop_applied flag. Use spawn_inert in async —
+        // keep pure unit with a local struct pattern by calling through a
+        // synthetic result after setting the flag on a real client.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut client = spawn_inert_client().await;
+            client.once_publish_stop_applied = true;
+            let result = serde_json::json!({ "stopReason": "cancelled" });
+            let reason = client.parse_stop_reason(&result).unwrap();
+            assert_eq!(
+                reason,
+                StopReason::EndTurn,
+                "once-publish cancel must map to EndTurn (no batch requeue)"
+            );
+            assert!(
+                !client.once_publish_stop_applied,
+                "applied flag clears after rewrite"
+            );
+            // Plain cancelled without once-publish stays Cancelled.
+            let reason2 = client
+                .parse_stop_reason(&serde_json::json!({ "stopReason": "cancelled" }))
+                .unwrap();
+            assert_eq!(reason2, StopReason::Cancelled);
+        });
     }
 
     /// Argv-style publish (Python subprocess) is recognized as a candidate and
