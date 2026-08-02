@@ -966,6 +966,10 @@ fn child_rust_log_filter() -> String {
     }
 }
 
+fn manual_start_uses_lazy_pool() -> bool {
+    true
+}
+
 pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
@@ -998,7 +1002,16 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    // Manual starts and config-driven restarts must match launch restore's
+    // lazy behavior. Eager startup reserves every configured ACP slot before
+    // an event arrives, multiplying idle child processes across a fleet.
+    let mut process = spawn_agent_child(
+        app,
+        record,
+        &key.relay_url,
+        manual_start_uses_lazy_pool(),
+        owner_hex,
+    )?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
