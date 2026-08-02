@@ -42,6 +42,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     final sessionState = ref.watch(relaySessionProvider);
 
     ref.onDispose(() {
+      _subscriptionVersion++;
+      _pending.clear();
       _batchTimer?.cancel();
       _batchTimer = null;
       _refreshTimer?.cancel();

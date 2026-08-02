@@ -251,6 +251,24 @@ void main() {
       expect(container.read(presenceCacheProvider), isEmpty);
     },
   );
+
+  test('dispose discards an in-flight snapshot', () async {
+    final snapshotCompleter = Completer<List<NostrEvent>>();
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryCompleter = snapshotCompleter;
+    final container = _buildContainer(relaySession: relaySession);
+
+    container.read(presenceCacheProvider);
+    await _waitFor(() => relaySession.filters.isNotEmpty);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitFor(() => relaySession.queries.isNotEmpty);
+
+    container.dispose();
+    snapshotCompleter.complete([_snapshot('alice', 'online')]);
+    await _pumpEventQueue();
+
+    expect(relaySession.filters, isEmpty);
+  });
 }
 
 NostrEvent _presence(
