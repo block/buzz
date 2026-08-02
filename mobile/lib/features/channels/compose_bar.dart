@@ -61,6 +61,29 @@ typedef ComposeBarOnSend =
       List<List<String>> mediaTags,
     });
 
+List<String> messageNotificationPubkeys({
+  required Iterable<String> explicitMentions,
+  required Iterable<ChannelMember> channelMembers,
+  required String? currentPubkey,
+  required bool isDirectMessage,
+}) {
+  final current = currentPubkey?.toLowerCase();
+  final seen = <String>{};
+  final recipients = <String>[];
+
+  void add(String pubkey) {
+    final normalized = pubkey.toLowerCase();
+    if (normalized == current || !seen.add(normalized)) return;
+    recipients.add(pubkey);
+  }
+
+  explicitMentions.forEach(add);
+  if (isDirectMessage) {
+    channelMembers.map((member) => member.pubkey).forEach(add);
+  }
+  return recipients;
+}
+
 class ComposeBar extends HookConsumerWidget {
   final String channelId;
   final String channelName;
@@ -467,7 +490,15 @@ class ComposeBar extends HookConsumerWidget {
       // Mentioning humans outside the channel prompts "Invite" / "Do
       // nothing" (send without inviting) — mirrors desktop's
       // NonMemberMentionDialog. Agents keep the existing silent auto-add.
-      var mentionPubkeys = pubkeys;
+      final directMessageMembers = isDmChannel
+          ? await ref.read(channelMembersProvider(channelId).future)
+          : const <ChannelMember>[];
+      var mentionPubkeys = messageNotificationPubkeys(
+        explicitMentions: pubkeys,
+        channelMembers: directMessageMembers,
+        currentPubkey: currentPubkey,
+        isDirectMessage: isDmChannel,
+      );
       final referenceMentionTags = <List<String>>[];
       var inviteHumanPubkeys = const <String>[];
       if (nonMemberHumans.isNotEmpty) {

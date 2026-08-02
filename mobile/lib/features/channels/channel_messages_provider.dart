@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'channel.dart';
+import 'channels_provider.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
@@ -10,6 +12,42 @@ const _channelLiveEventKinds = [
   ...EventKind.channelEventKinds,
   EventKind.channelThreadSummary,
 ];
+
+bool shouldLoadFullChannelTimeline(
+  AsyncValue<List<Channel>> channels,
+  String channelId,
+) {
+  final knownChannels = channels.asData?.value;
+  if (knownChannels == null) return true;
+  for (final channel in knownChannels) {
+    if (channel.id == channelId) return channel.isDm;
+  }
+  // Missing metadata must not hide replies. Non-DM UI still groups the extra
+  // events into threads, so loading the full set is the conservative fallback.
+  return true;
+}
+
+bool isConfirmedDirectMessage(
+  AsyncValue<List<Channel>> channels,
+  String channelId,
+) {
+  final knownChannels = channels.asData?.value;
+  if (knownChannels == null) return false;
+  for (final channel in knownChannels) {
+    if (channel.id == channelId) return channel.isDm;
+  }
+  return false;
+}
+
+final channelLoadsFullTimelineProvider = Provider.family<bool, String>(
+  (ref, channelId) =>
+      shouldLoadFullChannelTimeline(ref.watch(channelsProvider), channelId),
+);
+
+final channelIsDirectMessageProvider = Provider.family<bool, String>(
+  (ref, channelId) =>
+      isConfirmedDirectMessage(ref.watch(channelsProvider), channelId),
+);
 
 /// Provides the message list for a specific channel. Registers a live
 /// subscription first, then syncs history via the server-assembled channel
@@ -22,6 +60,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _initInFlight = false;
   bool _usingChannelWindow = false;
   bool _initialWindowQueryInFlight = false;
+  bool _loadsFullTimeline = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
   final Set<String> _liveSummaryRootsDuringInitialWindowQuery = {};
@@ -46,6 +85,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
+    _loadsFullTimeline = ref.watch(channelLoadsFullTimelineProvider(channelId));
     ref.onDispose(() {
       _initVersion++;
       _clearSubscription();
@@ -135,6 +175,15 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Future<List<NostrEvent>> _fetchNewestHistory(
     RelaySessionNotifier session,
   ) async {
+    if (_loadsFullTimeline) {
+      _usingChannelWindow = false;
+      final history = await session.fetchHistory(
+        NostrFilters.messages(channelId),
+      );
+      history.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      return history;
+    }
+
     try {
       _initialWindowQueryInFlight = true;
       final page = await _fetchWindowPage(session, null);

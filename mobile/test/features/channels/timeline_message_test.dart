@@ -773,7 +773,125 @@ void main() {
     });
   });
 
+  group('buildThreadReplies', () {
+    Map<String, List<TimelineMessage>> childrenOf(
+      List<TimelineMessage> messages,
+    ) {
+      final byParent = <String, List<TimelineMessage>>{};
+      for (final message in messages) {
+        final parentId = message.parentId;
+        if (parentId == null) continue;
+        byParent.putIfAbsent(parentId, () => []).add(message);
+      }
+      return byParent;
+    }
+
+    test('keeps direct children only when not linearized', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'a', createdAt: 1000),
+        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
+        _replyMsg(id: 'r2', parentId: 'r1', rootId: 'a', createdAt: 3000),
+      ]);
+      final head = messages.firstWhere((message) => message.id == 'a');
+
+      final replies = buildThreadReplies(messages, head, childrenOf(messages));
+
+      expect(replies.map((message) => message.id), ['r1']);
+    });
+
+    test('linearizes every descendant of the same root in order', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'a', createdAt: 1000),
+        _replyMsg(id: 'r2', parentId: 'r1', rootId: 'a', createdAt: 3000),
+        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
+        _replyMsg(id: 'r3', parentId: 'r2', rootId: 'a', createdAt: 4000),
+      ]);
+      final head = messages.firstWhere((message) => message.id == 'a');
+
+      final replies = buildThreadReplies(
+        messages,
+        head,
+        childrenOf(messages),
+        linearize: true,
+      );
+
+      expect(replies.map((message) => message.id), ['r1', 'r2', 'r3']);
+    });
+
+    test('never merges a different thread of the same channel', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'a', createdAt: 1000),
+        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
+        _textMsg(id: 'b', createdAt: 3000),
+        _replyMsg(id: 'r2', parentId: 'b', createdAt: 4000),
+      ]);
+      final head = messages.firstWhere((message) => message.id == 'a');
+
+      final replies = buildThreadReplies(
+        messages,
+        head,
+        childrenOf(messages),
+        linearize: true,
+      );
+
+      expect(replies.map((message) => message.id), ['r1']);
+    });
+
+    test('a nested branch head keeps its direct children', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'a', createdAt: 1000),
+        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
+        _replyMsg(id: 'r2', parentId: 'r1', rootId: 'a', createdAt: 3000),
+      ]);
+      final branchHead = messages.firstWhere((message) => message.id == 'r1');
+
+      final replies = buildThreadReplies(
+        messages,
+        branchHead,
+        childrenOf(messages),
+        linearize: true,
+      );
+
+      expect(replies.map((message) => message.id), ['r2']);
+    });
+  });
+
+  group('shouldShowNestedThreadSummary', () {
+    test('hides nested thread affordances inside a linearized DM root', () {
+      expect(
+        shouldShowNestedThreadSummary(linearize: true, hasNestedChildren: true),
+        isFalse,
+      );
+    });
+
+    test('preserves nested thread affordances for normal threads', () {
+      expect(
+        shouldShowNestedThreadSummary(
+          linearize: false,
+          hasNestedChildren: true,
+        ),
+        isTrue,
+      );
+    });
+  });
+
   group('buildMainTimelineEntries', () {
+    test('keeps separate direct-message threads as separate entries', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'a', createdAt: 1000),
+        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
+        _replyMsg(id: 'r2', parentId: 'r1', rootId: 'a', createdAt: 3000),
+        _textMsg(id: 'b', createdAt: 4000),
+      ]);
+
+      final entries = buildMainTimelineEntries(messages);
+
+      // A new direct message opens its own thread; replies never get promoted
+      // into the main timeline, which would merge both conversations.
+      expect(entries.map((entry) => entry.message.id), ['a', 'b']);
+      expect(entries[0].summary?.replyCount, 1);
+    });
+
     test('returns only root messages', () {
       final messages = formatTimeline([
         _textMsg(id: 'a', createdAt: 1000),

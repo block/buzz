@@ -209,6 +209,10 @@ abstract final class NostrFilters {
   static NostrFilter agentProfiles() =>
       const NostrFilter(kinds: [10100], limit: 100);
 
+  /// Latest relay-signed NIP-IA archive snapshot (kind:13535).
+  static NostrFilter archivedIdentities(String relayPubkey) =>
+      NostrFilter(kinds: const [13535], authors: [relayPubkey], limit: 1);
+
   /// User status (NIP-38, kind:30315).
   static NostrFilter userStatus(String pubkey) =>
       NostrFilter(kinds: [30315], authors: [pubkey], limit: 1);

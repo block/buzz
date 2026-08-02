@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
@@ -65,9 +67,182 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   final sessionState = ref.watch(relaySessionProvider);
   if (sessionState.status != SessionStatus.connected) return const [];
   final session = ref.read(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(NostrFilters.agentProfiles());
-  return [for (final event in events) AgentDirectoryEntry.fromEvent(event)];
+  final results = await Future.wait([
+    session.fetchHistory(NostrFilters.agentProfiles()),
+    ref.watch(archivedIdentityPubkeysProvider.future),
+  ]);
+  return activeAgentDirectoryEntries(
+    results[0] as List<NostrEvent>,
+    archivedPubkeys: results[1] as Set<String>,
+  );
 });
+
+/// HTTP client used to read the relay's NIP-11 signing identity.
+final relayIdentityHttpClientProvider = Provider<http.Client>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return client;
+});
+
+/// Relay signing pubkey advertised by NIP-11 `self`.
+final relayIdentityPubkeyProvider = FutureProvider<String?>((ref) async {
+  final baseUrl = ref.watch(relayConfigProvider).baseUrl;
+  try {
+    final response = await ref
+        .read(relayIdentityHttpClientProvider)
+        .get(
+          Uri.parse(baseUrl),
+          headers: const {'Accept': 'application/nostr+json'},
+        )
+        .timeout(const Duration(seconds: 5));
+    if (response.statusCode < 200 || response.statusCode >= 300) return null;
+    final decoded = jsonDecode(response.body);
+    final relayPubkey = decoded is Map<String, dynamic>
+        ? decoded['self'] as String?
+        : null;
+    final normalized = relayPubkey?.toLowerCase();
+    return normalized != null && _isHex64(normalized) ? normalized : null;
+  } catch (_) {
+    return null;
+  }
+});
+
+class _ArchiveIdentitySubscription extends Notifier<int> {
+  void Function()? _unsubscribe;
+  int _subscriptionVersion = 0;
+
+  @override
+  int build() {
+    final sessionState = ref.watch(relaySessionProvider);
+    final subscriptionVersion = ++_subscriptionVersion;
+    _clearSubscription();
+    ref.onDispose(() {
+      _subscriptionVersion++;
+      _clearSubscription();
+    });
+
+    if (sessionState.status != SessionStatus.connected) return 0;
+    Future.microtask(() => _subscribe(subscriptionVersion));
+    return 0;
+  }
+
+  Future<void> _subscribe(int subscriptionVersion) async {
+    try {
+      final relayPubkey = await ref.read(relayIdentityPubkeyProvider.future);
+      if (relayPubkey == null || !_isCurrent(subscriptionVersion)) return;
+      final session = ref.read(relaySessionProvider.notifier);
+      final unsubscribe = await session.subscribe(
+        NostrFilters.archivedIdentities(
+          relayPubkey,
+        ).copyWithSince(DateTime.now().millisecondsSinceEpoch ~/ 1000),
+        (_) {
+          if (_isCurrent(subscriptionVersion)) state++;
+        },
+      );
+      if (!_isCurrent(subscriptionVersion)) {
+        unsubscribe();
+        return;
+      }
+      _unsubscribe = unsubscribe;
+    } catch (error) {
+      if (_isCurrent(subscriptionVersion)) {
+        debugPrint('[ArchiveIdentitySubscription] failed: $error');
+      }
+    }
+  }
+
+  bool _isCurrent(int subscriptionVersion) =>
+      subscriptionVersion == _subscriptionVersion;
+
+  void _clearSubscription() {
+    _unsubscribe?.call();
+    _unsubscribe = null;
+  }
+}
+
+final archiveIdentityUpdateProvider =
+    NotifierProvider.autoDispose<_ArchiveIdentitySubscription, int>(
+      _ArchiveIdentitySubscription.new,
+    );
+
+/// Current relay-scoped archive state, verified against NIP-11 `self`.
+final archivedIdentityPubkeysProvider = FutureProvider<Set<String>>((
+  ref,
+) async {
+  ref.watch(archiveIdentityUpdateProvider);
+  final sessionState = ref.watch(relaySessionProvider);
+  if (sessionState.status != SessionStatus.connected) return const {};
+  final relayPubkey = await ref.watch(relayIdentityPubkeyProvider.future);
+  if (relayPubkey == null) return const {};
+  final session = ref.read(relaySessionProvider.notifier);
+  final snapshots = await session.fetchHistory(
+    NostrFilters.archivedIdentities(relayPubkey),
+  );
+  return archivedIdentityPubkeysFromSnapshots(
+    snapshots,
+    relayPubkey: relayPubkey,
+    verifySignature: _hasValidNostrSignature,
+  );
+});
+
+List<AgentDirectoryEntry> activeAgentDirectoryEntries(
+  Iterable<NostrEvent> events, {
+  required Set<String> archivedPubkeys,
+}) => [
+  for (final event in events)
+    if (!archivedPubkeys.contains(event.pubkey.toLowerCase()))
+      AgentDirectoryEntry.fromEvent(event),
+];
+
+Set<String> archivedIdentityPubkeysFromSnapshots(
+  Iterable<NostrEvent> snapshots, {
+  required String relayPubkey,
+  required bool Function(NostrEvent event) verifySignature,
+}) {
+  final normalizedRelayPubkey = relayPubkey.toLowerCase();
+  final valid =
+      snapshots
+          .where(
+            (event) =>
+                event.kind == 13535 &&
+                event.pubkey.toLowerCase() == normalizedRelayPubkey &&
+                _hasExactlyOneNip70Tag(event.tags) &&
+                verifySignature(event),
+          )
+          .toList()
+        ..sort((a, b) {
+          final byTimestamp = b.createdAt.compareTo(a.createdAt);
+          return byTimestamp != 0 ? byTimestamp : a.id.compareTo(b.id);
+        });
+  if (valid.isEmpty) return const {};
+  return {
+    for (final tag in valid.first.tags)
+      if (tag.length >= 2 && tag[0] == 'p' && _isHex64(tag[1]))
+        tag[1].toLowerCase(),
+  };
+}
+
+bool _hasExactlyOneNip70Tag(List<List<String>> tags) {
+  var count = 0;
+  for (final tag in tags) {
+    if (tag.isEmpty || tag.first != '-') continue;
+    if (tag.length != 1) return false;
+    count++;
+  }
+  return count == 1;
+}
+
+bool _hasValidNostrSignature(NostrEvent event) {
+  try {
+    nostr.Event.fromJson(jsonEncode(event.toJson()));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+bool _isHex64(String value) =>
+    value.length == 64 && RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value);
 
 /// Verified NIP-OA owner pubkey per agent pubkey, from the agents' kind:0
 /// profiles. An entry exists only when the `auth` tag verifies — mirrors

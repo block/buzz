@@ -109,7 +109,18 @@ class ThreadDetailPage extends HookConsumerWidget {
       childrenByParent.putIfAbsent(pid, () => []).add(msg);
     }
 
-    final replies = childrenByParent[threadHead.id] ?? const [];
+    // In a DM the turns of one thread read as a single conversation, so every
+    // descendant of this root is shown in chronological order. A new direct
+    // message still opens its own thread; only this root's turns are merged.
+    final linearizeThread = ref.watch(
+      channelIsDirectMessageProvider(channelId),
+    );
+    final replies = buildThreadReplies(
+      allMsgs,
+      threadHead,
+      childrenByParent,
+      linearize: linearizeThread,
+    );
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final didJumpToInitialMessage = useRef(false);
@@ -336,9 +347,14 @@ class ThreadDetailPage extends HookConsumerWidget {
 
                   // Check if this reply itself has children (nested thread).
                   final nestedChildren = childrenByParent[reply.id];
+                  final hasNestedChildren =
+                      nestedChildren != null && nestedChildren.isNotEmpty;
                   final nestedSummary =
-                      nestedChildren != null && nestedChildren.isNotEmpty
-                      ? _buildNestedSummary(reply.id, nestedChildren)
+                      shouldShowNestedThreadSummary(
+                        linearize: linearizeThread,
+                        hasNestedChildren: hasNestedChildren,
+                      )
+                      ? _buildNestedSummary(reply.id, nestedChildren!)
                       : null;
 
                   return Padding(

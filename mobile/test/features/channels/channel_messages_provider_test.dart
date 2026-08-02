@@ -4,12 +4,132 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test('unknown channel metadata uses the reply-preserving history path', () {
+    expect(
+      shouldLoadFullChannelTimeline(
+        const AsyncLoading<List<Channel>>(),
+        _channelId,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldLoadFullChannelTimeline(
+        AsyncError<List<Channel>>(StateError('unavailable'), StackTrace.empty),
+        _channelId,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldLoadFullChannelTimeline(
+        const AsyncData<List<Channel>>([]),
+        _channelId,
+      ),
+      isTrue,
+    );
+  });
+
+  test('unknown channel metadata is not treated as a confirmed DM', () {
+    expect(
+      isConfirmedDirectMessage(const AsyncLoading<List<Channel>>(), _channelId),
+      isFalse,
+    );
+    expect(
+      isConfirmedDirectMessage(
+        AsyncError<List<Channel>>(StateError('unavailable'), StackTrace.empty),
+        _channelId,
+      ),
+      isFalse,
+    );
+    expect(
+      isConfirmedDirectMessage(const AsyncData<List<Channel>>([]), _channelId),
+      isFalse,
+    );
+  });
+
+  test('optimistic DM replies stay in their thread and roll back', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    final container = _buildContainer(relaySession, isDirectMessage: true);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    relaySession.completeHistory([_event(id: 'root', createdAt: 10)]);
+    await _pumpEventQueue();
+
+    final args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+    final reply = _event(
+      id: 'local-reply',
+      createdAt: 20,
+      extraTags: const [
+        ['e', 'root', '', 'reply'],
+      ],
+    );
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    notifier.addLocalMessage(reply);
+
+    // A DM reply belongs to its root's thread, not to the main timeline.
+    // Promoting it would merge separate conversations into one stream.
+    expect(
+      container.read(threadLocalRepliesProvider(args)).map((event) => event.id),
+      ['local-reply'],
+    );
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['root'],
+    );
+
+    notifier.removeLocalMessage(reply.id);
+    expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['root'],
+    );
+  });
+
+  test('loads the full DM history so thread replies stay available', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    final container = _buildContainer(relaySession, isDirectMessage: true);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    relaySession.completeHistory([
+      _event(id: 'root', createdAt: 10),
+      _event(
+        id: 'reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      ),
+    ]);
+    await _pumpEventQueue();
+
+    expect(relaySession.operations, ['subscribe', 'fetch']);
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['root', 'reply'],
+    );
+  });
+
   test(
     'keeps live events that arrive while initial history is loading',
     () async {
@@ -614,9 +734,20 @@ void main() {
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
 
-ProviderContainer _buildContainer(_RecordingRelaySessionNotifier relaySession) {
+ProviderContainer _buildContainer(
+  _RecordingRelaySessionNotifier relaySession, {
+  bool isDirectMessage = false,
+}) {
   return ProviderContainer(
-    overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    overrides: [
+      relaySessionProvider.overrideWith(() => relaySession),
+      channelIsDirectMessageProvider.overrideWith(
+        (ref, channelId) => isDirectMessage,
+      ),
+      channelLoadsFullTimelineProvider.overrideWith(
+        (ref, channelId) => isDirectMessage,
+      ),
+    ],
   );
 }
 
