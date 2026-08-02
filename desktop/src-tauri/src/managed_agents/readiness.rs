@@ -482,6 +482,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         Some("anthropic") => Some("ANTHROPIC_MODEL"),
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
         Some("openrouter") => Some("OPENROUTER_MODEL"),
+        Some("deepseek") => Some("DEEPSEEK_MODEL"),
         _ => None,
     };
     let model_present = effective
@@ -528,6 +529,12 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
             if env_key_missing("OPENROUTER_API_KEY") => {
                 missing.push(Requirement::EnvKey {
                     key: "OPENROUTER_API_KEY".to_string(),
+                });
+            }
+        Some("deepseek")
+            if env_key_missing("DEEPSEEK_API_KEY") => {
+                missing.push(Requirement::EnvKey {
+                    key: "DEEPSEEK_API_KEY".to_string(),
                 });
             }
         _ => {
@@ -642,6 +649,13 @@ fn goose_requirements(
         {
             missing.push(Requirement::EnvKey {
                 key: "OPENROUTER_API_KEY".to_string(),
+            });
+        }
+        Some("deepseek")
+            if env_key_missing("DEEPSEEK_API_KEY") && !file_key_present("DEEPSEEK_API_KEY") =>
+        {
+            missing.push(Requirement::EnvKey {
+                key: "DEEPSEEK_API_KEY".to_string(),
             });
         }
         _ => {}
@@ -1732,6 +1746,58 @@ mod tests {
         assert!(
             result.is_ready(),
             "OPENROUTER_MODEL fallback should satisfy model requirement"
+        );
+    }
+
+    // ── DeepSeek readiness ───────────────────────────────────────────────
+
+    #[test]
+    fn buzz_agent_deepseek_with_all_fields_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "deepseek"),
+                ("BUZZ_AGENT_MODEL", "deepseek-chat"),
+                ("DEEPSEEK_API_KEY", "sk-ds-test-key"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            result.is_ready(),
+            "deepseek with all fields should be ready"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_deepseek_missing_key_returns_not_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "deepseek"),
+                ("BUZZ_AGENT_MODEL", "deepseek-chat"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(!result.is_ready());
+        assert!(result.requirements().contains(&Requirement::EnvKey {
+            key: "DEEPSEEK_API_KEY".to_string()
+        }));
+    }
+
+    #[test]
+    fn buzz_agent_deepseek_with_provider_model_fallback_is_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "deepseek"),
+                ("DEEPSEEK_MODEL", "deepseek-reasoner"),
+                ("DEEPSEEK_API_KEY", "sk-ds-test-key"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            result.is_ready(),
+            "DEEPSEEK_MODEL fallback should satisfy model requirement"
         );
     }
 }
