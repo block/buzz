@@ -20,10 +20,11 @@ type DeleteManagedAgentInput = {
 type StartManagedAgent = (pubkey: string) => Promise<unknown>;
 type StopManagedAgent = (pubkey: string) => Promise<unknown>;
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
-type RestartExecutionWorkload = (input: {
+type ExecutionWorkloadCommand = (input: {
   nodeId: string;
   workloadId: string;
 }) => Promise<unknown>;
+type RestartExecutionWorkload = ExecutionWorkloadCommand;
 
 type ManagedAgentChannelContext = {
   channels: readonly Channel[];
@@ -41,6 +42,35 @@ export type ManagedAgentActionResult = {
   cancelled?: boolean;
   noticeMessage?: string;
 };
+
+/**
+ * Execution-node agents share one control shape: guard that the agent has a
+ * deployed workload, run the node-side workload command, then refresh the
+ * managed agent list. Returns `false` when the agent is not on an execution
+ * node so callers fall through to their local/provider paths.
+ */
+async function runExecutionNodeWorkloadCommand({
+  agent,
+  command,
+  refreshManagedAgents,
+}: {
+  agent: ManagedAgent;
+  command: ExecutionWorkloadCommand;
+  refreshManagedAgents?: RefreshManagedAgents;
+}): Promise<boolean> {
+  if (agent.backend.type !== "execution_node") {
+    return false;
+  }
+  if (!agent.backendAgentId) {
+    throw new Error("Agent has not been deployed to its execution node");
+  }
+  await command({
+    nodeId: agent.backend.nodeId,
+    workloadId: agent.backendAgentId,
+  });
+  await refreshManagedAgents?.();
+  return true;
+}
 
 export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
@@ -101,15 +131,13 @@ export async function startManagedAgentWithRules({
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
-  if (agent.backend.type === "execution_node") {
-    if (!agent.backendAgentId) {
-      throw new Error("Agent has not been deployed to its execution node");
-    }
-    await startExecutionWorkload({
-      nodeId: agent.backend.nodeId,
-      workloadId: agent.backendAgentId,
-    });
-    await refreshManagedAgents?.();
+  if (
+    await runExecutionNodeWorkloadCommand({
+      agent,
+      command: startExecutionWorkload,
+      refreshManagedAgents,
+    })
+  ) {
     return;
   }
 
@@ -133,15 +161,13 @@ export async function respawnManagedAgentWithRules({
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
 }) {
-  if (agent.backend.type === "execution_node") {
-    if (!agent.backendAgentId) {
-      throw new Error("Agent has not been deployed to its execution node");
-    }
-    await restartExecutionWorkload({
-      nodeId: agent.backend.nodeId,
-      workloadId: agent.backendAgentId,
-    });
-    await refreshManagedAgents?.();
+  if (
+    await runExecutionNodeWorkloadCommand({
+      agent,
+      command: restartExecutionWorkload,
+      refreshManagedAgents,
+    })
+  ) {
     return;
   }
 
@@ -183,15 +209,13 @@ export async function stopManagedAgentWithRules({
     };
   }
 
-  if (agent.backend.type === "execution_node") {
-    if (!agent.backendAgentId) {
-      throw new Error("Agent has not been deployed to its execution node");
-    }
-    await stopExecutionWorkload({
-      nodeId: agent.backend.nodeId,
-      workloadId: agent.backendAgentId,
-    });
-    await refreshManagedAgents?.();
+  if (
+    await runExecutionNodeWorkloadCommand({
+      agent,
+      command: stopExecutionWorkload,
+      refreshManagedAgents,
+    })
+  ) {
     return {};
   }
 

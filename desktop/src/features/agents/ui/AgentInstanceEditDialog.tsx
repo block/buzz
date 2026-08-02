@@ -12,6 +12,7 @@ import {
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { runLocationForRunOn } from "@/features/agents/lib/agentAccessWarning";
 import type {
   ManagedAgent,
   RespondToMode,
@@ -22,7 +23,6 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
@@ -36,8 +36,6 @@ import {
   getPersonaProviderOptions,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
-  PERSONA_FIELD_CONTROL_CLASS,
-  PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
@@ -94,6 +92,10 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { AgentRunLocationProvider } from "./AgentRunLocationContext";
+import { EditAgentTextField } from "./EditAgentTextField";
+import { useEditAgentBackendSwap } from "./useEditAgentBackendSwap";
+import { WhereToRunSection } from "./WhereToRunSection";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -144,6 +146,8 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  // "Run on" draft + swap machinery — see useEditAgentBackendSwap.
+  const backendSwap = useEditAgentBackendSwap(agent);
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -193,6 +197,7 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      backendSwap.reset();
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
@@ -611,8 +616,19 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    backendSwap.canSubmit &&
     !updateMutation.isPending &&
+    !backendSwap.isPending &&
     !isAvatarUploadPending;
+
+  const isSaving = updateMutation.isPending || backendSwap.isPending;
+
+  // Runtime id for an execution-node deploy. "custom" is a local shell
+  // command, not a catalog runtime a node can map to a harness — omit it.
+  const executionNodeRuntimeId =
+    prospectiveRuntimeId && prospectiveRuntimeId !== "custom"
+      ? prospectiveRuntimeId
+      : undefined;
 
   async function handleSubmit() {
     try {
@@ -734,20 +750,39 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
-      showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
+
+      // Backend swap runs AFTER the field patch (an execution-node deploy
+      // snapshots the saved record) — see useEditAgentBackendSwap.
+      let finalAgent = result.agent;
+      const swap = await backendSwap.perform(
+        result.agent,
+        executionNodeRuntimeId,
+      );
+      if (swap.status === "failed") {
+        // Field edits are already saved; keep the dialog open so the failed
+        // swap (captured in backendSwap.error) is visible and retryable.
+        return;
+      }
+      if (swap.status === "cancelled") {
+        toast(`${result.agent.name} saved. Run on left unchanged.`);
+      } else if (swap.status === "swapped") {
+        finalAgent = swap.agent;
+      }
+
+      showAgentProfileSyncWarning(finalAgent.name, result.profileSyncError);
       handleOpenChange(false);
-      onUpdated?.(result.agent);
+      onUpdated?.(finalAgent);
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
       // to FIX one silently waits for a manual start. Offer that start
       // explicitly instead of relying on the user to know the policy.
-      if (!isManagedAgentActive(result.agent)) {
-        const startedName = result.agent.name;
+      if (!isManagedAgentActive(finalAgent)) {
+        const startedName = finalAgent.name;
         toast(`${startedName} saved while stopped.`, {
           action: {
             label: "Start now",
             onClick: () => {
-              startMutation.mutate(result.agent.pubkey, {
+              startMutation.mutate(finalAgent.pubkey, {
                 onSuccess: () => toast.success(`${startedName} started.`),
                 onError: (error) =>
                   toast.error(
@@ -846,178 +881,204 @@ export function AgentInstanceEditDialog({
     : ADVANCED_FIELDS_MOTION_TRANSITION;
 
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
-      <ChooserDialogContent
-        className="max-w-3xl border-0"
-        contentClassName="pt-3"
-        data-testid="edit-agent-dialog"
-        footerClassName="border-t-0 pt-0"
-        headerClassName="pb-2"
-        title={`Edit ${agent.name}`}
-        footer={
-          <div className="flex w-full items-center justify-end gap-2">
-            <Button
-              disabled={updateMutation.isPending || isAvatarUploadPending}
-              onClick={() => handleOpenChange(false)}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-            <Button
-              data-testid="edit-agent-dialog-submit"
-              disabled={!canSubmit}
-              onClick={() => void handleSubmit()}
-              type="button"
-            >
-              {updateMutation.isPending ? "Saving..." : "Save changes"}
-            </Button>
-          </div>
-        }
-      >
-        <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
-          {/* Avatar is definition-level identity. hideEditControl suppresses
-              the internal pencil badge; the CTA below is the only edit path. */}
-          <div className="flex flex-col items-center gap-2">
-            <AgentCreationPreview
-              avatarUrl={previewAvatarUrl}
-              hideEditControl
-              label={previewLabel}
-              onClearAvatar={() => setAvatarUrl("")}
-              onUploadPendingChange={setIsAvatarUploadPending}
-              onSelectAvatar={setAvatarUrl}
-            />
-            {onEditLinkedPersona ? (
+    // Draft-aware run location: the respond-to warning should name the
+    // machine the agent will run on AFTER this save, not the one it is
+    // leaving. Overrides the record-derived provider in AgentDialog.
+    <AgentRunLocationProvider
+      runLocation={runLocationForRunOn(backendSwap.runDraft.runOn)}
+    >
+      <Dialog onOpenChange={handleOpenChange} open={open}>
+        <ChooserDialogContent
+          className="max-w-3xl border-0"
+          contentClassName="pt-3"
+          data-testid="edit-agent-dialog"
+          footerClassName="border-t-0 pt-0"
+          headerClassName="pb-2"
+          title={`Edit ${agent.name}`}
+          footer={
+            <div className="flex w-full items-center justify-end gap-2">
               <Button
-                className="w-full"
-                onClick={() => {
-                  handleOpenChange(false);
-                  onEditLinkedPersona();
-                }}
-                size="sm"
+                disabled={isSaving || isAvatarUploadPending}
+                onClick={() => handleOpenChange(false)}
                 type="button"
                 variant="outline"
               >
-                Edit avatar
+                Cancel
               </Button>
-            ) : (
-              <p className="text-center text-xs text-muted-foreground">
-                Avatar is shared identity
-              </p>
-            )}
-          </div>
-          <div className="space-y-5">
-            {/* Agent name */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-name"
+              <Button
+                data-testid="edit-agent-dialog-submit"
+                disabled={!canSubmit}
+                onClick={() => void handleSubmit()}
+                type="button"
               >
-                Agent name
-              </label>
-              <div
-                className={cn(
-                  "flex min-h-11 items-center px-3",
-                  PERSONA_FIELD_SHELL_CLASS,
-                )}
-              >
-                <Input
-                  autoCorrect="off"
-                  className={cn(
-                    "h-8 px-0 py-0 leading-6",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
+                {isSaving ? "Saving..." : "Save changes"}
+              </Button>
+            </div>
+          }
+        >
+          <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
+            {/* Avatar is definition-level identity. hideEditControl suppresses
+              the internal pencil badge; the CTA below is the only edit path. */}
+            <div className="flex flex-col items-center gap-2">
+              <AgentCreationPreview
+                avatarUrl={previewAvatarUrl}
+                hideEditControl
+                label={previewLabel}
+                onClearAvatar={() => setAvatarUrl("")}
+                onUploadPendingChange={setIsAvatarUploadPending}
+                onSelectAvatar={setAvatarUrl}
+              />
+              {onEditLinkedPersona ? (
+                <Button
+                  className="w-full"
+                  onClick={() => {
+                    handleOpenChange(false);
+                    onEditLinkedPersona();
+                  }}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Edit avatar
+                </Button>
+              ) : (
+                <p className="text-center text-xs text-muted-foreground">
+                  Avatar is shared identity
+                </p>
+              )}
+            </div>
+            <div className="space-y-5">
+              {/* Agent name */}
+              <EditAgentTextField
+                disabled={updateMutation.isPending}
+                id="edit-agent-name"
+                label="Agent name"
+                onValueChange={setName}
+                placeholder="Agent name"
+                value={name}
+              />
+
+              {/* Who can send instructions */}
+              <CreateAgentRespondToField
+                allowlist={respondToAllowlist}
+                disabled={updateMutation.isPending}
+                mode={respondTo}
+                onAllowlistChange={setRespondToAllowlist}
+                onModeChange={setRespondTo}
+                variant="persona"
+              />
+
+              {/* Provider (runtime) */}
+              <div className="space-y-1.5">
+                <label
+                  className="text-sm font-medium text-foreground"
+                  htmlFor="edit-agent-runtime"
+                >
+                  Provider
+                </label>
+                <PersonaDropdownField
                   disabled={updateMutation.isPending}
-                  id="edit-agent-name"
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Agent name"
-                  value={name}
+                  id="edit-agent-runtime"
+                  onValueChange={handleRuntimeDropdownChange}
+                  options={runtimeDropdownOptions}
+                  placeholder="Choose a provider"
+                  value={runtimeDropdownValue}
+                />
+                {selectedRuntime ? (
+                  <p className="text-xs text-muted-foreground">
+                    Detected at{" "}
+                    <span className="font-medium">
+                      {selectedRuntime.binaryPath ??
+                        selectedRuntime.command ??
+                        selectedRuntime.id}
+                    </span>
+                  </p>
+                ) : null}
+                <AddCustomHarnessDialog
+                  onOpenChange={setIsAddHarnessOpen}
+                  onSaved={selectSavedHarness}
+                  open={isAddHarnessOpen}
                 />
               </div>
-            </div>
-
-            {/* Who can send instructions */}
-            <CreateAgentRespondToField
-              allowlist={respondToAllowlist}
-              disabled={updateMutation.isPending}
-              mode={respondTo}
-              onAllowlistChange={setRespondToAllowlist}
-              onModeChange={setRespondTo}
-              variant="persona"
-            />
-
-            <RunOnSummarySection backend={agent.backend} />
-
-            {/* Provider (runtime) */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-runtime"
-              >
-                Provider
-              </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending}
-                id="edit-agent-runtime"
-                onValueChange={handleRuntimeDropdownChange}
-                options={runtimeDropdownOptions}
-                placeholder="Choose a provider"
-                value={runtimeDropdownValue}
-              />
-              {selectedRuntime ? (
-                <p className="text-xs text-muted-foreground">
-                  Detected at{" "}
-                  <span className="font-medium">
-                    {selectedRuntime.binaryPath ??
-                      selectedRuntime.command ??
-                      selectedRuntime.id}
-                  </span>
-                </p>
+              {selectedRuntimeId === "custom" && !inheritHarness ? (
+                <EditAgentTextField
+                  disabled={updateMutation.isPending}
+                  id="edit-agent-command"
+                  label="Agent command"
+                  onValueChange={setAgentCommand}
+                  placeholder="Full path or shell command"
+                  value={agentCommand}
+                />
               ) : null}
-              <AddCustomHarnessDialog
-                onOpenChange={setIsAddHarnessOpen}
-                onSaved={selectSavedHarness}
-                open={isAddHarnessOpen}
-              />
-            </div>
-            {selectedRuntimeId === "custom" && !inheritHarness ? (
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-command"
-                >
-                  Agent command
-                </label>
-                <div
-                  className={cn(
-                    "flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
+              {/* LLM provider */}
+              {llmProviderFieldVisible ? (
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium text-foreground"
+                    htmlFor="edit-agent-llm-provider"
+                  >
+                    LLM provider
+                    {providerRequired ? (
+                      <span
+                        className="ml-1 text-destructive"
+                        aria-hidden="true"
+                      >
+                        *
+                      </span>
+                    ) : (
+                      <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+                        Optional
+                      </span>
                     )}
+                  </label>
+                  <PersonaDropdownField
                     disabled={updateMutation.isPending}
-                    id="edit-agent-command"
-                    onChange={(event) => setAgentCommand(event.target.value)}
-                    placeholder="Full path or shell command"
-                    value={agentCommand}
+                    id="edit-agent-llm-provider"
+                    onValueChange={handleProviderDropdownChange}
+                    options={providerDropdownOptions}
+                    placeholder="Default (auto)"
+                    value={providerSelectValue}
                   />
+                  {isCustomProviderEditing ? (
+                    <EditAgentTextField
+                      ariaLabel="Custom provider ID"
+                      containerClassName="mt-2"
+                      disabled={updateMutation.isPending}
+                      id="edit-agent-custom-provider"
+                      onValueChange={setProvider}
+                      placeholder="Custom provider ID"
+                      value={provider}
+                    />
+                  ) : null}
                 </div>
-              </div>
-            ) : null}
-            {/* LLM provider */}
-            {llmProviderFieldVisible ? (
+              ) : null}
+
+              {llmProviderFieldVisible && topLevelSecretEnvVar ? (
+                <PersonaProviderApiKeyField
+                  disabled={updateMutation.isPending}
+                  envVarName={topLevelSecretEnvVar}
+                  isInherited={apiKeyIsInherited}
+                  inheritedLabel={apiKeyInheritedLabel}
+                  isRequired={apiKeyIsRequired}
+                  label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
+                  onValueChange={(next) => {
+                    setEnvVars((prev) => ({
+                      ...prev,
+                      [topLevelSecretEnvVar]: next,
+                    }));
+                  }}
+                  value={apiKeyValue}
+                />
+              ) : null}
+
+              {/* Model */}
               <div className="space-y-1.5">
                 <label
                   className="text-sm font-medium text-foreground"
-                  htmlFor="edit-agent-llm-provider"
+                  htmlFor="edit-agent-model"
                 >
-                  LLM provider
-                  {providerRequired ? (
+                  Model
+                  {modelRequired ? (
                     <span className="ml-1 text-destructive" aria-hidden="true">
                       *
                     </span>
@@ -1028,200 +1089,137 @@ export function AgentInstanceEditDialog({
                   )}
                 </label>
                 <PersonaDropdownField
-                  disabled={updateMutation.isPending}
-                  id="edit-agent-llm-provider"
-                  onValueChange={handleProviderDropdownChange}
-                  options={providerDropdownOptions}
-                  placeholder="Default (auto)"
-                  value={providerSelectValue}
+                  disabled={updateMutation.isPending || modelDiscoveryLoading}
+                  id="edit-agent-model"
+                  onValueChange={handleModelDropdownChange}
+                  options={modelDropdownOptions}
+                  placeholder="Default model"
+                  value={modelSelectValue}
                 />
-                {isCustomProviderEditing ? (
-                  <div
-                    className={cn(
-                      "mt-2 flex min-h-11 items-center px-3",
-                      PERSONA_FIELD_SHELL_CLASS,
-                    )}
-                  >
-                    <Input
-                      aria-label="Custom provider ID"
-                      autoCorrect="off"
-                      className={cn(
-                        "h-8 px-0 py-0 leading-6",
-                        PERSONA_FIELD_CONTROL_CLASS,
-                      )}
-                      disabled={updateMutation.isPending}
-                      id="edit-agent-custom-provider"
-                      onChange={(event) => setProvider(event.target.value)}
-                      placeholder="Custom provider ID"
-                      value={provider}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {llmProviderFieldVisible && topLevelSecretEnvVar ? (
-              <PersonaProviderApiKeyField
-                disabled={updateMutation.isPending}
-                envVarName={topLevelSecretEnvVar}
-                isInherited={apiKeyIsInherited}
-                inheritedLabel={apiKeyInheritedLabel}
-                isRequired={apiKeyIsRequired}
-                label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
-                onValueChange={(next) => {
-                  setEnvVars((prev) => ({
-                    ...prev,
-                    [topLevelSecretEnvVar]: next,
-                  }));
-                }}
-                value={apiKeyValue}
-              />
-            ) : null}
-
-            {/* Model */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-model"
-              >
-                Model
-                {modelRequired ? (
-                  <span className="ml-1 text-destructive" aria-hidden="true">
-                    *
-                  </span>
-                ) : (
-                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-                )}
-              </label>
-              <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
-                id="edit-agent-model"
-                onValueChange={handleModelDropdownChange}
-                options={modelDropdownOptions}
-                placeholder="Default model"
-                value={modelSelectValue}
-              />
-              {showCustomModelInput ? (
-                <div
-                  className={cn(
-                    "mt-2 flex min-h-11 items-center px-3",
-                    PERSONA_FIELD_SHELL_CLASS,
-                  )}
-                >
-                  <Input
-                    aria-label="Custom model ID"
-                    autoCorrect="off"
-                    className={cn(
-                      "h-8 px-0 py-0 leading-6",
-                      PERSONA_FIELD_CONTROL_CLASS,
-                    )}
+                {showCustomModelInput ? (
+                  <EditAgentTextField
+                    ariaLabel="Custom model ID"
+                    containerClassName="mt-2"
                     disabled={updateMutation.isPending}
                     id="edit-agent-custom-model"
-                    onChange={(event) => setModel(event.target.value)}
+                    onValueChange={setModel}
                     placeholder="Custom model ID"
                     value={model}
                   />
-                </div>
+                ) : null}
+                {modelStatusMessage ? (
+                  <p className="text-xs text-muted-foreground">
+                    {modelStatusMessage}
+                  </p>
+                ) : null}
+              </div>
+
+              <AgentAiDefaultsNotice
+                onEditDefaults={() => setAiDefaultsOpen(true)}
+                triggerRef={aiDefaultsTriggerRef}
+                explicitModel={inheritedSubmission.model ?? ""}
+                explicitProvider={inheritedSubmission.provider ?? ""}
+                inheritedModel={inheritedModelDefault}
+                inheritedProvider={inheritedProviderDefault}
+              />
+
+              <AgentDefaultsDialog
+                onOpenChange={setAiDefaultsOpen}
+                open={aiDefaultsOpen}
+                returnFocusRef={aiDefaultsTriggerRef}
+              />
+
+              {/* Run on — create's selector; a change swaps backends on Save. */}
+              <WhereToRunSection
+                draft={backendSwap.runDraft}
+                isPending={isSaving}
+                onDraftChange={backendSwap.setRunDraft}
+              />
+
+              {/* Advanced settings */}
+              <div className="space-y-3">
+                <button
+                  aria-expanded={showAdvancedFields}
+                  className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => setShowAdvancedFields((current) => !current)}
+                  type="button"
+                >
+                  <span>Advanced</span>
+                  <AdvancedRequiredBadge
+                    envVars={inheritedSubmission.envVars}
+                    requiredEnvKeys={advancedRequiredEnvKeys}
+                    testId="edit-agent-advanced-required-badge"
+                  />
+                  <ChevronDown
+                    className={cn(
+                      "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
+                      showAdvancedFields && "rotate-180",
+                    )}
+                  />
+                </button>
+                <AnimatePresence initial={false}>
+                  {showAdvancedFields ? (
+                    <motion.div
+                      animate={{ height: "auto", opacity: 1, scale: 1 }}
+                      className="origin-top overflow-hidden"
+                      exit={{ height: 0, opacity: 0, scale: 0.98 }}
+                      initial={{ height: 0, opacity: 0, scale: 0.98 }}
+                      key="edit-agent-advanced-fields"
+                      transition={advancedFieldsTransition}
+                    >
+                      <EditAgentAdvancedFields
+                        acpCommand={acpCommand}
+                        agentArgs={agentArgs}
+                        autoRestartOnConfigChange={autoRestartOnConfigChange}
+                        disabled={updateMutation.isPending}
+                        envVars={envVars}
+                        fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
+                        hiddenEnvKeys={
+                          topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
+                        }
+                        focusKey={
+                          initialFocus?.type === "env_key"
+                            ? initialFocus.key
+                            : undefined
+                        }
+                        inheritedEnvVars={inheritedEnvVarsForAdvanced}
+                        inheritHarness={inheritHarness}
+                        linkedPersona={linkedPersona}
+                        model={inheritedSubmission.model ?? ""}
+                        modelTuningRuntimeId={prospectiveRuntimeId}
+                        parallelism={parallelism}
+                        provider={effectiveProvider}
+                        requiredEnvKeys={advancedRequiredEnvKeys}
+                        systemPrompt={systemPrompt}
+                        onAcpCommandChange={setAcpCommand}
+                        onAgentArgsChange={setAgentArgs}
+                        onAutoRestartChange={setAutoRestartOnConfigChange}
+                        onEnvVarsChange={setEnvVars}
+                        onInheritHarnessChange={setInheritHarness}
+                        onParallelismChange={setParallelism}
+                        onSystemPromptChange={setSystemPrompt}
+                      />
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+              </div>
+
+              {/* Error */}
+              {updateMutation.error instanceof Error ? (
+                <p className="text-sm text-destructive">
+                  {updateMutation.error.message}
+                </p>
               ) : null}
-              {modelStatusMessage ? (
-                <p className="text-xs text-muted-foreground">
-                  {modelStatusMessage}
+              {backendSwap.error ? (
+                <p className="text-sm text-destructive">
+                  Settings were saved, but moving the agent failed:{" "}
+                  {backendSwap.error.message}
                 </p>
               ) : null}
             </div>
-
-            <AgentAiDefaultsNotice
-              onEditDefaults={() => setAiDefaultsOpen(true)}
-              triggerRef={aiDefaultsTriggerRef}
-              explicitModel={inheritedSubmission.model ?? ""}
-              explicitProvider={inheritedSubmission.provider ?? ""}
-              inheritedModel={inheritedModelDefault}
-              inheritedProvider={inheritedProviderDefault}
-            />
-
-            <AgentDefaultsDialog
-              onOpenChange={setAiDefaultsOpen}
-              open={aiDefaultsOpen}
-              returnFocusRef={aiDefaultsTriggerRef}
-            />
-
-            {/* Advanced settings */}
-            <div className="space-y-3">
-              <button
-                aria-expanded={showAdvancedFields}
-                className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={() => setShowAdvancedFields((current) => !current)}
-                type="button"
-              >
-                <span>Advanced</span>
-                <AdvancedRequiredBadge
-                  envVars={inheritedSubmission.envVars}
-                  requiredEnvKeys={advancedRequiredEnvKeys}
-                  testId="edit-agent-advanced-required-badge"
-                />
-                <ChevronDown
-                  className={cn(
-                    "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
-                    showAdvancedFields && "rotate-180",
-                  )}
-                />
-              </button>
-              <AnimatePresence initial={false}>
-                {showAdvancedFields ? (
-                  <motion.div
-                    animate={{ height: "auto", opacity: 1, scale: 1 }}
-                    className="origin-top overflow-hidden"
-                    exit={{ height: 0, opacity: 0, scale: 0.98 }}
-                    initial={{ height: 0, opacity: 0, scale: 0.98 }}
-                    key="edit-agent-advanced-fields"
-                    transition={advancedFieldsTransition}
-                  >
-                    <EditAgentAdvancedFields
-                      acpCommand={acpCommand}
-                      agentArgs={agentArgs}
-                      autoRestartOnConfigChange={autoRestartOnConfigChange}
-                      disabled={updateMutation.isPending}
-                      envVars={envVars}
-                      fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
-                      hiddenEnvKeys={
-                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                      }
-                      focusKey={
-                        initialFocus?.type === "env_key"
-                          ? initialFocus.key
-                          : undefined
-                      }
-                      inheritedEnvVars={inheritedEnvVarsForAdvanced}
-                      inheritHarness={inheritHarness}
-                      linkedPersona={linkedPersona}
-                      model={inheritedSubmission.model ?? ""}
-                      modelTuningRuntimeId={prospectiveRuntimeId}
-                      parallelism={parallelism}
-                      provider={effectiveProvider}
-                      requiredEnvKeys={advancedRequiredEnvKeys}
-                      systemPrompt={systemPrompt}
-                      onAcpCommandChange={setAcpCommand}
-                      onAgentArgsChange={setAgentArgs}
-                      onAutoRestartChange={setAutoRestartOnConfigChange}
-                      onEnvVarsChange={setEnvVars}
-                      onInheritHarnessChange={setInheritHarness}
-                      onParallelismChange={setParallelism}
-                      onSystemPromptChange={setSystemPrompt}
-                    />
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
-            </div>
-
-            {/* Error */}
-            {updateMutation.error instanceof Error ? (
-              <p className="text-sm text-destructive">
-                {updateMutation.error.message}
-              </p>
-            ) : null}
           </div>
-        </div>
-      </ChooserDialogContent>
-    </Dialog>
+        </ChooserDialogContent>
+      </Dialog>
+    </AgentRunLocationProvider>
   );
 }

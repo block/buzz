@@ -402,12 +402,20 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
+    // A live instance owns the edit entry point: the instance dialog carries
+    // instance-only concerns (Run on, env overrides) and links onward to the
+    // definition via its "edit linked persona" hatch. Persona-only profiles
+    // (no managed instance) fall back to the definition dialog directly.
+    if (managedAgent) {
+      setEditAgentOpen(true);
+      return;
+    }
     if (resolvedPersona) {
       setPersonaDialogState(editPersonaDialogState(resolvedPersona));
       return;
     }
     setEditAgentOpen(true);
-  }, [resolvedPersona]);
+  }, [managedAgent, resolvedPersona]);
 
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({

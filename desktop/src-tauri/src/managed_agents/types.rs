@@ -12,7 +12,19 @@ pub enum BackendKind {
     },
     /// Workload managed by a paired Buzz execution node. The associated
     /// workload identity is stored in `ManagedAgentRecord::backend_agent_id`.
-    ExecutionNode { node_id: String },
+    ///
+    /// The field crosses the Tauri IPC seam, whose TS surface is camelCase
+    /// (`{ type: "execution_node", nodeId }`), so it serializes as `nodeId`
+    /// — the outer `rename_all` only renames variant tags, and the
+    /// `rename_all` on `CreateManagedAgentRequest` does not recurse into
+    /// nested enums. The `alias` keeps managed-agent records persisted with
+    /// the old `node_id` spelling deserializable; serialization migrates
+    /// them to `nodeId` on the next store write.
+    #[serde(rename_all = "camelCase")]
+    ExecutionNode {
+        #[serde(alias = "node_id")]
+        node_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

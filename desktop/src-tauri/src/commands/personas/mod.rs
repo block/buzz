@@ -168,7 +168,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 remote_deployed.join(", ")
             ));
         }
-        Ok(collect_execution_node_targets(&agents, &cascade)?)
+        collect_execution_node_targets(&agents, &cascade)
     })
     .await
     .map_err(|error| format!("persona deletion preflight failed: {error}"))??;

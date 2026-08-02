@@ -10,6 +10,7 @@ use buzz_core_pkg::execution::{
 };
 use buzz_core_pkg::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
+    KIND_PRESENCE_UPDATE,
 };
 use chrono::{Duration, Utc};
 use nostr::{nips::nip44, Event, EventBuilder, Kind, PublicKey, Tag};
@@ -30,13 +31,14 @@ use buzz_core_pkg::tenant::relay_url_authority;
 const RECEIPT_POLL_INTERVAL: StdDuration = StdDuration::from_millis(250);
 const RECEIPT_POLL_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
-/// Availability derived from the most recent signed node announcement.
-#[derive(Debug, Clone, Serialize)]
+/// Availability derived from the node's live kind:20001 presence heartbeat
+/// combined with the lifecycle in its most recent signed announcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionNodeAvailability {
-    /// The node announced itself recently.
+    /// The node is ready and its presence heartbeat is live on the relay.
     Connected,
-    /// The node has not announced itself within the reconnect window.
+    /// The node announced Ready but has no live presence heartbeat.
     Unavailable,
     /// The node is announcing but its lifecycle is not ready.
     Degraded,
@@ -74,6 +76,33 @@ pub struct DeployManagedAgentToExecutionNodeInput {
     pub channel_id: Option<String>,
 }
 
+/// Relay publish acknowledgement in the execution seam's camelCase shape.
+///
+/// [`SubmitEventResponse`] itself serializes `event_id` (snake_case) and is
+/// read that way by other TS callers (e.g. `social.ts`), so it cannot be
+/// renamed globally; this local projection matches the camelCase
+/// `publication` field the TS `DeployExecutionWorkloadResponse` declares.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPublicationAck {
+    /// Relay-assigned event identity.
+    pub event_id: String,
+    /// Whether the relay accepted the command event.
+    pub accepted: bool,
+    /// Relay acknowledgement message.
+    pub message: String,
+}
+
+impl From<SubmitEventResponse> for ExecutionPublicationAck {
+    fn from(response: SubmitEventResponse) -> Self {
+        Self {
+            event_id: response.event_id,
+            accepted: response.accepted,
+            message: response.message,
+        }
+    }
+}
+
 /// Result of publishing a deploy command and, when online, receiving its receipt.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +116,7 @@ pub struct DeployExecutionWorkloadResponse {
     /// Target node identity.
     pub node_id: String,
     /// Relay publish response.
-    pub publication: SubmitEventResponse,
+    pub publication: ExecutionPublicationAck,
     /// Terminal or latest receipt observed before the polling timeout.
     pub receipt: Option<ExecutionReceipt>,
 }
@@ -189,19 +218,11 @@ pub async fn list_execution_nodes(
     )
     .await?;
 
-    let now = Utc::now();
     let mut nodes: BTreeMap<String, (u64, String, ExecutionNodeTarget)> = BTreeMap::new();
     for event in events {
         let Some(status) = trusted_execution_node_status(&event, &relay_authority, &owner_pubkey)
         else {
             continue;
-        };
-        let availability = if status.lifecycle != ExecutionNodeLifecycle::Ready {
-            ExecutionNodeAvailability::Degraded
-        } else if status.observed_at <= now && now - status.observed_at <= Duration::minutes(2) {
-            ExecutionNodeAvailability::Connected
-        } else {
-            ExecutionNodeAvailability::Unavailable
         };
         let target = ExecutionNodeTarget {
             node_id: status.node_id.into(),
@@ -209,7 +230,8 @@ pub async fn list_execution_nodes(
             lifecycle: status.lifecycle,
             capabilities: status.capabilities,
             observed_at: status.observed_at,
-            availability,
+            // Placeholder until presence is resolved for all nodes at once below.
+            availability: ExecutionNodeAvailability::Unavailable,
             workloads: status.workloads,
         };
         let version = (event.created_at.as_secs(), event.id.to_hex());
@@ -222,9 +244,96 @@ pub async fn list_execution_nodes(
             })
             .or_insert((version.0, version.1, target));
     }
-    let mut nodes: Vec<_> = nodes.into_values().map(|(_, _, target)| target).collect();
+    let node_ids: Vec<String> = nodes.keys().cloned().collect();
+    let online = online_execution_node_pubkeys(&state, &node_ids).await;
+    let mut nodes: Vec<_> = nodes
+        .into_values()
+        .map(|(_, _, mut target)| {
+            target.availability = derive_execution_node_availability(
+                &target.lifecycle,
+                online.contains(&target.node_id),
+            );
+            target
+        })
+        .collect();
     nodes.sort_by(|left, right| left.display_name.cmp(&right.display_name));
     Ok(nodes)
+}
+
+/// Node pubkeys whose latest kind:20001 presence resolves to a live status.
+///
+/// Nodes heartbeat presence the same way members and managed agents do, so
+/// liveness rides the relay's Redis presence store (short TTL, cleared on
+/// clean disconnect) instead of announcement freshness. The relay's HTTP
+/// bridge intercepts `kinds:[20001]` + `authors` filters and synthesizes
+/// presence events from Redis. A lookup failure degrades to "no presence"
+/// rather than failing the node listing.
+async fn online_execution_node_pubkeys(
+    state: &State<'_, AppState>,
+    node_ids: &[String],
+) -> BTreeSet<String> {
+    if node_ids.is_empty() {
+        return BTreeSet::new();
+    }
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [KIND_PRESENCE_UPDATE],
+            "authors": node_ids,
+        })],
+    )
+    .await
+    .unwrap_or_default();
+    online_presence_pubkeys(&events)
+}
+
+/// Extract the subjects whose most recent presence event is a live status.
+///
+/// Relay-synthesized presence events (built from Redis on query) are signed
+/// by the relay and carry the subject in a `p` tag; self-signed live events
+/// use the event author directly — same distinction `get_presence` handles.
+fn online_presence_pubkeys(events: &[Event]) -> BTreeSet<String> {
+    let mut latest: BTreeMap<String, (u64, bool)> = BTreeMap::new();
+    for event in events {
+        let subject = event
+            .tags
+            .iter()
+            .find_map(|tag| {
+                let slice = tag.as_slice();
+                (slice.len() >= 2 && slice[0] == "p").then(|| slice[1].clone())
+            })
+            .unwrap_or_else(|| event.pubkey.to_hex());
+        let online = match event.content.trim() {
+            "online" | "away" => true,
+            "offline" => false,
+            _ => continue,
+        };
+        let ts = event.created_at.as_secs();
+        match latest.get(&subject) {
+            Some((prev_ts, _)) if *prev_ts >= ts => {}
+            _ => {
+                latest.insert(subject, (ts, online));
+            }
+        }
+    }
+    latest
+        .into_iter()
+        .filter_map(|(pubkey, (_, online))| online.then_some(pubkey))
+        .collect()
+}
+
+/// Classify node availability from announcement lifecycle plus live presence.
+fn derive_execution_node_availability(
+    lifecycle: &ExecutionNodeLifecycle,
+    presence_online: bool,
+) -> ExecutionNodeAvailability {
+    if *lifecycle != ExecutionNodeLifecycle::Ready {
+        ExecutionNodeAvailability::Degraded
+    } else if presence_online {
+        ExecutionNodeAvailability::Connected
+    } else {
+        ExecutionNodeAvailability::Unavailable
+    }
 }
 
 /// Deploy an already-created managed-agent identity to a paired execution node.
@@ -319,7 +428,10 @@ pub async fn deploy_managed_agent_to_execution_node(
     let response = send_execution_command(
         &state,
         node_id.clone(),
-        ExecutionCommand::Deploy { workload },
+        ExecutionCommand::Deploy {
+            workload: Box::new(workload),
+            supersedes_removal: None,
+        },
     )
     .await?;
     match response.receipt.as_ref() {
@@ -577,7 +689,26 @@ async fn send_execution_command(
     node_id: ExecutionNodeId,
     command: ExecutionCommand,
 ) -> Result<DeployExecutionWorkloadResponse, String> {
-    ensure_trusted_execution_node(state, &node_id).await?;
+    let node_status = ensure_trusted_execution_node(state, &node_id).await?;
+    let mut command = command;
+    // Deploys echo the highest node-assigned receipt sequence observed for
+    // the workload. The node's stable workload ids deliberately survive
+    // remove-then-redeploy, and its removal tombstones only yield to deploys
+    // that prove they were issued after the removal was observed — the echoed
+    // sequence is that proof (a stale replayed deploy cannot carry it).
+    if let ExecutionCommand::Deploy {
+        workload,
+        supersedes_removal,
+    } = &mut command
+    {
+        if supersedes_removal.is_none() {
+            *supersedes_removal = node_status
+                .workloads()
+                .iter()
+                .find(|status| status.workload_id == workload.workload_id)
+                .map(|status| status.sequence);
+        }
+    }
     let issued_at = Utc::now();
     let envelope = ExecutionCommandEnvelope::new(
         node_id.clone(),
@@ -647,7 +778,7 @@ async fn send_execution_command(
         request_id: envelope.request_id(),
         workload_id: envelope.command.workload_id().clone(),
         node_id: node_id.into(),
-        publication,
+        publication: publication.into(),
         receipt,
     })
 }
@@ -655,7 +786,7 @@ async fn send_execution_command(
 async fn ensure_trusted_execution_node(
     state: &State<'_, AppState>,
     expected_node_id: &ExecutionNodeId,
-) -> Result<(), String> {
+) -> Result<ExecutionNodeStatus, String> {
     let owner_keys = state.signing_keys()?;
     let owner_pubkey = owner_keys.public_key().to_hex();
     let relay_authority = relay_url_authority(&relay_ws_url_with_override(state));
@@ -670,15 +801,26 @@ async fn ensure_trusted_execution_node(
         })],
     )
     .await?;
-    let trusted = events.into_iter().any(|event| {
-        trusted_execution_node_status(&event, &relay_authority, &owner_pubkey)
-            .is_some_and(|status| status.node_id == *expected_node_id)
-    });
-    if trusted {
-        Ok(())
-    } else {
-        Err("execution node is not paired with this workspace owner and relay".into())
+    let mut newest: Option<(u64, String, ExecutionNodeStatus)> = None;
+    for event in events {
+        let Some(status) = trusted_execution_node_status(&event, &relay_authority, &owner_pubkey)
+        else {
+            continue;
+        };
+        if status.node_id != *expected_node_id {
+            continue;
+        }
+        let version = (event.created_at.as_secs(), event.id.to_hex());
+        if newest
+            .as_ref()
+            .is_none_or(|(seconds, id, _)| version > (*seconds, id.clone()))
+        {
+            newest = Some((version.0, version.1, status));
+        }
     }
+    newest.map(|(_, _, status)| status).ok_or_else(|| {
+        "execution node is not paired with this workspace owner and relay".to_string()
+    })
 }
 
 fn trusted_execution_node_status(
@@ -794,7 +936,77 @@ fn announcement_d_tag_matches(event: &nostr::Event, node_id: &str) -> bool {
 mod tests {
     use super::*;
     use buzz_core_pkg::execution::{ExecutionNodeId, ExecutionNodeStatus};
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+    fn presence_event(keys: &Keys, content: &str, subject: Option<&str>, created_at: u64) -> Event {
+        let builder = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), content)
+            .custom_created_at(Timestamp::from(created_at));
+        let builder = match subject {
+            Some(subject) => builder.tags([Tag::parse(["p", subject]).expect("p tag")]),
+            None => builder.tags([]),
+        };
+        builder.sign_with_keys(keys).expect("presence event")
+    }
+
+    #[test]
+    fn availability_requires_ready_lifecycle_and_live_presence() {
+        assert_eq!(
+            derive_execution_node_availability(&ExecutionNodeLifecycle::Ready, true),
+            ExecutionNodeAvailability::Connected
+        );
+        assert_eq!(
+            derive_execution_node_availability(&ExecutionNodeLifecycle::Ready, false),
+            ExecutionNodeAvailability::Unavailable
+        );
+        // Non-ready lifecycles are degraded regardless of presence.
+        assert_eq!(
+            derive_execution_node_availability(&ExecutionNodeLifecycle::Draining, true),
+            ExecutionNodeAvailability::Degraded
+        );
+        assert_eq!(
+            derive_execution_node_availability(&ExecutionNodeLifecycle::Connecting, false),
+            ExecutionNodeAvailability::Degraded
+        );
+    }
+
+    #[test]
+    fn presence_subject_prefers_p_tag_over_author() {
+        let relay_keys = Keys::generate();
+        let node_keys = Keys::generate();
+        let node_pubkey = node_keys.public_key().to_hex();
+
+        // Relay-synthesized presence: signed by the relay, subject in a p tag.
+        let synthesized = presence_event(&relay_keys, "online", Some(&node_pubkey), 100);
+        let online = online_presence_pubkeys(&[synthesized]);
+        assert!(online.contains(&node_pubkey));
+        assert!(!online.contains(&relay_keys.public_key().to_hex()));
+
+        // Self-signed live presence: no p tag, subject is the author.
+        let self_signed = presence_event(&node_keys, "online", None, 100);
+        let online = online_presence_pubkeys(&[self_signed]);
+        assert!(online.contains(&node_pubkey));
+    }
+
+    #[test]
+    fn presence_uses_latest_status_per_subject() {
+        let node_keys = Keys::generate();
+        let node_pubkey = node_keys.public_key().to_hex();
+
+        let stale_online = presence_event(&node_keys, "online", None, 100);
+        let fresh_offline = presence_event(&node_keys, "offline", None, 200);
+        let online = online_presence_pubkeys(&[stale_online.clone(), fresh_offline.clone()]);
+        assert!(!online.contains(&node_pubkey));
+
+        // Order independence: the newest event wins either way.
+        let online = online_presence_pubkeys(&[fresh_offline, stale_online]);
+        assert!(!online.contains(&node_pubkey));
+
+        // Unknown statuses are ignored rather than treated as offline.
+        let garbage = presence_event(&node_keys, "not-a-status", None, 300);
+        let recovered = presence_event(&node_keys, "online", None, 250);
+        let online = online_presence_pubkeys(&[garbage, recovered]);
+        assert!(online.contains(&node_pubkey));
+    }
 
     #[test]
     fn announcement_d_tag_must_match_once() {

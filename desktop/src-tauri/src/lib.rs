@@ -72,8 +72,10 @@ use tauri::{Listener, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
+
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
+
 fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
     if let Err(error) = window.show() {
         eprintln!("buzz-desktop: failed to reveal main window: {error}");
@@ -302,6 +304,13 @@ pub fn run() {
                                     .store(true, std::sync::atomic::Ordering::Release);
                             }
                         }
+                        // Emit ptt-state=true to the frontend.
+                        // The React side plays the press audio cue on this event
+                        // (Web Audio API via HuddleContext). Rust-side rodio audio
+                        // was considered but rejected: the rodio OutputStream must
+                        // outlive the handler and sharing it across the shortcut
+                        // closure adds lifecycle complexity for marginal gain.
+                        // The React implementation is sufficient and simpler.
                         let _ = app.emit("ptt-state", true);
                     }
                     ShortcutState::Released => {
@@ -828,6 +837,7 @@ pub fn run() {
             mesh_installed_models,
             mesh_model_catalog,
             update_managed_agent,
+            change_managed_agent_backend,
             discover_backend_providers,
             probe_backend_provider,
             list_personas,
