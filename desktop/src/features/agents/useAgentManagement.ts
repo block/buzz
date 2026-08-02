@@ -26,12 +26,9 @@ import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttach
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
-import {
-  deployManagedAgentToExecutionNode,
-  executionReceiptFailure,
-} from "@/shared/api/tauriExecution";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
+import { createAndDeployExecutionNodeAgent } from "./lib/createAndDeployExecutionNodeAgent";
 import type {
   CreatePersonaInput,
   UpdatePersonaInput,
@@ -210,34 +207,17 @@ export function useAgentManagement() {
 
       if (intent === "definition_start") {
         if (backendIntent?.type === "execution-node") {
-          const created = await createAgentMutation.mutateAsync(
-            await buildInstanceInputForDefinition(
+          const deployed = await createAndDeployExecutionNodeAgent({
+            input: await buildInstanceInputForDefinition(
               persona,
               runtime,
               undefined,
               backendIntent,
             ),
-          );
-          if (created.spawnError) throw new Error(created.spawnError);
-          const deployment = await deployManagedAgentToExecutionNode({
-            pubkey: created.agent.pubkey,
+            createManagedAgent: createAgentMutation.mutateAsync,
             nodeId: backendIntent.nodeId,
             channelId: request.request.channelId,
           });
-          const failure = executionReceiptFailure(deployment.receipt);
-          if (failure) {
-            throw new Error(
-              `The execution node rejected the workload command: ${failure}.`,
-            );
-          }
-          const deployed = {
-            ...created,
-            agent: {
-              ...created.agent,
-              backendAgentId: deployment.workloadId,
-              status: "deployed" as const,
-            },
-          };
           const targetChannel = (channelsQuery.data ?? []).find(
             (channel) => channel.id === request.request.channelId,
           );

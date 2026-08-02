@@ -37,10 +37,6 @@ import { personaSaveNotice } from "@/features/agents/lib/personaSaveNotice";
 import { useCreatedAgentChannelAttachment } from "@/features/agents/useCreatedAgentChannelAttachment";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import {
-  deployManagedAgentToExecutionNode,
-  executionReceiptFailure,
-} from "@/shared/api/tauriExecution";
 import type {
   SnapshotFormat,
   SnapshotMemoryLevel,
@@ -67,6 +63,7 @@ import {
   buildInstanceInputForDefinition,
   type BackendIntent,
 } from "../lib/instanceInputForDefinition";
+import { createAndDeployExecutionNodeAgent } from "../lib/createAndDeployExecutionNodeAgent";
 
 type PersonaFeedbackSurface = "catalog" | "library";
 
@@ -248,27 +245,12 @@ export function usePersonaActions() {
             undefined,
             startIntent,
           );
-          const created = await createAgentMutation.mutateAsync(agentInput);
-          if (created.spawnError) throw new Error(created.spawnError);
-          const deployment = await deployManagedAgentToExecutionNode({
-            pubkey: created.agent.pubkey,
+          const deployed = await createAndDeployExecutionNodeAgent({
+            input: agentInput,
+            createManagedAgent: createAgentMutation.mutateAsync,
             nodeId: startIntent.nodeId,
             channelId: targetChannel?.id,
           });
-          const failure = executionReceiptFailure(deployment.receipt);
-          if (failure) {
-            throw new Error(
-              `The execution node rejected the workload command: ${failure}.`,
-            );
-          }
-          const deployed = {
-            ...created,
-            agent: {
-              ...created.agent,
-              backendAgentId: deployment.workloadId,
-              status: "deployed" as const,
-            },
-          };
           await createdAgentAttachment.presentCreatedAgent(
             deployed,
             targetChannel,
