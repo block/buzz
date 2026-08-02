@@ -159,6 +159,22 @@ _ensure-sidecar-stubs:
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 
+# Copy freshly built sidecar binaries over the placeholder stubs. The desktop
+# app resolves buzz-acp & co. next to its own executable, and a zero-byte stub
+# there shadows the PATH fallback — dev builds must ship the real helpers or
+# agent sign-in fails with "Permission denied (os error 13)".
+# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
+_sync-sidecar-binaries:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
+
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
     #!/usr/bin/env bash
@@ -431,6 +447,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         done
     fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    "{{justfile_directory()}}/bin/just" _sync-sidecar-binaries
     if [[ -n "{{mesh}}" ]]; then
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
@@ -478,12 +495,7 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
-    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
-    done
+    "{{justfile_directory()}}/bin/just" _sync-sidecar-binaries
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     unset BUZZ_PRIVATE_KEY BUZZ_SHARE_IDENTITY
