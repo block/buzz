@@ -31,6 +31,12 @@ export const BUZZ_THEME_NAME = "buzz";
  */
 export const BUZZ_DARK_THEME_NAME = "buzz-dark";
 
+/** Glass light theme: GitHub-based Buzz chrome with native macOS vibrancy. */
+export const GLASS_THEME_NAME = "glass";
+
+/** Dark-mode counterpart to {@link GLASS_THEME_NAME}. */
+export const GLASS_DARK_THEME_NAME = "glass-dark";
+
 /** The Shiki bundle Buzz borrows its base palette from. */
 export const BUZZ_BASE_THEME: SyntaxThemeName = "github-light";
 
@@ -40,17 +46,17 @@ export const BUZZ_DARK_BASE_THEME: SyntaxThemeName = "github-dark";
 /**
  * Resolve a theme name to the real Shiki bundled theme it maps to.
  *
- * Most themes map to themselves, but the Buzz aliases (`buzz` / `buzz-dark`)
- * are not bundled Shiki themes — they reuse the GitHub Light / GitHub Dark
- * palettes. The Shiki highlighter engine (used for fenced code blocks in
- * `CodeBlock.tsx`) only understands bundled names, so callers that hand a
- * theme name to `loadTheme` / `codeToTokens` must resolve it through here
- * first; passing a raw Buzz alias makes Shiki throw and code blocks fall
- * back to unhighlighted plain text.
+ * Most themes map to themselves, but the Buzz and Glass aliases are not
+ * bundled Shiki themes — they reuse the GitHub Light / GitHub Dark palettes.
+ * The Shiki highlighter engine (used for fenced code blocks in `CodeBlock.tsx`)
+ * only understands bundled names, so callers must resolve first; passing a raw
+ * first-party alias makes Shiki throw and code blocks fall back to plain text.
  */
 export function resolveShikiThemeName(name: string): SyntaxThemeName {
   if (name === BUZZ_THEME_NAME) return BUZZ_BASE_THEME;
   if (name === BUZZ_DARK_THEME_NAME) return BUZZ_DARK_BASE_THEME;
+  if (name === GLASS_THEME_NAME) return BUZZ_BASE_THEME;
+  if (name === GLASS_DARK_THEME_NAME) return BUZZ_DARK_BASE_THEME;
   return name as SyntaxThemeName;
 }
 
@@ -60,6 +66,8 @@ export function resolveShikiThemeName(name: string): SyntaxThemeName {
 export const SYNTAX_THEMES = [
   "buzz",
   "buzz-dark",
+  "glass",
+  "glass-dark",
   "andromeeda",
   "aurora-x",
   "ayu-dark",
@@ -128,6 +136,7 @@ export type SyntaxThemeName = (typeof SYNTAX_THEMES)[number];
 // for themes that haven't been loaded yet.
 export const LIGHT_THEMES: ReadonlySet<SyntaxThemeName> = new Set([
   "buzz",
+  "glass",
   "catppuccin-latte",
   "everforest-light",
   "github-light",
@@ -157,6 +166,10 @@ const themeImports: Record<
   buzz: () => import("shiki/themes/github-light.mjs"),
   // Buzz Dark reuses the github-dark palette; dark gradient applied separately.
   "buzz-dark": () => import("shiki/themes/github-dark.mjs"),
+  // Glass uses the same content palettes; its translucent chrome is applied
+  // separately by ThemeProvider and the Buzz surface stylesheet.
+  glass: () => import("shiki/themes/github-light.mjs"),
+  "glass-dark": () => import("shiki/themes/github-dark.mjs"),
   andromeeda: () => import("shiki/themes/andromeeda.mjs"),
   "aurora-x": () => import("shiki/themes/aurora-x.mjs"),
   "ayu-dark": () => import("shiki/themes/ayu-dark.mjs"),
@@ -237,6 +250,7 @@ export const THEME_PAIRS: ReadonlyMap<SyntaxThemeName, SyntaxThemeName> =
     // Light → Dark
     // Buzz is the first-party pair; keep it first so it leads every category.
     ["buzz", "buzz-dark"],
+    ["glass", "glass-dark"],
     ["catppuccin-latte", "catppuccin-mocha"],
     ["everforest-light", "everforest-dark"],
     ["github-light", "github-dark"],
@@ -256,6 +270,7 @@ export const THEME_PAIRS: ReadonlyMap<SyntaxThemeName, SyntaxThemeName> =
     ["vitesse-light", "vitesse-dark"],
     // Dark → Light (reverse mappings)
     ["buzz-dark", "buzz"],
+    ["glass-dark", "glass"],
     ["catppuccin-mocha", "catppuccin-latte"],
     ["everforest-dark", "everforest-light"],
     ["github-dark", "github-light"],

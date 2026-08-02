@@ -22,7 +22,7 @@ export function GradientLayer() {
 export function ContentSurface({ children }: { children: ReactNode }) {
   return (
     <div
-      className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-content-edge"
+      className="relative z-10 mb-1 ml-px mr-1 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-content-surface bg-background shadow-content-edge"
       data-buzz-content-surface
     >
       {children}

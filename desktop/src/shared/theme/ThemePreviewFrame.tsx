@@ -20,6 +20,16 @@ export const BUZZ_GRADIENT_STOPS: Record<
     top: "var(--buzz-gradient-dark-top)",
     bottom: "var(--buzz-gradient-dark-bottom)",
   },
+  // Theme previews cannot sample the desktop behind the native window, so the
+  // light preview shows the same subtle white wash layered over native frost.
+  glass: {
+    top: "rgb(255 255 255 / 25%)",
+    bottom: "rgb(255 255 255 / 25%)",
+  },
+  "glass-dark": {
+    top: "rgb(18 22 29 / 93%)",
+    bottom: "rgb(10 20 35 / 93%)",
+  },
 };
 
 export const LIGHT_PREVIEW_VARS: ThemePreviewVars = {
