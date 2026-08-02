@@ -68,6 +68,12 @@ async fn run_node() -> Result<(), NodeError> {
     let config = NodeConfig::from_env()?;
     let identity = NodeIdentity::load_or_create(&config.data_dir)?;
     let owners = OwnerStore::load(&config.data_dir)?;
+    let relay_authority = relay_url_authority(&config.relay_url);
+    if relay_authority.is_empty() {
+        return Err(NodeError::InvalidConfiguration(
+            "configured relay URL has no valid authority".into(),
+        ));
+    }
     let mut controller = ExecutionController::load_with_concurrency(
         &config.data_dir,
         config.max_concurrent_commands,
@@ -98,6 +104,7 @@ async fn run_node() -> Result<(), NodeError> {
                 &identity,
                 &owners,
                 &mut controller,
+                &relay_authority,
                 &relay_connected,
                 connection_shutdown,
             ) => {
@@ -145,6 +152,7 @@ async fn run_connection(
     identity: &NodeIdentity,
     owners: &OwnerStore,
     controller: &mut ExecutionController,
+    relay_authority: &str,
     relay_connected: &AtomicBool,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), NodeError> {
@@ -215,9 +223,16 @@ async fn run_connection(
                     let controller = controller.clone();
                     let identity = identity.clone();
                     let owners = owners.clone();
+                    let relay_authority = relay_authority.to_string();
                     work.push(tokio::spawn(async move {
                         controller
-                            .handle_command_event(&identity, &owners, &event, chrono::Utc::now())
+                            .handle_command_event(
+                                &identity,
+                                &owners,
+                                &relay_authority,
+                                &event,
+                                chrono::Utc::now(),
+                            )
                             .await
                             .map(|receipts| (event.id, receipts))
                     }));

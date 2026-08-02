@@ -234,9 +234,24 @@ impl OwnerStore {
         Ok(())
     }
 
-    /// Check whether an owner public key is paired.
-    pub fn contains(&self, owner: &str) -> bool {
-        self.owners.iter().any(|candidate| candidate == owner)
+    /// Check whether an owner is paired to this node on the active relay.
+    ///
+    /// The legacy owner list is retained for on-disk compatibility, but it is
+    /// not sufficient for command authorization: the attestation must bind
+    /// the owner, this node, and the relay the process is currently connected
+    /// to.
+    pub fn contains_for_relay(
+        &self,
+        owner: &str,
+        node_id: &ExecutionNodeId,
+        relay_authority: &str,
+    ) -> bool {
+        self.attestations.iter().any(|attestation| {
+            attestation.owner_pubkey == owner
+                && attestation
+                    .verify(node_id, relay_authority, Some(owner))
+                    .is_ok()
+        })
     }
 
     /// Return paired owner identities without exposing any private material.
@@ -706,6 +721,7 @@ impl ExecutionController {
         &self,
         identity: &NodeIdentity,
         owners: &OwnerStore,
+        relay_authority: &str,
         event: &Event,
         now: DateTime<Utc>,
     ) -> Result<Vec<Event>, NodeError> {
@@ -718,12 +734,12 @@ impl ExecutionController {
             ));
         }
 
+        let node_id = identity.node_id()?;
         let owner = event.pubkey;
         let owner_hex = owner.to_hex();
-        if !owners.contains(&owner_hex) {
+        if !owners.contains_for_relay(&owner_hex, &node_id, relay_authority) {
             return Ok(Vec::new());
         }
-        let node_id = identity.node_id()?;
         if !has_exact_p_tag(event, node_id.as_str()) {
             return Err(NodeError::InvalidCommand(
                 "command must have exactly one p tag for this node".into(),
@@ -1197,6 +1213,32 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+    const TEST_RELAY_AUTHORITY: &str = "relay.example";
+
+    fn paired_owner_store(owner: &Keys, node: &NodeIdentity, data_dir: &Path) -> OwnerStore {
+        let node_id = node.node_id().expect("node id");
+        let attestation = ExecutionNodeAttestation::sign(owner, &node_id, TEST_RELAY_AUTHORITY)
+            .expect("attestation");
+        let mut owners = OwnerStore::default();
+        owners
+            .add_attestation(attestation, &node_id, TEST_RELAY_AUTHORITY, data_dir)
+            .expect("pair owner");
+        owners
+    }
+
+    #[test]
+    fn owner_attestation_is_bound_to_the_active_relay() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let owners = paired_owner_store(&owner, &node, &dir);
+        let node_id = node.node_id().expect("node id");
+        let owner_pubkey = owner.public_key().to_hex();
+
+        assert!(owners.contains_for_relay(&owner_pubkey, &node_id, TEST_RELAY_AUTHORITY));
+        assert!(!owners.contains_for_relay(&owner_pubkey, &node_id, "another-relay.example"));
+        let _ = fs::remove_dir_all(dir);
+    }
 
     fn temp_dir() -> PathBuf {
         let suffix = SystemTime::now()
@@ -1277,10 +1319,7 @@ mod tests {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
-        let mut owners = OwnerStore::default();
-        owners
-            .add(&owner.public_key().to_hex(), &dir)
-            .expect("pair owner");
+        let owners = paired_owner_store(&owner, &node, &dir);
         let workload_id = WorkloadId::random();
         let workload = WorkloadSpec::agent(
             workload_id,
@@ -1303,11 +1342,23 @@ mod tests {
         let controller = ExecutionController::default();
 
         let first = controller
-            .handle_command_event(&node, &owners, &event, now + Duration::seconds(1))
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &event,
+                now + Duration::seconds(1),
+            )
             .await
             .expect("first delivery");
         let second = controller
-            .handle_command_event(&node, &owners, &event, now + Duration::seconds(2))
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &event,
+                now + Duration::seconds(2),
+            )
             .await
             .expect("duplicate delivery");
 
@@ -1337,10 +1388,7 @@ mod tests {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
-        let mut owners = OwnerStore::default();
-        owners
-            .add(&owner.public_key().to_hex(), &dir)
-            .expect("pair owner");
+        let owners = paired_owner_store(&owner, &node, &dir);
         let now = Utc::now();
         let command = ExecutionCommandEnvelope::new(
             node.node_id().expect("node id"),
@@ -1362,13 +1410,25 @@ mod tests {
         let event = deploy_command_event(&owner, &node, &command);
         let first_controller = ExecutionController::load(&dir).expect("load controller");
         let first_receipts = first_controller
-            .handle_command_event(&node, &owners, &event, now + Duration::seconds(1))
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &event,
+                now + Duration::seconds(1),
+            )
             .await
             .expect("first delivery");
 
         let restarted_controller = ExecutionController::load(&dir).expect("restart controller");
         let receipts = restarted_controller
-            .handle_command_event(&node, &owners, &event, now + Duration::seconds(2))
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &event,
+                now + Duration::seconds(2),
+            )
             .await
             .expect("duplicate delivery after restart");
 
@@ -1385,10 +1445,7 @@ mod tests {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
-        let mut owners = OwnerStore::default();
-        owners
-            .add(&owner.public_key().to_hex(), &dir)
-            .expect("pair owner");
+        let owners = paired_owner_store(&owner, &node, &dir);
         let workload_id = WorkloadId::random();
         let now = Utc::now();
         let workload = WorkloadSpec::agent(
@@ -1435,6 +1492,7 @@ mod tests {
                 .handle_command_event(
                     &node,
                     &owners,
+                    TEST_RELAY_AUTHORITY,
                     &deploy_command_event(&owner, &node, &envelope),
                     now + Duration::seconds(1),
                 )
@@ -1465,10 +1523,7 @@ mod tests {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
-        let mut owners = OwnerStore::default();
-        owners
-            .add(&owner.public_key().to_hex(), &dir)
-            .expect("pair owner");
+        let owners = paired_owner_store(&owner, &node, &dir);
         let now = Utc::now();
         let first = ExecutionCommandEnvelope::new(
             node.node_id().expect("node id"),
@@ -1496,6 +1551,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &first),
                 now + Duration::seconds(1),
             )
@@ -1505,6 +1561,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &conflicting),
                 now + Duration::seconds(2),
             )
@@ -1514,6 +1571,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &conflicting),
                 now + Duration::seconds(3),
             )
@@ -1542,10 +1600,7 @@ mod tests {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
-        let mut owners = OwnerStore::default();
-        owners
-            .add(&owner.public_key().to_hex(), &dir)
-            .expect("pair owner");
+        let owners = paired_owner_store(&owner, &node, &dir);
         let workload_id = WorkloadId::random();
         let now = Utc::now();
         let deploy = ExecutionCommandEnvelope::new(
@@ -1570,6 +1625,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &deploy),
                 now,
             )
@@ -1594,6 +1650,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &begin),
                 now,
             )
@@ -1630,6 +1687,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &submit),
                 now,
             )
@@ -1660,6 +1718,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &retry_begin),
                 now,
             )
@@ -1679,6 +1738,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &cancel),
                 now,
             )
@@ -1713,6 +1773,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &retry_submit),
                 now,
             )
@@ -1753,6 +1814,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &expiring_begin),
                 now,
             )
@@ -1777,6 +1839,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &expired_submit),
                 now + Duration::seconds(2),
             )
@@ -1817,6 +1880,7 @@ mod tests {
             .handle_command_event(
                 &node,
                 &owners,
+                TEST_RELAY_AUTHORITY,
                 &deploy_command_event(&owner, &node, &expired),
                 now + Duration::seconds(2),
             )
@@ -1844,10 +1908,7 @@ mod tests {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
-        let mut owners = OwnerStore::default();
-        owners
-            .add(&owner.public_key().to_hex(), &dir)
-            .expect("pair owner");
+        let owners = paired_owner_store(&owner, &node, &dir);
         let now = Utc::now();
         let make_command = |name| {
             ExecutionCommandEnvelope::new(
@@ -1879,8 +1940,20 @@ mod tests {
             ExecutionController::load_with_concurrency(&dir, 2).expect("load durable controller");
 
         let (first_result, second_result) = tokio::join!(
-            controller.handle_command_event(&node, &owners, &first_event, now),
-            controller.handle_command_event(&node, &owners, &second_event, now),
+            controller.handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &first_event,
+                now,
+            ),
+            controller.handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &second_event,
+                now,
+            ),
         );
 
         assert!(first_result.is_ok());
@@ -1936,7 +2009,13 @@ mod tests {
         let controller = ExecutionController::default();
 
         let receipts = controller
-            .handle_command_event(&node, &OwnerStore::default(), &event, now)
+            .handle_command_event(
+                &node,
+                &OwnerStore::default(),
+                TEST_RELAY_AUTHORITY,
+                &event,
+                now,
+            )
             .await
             .expect("unpaired command is ignored");
 
@@ -1950,10 +2029,7 @@ mod tests {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
-        let mut owners = OwnerStore::default();
-        owners
-            .add(&owner.public_key().to_hex(), &dir)
-            .expect("pair owner");
+        let owners = paired_owner_store(&owner, &node, &dir);
         let issued_at = Utc::now() - Duration::minutes(2);
         let command = ExecutionCommandEnvelope::new(
             node.node_id().expect("node id"),
@@ -1976,7 +2052,7 @@ mod tests {
         let controller = ExecutionController::default();
 
         let receipts = controller
-            .handle_command_event(&node, &owners, &event, Utc::now())
+            .handle_command_event(&node, &owners, TEST_RELAY_AUTHORITY, &event, Utc::now())
             .await
             .expect("expired command receipt");
         let plaintext = nip44::decrypt(
