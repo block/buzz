@@ -212,4 +212,40 @@ mod tests {
             .unwrap_err()
             .contains("not a real directory"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_store_repairs_directory_permissions_and_keeps_downloads_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let component_root = parent.path().join("components");
+        fs::create_dir(&component_root).unwrap();
+        fs::set_permissions(&component_root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        create_restricted_directory(&component_root, "component store").unwrap();
+        assert_eq!(
+            fs::metadata(&component_root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let download = component_root.join("download");
+        drop(create_private_file(&download).unwrap());
+        assert_eq!(
+            fs::metadata(&download).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn private_download_creation_never_overwrites_a_locked_or_partial_file() {
+        let root = tempfile::tempdir().unwrap();
+        let download = root.path().join("download");
+        fs::write(&download, b"partial prior download").unwrap();
+
+        assert!(create_private_file(&download)
+            .unwrap_err()
+            .contains("create private Guardian download"));
+        assert_eq!(fs::read(download).unwrap(), b"partial prior download");
+    }
 }
