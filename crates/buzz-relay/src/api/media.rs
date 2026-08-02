@@ -1027,6 +1027,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn media_reads_reject_unauthenticated_get_and_head_before_sidecar_gate() {
         for method in ["GET", "HEAD"] {
             let response = media_get_auth_router()
@@ -1040,6 +1041,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn media_read_with_valid_server_scoped_token_reaches_sidecar_gate() {
         let keys = Keys::generate();
         let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
@@ -1053,6 +1055,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
         let keys = Keys::generate();
         let now = Timestamp::now().as_secs();
@@ -1094,6 +1097,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn media_read_accepts_range_header_only_after_auth() {
         let keys = Keys::generate();
         let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
@@ -1112,6 +1116,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn upload_rate_limiter_is_scoped_by_community() {
         let state = test_state().await;
         let pubkey = nostr::Keys::generate().public_key();
@@ -1127,6 +1132,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn upload_concurrency_limit_is_scoped_by_community() {
         let state = test_state().await;
         let pubkey = nostr::Keys::generate().public_key();

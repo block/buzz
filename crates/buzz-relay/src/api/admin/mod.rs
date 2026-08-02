@@ -390,6 +390,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn report_detail_rejects_unknown_report() {
         let response = router(test_state().await)
             .oneshot(
@@ -420,6 +421,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn feedback_attachment_rejects_unknown_feedback() {
         let response = router(test_state().await)
             .oneshot(
