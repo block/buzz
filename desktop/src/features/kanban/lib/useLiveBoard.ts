@@ -2,6 +2,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   useBoardQuery,
   useCardsQuery,
+  useMemberChannelIds,
 } from "@/features/kanban/lib/boardQueries";
 import type {
   KanbanBoard,
@@ -20,8 +21,9 @@ import { groupCardsByColumn } from "@/features/kanban/lib/kanbanTypes";
 export function useLiveBoard(boardId: string) {
   const { data: identity } = useIdentityQuery();
   const me = identity?.pubkey;
+  const memberChannelIds = useMemberChannelIds();
 
-  const boardQuery = useBoardQuery(boardId, me);
+  const boardQuery = useBoardQuery(boardId, me, memberChannelIds);
   const board: KanbanBoard | null = boardQuery.data ?? null;
   const cardsQuery = useCardsQuery(board?.owner, boardId);
   const cards: KanbanCard[] = cardsQuery.data ?? [];

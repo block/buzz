@@ -7,7 +7,10 @@ import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { useBoardsQuery } from "@/features/kanban/lib/boardQueries";
+import {
+  useBoardsQuery,
+  useMemberChannelIds,
+} from "@/features/kanban/lib/boardQueries";
 import type { KanbanBoard } from "@/features/kanban/lib/kanbanTypes";
 
 type BoardScope = "all" | "owned" | "shared";
@@ -15,7 +18,8 @@ type BoardScope = "all" | "owned" | "shared";
 export function BoardList() {
   const { data: identity } = useIdentityQuery();
   const me = identity?.pubkey;
-  const boardsQuery = useBoardsQuery(me);
+  const memberChannelIds = useMemberChannelIds();
+  const boardsQuery = useBoardsQuery(me, memberChannelIds);
   const boards = boardsQuery.data ?? [];
 
   const [scope, setScope] = React.useState<BoardScope>("all");

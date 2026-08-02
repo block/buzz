@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boardIsAccessible,
   collapseBoards,
   collapseCards,
   parseBoard,
@@ -174,4 +175,70 @@ test("collapseBoards/collapseCards: latest-created_at head wins per coordinate",
   const cards = collapseCards([cardOldEv, cardNewEv]);
   assert.equal(cards.length, 1);
   assert.equal(cards[0].column, "done");
+});
+
+function accessBoard(overrides = {}) {
+  return {
+    id: "b1",
+    owner: "0owner",
+    name: "b",
+    description: "",
+    columns: [],
+    channels: [],
+    invites: [],
+    createdAt: 1000,
+    ...overrides,
+  };
+}
+
+test("boardIsAccessible: no identity → always denied", () => {
+  assert.equal(boardIsAccessible(accessBoard(), undefined, []), false);
+  assert.equal(
+    boardIsAccessible(accessBoard({ owner: "0owner" }), undefined, []),
+    false,
+  );
+});
+
+test("boardIsAccessible: owner is visible (case-insensitive)", () => {
+  assert.equal(
+    boardIsAccessible(accessBoard({ owner: "AbC123" }), "abc123", []),
+    true,
+  );
+});
+
+test("boardIsAccessible: invite-named reader is visible", () => {
+  assert.equal(
+    boardIsAccessible(
+      accessBoard({ owner: "0other", invites: ["0reader"] }),
+      "0reader",
+      [],
+    ),
+    true,
+  );
+});
+
+test("boardIsAccessible: channel-shared board visible to a member", () => {
+  assert.equal(
+    boardIsAccessible(
+      accessBoard({ owner: "0other", channels: ["chan-a", "chan-b"] }),
+      "0reader",
+      ["chan-b"],
+    ),
+    true,
+  );
+});
+
+test("boardIsAccessible: unrelated reader denied across all paths", () => {
+  assert.equal(
+    boardIsAccessible(
+      accessBoard({
+        owner: "0other",
+        invites: ["0invitee"],
+        channels: ["chan-a"],
+      }),
+      "0stranger",
+      ["chan-b"],
+    ),
+    false,
+  );
 });

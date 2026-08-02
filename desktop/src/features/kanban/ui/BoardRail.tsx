@@ -11,7 +11,10 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
-import { useBoardsQuery } from "@/features/kanban/lib/boardQueries";
+import {
+  useBoardsQuery,
+  useMemberChannelIds,
+} from "@/features/kanban/lib/boardQueries";
 
 type BoardRailProps = {
   isCollapsed: boolean;
@@ -30,7 +33,8 @@ const SECTION_LABEL_CLASS =
 export function BoardRail({ isCollapsed, onToggleCollapsed }: BoardRailProps) {
   const { data: identity } = useIdentityQuery();
   const me = identity?.pubkey;
-  const boardsQuery = useBoardsQuery(me);
+  const memberChannelIds = useMemberChannelIds();
+  const boardsQuery = useBoardsQuery(me, memberChannelIds);
   const boards = boardsQuery.data ?? [];
   const navigate = useNavigate();
 

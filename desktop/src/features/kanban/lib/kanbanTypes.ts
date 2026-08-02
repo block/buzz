@@ -131,6 +131,36 @@ function boardOwnerFromEvent(event: RelayEvent): string {
   return (owner ?? event.pubkey).toLowerCase();
 }
 
+function samePubkey(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+/**
+ * A board is visible to the reader when they own it, are named in an
+ * `invite` tag, OR are a member of any channel the board was shared to via an
+ * `h` tag.
+ *
+ * Kanban kinds are stored globally (`channel_id = NULL`) and are in no
+ * relay-gated set (see the P3 entry-gate finding in WORK_LOGS), so a bare
+ * `{kinds:[31001]}` REQ returns *every* community board. This client-side
+ * check — own + `invite` + channel-shared (`h`) membership — is the only
+ * access boundary keeping private boards out of a reader's list, so it must
+ * coincide with the P3 write gate (owner + invited + channel members).
+ */
+export function boardIsAccessible(
+  board: KanbanBoard,
+  me: string | undefined,
+  memberChannelIds: readonly string[],
+): boolean {
+  if (!me) return false;
+  if (samePubkey(board.owner, me)) return true;
+  if (board.invites.some((invite) => samePubkey(invite, me))) return true;
+  // Channel-shared: visible iff the reader belongs to one of the shared `h` channels.
+  return board.channels.some((channelId) =>
+    memberChannelIds.some((memberId) => samePubkey(memberId, channelId)),
+  );
+}
+
 /** Parse a board (31001) event into the read model. */
 export function parseBoard(event: RelayEvent): KanbanBoard | null {
   if (event.kind !== KIND_KANBAN_BOARD) return null;

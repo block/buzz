@@ -4,8 +4,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 import { KIND_KANBAN_BOARD, KIND_KANBAN_CARD } from "@/shared/constants/kinds";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import type { RelayEvent } from "@/shared/api/types";
 import {
+  boardIsAccessible,
   collapseBoards,
   collapseCards,
   type KanbanBoard,
@@ -18,43 +20,47 @@ export const boardQueryKey = (boardId: string) =>
 export const cardsQueryKey = (boardRef: string) =>
   ["kanban", "cards", boardRef] as const;
 
+/**
+ * Ids of the channels the current user is a member of. Used to resolve
+ * channel-shared (`h`) board visibility — a board shared to a channel you
+ * belong to is readable.
+ */
+export function useMemberChannelIds(): string[] {
+  const { data: channels } = useChannelsQuery();
+  return (channels ?? [])
+    .filter((channel) => channel.isMember === true)
+    .map((channel) => channel.id);
+}
+
 const BOARD_SCAN_LIMIT = 500;
 const CARD_SCAN_LIMIT = 1_000;
 
-function samePubkey(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
-}
-
-function boardIsAccessible(
-  board: KanbanBoard,
-  me: string | undefined,
-): boolean {
-  if (!me) return false;
-  if (samePubkey(board.owner, me)) return true;
-  return board.invites.some((invite) => samePubkey(invite, me));
-}
-
 /**
  * Fetch every board head currently on the relay, then narrow client-side to
- * the ones the current user can see: boards they own plus boards whose
- * `invite` tag names them. Channel-shared boards (`h` tags) may not be found
- * by a plain `{kinds:[31001]}` scan because the relay index is
- * author/kind-based and may not index custom tags — see the P2 review flag in
- * the build notes. Scheduling a follow-up `#invite`-indexed REQ is a P3+
- * improvement once relay indexing of `invite` is confirmed.
+ * the ones the current user can see: boards they own, boards whose `invite`
+ * tag names them, and boards shared to a channel they are a member of (`h`).
+ * The P3 entry-gate confirmed the bare `{kinds:[31001]}` scan returns ALL
+ * community boards (global-only, ungated), so this filter is the access
+ * boundary — keep it authoritative.
  */
-async function fetchBoards(me: string | undefined): Promise<KanbanBoard[]> {
+async function fetchBoards(
+  me: string | undefined,
+  memberChannelIds: readonly string[],
+): Promise<KanbanBoard[]> {
   if (!me) return [];
   const events = await relayClient.fetchEvents({
     kinds: [KIND_KANBAN_BOARD],
     limit: BOARD_SCAN_LIMIT,
   });
-  return collapseBoards(events).filter((board) => boardIsAccessible(board, me));
+  return collapseBoards(events).filter((board) =>
+    boardIsAccessible(board, me, memberChannelIds),
+  );
 }
 
 async function fetchBoard(
   boardId: string,
   me: string | undefined,
+  memberChannelIds: readonly string[],
 ): Promise<KanbanBoard | null> {
   if (!me) return null;
   const events = await relayClient.fetchEvents({
@@ -63,7 +69,10 @@ async function fetchBoard(
     limit: 20,
   });
   const boards = collapseBoards(events);
-  return boards.find((board) => boardIsAccessible(board, me)) ?? null;
+  return (
+    boards.find((board) => boardIsAccessible(board, me, memberChannelIds)) ??
+    null
+  );
 }
 
 async function fetchCards(
@@ -139,22 +148,29 @@ function useBoardLiveUpdates(
   }, [boardId, boardRef, queryClient]);
 }
 
-/** Every board the current user can see (own + invited). */
-export function useBoardsQuery(me: string | undefined) {
+/** Every board the current user can see (own + invited + channel-shared). */
+export function useBoardsQuery(
+  me: string | undefined,
+  memberChannelIds: readonly string[],
+) {
   return useQuery({
     enabled: Boolean(me),
     queryKey: boardsQueryKey(),
-    queryFn: () => fetchBoards(me),
+    queryFn: () => fetchBoards(me, memberChannelIds),
     staleTime: 15_000,
   });
 }
 
 /** A single board head by id. */
-export function useBoardQuery(boardId: string, me: string | undefined) {
+export function useBoardQuery(
+  boardId: string,
+  me: string | undefined,
+  memberChannelIds: readonly string[],
+) {
   return useQuery({
     enabled: Boolean(me),
     queryKey: boardQueryKey(boardId),
-    queryFn: () => fetchBoard(boardId, me),
+    queryFn: () => fetchBoard(boardId, me, memberChannelIds),
     staleTime: 30_000,
   });
 }
