@@ -1,4 +1,10 @@
 .living-ship-screen {
+  --living-ship-text-3xs: 0.5rem;
+  --living-ship-text-2xs: 0.6875rem;
+  --living-ship-text-xs: 0.75rem;
+  --living-ship-text-sm: 0.875rem;
+  --living-ship-text-base: 1rem;
+  --living-ship-text-2xl: 1.5rem;
   display: flex;
   min-height: 0;
   flex: 1;
@@ -20,7 +26,7 @@
 
 .living-ship-header h1 {
   margin-top: 0.2rem;
-  font-size: var(--text-2xl);
+  font-size: var(--living-ship-text-2xl);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -28,7 +34,7 @@
 .living-ship-header p {
   margin-top: 0.25rem;
   color: #a9bfd0;
-  font-size: var(--text-sm);
+  font-size: var(--living-ship-text-sm);
 }
 
 .living-ship-kicker {
@@ -36,7 +42,7 @@
   align-items: center;
   gap: 0.4rem;
   color: #72d7dd;
-  font-size: var(--text-2xs);
+  font-size: var(--living-ship-text-2xs);
   font-weight: 700;
   letter-spacing: 0.13em;
   text-transform: uppercase;
@@ -51,7 +57,7 @@
   justify-content: flex-end;
   gap: 0.5rem 1rem;
   color: #c6d6df;
-  font-size: var(--text-2xs);
+  font-size: var(--living-ship-text-2xs);
 }
 
 .living-ship-legend span {
@@ -89,7 +95,7 @@
 .living-ship-canvas {
   position: relative;
   width: 100%;
-  aspect-ratio: 8 / 3;
+  aspect-ratio: 1754 / 896;
   isolation: isolate;
   overflow: hidden;
   background: #071a35;
@@ -109,16 +115,16 @@
   position: absolute;
   z-index: 2;
   left: calc(var(--room-x) * 100% / 1920);
-  top: calc(var(--room-y) * 100% / 720);
+  top: calc(var(--room-y) * 100% / 981);
   width: calc(var(--room-width) * 100% / 1920);
-  height: calc(var(--room-height) * 100% / 720);
+  height: calc(var(--room-height) * 100% / 981);
   padding: 0.2rem;
   border: 1px solid transparent;
   border-radius: 0.2rem;
   background: transparent;
   color: #fff2cd;
   cursor: pointer;
-  font-size: var(--text-3xs);
+  font-size: var(--living-ship-text-3xs);
   font-weight: 800;
   letter-spacing: 0.05em;
   text-align: left;
@@ -164,7 +170,7 @@
 
 .living-ship-personnel-title {
   color: #d6e2e8;
-  font-size: var(--text-2xs);
+  font-size: var(--living-ship-text-2xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -173,15 +179,15 @@
 .living-ship-personnel-subtitle {
   margin-top: 0.15rem;
   color: #8fa6b6;
-  font-size: var(--text-3xs);
+  font-size: var(--living-ship-text-3xs);
 }
 
 .living-ship-agent {
   position: absolute;
   z-index: 4;
   left: calc(var(--agent-x) * 100% / 1920);
-  top: calc(var(--agent-y) * 100% / 720);
-  width: 3.4%;
+  top: calc(var(--agent-y) * 100% / 981);
+  width: 2.8%;
   aspect-ratio: 0.68;
   padding: 0;
   border: 0;
@@ -213,7 +219,7 @@
   border-radius: 0.18rem;
   background: rgb(3 14 28 / 88%);
   color: #f5f5ec;
-  font-size: var(--text-3xs);
+  font-size: var(--living-ship-text-3xs);
   font-weight: 800;
   line-height: 1;
   text-overflow: ellipsis;
@@ -273,20 +279,20 @@
 .living-ship-details h2 {
   margin-top: 0.15rem;
   color: #fff6df;
-  font-size: var(--text-base);
+  font-size: var(--living-ship-text-base);
   font-weight: 700;
 }
 
 .living-ship-details p,
 .living-ship-details-hint {
   color: #b9cad5;
-  font-size: var(--text-xs);
+  font-size: var(--living-ship-text-xs);
   line-height: 1.45;
 }
 
 .living-ship-details-eyebrow {
   color: #72d7dd;
-  font-size: var(--text-3xs);
+  font-size: var(--living-ship-text-3xs);
   font-weight: 800;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -306,7 +312,7 @@
 
 .living-ship-details dt,
 .living-ship-details dd {
-  font-size: var(--text-2xs);
+  font-size: var(--living-ship-text-2xs);
 }
 
 .living-ship-details dt {
@@ -322,7 +328,7 @@
   gap: 0.4rem;
   margin-top: 0.65rem;
   color: #e4c7fa;
-  font-size: var(--text-2xs);
+  font-size: var(--living-ship-text-2xs);
 }
 
 .living-ship-activity-button {
@@ -337,7 +343,7 @@
   border-radius: 0.3rem;
   background: #123c50;
   color: #e7ffff;
-  font-size: var(--text-2xs);
+  font-size: var(--living-ship-text-2xs);
   font-weight: 700;
 }
 
@@ -361,7 +367,7 @@
   justify-content: center;
   padding: 2rem;
   color: #a9bfd0;
-  font-size: var(--text-sm);
+  font-size: var(--living-ship-text-sm);
 }
 
 .living-ship-error {

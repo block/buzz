@@ -26,7 +26,7 @@ function agentPosition(
     (candidate) => candidate.pubkey === agent.pubkey,
   );
   if (agent.locationId === "personnel-strip") {
-    return { x: 52 + index * 66, y: 54 };
+    return { x: 52 + index * 66, y: 102 };
   }
   const room = SHIP_ROOMS.find(
     (candidate) => candidate.id === agent.locationId,
@@ -35,7 +35,7 @@ function agentPosition(
   const spacing = Math.min(54, (room.width - 44) / Math.max(peers.length, 1));
   return {
     x: room.x + 12 + index * spacing,
-    y: room.y + Math.max(22, room.height - 68),
+    y: room.y + Math.max(0, room.height - 78),
   };
 }
 
