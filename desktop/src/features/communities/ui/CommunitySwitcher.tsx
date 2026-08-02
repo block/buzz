@@ -6,6 +6,7 @@ import {
   MoreHorizontal,
   Plus,
   Settings2,
+  LogOut,
   Ticket,
   WifiOff,
 } from "lucide-react";
@@ -103,6 +104,8 @@ export function CommunitySwitcher({
   const [editingCommunity, setEditingCommunity] =
     React.useState<Community | null>(null);
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
+  const [leaveError, setLeaveError] = React.useState<string | null>(null);
+  const [isLeaving, setIsLeaving] = React.useState(false);
   const profileMenuHoverTimer = React.useRef<number | null>(null);
   const connectionState = useRelayConnection();
   const degraded = isRelayConnectionDegraded(connectionState);
@@ -146,6 +149,30 @@ export function CommunitySwitcher({
     },
     [],
   );
+
+  const handleLeaveCommunity = React.useCallback(async () => {
+    if (!activeCommunity || isLeaving) return;
+
+    if (profileMenuHoverTimer.current !== null) {
+      window.clearTimeout(profileMenuHoverTimer.current);
+      profileMenuHoverTimer.current = null;
+    }
+    setIsLeaving(true);
+    setLeaveError(null);
+    try {
+      await onRemoveCommunity(activeCommunity.id);
+      setDropdownOpen(false);
+    } catch (error) {
+      setLeaveError(
+        error instanceof Error
+          ? error.message
+          : "Could not leave the community. Try again.",
+      );
+      setDropdownOpen(true);
+    } finally {
+      setIsLeaving(false);
+    }
+  }, [activeCommunity, isLeaving, onRemoveCommunity]);
 
   const triggerContent = (
     <>
@@ -278,6 +305,24 @@ export function CommunitySwitcher({
                   <Settings2 className="h-4 w-4" />
                   <span>Community settings</span>
                 </button>
+                <button
+                  className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-destructive outline-hidden transition-colors hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+                  disabled={isLeaving}
+                  onClick={() => void handleLeaveCommunity()}
+                  role="menuitem"
+                  type="button"
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span>{isLeaving ? "Leaving…" : "Leave community"}</span>
+                </button>
+                {leaveError ? (
+                  <p
+                    className="px-3 py-1 text-xs text-destructive"
+                    role="alert"
+                  >
+                    {leaveError}
+                  </p>
+                ) : null}
                 <hr className="-mx-1 my-1 h-px border-0 bg-muted" />
               </>
             ) : null}
@@ -391,11 +436,9 @@ export function CommunitySwitcher({
       )}
 
       <EditCommunityDialog
-        canRemove
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}
-        onRemove={onRemoveCommunity}
         onSave={onUpdateCommunity}
         open={editingCommunity !== null}
         community={editingCommunity}

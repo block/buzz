@@ -48,7 +48,6 @@ type CommunityRailProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => Promise<void>;
   onReorderCommunities: (orderedIds: string[]) => void;
 };
 
@@ -305,7 +304,6 @@ export function CommunityRail({
   onSwitchCommunity,
   onAddCommunity,
   onUpdateCommunity,
-  onRemoveCommunity,
   onReorderCommunities,
 }: CommunityRailProps) {
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
@@ -423,11 +421,9 @@ export function CommunityRail({
         <TooltipContent side="right">Add community</TooltipContent>
       </Tooltip>
       <EditCommunityDialog
-        canRemove
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}
-        onRemove={onRemoveCommunity}
         onSave={onUpdateCommunity}
         open={editingCommunity !== null}
         community={editingCommunity}
