@@ -35,7 +35,19 @@ export type TtsSettings = {
   version: number;
   agentTextToSpeech: boolean;
   voicePreferences: string[];
+  captionLanguage: string;
+  speakCaptions: boolean;
 };
+
+/**
+ * Languages `caption_forward.py` currently translates huddle captions into.
+ * Extend alongside that script's `--languages` support.
+ */
+const CAPTION_LANGUAGE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "en", label: "English" },
+  { value: "es", label: "Spanish" },
+  { value: "zh", label: "Chinese" },
+];
 
 type TtsVoiceMutation = {
   settings: TtsSettings;
@@ -103,6 +115,44 @@ export function VoiceSettingsCard() {
         saveError instanceof Error
           ? saveError.message
           : "Voice settings could not be saved.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const saveCaptionLanguage = React.useCallback(async (language: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await invokeTauri<TtsSettings>("set_caption_language", {
+        language,
+      });
+      setSettings(saved);
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Caption language could not be saved.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const saveSpeakCaptions = React.useCallback(async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await invokeTauri<TtsSettings>("set_speak_captions", {
+        enabled,
+      });
+      setSettings(saved);
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Caption speak-aloud preference could not be saved.",
       );
     } finally {
       setBusy(false);
@@ -178,6 +228,8 @@ export function VoiceSettingsCard() {
     voices,
   );
   const enabled = settings?.agentTextToSpeech ?? true;
+  const captionLanguage = settings?.captionLanguage ?? "en";
+  const speakCaptions = settings?.speakCaptions ?? true;
   const controlsDisabled = !settings || busy || !enabled;
 
   return (
@@ -212,6 +264,86 @@ export function VoiceSettingsCard() {
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>
+
+        <div
+          aria-disabled={!enabled}
+          className={cn(
+            "transition-opacity",
+            !enabled && "pointer-events-none opacity-45",
+          )}
+          data-testid="caption-speech-controls"
+        >
+          <SettingsOptionGroup>
+            <SettingsOptionRow>
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Caption language</p>
+                <p className="text-sm text-muted-foreground">
+                  Translated huddle captions in this language may be spoken
+                  aloud; others still appear as text.
+                </p>
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label={`Caption language: ${
+                      CAPTION_LANGUAGE_OPTIONS.find(
+                        (option) => option.value === captionLanguage,
+                      )?.label ?? captionLanguage
+                    }`}
+                    className="min-w-32 justify-between"
+                    data-testid="caption-language-selector"
+                    disabled={controlsDisabled}
+                    variant="outline"
+                  >
+                    {CAPTION_LANGUAGE_OPTIONS.find(
+                      (option) => option.value === captionLanguage,
+                    )?.label ?? captionLanguage}
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuRadioGroup
+                    onValueChange={(language) => {
+                      if (settings) void saveCaptionLanguage(language);
+                    }}
+                    value={captionLanguage}
+                  >
+                    {CAPTION_LANGUAGE_OPTIONS.map((option) => (
+                      <DropdownMenuRadioItem
+                        key={option.value}
+                        value={option.value}
+                      >
+                        {option.label}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </SettingsOptionRow>
+            <SettingsOptionRow>
+              <div className="min-w-0">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="speak-captions-switch"
+                >
+                  Speak captions aloud
+                </label>
+                <p className="text-sm text-muted-foreground">
+                  Turn off to see captions as text only, without hearing them.
+                </p>
+              </div>
+              <Switch
+                checked={speakCaptions}
+                data-testid="speak-captions-toggle"
+                disabled={controlsDisabled}
+                id="speak-captions-switch"
+                onCheckedChange={(checked) => {
+                  if (settings) void saveSpeakCaptions(checked);
+                }}
+              />
+            </SettingsOptionRow>
+          </SettingsOptionGroup>
+        </div>
 
         <div
           aria-disabled={!enabled}

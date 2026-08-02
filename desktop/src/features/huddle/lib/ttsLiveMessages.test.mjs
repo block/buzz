@@ -18,8 +18,19 @@ const base = {
   content: "Hello there",
   tags: [["h", CHANNEL]],
 };
-const speakableText = (event, selfPubkey = "human") =>
-  classifySpeakableAgentText(event, agents, selfPubkey, CHANNEL).text;
+const SPEAK_ALL = { speakCaptions: true, captionLanguage: "en" };
+const speakableText = (
+  event,
+  selfPubkey = "human",
+  captionPreferences = SPEAK_ALL,
+) =>
+  classifySpeakableAgentText(
+    event,
+    agents,
+    selfPubkey,
+    CHANNEL,
+    captionPreferences,
+  ).text;
 
 test("speaks only new agent-authored text message events", () => {
   assert.equal(speakableText(base), "Hello there");
@@ -79,6 +90,7 @@ test("routes managed stream-message-v2 through membership and enabled ordering",
       CHANNEL,
       77,
       speaker.enqueue,
+      SPEAK_ALL,
     ),
     "queued",
   );
@@ -90,6 +102,7 @@ test("routes managed stream-message-v2 through membership and enabled ordering",
       CHANNEL,
       78,
       speaker.enqueue,
+      SPEAK_ALL,
     ),
     "unsupported_kind",
   );
@@ -101,6 +114,7 @@ test("routes managed stream-message-v2 through membership and enabled ordering",
       CHANNEL,
       79,
       speaker.enqueue,
+      SPEAK_ALL,
     ),
     "h_tag_mismatch",
   );
@@ -112,11 +126,48 @@ test("routes managed stream-message-v2 through membership and enabled ordering",
       CHANNEL,
       80,
       speaker.enqueue,
+      SPEAK_ALL,
     ),
     "author_not_agent",
   );
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(invoked, [{ text: "Hello there", routeId: 77 }]);
+});
+
+test("gates banner-tagged captions on the listener's language and speak-aloud preference", () => {
+  const spanishCaption = { ...base, content: "[ES] Hola" };
+  assert.equal(
+    speakableText(spanishCaption, "human", {
+      speakCaptions: true,
+      captionLanguage: "es",
+    }),
+    "[ES] Hola",
+    "caption in the listener's preferred language is spoken",
+  );
+  assert.equal(
+    speakableText(spanishCaption, "human", {
+      speakCaptions: true,
+      captionLanguage: "en",
+    }),
+    null,
+    "caption in another language is held back",
+  );
+  assert.equal(
+    speakableText(spanishCaption, "human", {
+      speakCaptions: false,
+      captionLanguage: "es",
+    }),
+    null,
+    "speak-aloud off silences even a matching-language caption",
+  );
+  assert.equal(
+    speakableText(base, "human", {
+      speakCaptions: false,
+      captionLanguage: "en",
+    }),
+    null,
+    "speak-aloud off also silences untagged agent replies",
+  );
 });
 
 test("strips attachment markup and skips attachment-only events", () => {
