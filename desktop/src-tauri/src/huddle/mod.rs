@@ -231,6 +231,7 @@ pub async fn start_huddle(
             "private",
             "stream",
             None,
+            None,
             Some(3600),
         )?;
         submit_event(create_builder, &state).await?;

@@ -1,13 +1,5 @@
 import type * as React from "react";
-import {
-  BellOff,
-  ChevronDown,
-  CircleDot,
-  FileText,
-  Hash,
-  Lock,
-  X,
-} from "lucide-react";
+import { BellOff, ChevronDown, CircleDot, X } from "lucide-react";
 
 import {
   ContextMenu,
@@ -25,6 +17,7 @@ import {
   ProfileAvatarWithStatus,
   scaleProfileAvatarStatusGeometry,
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { ChannelAvatar } from "@/features/channels/ui/ChannelAvatar";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
@@ -234,15 +227,18 @@ function SidebarChannelIcon({
     );
   }
 
-  if (channel.visibility === "private") {
-    return <Lock className="h-4 w-4" />;
-  }
-
-  if (channel.channelType === "forum") {
-    return <FileText className="h-4 w-4" />;
-  }
-
-  return <Hash className="h-4 w-4" />;
+  return (
+    <ChannelAvatar
+      avatarUrl={channel.avatarUrl}
+      channelType={channel.channelType}
+      className="h-6 w-6 bg-transparent shadow-none"
+      fallbackClassName="bg-transparent text-current"
+      name={channel.name}
+      size="sm"
+      testId={`channel-icon-${channel.name}`}
+      visibility={channel.visibility}
+    />
+  );
 }
 
 export function ChannelMenuButton({

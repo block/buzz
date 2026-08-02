@@ -81,6 +81,7 @@ import {
   NarrativeField,
   NarrativeGroup,
 } from "./ChannelManagementSheetRows";
+import { ChannelIconUrlField } from "./ChannelIconUrlField";
 import {
   ChannelManagementModerationActions,
   useChannelModerationCapabilities,
@@ -160,6 +161,7 @@ export function ChannelManagementSheet({
 
   const [nameDraft, setNameDraft] = React.useState("");
   const [descriptionDraft, setDescriptionDraft] = React.useState("");
+  const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
   const [isPrivateDraft, setIsPrivateDraft] = React.useState(false);
   const [isEphemeralDraft, setIsEphemeralDraft] = React.useState(false);
   const [ttlSecondsDraft, setTtlSecondsDraft] = React.useState(
@@ -199,6 +201,7 @@ export function ChannelManagementSheet({
 
     setNameDraft(detail.name);
     setDescriptionDraft(detail.description);
+    setAvatarUrlDraft(detail.avatarUrl ?? "");
     setIsPrivateDraft(detail.visibility === "private");
     setIsEphemeralDraft(detail.ttlSeconds !== null);
     setTtlSecondsDraft(detail.ttlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
@@ -250,8 +253,11 @@ export function ChannelManagementSheet({
   const nameDirty = nameDraft.trim() !== resolvedChannel.name.trim();
   const descriptionDirty =
     descriptionDraft.trim() !== resolvedChannel.description.trim();
+  const avatarUrlDirty =
+    avatarUrlDraft.trim() !== (resolvedChannel.avatarUrl ?? "").trim();
   const isSavingChannelEdits = updateChannelDetailsMutation.isPending;
-  const hasChannelEditChanges = nameDirty || descriptionDirty || lifecycleDirty;
+  const hasChannelEditChanges =
+    nameDirty || descriptionDirty || avatarUrlDirty || lifecycleDirty;
   const canSaveChannelEdits =
     nameDraft.trim().length > 0 &&
     hasUserEditedChannelDraft &&
@@ -268,6 +274,7 @@ export function ChannelManagementSheet({
     if (!next) {
       setNameDraft(resolvedChannel.name);
       setDescriptionDraft(resolvedChannel.description);
+      setAvatarUrlDraft(resolvedChannel.avatarUrl ?? "");
       setIsEphemeralDraft(currentTtlSeconds !== null);
       setTtlSecondsDraft(currentTtlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
       setHasUserEditedChannelDraft(false);
@@ -278,8 +285,9 @@ export function ChannelManagementSheet({
 
   async function handleSaveChannelEdits() {
     try {
-      if (nameDirty || descriptionDirty || lifecycleDirty) {
+      if (nameDirty || descriptionDirty || avatarUrlDirty || lifecycleDirty) {
         await updateChannelDetailsMutation.mutateAsync({
+          avatarUrl: avatarUrlDirty ? avatarUrlDraft.trim() || null : undefined,
           description: descriptionDirty ? descriptionDraft.trim() : undefined,
           name: nameDirty ? nameDraft.trim() : undefined,
           ttlSeconds:
@@ -502,6 +510,20 @@ export function ChannelManagementSheet({
                       />
                     </div>
                   </div>
+                  {resolvedChannel.channelType !== "dm" ? (
+                    <ChannelIconUrlField
+                      avatarUrl={avatarUrlDraft}
+                      channelType={resolvedChannel.channelType}
+                      disabled={isSavingChannelEdits}
+                      name={nameDraft || resolvedChannel.name}
+                      onChange={(nextAvatarUrl) => {
+                        setAvatarUrlDraft(nextAvatarUrl);
+                        setHasUserEditedChannelDraft(true);
+                      }}
+                      testIdPrefix="channel-management"
+                      visibility={isPrivateDraft ? "private" : "open"}
+                    />
+                  ) : null}
                 </div>
 
                 {resolvedChannel.channelType !== "dm" ? (

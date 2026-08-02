@@ -1,7 +1,3 @@
-//! Nostr event → desktop model converters.
-//!
-//! These pure functions translate raw Nostr protocol events into the
-//! model types expected by the Tauri frontend commands.
 //!
 //! All converters here are I/O-free and deterministic — they take owned
 //! or borrowed events and return models. This makes them trivially
@@ -104,6 +100,7 @@ pub fn channel_info_from_event(
 
     let name = first_tag_value(event, "name").unwrap_or("").to_string();
     let description = first_tag_value(event, "about").unwrap_or("").to_string();
+    let avatar_url = first_tag_value(event, "picture").map(str::to_string);
     let topic = first_tag_value(event, "topic").map(str::to_string);
     let purpose = first_tag_value(event, "purpose").map(str::to_string);
     // Prefer explicit ["t", type] tag; fall back to inferring from ["hidden"]
@@ -166,6 +163,7 @@ pub fn channel_info_from_event(
         description,
         topic,
         purpose,
+        avatar_url,
         member_count,
         member_pubkeys: Vec::new(),
         last_message_at,
@@ -186,6 +184,7 @@ pub fn channel_detail_from_event(event: &Event) -> Result<ChannelDetailInfo, Str
 
     let name = first_tag_value(event, "name").unwrap_or("").to_string();
     let description = first_tag_value(event, "about").unwrap_or("").to_string();
+    let avatar_url = first_tag_value(event, "picture").map(str::to_string);
     let topic = first_tag_value(event, "topic").map(str::to_string);
     let purpose = first_tag_value(event, "purpose").map(str::to_string);
     // Prefer explicit ["t", type]; fall back to ["hidden"] = dm, else "stream".
@@ -225,6 +224,7 @@ pub fn channel_detail_from_event(event: &Event) -> Result<ChannelDetailInfo, Str
         topic_set_by: None,
         topic_set_at: None,
         purpose,
+        avatar_url,
         purpose_set_by: None,
         purpose_set_at: None,
         created_by: event.pubkey.to_hex(),

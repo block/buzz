@@ -1,7 +1,6 @@
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
-
 export type Channel = {
   id: string;
   name: string;
@@ -10,6 +9,7 @@ export type Channel = {
   description: string;
   topic: string | null;
   purpose: string | null;
+  avatarUrl: string | null;
   memberCount: number;
   memberPubkeys: string[];
   lastMessageAt: string | null;
@@ -33,7 +33,6 @@ export type ChannelDetail = Channel & {
   maxMembers: number | null;
   nip29GroupId: string | null;
 };
-
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;
@@ -47,6 +46,7 @@ export type CreateChannelInput = {
   channelType: Exclude<ChannelType, "dm">;
   visibility: ChannelVisibility;
   description?: string;
+  avatarUrl?: string;
   ttlSeconds?: number;
 };
 
@@ -59,7 +59,7 @@ export type UpdateChannelInput = {
   name?: string;
   description?: string;
   visibility?: ChannelVisibility;
-  /** Omit to leave unchanged, `null` to clear (permanent), or a positive number of seconds to set. */
+  avatarUrl?: string | null;
   ttlSeconds?: number | null;
 };
 

@@ -274,6 +274,7 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
         name: " General ".to_string(),
         channel_type: "stream".to_string(),
         visibility: "open".to_string(),
+        avatar_url: None,
         description: "".to_string(),
         topic: None,
         purpose: None,

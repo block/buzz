@@ -10,6 +10,7 @@ export type CreateChannelInput = {
   name: string;
   description?: string;
   visibility: ChannelVisibility;
+  avatarUrl?: string;
   ttlSeconds?: number;
   templateId?: string;
 };
@@ -35,6 +36,8 @@ export type CreateChannelFormState = {
   setName: (value: string) => void;
   description: string;
   setDescription: (value: string) => void;
+  avatarUrl: string;
+  setAvatarUrl: (value: string) => void;
   visibility: ChannelVisibility;
   setVisibility: (value: ChannelVisibility) => void;
   ephemeral: boolean;
@@ -69,6 +72,7 @@ export function useCreateChannelForm({
 }: UseCreateChannelFormOptions): CreateChannelFormState {
   const [name, setName] = React.useState(initialName ?? "");
   const [description, setDescription] = React.useState("");
+  const [avatarUrl, setAvatarUrl] = React.useState("");
   const [visibility, setVisibility] = React.useState<ChannelVisibility>("open");
   const [ephemeral, setEphemeral] = React.useState(false);
   const [ttlSeconds, setTtlSeconds] = React.useState(
@@ -91,6 +95,7 @@ export function useCreateChannelForm({
 
     setName(initialName ?? "");
     setDescription("");
+    setAvatarUrl("");
     setVisibility("open");
     setEphemeral(false);
     setTtlSeconds(DEFAULT_EPHEMERAL_TTL_SECONDS);
@@ -158,6 +163,7 @@ export function useCreateChannelForm({
             name: trimmedName,
             description: description.trim() || undefined,
             visibility,
+            avatarUrl: avatarUrl.trim() || undefined,
             ttlSeconds: ephemeral ? ttlSeconds : undefined,
             templateId: selectedTemplateId ?? undefined,
           });
@@ -172,6 +178,7 @@ export function useCreateChannelForm({
       })();
     },
     [
+      avatarUrl,
       description,
       ephemeral,
       kindLabel,
@@ -195,6 +202,11 @@ export function useCreateChannelForm({
     description,
     setDescription: (value: string) => {
       setDescription(value);
+      setErrorMessage(null);
+    },
+    avatarUrl,
+    setAvatarUrl: (value: string) => {
+      setAvatarUrl(value);
       setErrorMessage(null);
     },
     visibility,

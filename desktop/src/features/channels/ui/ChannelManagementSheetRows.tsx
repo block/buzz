@@ -1,36 +1,25 @@
-import {
-  ChevronRight,
-  Copy,
-  FileText,
-  Hash,
-  MessageSquare,
-  type LucideIcon,
-} from "lucide-react";
+import { ChevronRight, Copy, type LucideIcon } from "lucide-react";
 import type * as React from "react";
 import { toast } from "sonner";
 
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
-
-function getChannelIcon(channelType: Channel["channelType"]): LucideIcon {
-  if (channelType === "forum") {
-    return FileText;
-  }
-  if (channelType === "dm") {
-    return MessageSquare;
-  }
-  return Hash;
-}
+import { ChannelAvatar } from "./ChannelAvatar";
 
 export function ChannelHero({ channel }: { channel: Channel }) {
-  const Icon = getChannelIcon(channel.channelType);
-
   return (
     <div className="flex flex-col items-center gap-3 text-center">
-      <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary text-primary-foreground">
-        <Icon className="h-8 w-8" />
-      </div>
+      <ChannelAvatar
+        avatarUrl={channel.avatarUrl}
+        channelType={channel.channelType}
+        className="h-20 w-20 bg-primary text-primary-foreground shadow-none"
+        fallbackClassName="bg-primary text-primary-foreground"
+        name={channel.name}
+        size="lg"
+        testId="channel-management-avatar"
+        visibility={channel.visibility}
+      />
       <div className="flex max-w-full flex-col items-center">
         <h3 className="max-w-full truncate text-xl font-semibold tracking-tight">
           {channel.name}

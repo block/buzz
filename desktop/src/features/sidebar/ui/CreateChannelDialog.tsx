@@ -23,6 +23,7 @@ type CreateChannelDialogProps = {
     name: string;
     description?: string;
     visibility: ChannelVisibility;
+    avatarUrl?: string;
     ttlSeconds?: number;
     templateId?: string;
   }) => Promise<void>;

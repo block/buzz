@@ -2707,6 +2707,7 @@ mod sec005_read_gate_tests {
             buzz_db::channel::ChannelType::Stream,
             buzz_db::channel::ChannelVisibility::Open,
             None,
+            None,
             &creator_pk,
             None,
         )

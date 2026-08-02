@@ -19,6 +19,7 @@ import {
 } from "@/features/channels/ui/channelFormStyles";
 import { ChannelPermissionsSettings } from "@/features/channels/ui/ChannelPermissionsSettings";
 import { ChannelTypeSettings } from "@/features/channels/ui/ChannelTypeSettings";
+import { ChannelIconUrlField } from "@/features/channels/ui/ChannelIconUrlField";
 import type { CreateChannelFormState } from "@/features/sidebar/lib/useCreateChannelForm";
 
 const CREATE_LABEL_OPTIONAL_CLASS =
@@ -104,6 +105,16 @@ export function CreateChannelFormFields({
           />
         </div>
       </div>
+
+      <ChannelIconUrlField
+        avatarUrl={form.avatarUrl}
+        channelType={form.channelKind}
+        disabled={isCreating}
+        name={form.name || kindLabel}
+        onChange={form.setAvatarUrl}
+        testIdPrefix="create-channel"
+        visibility={form.visibility}
+      />
 
       <ChannelTypeSettings
         disabled={isCreating}

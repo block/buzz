@@ -2134,6 +2134,7 @@ impl Db {
         channel_type: channel::ChannelType,
         visibility: channel::ChannelVisibility,
         description: Option<&str>,
+        avatar_url: Option<&str>,
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> Result<channel::ChannelRecord> {
@@ -2144,6 +2145,7 @@ impl Db {
             channel_type,
             visibility,
             description,
+            avatar_url,
             created_by,
             ttl_seconds,
         )
@@ -2162,6 +2164,7 @@ impl Db {
         channel_type: channel::ChannelType,
         visibility: channel::ChannelVisibility,
         description: Option<&str>,
+        avatar_url: Option<&str>,
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> Result<(channel::ChannelRecord, bool)> {
@@ -2173,6 +2176,7 @@ impl Db {
             channel_type,
             visibility,
             description,
+            avatar_url,
             created_by,
             ttl_seconds,
         )
@@ -6532,6 +6536,7 @@ mod tests {
             &format!("replica-routing-{channel}"),
             crate::channel::ChannelType::Stream,
             crate::channel::ChannelVisibility::Open,
+            None,
             None,
             author.public_key().to_bytes().as_slice(),
             None,

@@ -2479,6 +2479,31 @@ async fn ingest_event_inner(
                 IngestError::Rejected(format!("invalid channel_type: {channel_type_str}"))
             })?;
 
+        let picture = event.tags.iter().find_map(|t| {
+            if t.kind().to_string() == "picture" {
+                Some(t.content().map(|s| s.to_string()))
+            } else {
+                None
+            }
+        });
+        let picture = match picture {
+            Some(Some(value)) => {
+                super::validate_channel_picture_url(&value)
+                    .map_err(|e| IngestError::Rejected(format!("invalid picture: {e}")))?;
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value)
+                }
+            }
+            Some(None) => {
+                return Err(IngestError::Rejected(
+                    "invalid picture: picture tag must have a value".into(),
+                ));
+            }
+            None => None,
+        };
+
         if let Some(client_uuid) = channel_id {
             let name = create_name.unwrap_or_default();
             let name = buzz_core::channel::canonical_channel_name(&name);
@@ -2503,6 +2528,7 @@ async fn ingest_event_inner(
                     channel_type,
                     visibility,
                     description.as_deref(),
+                    picture.as_deref(),
                     &actor_bytes,
                     ttl_seconds,
                 )

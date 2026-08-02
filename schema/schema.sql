@@ -81,6 +81,7 @@ CREATE TABLE channels (
     visibility      channel_visibility NOT NULL DEFAULT 'open',
     description     TEXT,
     canvas          TEXT,
+    avatar_url      TEXT,
     created_by      BYTEA NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

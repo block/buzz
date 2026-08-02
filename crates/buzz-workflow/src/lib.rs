@@ -1699,7 +1699,7 @@ steps:
     async fn setup_db() -> buzz_db::Db {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned()); // sadscan:disable np.postgres.1
         buzz_db::Db::new(&buzz_db::DbConfig {
             database_url,
             ..Default::default()
@@ -1733,6 +1733,7 @@ steps:
             &format!("ch-{}", channel_id.simple()),
             buzz_db::channel::ChannelType::Stream,
             buzz_db::channel::ChannelVisibility::Open,
+            None,
             None,
             creator,
             None,

@@ -11,6 +11,11 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
+
+export type {
+  CreateChannelInput,
+  UpdateChannelInput,
+} from "@/shared/api/types";
 import { invokeTauri } from "@/shared/api/tauri";
 
 export type RawChannel = {
@@ -19,6 +24,7 @@ export type RawChannel = {
   channel_type: ChannelType;
   visibility: "open" | "private";
   description: string;
+  avatar_url: string | null;
   topic: string | null;
   purpose: string | null;
   member_count: number;
@@ -65,6 +71,7 @@ export function fromRawChannel(channel: RawChannel): Channel {
     channelType: channel.channel_type,
     visibility: channel.visibility,
     description: channel.description,
+    avatarUrl: channel.avatar_url,
     topic: channel.topic,
     purpose: channel.purpose,
     memberCount: channel.member_count,

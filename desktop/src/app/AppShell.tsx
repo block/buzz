@@ -88,6 +88,15 @@ import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
 import type { ChannelVisibility, SearchHit } from "@/shared/api/types";
+
+type CreateChannelRequest = {
+  name: string;
+  description?: string;
+  visibility: ChannelVisibility;
+  avatarUrl?: string;
+  ttlSeconds?: number;
+  templateId?: string;
+};
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
@@ -491,20 +500,16 @@ export function AppShell() {
         description,
         name,
         visibility,
+        avatarUrl,
         ttlSeconds,
         templateId,
-      }: {
-        name: string;
-        description?: string;
-        visibility: ChannelVisibility;
-        ttlSeconds?: number;
-        templateId?: string;
-      },
+      }: CreateChannelRequest,
       onCreated?: (channelId: string) => void,
     ) => {
       const createdChannel = await createChannelMutation.mutateAsync({
         name,
         description,
+        avatarUrl,
         channelType: "stream",
         visibility,
         ttlSeconds,
@@ -522,18 +527,14 @@ export function AppShell() {
       description,
       name,
       visibility,
+      avatarUrl,
       ttlSeconds,
       templateId,
-    }: {
-      name: string;
-      description?: string;
-      visibility: ChannelVisibility;
-      ttlSeconds?: number;
-      templateId?: string;
-    }) => {
+    }: CreateChannelRequest) => {
       const createdForum = await createForumMutation.mutateAsync({
         name,
         description,
+        avatarUrl,
         channelType: "forum",
         visibility,
         ttlSeconds,
@@ -549,13 +550,7 @@ export function AppShell() {
   // The channel browser can create either a stream or a forum depending on
   // which section opened it. Route to the matching handler.
   const handleBrowseChannelCreate = React.useCallback(
-    async (input: {
-      name: string;
-      description?: string;
-      visibility: ChannelVisibility;
-      ttlSeconds?: number;
-      templateId?: string;
-    }) => {
+    async (input: CreateChannelRequest) => {
       if (browseDialogType === "forum") {
         await handleCreateForum(input);
       } else {

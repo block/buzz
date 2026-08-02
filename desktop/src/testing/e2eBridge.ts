@@ -589,6 +589,7 @@ type RawChannel = {
   channel_type: "stream" | "forum" | "dm";
   visibility: "open" | "private";
   description: string;
+  avatar_url: string | null;
   topic: string | null;
   purpose: string | null;
   member_count: number;
@@ -1394,6 +1395,7 @@ function toRawChannel(
     channel_type: channel.channel_type,
     visibility: channel.visibility,
     description: channel.description,
+    avatar_url: channel.avatar_url,
     topic: channel.topic,
     purpose: channel.purpose,
     member_count: channel.member_count,
@@ -1452,6 +1454,7 @@ function createMockChannel(
     | "updated_at"
     | "participant_pubkeys"
     | "participants"
+    | "avatar_url"
     | "ttl_seconds"
     | "ttl_deadline"
   > & {
@@ -1461,6 +1464,7 @@ function createMockChannel(
     participants?: string[];
     ttl_seconds?: number | null;
     ttl_deadline?: string | null;
+    avatar_url?: string | null;
     updated_minutes_ago?: number;
   },
 ): MockChannel {
@@ -1471,6 +1475,7 @@ function createMockChannel(
     members: cloneMembers(seed.members),
     participant_pubkeys: [...(seed.participant_pubkeys ?? [])],
     participants: [...(seed.participants ?? [])],
+    avatar_url: seed.avatar_url ?? null,
     ttl_seconds: seed.ttl_seconds ?? null,
     ttl_deadline: seed.ttl_deadline ?? null,
     updated_at: isoMinutesAgo(
@@ -5970,6 +5975,7 @@ async function handleCreateChannel(
     channelType: "stream" | "forum";
     visibility: "open" | "private";
     description?: string;
+    avatarUrl?: string;
     ttlSeconds?: number;
   },
   config: E2eConfig | undefined,
@@ -5992,6 +5998,7 @@ async function handleCreateChannel(
       channel_type: args.channelType,
       visibility: args.visibility,
       description: args.description ?? "",
+      avatar_url: args.avatarUrl ?? null,
       topic: null,
       purpose: null,
       last_message_at: null,
@@ -6024,6 +6031,9 @@ async function handleCreateChannel(
   if (args.description) {
     tags.push(["about", args.description]);
   }
+  if (args.avatarUrl) {
+    tags.push(["picture", args.avatarUrl]);
+  }
   if (typeof args.ttlSeconds === "number") {
     tags.push(["ttl", String(args.ttlSeconds)]);
   }
@@ -6045,6 +6055,7 @@ async function handleCreateChannel(
     id: channelId,
     name: getTag("name") ?? args.name,
     description: getTag("about") ?? args.description ?? null,
+    avatar_url: getTag("picture"),
     channel_type: args.channelType,
     visibility: args.visibility,
     topic: null,
@@ -6274,6 +6285,7 @@ async function handleUpdateChannel(
     name?: string;
     description?: string;
     visibility?: "open" | "private";
+    avatarUrl?: string | null;
     ttlSeconds?: number | null;
   },
   config: E2eConfig | undefined,
@@ -6294,6 +6306,9 @@ async function handleUpdateChannel(
     }
     if (args.visibility !== undefined) {
       channel.visibility = args.visibility;
+    }
+    if (args.avatarUrl !== undefined) {
+      channel.avatar_url = args.avatarUrl;
     }
     if (args.ttlSeconds !== undefined) {
       channel.ttl_seconds = args.ttlSeconds;
@@ -6316,6 +6331,9 @@ async function handleUpdateChannel(
   if (args.visibility !== undefined) {
     tags.push(["visibility", args.visibility]);
   }
+  if (args.avatarUrl !== undefined) {
+    tags.push(["picture", args.avatarUrl ?? ""]);
+  }
   if (args.ttlSeconds !== undefined) {
     tags.push(["ttl", args.ttlSeconds === null ? "" : String(args.ttlSeconds)]);
   }
@@ -6335,6 +6353,7 @@ async function handleUpdateChannel(
     id: args.channelId,
     name: getTag("name") ?? "",
     description: getTag("about") ?? null,
+    avatar_url: getTag("picture"),
     channel_type: getTag("t") ?? "stream",
     visibility: getTag("visibility") ?? "open",
     topic: getTag("topic") ?? null,
