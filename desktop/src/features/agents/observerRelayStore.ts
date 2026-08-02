@@ -25,6 +25,10 @@ import {
   createEmptyTranscriptState,
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
+import {
+  parseAvailableCommandsEvent,
+  type AgentAvailableCommand,
+} from "./lib/agentAvailableCommands";
 
 const MAX_OBSERVER_EVENTS = 3000;
 const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
@@ -43,11 +47,20 @@ const IDLE_SNAPSHOT: ObserverSnapshot = {
 
 const EMPTY_EVENTS: ObserverEvent[] = [];
 const EMPTY_TRANSCRIPT: TranscriptItem[] = [];
+const EMPTY_AVAILABLE_COMMANDS: AgentAvailableCommand[] = [];
 
 const listeners = new Set<() => void>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
+const availableCommandsByAgent = new Map<
+  string,
+  {
+    commands: AgentAvailableCommand[];
+    timestamp: string;
+    seq: number;
+  }
+>();
 
 // Channel-scoped archive event journal — holds paged history loaded from the local
 // SQLite archive without the MAX_OBSERVER_EVENTS live-relay cap. Keyed by
@@ -179,6 +192,25 @@ function invalidateSnapshot(key: string) {
   snapshotByAgent.delete(key);
 }
 
+function updateAvailableCommands(
+  agentPubkey: string,
+  event: ObserverEvent,
+): boolean {
+  const commands = parseAvailableCommandsEvent(event);
+  if (commands === null) return false;
+
+  const key = normalizePubkey(agentPubkey);
+  const current = availableCommandsByAgent.get(key);
+  if (current && !isObserverEventAfter(event, current)) return false;
+
+  availableCommandsByAgent.set(key, {
+    commands,
+    timestamp: event.timestamp,
+    seq: event.seq,
+  });
+  return true;
+}
+
 function setConnectionState(
   nextState: ConnectionState,
   nextErrorMessage: string | null = errorMessage,
@@ -211,6 +243,7 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
     ? sorted.slice(sorted.length - MAX_OBSERVER_EVENTS)
     : sorted;
   eventsByAgent.set(key, final);
+  updateAvailableCommands(key, event);
 
   // Determine whether the new event landed at the end of the sorted array.
   // If it did (common case), we can incrementally process just this event.
@@ -590,6 +623,17 @@ export function getAgentTranscript(
   return state?.items ?? EMPTY_TRANSCRIPT;
 }
 
+/** Read the latest command catalog advertised by an agent's ACP runtime. */
+export function getAvailableAgentCommands(
+  agentPubkey?: string | null,
+): AgentAvailableCommand[] {
+  if (!agentPubkey) return EMPTY_AVAILABLE_COMMANDS;
+  return (
+    availableCommandsByAgent.get(normalizePubkey(agentPubkey))?.commands ??
+    EMPTY_AVAILABLE_COMMANDS
+  );
+}
+
 export function shouldObserveManagedAgents(
   agents: readonly Pick<ManagedAgent, "pubkey">[],
 ): boolean {
@@ -662,6 +706,7 @@ export async function ingestArchivedObserverEvents(
   _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
 ): Promise<void> {
   let archiveChanged = false;
+  let availableCommandsChanged = false;
   for (const event of rawEvents) {
     const agentPubkey = observerTag(event, "agent");
     const frame = observerTag(event, "frame");
@@ -676,6 +721,9 @@ export async function ingestArchivedObserverEvents(
     }
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
+      if (updateAvailableCommands(agentPubkey, parsed)) {
+        availableCommandsChanged = true;
+      }
       // Route archived events to the channel-scoped archive window (no cap)
       // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
       // Events without a channelId fall through to the live store so they
@@ -698,7 +746,7 @@ export async function ingestArchivedObserverEvents(
   // Batch-notify once for the whole page of archive events. appendAgentEvent
   // already notifies individually for live/no-channelId events above, so we
   // only need one extra notify here for the archive path.
-  if (archiveChanged) {
+  if (archiveChanged || availableCommandsChanged) {
     notifyListeners();
   }
 }
@@ -744,6 +792,7 @@ export function resetAgentObserverStore() {
   eventsByAgent.clear();
   transcriptByAgent.clear();
   snapshotByAgent.clear();
+  availableCommandsByAgent.clear();
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();

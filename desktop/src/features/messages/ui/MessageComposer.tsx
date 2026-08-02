@@ -4,11 +4,10 @@ import { EditorContent } from "@tiptap/react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
-import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
-import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
+import { useComposerAutocompleteInsertions } from "@/features/messages/lib/useComposerAutocompleteInsertions";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
@@ -23,6 +22,7 @@ import {
 import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import { useSlashCommandAutocomplete } from "@/features/messages/lib/useSlashCommandAutocomplete";
 import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -32,7 +32,6 @@ import {
 } from "@/features/messages/lib/normalizeMentionClipboard";
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
-  type AutocompleteEdit,
   type LinkSelectionInfo,
   useRichTextEditor,
 } from "@/features/messages/lib/useRichTextEditor";
@@ -45,10 +44,8 @@ import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
-import {
-  MentionAutocomplete,
-  type MentionSuggestion,
-} from "./MentionAutocomplete";
+import { SlashCommandAutocomplete } from "./SlashCommandAutocomplete";
+import { MentionAutocomplete } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
@@ -133,6 +130,7 @@ function MessageComposerImpl({
   const mentions = useMentions(channelId, undefined, profiles, {
     channelType,
   });
+  const slashCommands = useSlashCommandAutocomplete(mentions);
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();
   const emojiAutocomplete = useEmojiAutocomplete(customEmoji);
@@ -178,6 +176,7 @@ function MessageComposerImpl({
     setIsEmojiPickerOpen(false);
     channelLinks.clearChannels();
     emojiAutocomplete.clearEmojis();
+    slashCommands.clear();
   }, [effectiveDraftKey]);
 
   const disabledRef = React.useRef(disabled);
@@ -203,7 +202,8 @@ function MessageComposerImpl({
   isAutocompleteOpenRef.current =
     mentions.isMentionOpen ||
     channelLinks.isChannelOpen ||
-    emojiAutocomplete.isEmojiAutocompleteOpen;
+    emojiAutocomplete.isEmojiAutocompleteOpen ||
+    slashCommands.isOpen;
 
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
@@ -259,6 +259,7 @@ function MessageComposerImpl({
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
+      slashCommands.updateQuery(text, cursor);
 
       persistentMentionHydrationRef.current?.reconcile(text);
 
@@ -386,56 +387,19 @@ function MessageComposerImpl({
   // ── Autofocus on mount / channel switch ─────────────────────────────
   useComposerAutofocus(richText.focus, effectiveDraftKey, disabled);
 
-  // ── Mention / channel / emoji autocomplete insertion ────────────────
-  // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
-  // applies it as a single ProseMirror transaction (no markdown round-trip).
-  const applyAutocompleteEdit = React.useCallback(
-    (edit: AutocompleteEdit) => {
-      richText.replacePlainTextRange(
-        edit.replaceFromOffset,
-        edit.replaceToOffset,
-        edit.insertText,
-        edit.customEmojiShortcode,
-      );
-    },
-    [richText.replacePlainTextRange],
-  );
-
-  const applyMentionInsert = React.useCallback(
-    (suggestion: MentionSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      mentions.insertMention,
-      richText.getPlainTextAndCursor,
-    ],
-  );
-
-  const applyChannelInsert = React.useCallback(
-    (suggestion: ChannelSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(channelLinks.insertChannel(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      channelLinks.insertChannel,
-      richText.getPlainTextAndCursor,
-    ],
-  );
-
-  const applyEmojiInsert = React.useCallback(
-    (suggestion: EmojiSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(emojiAutocomplete.insertEmoji(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      emojiAutocomplete.insertEmoji,
-      richText.getPlainTextAndCursor,
-    ],
-  );
+  const {
+    applyChannelInsert,
+    applyEmojiInsert,
+    applyMentionInsert,
+    applySlashCommandInsert,
+  } = useComposerAutocompleteInsertions({
+    getCursor: richText.getPlainTextAndCursor,
+    replacePlainTextRange: richText.replacePlainTextRange,
+    insertMention: mentions.insertMention,
+    insertChannel: channelLinks.insertChannel,
+    insertEmoji: emojiAutocomplete.insertEmoji,
+    insertSlashCommand: slashCommands.insert,
+  });
 
   // ── Emoji insertion ─────────────────────────────────────────────────
   const insertEmoji = React.useCallback(
@@ -558,6 +522,7 @@ function MessageComposerImpl({
       mentions.clearMentions();
       channelLinks.clearChannels();
       emojiAutocomplete.clearEmojis();
+      slashCommands.clear();
       setIsEmojiPickerOpen(false);
 
       try {
@@ -627,6 +592,7 @@ function MessageComposerImpl({
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
+    slashCommands.clear,
     richText.clearContent,
     richText.setContent,
     setComposerContent,
@@ -691,6 +657,16 @@ function MessageComposerImpl({
   // Plain Enter → submit is now handled inside the Tiptap `submitOnEnter`
   // extension (fires before ProseMirror's splitBlock). This wrapper only
   // handles autocomplete arrow/enter keys and Escape for edit mode.
+  const handleSlashCommandKeyDownCapture = React.useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const result = slashCommands.handleKeyDown(event);
+      if (!result.handled) return;
+      event.stopPropagation();
+      if (result.suggestion) applySlashCommandInsert(result.suggestion);
+    },
+    [applySlashCommandInsert, slashCommands.handleKeyDown],
+  );
+
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       // Let autocomplete handle keys first
@@ -919,6 +895,13 @@ function MessageComposerImpl({
             }}
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
+            <SlashCommandAutocomplete
+              onSelect={applySlashCommandInsert}
+              selectedIndex={slashCommands.selectedIndex}
+              suggestions={
+                slashCommands.isOpen ? slashCommands.suggestions : []
+              }
+            />
             <EmojiAutocomplete
               onSelect={applyEmojiInsert}
               selectedIndex={emojiAutocomplete.emojiSelectedIndex}
@@ -979,6 +962,7 @@ function MessageComposerImpl({
               className="rich-text-composer relative max-h-32 overflow-y-auto"
               data-testid="message-input-scroll"
               ref={composerScrollRef}
+              onKeyDownCapture={handleSlashCommandKeyDownCapture}
               onKeyDown={handleEditorKeyDown}
             >
               <EditorContent editor={richText.editor} />

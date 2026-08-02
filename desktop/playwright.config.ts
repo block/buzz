@@ -64,6 +64,7 @@ export default defineConfig({
         "**/composer-selection-formatting.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",
+        "**/slash-command-autocomplete.spec.ts",
         "**/team-mentions.spec.ts",
         "**/persistent-agent-audience.spec.ts",
         "**/relay-reconnect.spec.ts",
