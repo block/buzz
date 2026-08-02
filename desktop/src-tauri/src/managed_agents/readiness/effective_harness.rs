@@ -98,6 +98,11 @@ pub(crate) fn resolve_effective_harness_descriptor(
     );
     let mut effective_env =
         resolve_effective_agent_env_with_def(record, personas, runtime_meta, global, harness_def);
+    // Guardian owns the managed harness permission mode. Preserving a generic
+    // `accept-edits` or `bypass-permissions` value here would let a lower env
+    // layer punch through an inherited lockdown (or bypass monitor evidence).
+    // Non-Guardian permission modes remain available to unmanaged buzz-acp
+    // processes, but managed agents intentionally resolve to default/dont-ask.
     effective_env
         .env
         .retain(|key, _| !key.eq_ignore_ascii_case("BUZZ_ACP_PERMISSION_MODE"));

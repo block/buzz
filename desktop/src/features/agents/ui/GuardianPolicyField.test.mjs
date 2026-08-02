@@ -63,7 +63,7 @@ test("Guardian policy renders the monitor default with accessible consequence co
   );
   assert.match(
     html,
-    /id="global-agent-guardian-policy-description"[^>]*>Monitor allows permission requests and records each decision\. Lockdown denies permission requests before the tool runs\./,
+    /id="global-agent-guardian-policy-description"[^>]*>Monitor allows permission requests and records each decision\. Lockdown denies permission requests before the tool runs\. An inherited Lockdown policy cannot be weakened for an individual agent\./,
   );
 });
 

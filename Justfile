@@ -495,11 +495,12 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     cargo build --manifest-path desktop/src-tauri/Cargo.toml --bin buzz-guardian-numbat
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    DESKTOP_TARGET_DIR=$(cargo metadata --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
         cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
-    cp "desktop/src-tauri/target/debug/buzz-guardian-numbat" "desktop/src-tauri/binaries/buzz-guardian-numbat-${TARGET}"
+    cp "${DESKTOP_TARGET_DIR}/debug/buzz-guardian-numbat" "desktop/src-tauri/binaries/buzz-guardian-numbat-${TARGET}"
     chmod +x "desktop/src-tauri/binaries/buzz-guardian-numbat-${TARGET}"
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install

@@ -267,7 +267,32 @@ fn findings_generation(path: &Path) -> Result<u64, String> {
         .map_err(|error| format!("failed to identify Guardian storage: {error}"))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn findings_generation(path: &Path) -> Result<u64, String> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    path.metadata()
+        .map(|metadata| {
+            // A rename preserves timestamps on Windows. The volume/file index
+            // identifies the replacement file instead, matching Unix inode
+            // semantics and invalidating stale cursors after retention rotates.
+            let volume = u64::from(metadata.volume_serial_number().unwrap_or_default());
+            let index = metadata
+                .file_index()
+                .unwrap_or_else(|| metadata.creation_time() ^ metadata.file_size().rotate_left(17));
+            (index ^ volume.rotate_left(32)) & CURSOR_GENERATION_MASK
+        })
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(0)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| format!("failed to identify Guardian storage: {error}"))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn findings_generation(path: &Path) -> Result<u64, String> {
     path.metadata()
         .and_then(|metadata| metadata.modified())
