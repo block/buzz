@@ -168,7 +168,9 @@ pub(crate) fn build_managed_agent_route_inventory(
         .collect()
 }
 
-pub(crate) fn require_signing_identity_available<T>(identity: Result<T, String>) -> Result<(), String> {
+pub(crate) fn require_signing_identity_available<T>(
+    identity: Result<T, String>,
+) -> Result<(), String> {
     identity
         .map(|_| ())
         .map_err(|_| "route inventory requires an available signing identity".to_string())
@@ -487,9 +489,9 @@ mod tests {
     fn unavailable_signing_identity_fails_before_building_a_payload() {
         let build_calls = std::cell::Cell::new(0);
         let result =
-            require_signing_identity_available::<()>(Err("identity_lost".into())).and_then(|_| {
+            require_signing_identity_available::<()>(Err("identity_lost".into())).map(|_| {
                 build_calls.set(build_calls.get() + 1);
-                Ok(vec!["payload"])
+                vec!["payload"]
             });
         assert_eq!(
             result.unwrap_err(),
