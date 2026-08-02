@@ -605,7 +605,10 @@ class PairingNotifier extends Notifier<PairingState> {
       throw const FormatException('Pairing payload missing nsec');
     }
     final uri = Uri.parse(relayUrl);
-    final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
+    // Preserve transport security: https/wss -> wss, http/ws -> ws. (Avoids
+    // silently downgrading a `wss://<onion>` payload to plain ws.)
+    final secure = uri.scheme == 'https' || uri.scheme == 'wss';
+    final scheme = secure ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
     final socket = RelaySocket(
@@ -653,15 +656,20 @@ class PairingNotifier extends Notifier<PairingState> {
 
   void _validateRelayUrl(String url) {
     final uri = Uri.parse(url);
+    final host = uri.host.toLowerCase();
+    final isOnion = isOnionHost(host);
 
-    if (!kDebugMode && uri.scheme != 'https') {
-      throw const FormatException('Relay URL must use HTTPS');
-    }
-    if (uri.scheme != 'http' && uri.scheme != 'https') {
+    // Onion hosts are authenticated by Tor's rendezvous handshake (the .onion
+    // address IS the relay's ed25519 pubkey), so they need no CA-issued cert
+    // and may pair over ws/wss directly. Clearnet relays still require HTTPS.
+    const allowedSchemes = {'http', 'https', 'ws', 'wss'};
+    if (!allowedSchemes.contains(uri.scheme)) {
       throw FormatException('Invalid URL scheme: ${uri.scheme}');
     }
+    if (!kDebugMode && !isOnion && uri.scheme != 'https') {
+      throw const FormatException('Relay URL must use HTTPS');
+    }
 
-    final host = uri.host.toLowerCase();
     if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
       if (!kDebugMode) {
         throw const FormatException('Relay URL cannot target localhost');
