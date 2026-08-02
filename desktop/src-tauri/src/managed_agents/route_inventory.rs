@@ -2,6 +2,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use super::{
+    discovery::dangling_harness_id,
     effective_config::{resolve_effective_config, ConfigSource, EffectiveConfigResult},
     known_acp_runtime, resolve_effective_harness_descriptor, AgentDefinition, GlobalAgentConfig,
     ManagedAgentRecord,
@@ -22,6 +23,7 @@ enum RouteSource {
     NotInSpawnEffectiveConfig,
     NoSafeToolCatalog,
     OrphanedInstance,
+    DanglingHarness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -156,7 +158,21 @@ pub(crate) fn build_managed_agent_route_inventory(
                     });
                 }
             };
-            let descriptor = resolve_effective_harness_descriptor(record, personas, global)?;
+            let descriptor = match resolve_effective_harness_descriptor(record, personas, global) {
+                Ok(descriptor) => descriptor,
+                Err(error) if dangling_harness_id(&error).is_some() => {
+                    return Ok(ManagedAgentRouteInventoryEntry {
+                        identity: record.name.clone(),
+                        pubkey: record.pubkey.clone(),
+                        runtime: RouteField::unavailable(RouteSource::DanglingHarness),
+                        provider: RouteField::unavailable(RouteSource::DanglingHarness),
+                        model: RouteField::unavailable(RouteSource::DanglingHarness),
+                        effort: RouteField::unavailable(RouteSource::DanglingHarness),
+                        tools: RouteListField::unavailable(RouteSource::DanglingHarness),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
             Ok(ManagedAgentRouteInventoryEntry {
                 identity: record.name.clone(),
                 pubkey: record.pubkey.clone(),
@@ -527,39 +543,62 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_instance_degrades_only_its_own_entry() {
+    fn broken_references_degrade_only_their_own_entries() {
         let mut healthy = record("Healthy", "healthy-pk", None);
         healthy.runtime = Some("goose".into());
+        let mut dangling = record("Dangling", "dangling-pk", None);
+        dangling.runtime = Some("deleted-custom-harness".into());
         let orphan = record("Orphan", "orphan-pk", Some("deleted-persona"));
 
         let entries = build_managed_agent_route_inventory(
-            &[healthy, orphan],
+            &[healthy, dangling, orphan],
             &[],
             &GlobalAgentConfig::default(),
         )
         .unwrap();
 
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].identity, "Healthy");
-        assert_eq!(entries[1].identity, "Orphan");
+        assert_eq!(entries[1].identity, "Dangling");
+        assert_eq!(entries[2].identity, "Orphan");
         assert_eq!(
             entries[1].runtime,
-            RouteField::unavailable(RouteSource::OrphanedInstance)
+            RouteField::unavailable(RouteSource::DanglingHarness)
         );
         assert_eq!(
             entries[1].provider,
-            RouteField::unavailable(RouteSource::OrphanedInstance)
+            RouteField::unavailable(RouteSource::DanglingHarness)
         );
         assert_eq!(
             entries[1].model,
-            RouteField::unavailable(RouteSource::OrphanedInstance)
+            RouteField::unavailable(RouteSource::DanglingHarness)
         );
         assert_eq!(
             entries[1].effort,
-            RouteField::unavailable(RouteSource::OrphanedInstance)
+            RouteField::unavailable(RouteSource::DanglingHarness)
         );
         assert_eq!(
             entries[1].tools,
+            RouteListField::unavailable(RouteSource::DanglingHarness)
+        );
+        assert_eq!(
+            entries[2].runtime,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[2].provider,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[2].model,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[2].effort,
+            RouteField::unavailable(RouteSource::OrphanedInstance)
+        );
+        assert_eq!(
+            entries[2].tools,
             RouteListField::unavailable(RouteSource::OrphanedInstance)
         );
     }
