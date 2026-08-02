@@ -40,6 +40,61 @@ export type CatalogPersona = AgentPersona & {
 
 type JsonObject = Record<string, unknown>;
 
+const MAX_AGENT_DISPLAY_NAME_CHARACTERS = 128;
+const MAX_AGENT_SYSTEM_PROMPT_BYTES = 64 * 1_024;
+
+function isProhibitedAgentTextCharacter(
+  character: string,
+  allowLayoutControls: boolean,
+): boolean {
+  const codePoint = character.codePointAt(0);
+  if (codePoint === undefined) return false;
+
+  const isControl =
+    codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+  const isAllowedLayoutControl =
+    allowLayoutControls && (codePoint === 0x09 || codePoint === 0x0a);
+  if (isControl && !isAllowedLayoutControl) return true;
+
+  return (
+    codePoint === 0x00ad ||
+    codePoint === 0x034f ||
+    codePoint === 0x061c ||
+    (codePoint >= 0x115f && codePoint <= 0x1160) ||
+    (codePoint >= 0x17b4 && codePoint <= 0x17b5) ||
+    (codePoint >= 0x180b && codePoint <= 0x180f) ||
+    (codePoint >= 0x200b && codePoint <= 0x200f) ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2060 && codePoint <= 0x206f) ||
+    codePoint === 0x3164 ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    codePoint === 0xfeff ||
+    codePoint === 0xffa0 ||
+    (codePoint >= 0xfff0 && codePoint <= 0xfff8) ||
+    (codePoint >= 0x1bca0 && codePoint <= 0x1bca3) ||
+    (codePoint >= 0x1d173 && codePoint <= 0x1d17a) ||
+    (codePoint >= 0xe0000 && codePoint <= 0xe0fff)
+  );
+}
+
+function isSafeAgentDefinitionText(
+  displayName: string,
+  systemPrompt: string,
+): boolean {
+  return (
+    displayName.trim().length > 0 &&
+    [...displayName].length <= MAX_AGENT_DISPLAY_NAME_CHARACTERS &&
+    new TextEncoder().encode(systemPrompt).length <=
+      MAX_AGENT_SYSTEM_PROMPT_BYTES &&
+    ![...displayName].some((character) =>
+      isProhibitedAgentTextCharacter(character, false),
+    ) &&
+    ![...systemPrompt].some((character) =>
+      isProhibitedAgentTextCharacter(character, true),
+    )
+  );
+}
+
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -133,10 +188,14 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
   } catch {
     return null;
   }
+  if (!isObject(parsed)) return null;
+
+  const displayName = parsed.display_name;
+  const systemPrompt =
+    typeof parsed.system_prompt === "string" ? parsed.system_prompt : "";
   if (
-    !isObject(parsed) ||
-    typeof parsed.display_name !== "string" ||
-    parsed.display_name.trim().length === 0
+    typeof displayName !== "string" ||
+    !isSafeAgentDefinitionText(displayName, systemPrompt)
   ) {
     return null;
   }
@@ -167,10 +226,9 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
       : null;
 
   return {
-    displayName: parsed.display_name,
+    displayName,
     avatarUrl,
-    systemPrompt:
-      typeof parsed.system_prompt === "string" ? parsed.system_prompt : "",
+    systemPrompt,
     runtime: optionalString(parsed.runtime),
     model: optionalString(parsed.model),
     provider: optionalString(parsed.provider),
