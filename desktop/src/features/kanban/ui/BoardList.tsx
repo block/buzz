@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { Plus, Search } from "lucide-react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -8,9 +9,11 @@ import { Input } from "@/shared/ui/input";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
 import {
+  boardsQueryKey,
   useBoardsQuery,
   useMemberChannelIds,
 } from "@/features/kanban/lib/boardQueries";
+import { NewBoardDialog } from "@/features/kanban/ui/NewBoardDialog";
 import type { KanbanBoard } from "@/features/kanban/lib/kanbanTypes";
 
 type BoardScope = "all" | "owned" | "shared";
@@ -24,7 +27,14 @@ export function BoardList() {
 
   const [scope, setScope] = React.useState<BoardScope>("all");
   const [query, setQuery] = React.useState("");
+  const [newBoardOpen, setNewBoardOpen] = React.useState(false);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  async function handleBoardCreated(boardId: string) {
+    await queryClient.invalidateQueries({ queryKey: boardsQueryKey() });
+    navigate({ to: "/boards/$boardId", params: { boardId } });
+  }
 
   const normalizedQuery = query.trim().toLowerCase();
   const filtered = boards.filter((board) => {
@@ -49,8 +59,12 @@ export function BoardList() {
             Boards you own or were invited to.
           </p>
         </div>
-        {/* Creation ships in P3 — the button is present but disabled. */}
-        <Button disabled title="New boards ship in P3" type="button">
+        {/* In-app board creation (P3 write path) — signs under the Desktop identity. */}
+        <Button
+          disabled={!me}
+          onClick={() => setNewBoardOpen(true)}
+          type="button"
+        >
           <Plus className="size-4" />
           New board
         </Button>
@@ -97,7 +111,7 @@ export function BoardList() {
         ) : filtered.length === 0 ? (
           <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
             {boards.length === 0
-              ? "No boards yet. Create one from the CLI (`buzz boards create`) — inline creation ships in P3."
+              ? "No boards yet. Create your first board."
               : "No boards match this filter."}
           </div>
         ) : (
@@ -120,6 +134,15 @@ export function BoardList() {
           </div>
         )}
       </div>
+
+      {me ? (
+        <NewBoardDialog
+          onCreated={handleBoardCreated}
+          onOpenChange={setNewBoardOpen}
+          open={newBoardOpen}
+          owner={me}
+        />
+      ) : null}
     </div>
   );
 }
