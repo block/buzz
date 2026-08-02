@@ -3,6 +3,7 @@ import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
+  type PendingSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
@@ -104,29 +105,37 @@ export function AgentsView() {
   );
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
+    const openPendingSnapshot = async (pending: PendingSnapshotImport) => {
+      if (pending.snapshotKind === "team") {
+        await teamActions.handleImportTeamSnapshotFile(
+          pending.fileBytes,
+          pending.fileName,
+        );
+        await pending.onPreviewAccepted?.();
+      } else if (
+        await personas.handleImportSnapshotFile(
+          pending.fileBytes,
+          pending.fileName,
+        )
+      ) {
+        const acknowledged = await pending.onPreviewAccepted?.();
+        if (acknowledged === false) {
+          personas.closeSnapshotImportDialog();
+          await pending.onPreviewRejected?.();
+        }
+      } else {
+        await pending.onPreviewRejected?.();
+      }
+    };
     // Consume a snapshot import that was enqueued before navigation (e.g. from
     // a timeline AgentSnapshotCard click that navigated here).
     const pending = consumePendingSnapshotImport();
     if (pending) {
-      if (pending.snapshotKind === "team") {
-        void teamActions.handleImportTeamSnapshotFile(
-          pending.fileBytes,
-          pending.fileName,
-        );
-      } else {
-        void personas.handleImportSnapshotFile(
-          pending.fileBytes,
-          pending.fileName,
-        );
-      }
+      void openPendingSnapshot(pending);
     }
 
-    return subscribeSnapshotImport(({ fileBytes, fileName, snapshotKind }) => {
-      if (snapshotKind === "team") {
-        void teamActions.handleImportTeamSnapshotFile(fileBytes, fileName);
-      } else {
-        void personas.handleImportSnapshotFile(fileBytes, fileName);
-      }
+    return subscribeSnapshotImport((next) => {
+      void openPendingSnapshot(next);
     });
   }, []);
 

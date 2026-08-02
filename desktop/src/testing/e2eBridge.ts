@@ -11019,6 +11019,10 @@ export function maybeInstallE2eTauriMocks() {
           activeWorkspaceId: null,
           onboardingCompletions: [],
         };
+      case "take_pending_agent_snapshot_import":
+        return null;
+      case "acknowledge_pending_agent_snapshot_import":
+        return false;
       case "take_pending_community_deep_link":
         // Mirrors the Rust queue: peek the head; acknowledge removes it.
         return mockPendingCommunityDeepLinks[0] ?? null;

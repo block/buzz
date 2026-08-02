@@ -6,6 +6,149 @@ use url::Url;
 
 use crate::nostr_bind;
 
+mod agent_snapshot_handoff_security;
+
+use agent_snapshot_handoff_security::{
+    agent_snapshot_handoff_dir, open_agent_snapshot_handoff_from_dir,
+    parse_agent_snapshot_handoff_id, OpenAgentSnapshotHandoff,
+};
+#[cfg(test)]
+use agent_snapshot_handoff_security::{
+    consume_agent_snapshot_handoff_from_dir, read_agent_snapshot_handoff_from_dir,
+    validate_agent_snapshot_handoff_directory_metadata, validate_agent_snapshot_handoff_metadata,
+    AGENT_SNAPSHOT_HANDOFF_MAX_AGE,
+};
+
+const AGENT_SNAPSHOT_HANDOFF_EVENT: &str = "agent-snapshot-import-available";
+const MAX_DEEP_LINK_URL_BYTES: usize = 64 * 1024;
+const AGENT_SNAPSHOT_HANDOFF_MAX_URL_BYTES: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingAgentSnapshotImport {
+    id: String,
+    file_bytes: Vec<u8>,
+    file_name: String,
+    snapshot_kind: String,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingAgentSnapshotImports(Mutex<VecDeque<QueuedAgentSnapshotImport>>);
+
+struct QueuedAgentSnapshotImport {
+    pending: PendingAgentSnapshotImport,
+    source: OpenAgentSnapshotHandoff,
+}
+
+impl PendingAgentSnapshotImports {
+    fn enqueue(
+        &self,
+        pending: PendingAgentSnapshotImport,
+        source: OpenAgentSnapshotHandoff,
+    ) -> Result<bool, ()> {
+        let mut queue = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if queue.iter().any(|item| item.pending.id == pending.id) {
+            return Ok(false);
+        }
+        if !queue.is_empty() {
+            return Err(());
+        }
+        queue.push_back(QueuedAgentSnapshotImport { pending, source });
+        Ok(true)
+    }
+
+    fn first(&self) -> Option<PendingAgentSnapshotImport> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .front()
+            .map(|item| item.pending.clone())
+    }
+
+    fn consume(&self, id: &str) -> bool {
+        let mut queue = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(item) = queue.front_mut() else {
+            return false;
+        };
+        if item.pending.id != id
+            || item
+                .source
+                .erase_after_acceptance(&item.pending.file_bytes)
+                .is_err()
+        {
+            return false;
+        }
+        queue.pop_front();
+        true
+    }
+
+    fn discard(&self, id: &str) -> bool {
+        let mut queue = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !queue.front().is_some_and(|item| item.pending.id == id) {
+            return false;
+        }
+        queue.pop_front();
+        true
+    }
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_agent_snapshot_import(
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> Option<PendingAgentSnapshotImport> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_agent_snapshot_import(
+    id: String,
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> bool {
+    pending.consume(&id)
+}
+
+#[tauri::command]
+pub(crate) fn reject_pending_agent_snapshot_import(
+    id: String,
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> bool {
+    pending.discard(&id)
+}
+
+fn queue_agent_snapshot_handoff(
+    app: &tauri::AppHandle,
+    handoff_id: String,
+) -> Result<bool, String> {
+    let source = open_agent_snapshot_handoff_from_dir(&agent_snapshot_handoff_dir()?, &handoff_id)?;
+    let bytes = source.bytes().to_vec();
+    match app.state::<PendingAgentSnapshotImports>().enqueue(
+        PendingAgentSnapshotImport {
+            file_name: format!("{handoff_id}.agent.json"),
+            id: handoff_id,
+            file_bytes: bytes,
+            snapshot_kind: "agent".to_string(),
+        },
+        source,
+    ) {
+        Ok(is_new) => Ok(is_new),
+        Err(()) => Err("another agent snapshot handoff is already awaiting preview".to_string()),
+    }
+}
+
+fn agent_snapshot_handoff_url_exceeds_limit(url: &Url, raw: &str) -> bool {
+    url.host_str() == Some("import-agent-snapshot")
+        && raw.len() > AGENT_SNAPSHOT_HANDOFF_MAX_URL_BYTES
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingCommunityDeepLink {
@@ -296,6 +439,10 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
 /// Currently supports:
 /// - `buzz://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
 pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
+    if url_str.len() > MAX_DEEP_LINK_URL_BYTES {
+        eprintln!("buzz-desktop: deep link exceeds the URL size limit");
+        return;
+    }
     let url = match Url::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
@@ -310,6 +457,27 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     }
 
     match url.host_str() {
+        Some("import-agent-snapshot") => {
+            if agent_snapshot_handoff_url_exceeds_limit(&url, url_str) {
+                eprintln!("buzz-desktop: snapshot handoff deep link exceeds the URL size limit");
+                return;
+            }
+            let Some(handoff_id) = parse_agent_snapshot_handoff_id(&url) else {
+                eprintln!("buzz-desktop: snapshot handoff deep link has an invalid id: {url_str}");
+                return;
+            };
+            let is_new = match queue_agent_snapshot_handoff(app, handoff_id) {
+                Ok(is_new) => is_new,
+                Err(error) => {
+                    eprintln!("buzz-desktop: rejecting agent snapshot handoff: {error}");
+                    return;
+                }
+            };
+            activate_main_window(app);
+            if is_new {
+                let _ = app.emit(AGENT_SNAPSHOT_HANDOFF_EVENT, ());
+            }
+        }
         Some("connect") => {
             let Some(relay_url) = parse_websocket_relay_param(&url) else {
                 eprintln!("buzz-desktop: connect deep link missing/invalid relay: {url_str}");
@@ -383,6 +551,10 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "deep_link/agent_snapshot_handoff.rs"]
+mod agent_snapshot_handoff_tests;
 
 #[cfg(test)]
 mod tests {
