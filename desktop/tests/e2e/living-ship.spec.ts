@@ -3,6 +3,8 @@ import { expect, test } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
+test.use({ viewport: { width: 1510, height: 874 } });
+
 const COMMAND_AGENTS = [
   [
     "1".repeat(64),

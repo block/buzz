@@ -76,3 +76,24 @@ test("renders the full ship workspace as semantic rooms and agent controls", () 
   assert.match(html, /data-state="working"/);
   assert.match(html, /data-state="offline"/);
 });
+
+test("projects room and agent controls into the native ship artwork coordinates", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(LivingShipCanvas, {
+      agents,
+      onSelectAgent() {},
+      onSelectRoom() {},
+      selectedAgentPubkey: null,
+      selectedRoomId: null,
+    }),
+  );
+
+  assert.match(
+    html,
+    /data-room-id="cic"[^>]*style="--room-x:66\.704675%;--room-y:49\.888393%;--room-width:7\.981756%;--room-height:9\.151786%"/,
+  );
+  assert.match(
+    html,
+    /aria-label="Select Operations in C\.I\.C\."[^>]*style="--agent-x:67\.388826%;--agent-y:50\.334821%;/,
+  );
+});

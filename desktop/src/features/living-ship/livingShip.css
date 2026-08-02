@@ -95,7 +95,7 @@
 .living-ship-canvas {
   position: relative;
   width: 100%;
-  aspect-ratio: 1754 / 896;
+  aspect-ratio: var(--ship-scene-width) / var(--ship-scene-height);
   isolation: isolate;
   overflow: hidden;
   background: #071a35;
@@ -114,10 +114,10 @@
 .living-ship-room {
   position: absolute;
   z-index: 2;
-  left: calc(var(--room-x) * 100% / 1920);
-  top: calc(var(--room-y) * 100% / 981);
-  width: calc(var(--room-width) * 100% / 1920);
-  height: calc(var(--room-height) * 100% / 981);
+  left: var(--room-x);
+  top: var(--room-y);
+  width: var(--room-width);
+  height: var(--room-height);
   padding: 0.2rem;
   border: 1px solid transparent;
   border-radius: 0.2rem;
@@ -185,8 +185,8 @@
 .living-ship-agent {
   position: absolute;
   z-index: 4;
-  left: calc(var(--agent-x) * 100% / 1920);
-  top: calc(var(--agent-y) * 100% / 981);
+  left: var(--agent-x);
+  top: var(--agent-y);
   width: 2.8%;
   aspect-ratio: 0.68;
   padding: 0;

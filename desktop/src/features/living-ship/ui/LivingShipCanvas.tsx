@@ -7,6 +7,13 @@ import type { LivingShipAgentPresentation } from "../domain/shipProjection";
 
 type CanvasStyle = React.CSSProperties & Record<`--${string}`, number | string>;
 
+const SHIP_SCENE_WIDTH = 1754;
+const SHIP_SCENE_HEIGHT = 896;
+
+function scenePercent(value: number, extent: number) {
+  return `${((value / extent) * 100).toFixed(6)}%`;
+}
+
 type LivingShipCanvasProps = {
   agents: readonly LivingShipAgentPresentation[];
   selectedAgentPubkey: string | null;
@@ -56,11 +63,16 @@ export function LivingShipCanvas({
   onSelectAgent,
   onSelectRoom,
 }: LivingShipCanvasProps) {
+  const canvasStyle: CanvasStyle = {
+    "--ship-scene-width": SHIP_SCENE_WIDTH,
+    "--ship-scene-height": SHIP_SCENE_HEIGHT,
+  };
   return (
     <section
       aria-label="HMAS Supply living ship workspace"
       className="living-ship-canvas"
       data-testid="living-ship-canvas"
+      style={canvasStyle}
     >
       <img
         alt="Pixel-art side elevation of HMAS Supply with visible workspaces"
@@ -81,10 +93,10 @@ export function LivingShipCanvas({
           (agent) => agent.locationId === room.id,
         );
         const style: CanvasStyle = {
-          "--room-x": room.x,
-          "--room-y": room.y,
-          "--room-width": room.width,
-          "--room-height": room.height,
+          "--room-x": scenePercent(room.x, SHIP_SCENE_WIDTH),
+          "--room-y": scenePercent(room.y, SHIP_SCENE_HEIGHT),
+          "--room-width": scenePercent(room.width, SHIP_SCENE_WIDTH),
+          "--room-height": scenePercent(room.height, SHIP_SCENE_HEIGHT),
         };
         return (
           <button
@@ -105,8 +117,8 @@ export function LivingShipCanvas({
       {agents.map((agent) => {
         const position = agentPosition(agent, agents);
         const style: CanvasStyle = {
-          "--agent-x": position.x,
-          "--agent-y": position.y,
+          "--agent-x": scenePercent(position.x, SHIP_SCENE_WIDTH),
+          "--agent-y": scenePercent(position.y, SHIP_SCENE_HEIGHT),
           "--sprite-position": `${(agent.spriteColumn / 7) * 100}%`,
         };
         const state =
