@@ -1,6 +1,7 @@
 //! Runtime-neutral relay client for a standalone Buzz execution node.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::net::SocketAddr;
@@ -301,7 +302,7 @@ pub fn build_announcement_with_workloads_and_attestations(
 }
 
 /// Payload sent by the existing Desktop NIP-AB pairing flow.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopPairingPayload {
     /// Workspace owner identity. The legacy `pubkey` name is accepted too.
@@ -315,7 +316,19 @@ pub struct DesktopPairingPayload {
     pub nsec: Option<String>,
 }
 
-/// Parse a Desktop pairing payload without retaining the private key it may contain.
+impl fmt::Debug for DesktopPairingPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DesktopPairingPayload")
+            .field("owner_pubkey", &self.owner_pubkey)
+            .field("relay_url", &self.relay_url)
+            .field("nsec", &self.nsec.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+/// Parse and validate a Desktop pairing payload. The caller must consume the
+/// transient private key and zeroize it after deriving the node attestation.
 pub fn parse_desktop_pairing_payload(payload: &str) -> Result<DesktopPairingPayload, NodeError> {
     let parsed: DesktopPairingPayload = serde_json::from_str(payload)?;
     nostr::PublicKey::from_hex(&parsed.owner_pubkey)
@@ -1224,6 +1237,9 @@ mod tests {
         assert!(!serde_json::to_string(&parsed)
             .expect("serialize")
             .contains("must-not-be-persisted"));
+        let debug = format!("{parsed:?}");
+        assert!(!debug.contains("must-not-be-persisted"));
+        assert!(debug.contains("[redacted]"));
     }
 
     #[test]

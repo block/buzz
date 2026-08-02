@@ -421,7 +421,7 @@ async fn pair_node(qr_arg: Option<String>) -> Result<(), NodeError> {
             "pairing payload relay does not match the configured relay".into(),
         ));
     }
-    let nsec = nsec
+    let mut nsec = nsec
         .take()
         .ok_or_else(|| NodeError::PairingPayload("pairing payload is missing nsec".into()))?;
     let owner_keys = match nostr::Keys::parse(&nsec) {
