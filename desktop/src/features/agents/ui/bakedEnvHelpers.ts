@@ -73,6 +73,8 @@ function providerModelEnvKey(provider: string): string | null {
       return "OPENROUTER_MODEL";
     case "deepseek":
       return "DEEPSEEK_MODEL";
+    case "groq":
+      return "GROQ_MODEL";
     default:
       return null;
   }

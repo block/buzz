@@ -27,6 +27,8 @@ function providerObjectLabel(provider: string): string {
       return "OpenAI-compatible";
     case "deepseek":
       return "DeepSeek";
+    case "groq":
+      return "Groq";
     case "openrouter":
       return "OpenRouter";
     default:

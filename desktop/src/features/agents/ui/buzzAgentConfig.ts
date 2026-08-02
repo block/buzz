@@ -135,6 +135,9 @@ export function getProviderEffortConfig(
     // Chat Completions + reasoning_content; expose full effort ladder like openrouter.
     return { validValues: ALL_VALUES, defaultValue: "medium" };
   }
+  if (provider === "groq") {
+    return { validValues: ALL_VALUES, defaultValue: "medium" };
+  }
   // openai-compat, unknown, empty — all values, default medium.
   return { validValues: ALL_VALUES, defaultValue: "medium" };
 }

@@ -135,7 +135,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `deepseek`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `deepseek`, `groq`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
@@ -150,6 +150,9 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `DEEPSEEK_API_KEY` | — | Required when provider=deepseek. |
 | `DEEPSEEK_MODEL` | — | Required when provider=deepseek (e.g. `deepseek-chat`, `deepseek-reasoner`). |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | Chat Completions only. |
+| `GROQ_API_KEY` | — | Required when provider=groq. |
+| `GROQ_MODEL` | — | Required when provider=groq. |
+| `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Chat Completions only. |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
@@ -243,10 +246,11 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | DeepSeek | `deepseek` | `POST {base}/chat/completions` | deepseek-chat, deepseek-reasoner (reasoning_content) |
+| Groq | `groq` | `POST {base}/chat/completions` | llama / mixtral / tool-capable Groq IDs |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, or `BUZZ_AGENT_PROVIDER=deepseek` is selected without `DEEPSEEK_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, or `BUZZ_AGENT_PROVIDER=deepseek` is selected without `DEEPSEEK_API_KEY`, or `BUZZ_AGENT_PROVIDER=groq` is selected without `GROQ_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 

@@ -134,6 +134,17 @@ pub fn normalize_host(host: &str) -> String {
     if let Some(stripped) = host.strip_suffix('.') {
         host = stripped.to_string();
     }
+    // Normalize loopback variants so 127.0.0.1 and localhost resolve to the
+    // same community. Without this, Rust WS clients (tungstenite) that resolve
+    // localhost -> 127.0.0.1 and send Host: 127.0.0.1:3000 get 404 from a
+    // community bound to localhost:3000.
+    host = host
+        .replace("127.0.0.1:", "localhost:")
+        .replace("[::1]:", "localhost:")
+        .replace("[::1]", "localhost");
+    if host == "127.0.0.1" {
+        host = "localhost".to_string();
+    }
     host
 }
 
@@ -220,9 +231,9 @@ mod tests {
 
     #[test]
     fn normalize_host_leaves_ipv6_literal_intact() {
-        // IPv6 literals contain colons but no trailing default-port suffix.
-        assert_eq!(normalize_host("[::1]"), "[::1]");
-        assert_eq!(normalize_host("[::1]:443"), "[::1]");
+        // IPv6 loopback [::1] normalizes to localhost (same community).
+        assert_eq!(normalize_host("[::1]"), "localhost");
+        assert_eq!(normalize_host("[::1]:443"), "localhost");
     }
 
     #[test]
@@ -261,9 +272,8 @@ mod tests {
 
     #[test]
     fn relay_url_authority_preserves_ipv6_brackets() {
-        // `host_str()` strips IPv6 brackets and the port; `relay_url_authority`
-        // must keep both so the authority matches `communities.host`.
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
+        // IPv6 loopback normalizes to localhost (same community).
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "localhost:3000");
     }
 
     #[test]

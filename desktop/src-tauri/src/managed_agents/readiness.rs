@@ -483,6 +483,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
         Some("openrouter") => Some("OPENROUTER_MODEL"),
         Some("deepseek") => Some("DEEPSEEK_MODEL"),
+        Some("groq") => Some("GROQ_MODEL"),
         _ => None,
     };
     let model_present = effective
@@ -535,6 +536,12 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
             if env_key_missing("DEEPSEEK_API_KEY") => {
                 missing.push(Requirement::EnvKey {
                     key: "DEEPSEEK_API_KEY".to_string(),
+                });
+            }
+        Some("groq")
+            if env_key_missing("GROQ_API_KEY") => {
+                missing.push(Requirement::EnvKey {
+                    key: "GROQ_API_KEY".to_string(),
                 });
             }
         _ => {
@@ -656,6 +663,13 @@ fn goose_requirements(
         {
             missing.push(Requirement::EnvKey {
                 key: "DEEPSEEK_API_KEY".to_string(),
+            });
+        }
+        Some("groq")
+            if env_key_missing("GROQ_API_KEY") && !file_key_present("GROQ_API_KEY") =>
+        {
+            missing.push(Requirement::EnvKey {
+                key: "GROQ_API_KEY".to_string(),
             });
         }
         _ => {}

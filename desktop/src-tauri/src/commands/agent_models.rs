@@ -378,6 +378,23 @@ fn is_deepseek_provider(provider: Option<&str>) -> bool {
     )
 }
 
+fn is_groq_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("groq")
+    )
+}
+
+fn groq_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
+    let base_url = env_or_process_value(env, "GROQ_BASE_URL")
+        .or_else(|| env_or_process_value(env, "OPENAI_COMPAT_BASE_URL"))
+        .unwrap_or_else(|| "https://api.groq.com/openai/v1".to_string());
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
 fn is_agent_text_model_id(id: &str) -> bool {
     let lower = id.to_ascii_lowercase();
     if [
@@ -505,15 +522,22 @@ async fn discover_openai_compatible_models(
     if !relay_mesh
         && !is_openai_compatible_provider(provider.as_deref())
         && !is_deepseek_provider(provider.as_deref())
+        && !is_groq_provider(provider.as_deref())
     {
         return Ok(None);
     }
 
     let deepseek = is_deepseek_provider(provider.as_deref());
+    let groq = is_groq_provider(provider.as_deref());
     let api_key = if relay_mesh {
         crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
     } else if deepseek {
         match provider.required_env(env, "DEEPSEEK_API_KEY")? {
+            Some(api_key) => api_key,
+            None => return Ok(None),
+        }
+    } else if groq {
+        match provider.required_env(env, "GROQ_API_KEY")? {
             Some(api_key) => api_key,
             None => return Ok(None),
         }
@@ -525,6 +549,8 @@ async fn discover_openai_compatible_models(
     };
     let redaction_key = if deepseek {
         "DEEPSEEK_API_KEY"
+    } else if groq {
+        "GROQ_API_KEY"
     } else {
         "OPENAI_COMPAT_API_KEY"
     };
@@ -533,10 +559,18 @@ async fn discover_openai_compatible_models(
         format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
     } else if deepseek {
         deepseek_models_url_for_discovery(env)
+    } else if groq {
+        groq_models_url_for_discovery(env)
     } else {
         openai_compatible_models_url_for_discovery(env)
     };
-    let host_label = if deepseek { "DeepSeek" } else { "OpenAI" };
+    let host_label = if deepseek {
+        "DeepSeek"
+    } else if groq {
+        "Groq"
+    } else {
+        "OpenAI"
+    };
     let response = client
         .get(&url)
         .bearer_auth(&api_key)
