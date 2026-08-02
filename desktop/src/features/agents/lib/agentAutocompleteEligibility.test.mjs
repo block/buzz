@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
+  getOwnedMemberAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
   isAgentMentionEligible,
@@ -544,5 +545,33 @@ test("isAgentMentionEligible: applies both gates, not just the managed-list one"
       mentionableAgentPubkeys: new Set(),
     }),
     false,
+  );
+});
+
+test("getOwnedMemberAgentPubkeys: collects in-channel agents owned by the current user", () => {
+  // These are exactly the agents the ownership branch newly admits, so
+  // downstream agent classification must recognise them too.
+  assert.deepEqual(
+    getOwnedMemberAgentPubkeys(
+      [
+        { isAgent: true, isMember: true, pubkey: PUB_A.toUpperCase(), ownerPubkey: CURRENT_PUBKEY },
+        { isAgent: true, isMember: false, pubkey: PUB_B, ownerPubkey: CURRENT_PUBKEY },
+        { isAgent: true, isMember: true, pubkey: PUB_C, ownerPubkey: PUB_D },
+        { isAgent: false, isMember: true, pubkey: PUB_D, ownerPubkey: CURRENT_PUBKEY },
+        { isAgent: true, isMember: true, ownerPubkey: CURRENT_PUBKEY },
+      ],
+      CURRENT_PUBKEY,
+    ),
+    new Set([PUB_A]),
+  );
+});
+
+test("getOwnedMemberAgentPubkeys: empty without a current pubkey", () => {
+  assert.deepEqual(
+    getOwnedMemberAgentPubkeys(
+      [{ isAgent: true, isMember: true, pubkey: PUB_A, ownerPubkey: CURRENT_PUBKEY }],
+      null,
+    ),
+    new Set(),
   );
 });

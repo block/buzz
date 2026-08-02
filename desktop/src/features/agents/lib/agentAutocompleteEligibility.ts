@@ -155,6 +155,45 @@ export function shouldHideAgentFromMentions({
 }
 
 /**
+ * Agent pubkeys the current user can address even though the relay directory
+ * never marks them invocable: in-channel agents they own.
+ *
+ * `getMentionableAgentPubkeys` only admits `respond_to: anyone` or an
+ * allowlist naming us, so an `owner-only` agent is absent from it. That set
+ * also drives downstream agent classification (`isAgentPubkey`), which decides
+ * whether a sent mention is kept as the persistent agent audience. Offering
+ * such an agent in autocomplete without adding it here would surface it and
+ * then fail to treat it as an agent once addressed.
+ *
+ * Derived from the same ownership rule as `isAgentIdentityInManagedList`, so
+ * eligibility and classification cannot drift apart.
+ */
+export function getOwnedMemberAgentPubkeys(
+  candidates: readonly {
+    isAgent?: boolean;
+    isMember?: boolean;
+    pubkey?: string;
+    ownerPubkey?: string | null;
+  }[],
+  currentPubkey?: string | null,
+) {
+  const pubkeys = new Set<string>();
+  for (const candidate of candidates) {
+    if (
+      candidate.isAgent !== true ||
+      candidate.isMember !== true ||
+      !candidate.pubkey
+    ) {
+      continue;
+    }
+    if (isOwnedByCurrentUser(candidate.ownerPubkey, currentPubkey)) {
+      pubkeys.add(normalizePubkey(candidate.pubkey));
+    }
+  }
+  return pubkeys;
+}
+
+/**
  * The single eligibility decision for an @-mention autocomplete candidate.
  *
  * The two predicates above encode one policy but are ordered: the managed-list
