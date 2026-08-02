@@ -77,6 +77,22 @@ down:
 ps:
     docker compose ps
 
+# Start all local-lab Buzz agents (or pass names: just lab-up ace haute)
+lab-up *AGENTS:
+    ./scripts/local-agents.sh up {{AGENTS}}
+
+# Stop all local-lab Buzz agents (or pass names: just lab-down ace)
+lab-down *AGENTS:
+    ./scripts/local-agents.sh down {{AGENTS}}
+
+# Show local-lab Buzz agent service state
+lab-status:
+    ./scripts/local-agents.sh status
+
+# Restart all local-lab Buzz agents (or pass names)
+lab-restart *AGENTS:
+    ./scripts/local-agents.sh restart {{AGENTS}}
+
 # Tail all service logs
 logs *ARGS:
     docker compose logs -f {{ARGS}}

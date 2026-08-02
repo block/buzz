@@ -30,6 +30,7 @@ type UnifiedAgentsSectionProps = {
   isAgentsLoading: boolean;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onOpenAgentProfile: (
     pubkey: string,
@@ -38,6 +39,7 @@ type UnifiedAgentsSectionProps = {
   onOpenPersonaProfile: (persona: AgentPersona) => void;
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
   personas: AgentPersona[];
   personasError: Error | null;
@@ -73,11 +75,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isAgentsLoading,
     restartingAgentPubkey,
     startingAgentPubkey,
+    stoppingAgentPubkey,
     startingPersonaIds,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onRestartAgent,
     onStartAgent,
+    onStopAgent,
     onStartPersona,
     personas,
     personasError,
@@ -154,11 +158,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   persona={group.persona}
                   restartingAgentPubkey={restartingAgentPubkey}
                   startingAgentPubkey={startingAgentPubkey}
+                  stoppingAgentPubkey={stoppingAgentPubkey}
                   startingPersonaIds={startingPersonaIds}
                   onOpenAgentProfile={onOpenAgentProfile}
                   onOpenPersonaProfile={onOpenPersonaProfile}
                   onRestartAgent={onRestartAgent}
                   onStartAgent={onStartAgent}
+                  onStopAgent={onStopAgent}
                   onStartPersona={onStartPersona}
                 />
               );
@@ -174,10 +180,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               label="Unknown agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              stoppingAgentPubkey={stoppingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
               onStartAgent={onStartAgent}
+              onStopAgent={onStopAgent}
             />
           ) : null}
           {ungrouped.length > 0 ? (
@@ -189,10 +197,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               label="Custom agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              stoppingAgentPubkey={stoppingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
               onStartAgent={onStartAgent}
+              onStopAgent={onStopAgent}
             />
           ) : null}
         </div>
@@ -223,11 +233,13 @@ function AgentPersonaCard({
   persona,
   restartingAgentPubkey,
   startingAgentPubkey,
+  stoppingAgentPubkey,
   startingPersonaIds,
   onOpenAgentProfile,
   onOpenPersonaProfile,
   onRestartAgent,
   onStartAgent,
+  onStopAgent,
   onStartPersona,
 }: {
   actions?: (
@@ -239,6 +251,7 @@ function AgentPersonaCard({
   persona: AgentPersona;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onOpenAgentProfile: (
     pubkey: string,
@@ -247,6 +260,7 @@ function AgentPersonaCard({
   onOpenPersonaProfile: (persona: AgentPersona) => void;
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
 }) {
   const title = persona.displayName;
@@ -281,10 +295,12 @@ function AgentPersonaCard({
             errorTestId={`agent-runtime-error-${agent.pubkey}`}
             isActive={isActive}
             isRestarting={restartingAgentPubkey === agent.pubkey}
+            isStopping={stoppingAgentPubkey === agent.pubkey}
             isStarting={startingAgentPubkey === agent.pubkey}
             label={title}
             requiresRestart={agent.needsRestart}
             startTestId={`agent-runtime-start-${agent.pubkey}`}
+            stopTestId={`agent-runtime-stop-${agent.pubkey}`}
             onOpenError={() => {
               onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
             }}
@@ -293,6 +309,7 @@ function AgentPersonaCard({
                 ? onRestartAgent(agent.pubkey)
                 : onStartAgent(agent.pubkey)
             }
+            onStop={() => onStopAgent(agent.pubkey)}
           />
         ) : (
           <AgentRuntimeAvatarControl
@@ -337,20 +354,24 @@ function StandaloneAgentCard({
   defaultModel,
   restartingAgentPubkey,
   startingAgentPubkey,
+  stoppingAgentPubkey,
   onOpenAgentProfile,
   onRestartAgent,
   onStartAgent,
+  onStopAgent,
 }: {
   agent: ManagedAgent;
   defaultModel: string;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
   ) => void;
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
@@ -372,10 +393,12 @@ function StandaloneAgentCard({
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
           isRestarting={restartingAgentPubkey === agent.pubkey}
+          isStopping={stoppingAgentPubkey === agent.pubkey}
           isStarting={startingAgentPubkey === agent.pubkey}
           label={title}
           requiresRestart={agent.needsRestart}
           startTestId={`agent-runtime-start-${agent.pubkey}`}
+          stopTestId={`agent-runtime-stop-${agent.pubkey}`}
           onOpenError={() => {
             onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
           }}
@@ -384,6 +407,7 @@ function StandaloneAgentCard({
               ? onRestartAgent(agent.pubkey)
               : onStartAgent(agent.pubkey)
           }
+          onStop={() => onStopAgent(agent.pubkey)}
         />
       }
       avatarUrl={profileQuery.data?.avatarUrl}
@@ -439,10 +463,12 @@ function CollapsibleAgentGroup({
   defaultModel,
   restartingAgentPubkey,
   startingAgentPubkey,
+  stoppingAgentPubkey,
   onToggle,
   onOpenAgentProfile,
   onRestartAgent,
   onStartAgent,
+  onStopAgent,
 }: {
   groupKey: string;
   label: string;
@@ -451,6 +477,7 @@ function CollapsibleAgentGroup({
   defaultModel: string;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   onToggle: (key: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
@@ -458,6 +485,7 @@ function CollapsibleAgentGroup({
   ) => void;
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
 }) {
   const isCollapsed = collapsed.has(groupKey);
   return (
@@ -484,9 +512,11 @@ function CollapsibleAgentGroup({
               key={agent.pubkey}
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              stoppingAgentPubkey={stoppingAgentPubkey}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
               onStartAgent={onStartAgent}
+              onStopAgent={onStopAgent}
             />
           ))}
         </div>
