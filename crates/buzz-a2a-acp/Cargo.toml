@@ -1,0 +1,32 @@
+[package]
+name = "buzz-a2a-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ACP adapter for agents advertised by an OASF Agent Record and invoked through A2A"
+readme = "README.md"
+keywords = ["acp", "a2a", "agntcy", "oasf", "agent"]
+categories = ["command-line-utilities", "web-programming"]
+
+[lib]
+name = "buzz_a2a_acp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-a2a-acp"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+hex = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+url = { workspace = true }
+uuid = { workspace = true }

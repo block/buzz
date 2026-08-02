@@ -457,6 +457,8 @@ impl AcpClient {
         use std::process::Stdio;
 
         let mut cmd = tokio::process::Command::new(command);
+        let is_remote_a2a_adapter =
+            crate::config::normalize_agent_command_identity(command) == "buzz-a2a-acp";
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -465,6 +467,19 @@ impl AcpClient {
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
+        if is_remote_a2a_adapter {
+            for key in [
+                "BUZZ_PRIVATE_KEY",
+                "NOSTR_PRIVATE_KEY",
+                "BUZZ_AUTH_TAG",
+                "BUZZ_API_TOKEN",
+                "BUZZ_ACP_PRIVATE_KEY",
+                "BUZZ_ACP_API_TOKEN",
+                "BUZZ_A2A_BEARER_TOKEN",
+            ] {
+                cmd.env_remove(key);
+            }
+        }
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
@@ -503,6 +518,10 @@ impl AcpClient {
         for (key, value) in extra_env {
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
+                continue;
+            }
+            if is_remote_a2a_adapter && key == "BUZZ_A2A_BEARER_TOKEN" {
+                cmd.env(key, value);
                 continue;
             }
             if std::env::var_os(key).is_none() {

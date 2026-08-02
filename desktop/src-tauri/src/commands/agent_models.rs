@@ -5,6 +5,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
+use super::agent_name_update::apply_managed_agent_name_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 #[cfg(test)]
@@ -833,14 +834,7 @@ pub async fn update_managed_agent(
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
 
-        let mut name_changed = false;
-        if let Some(name_update) = input.name {
-            let trimmed = name_update.trim().to_string();
-            if !trimmed.is_empty() && trimmed != record.name {
-                record.name = trimmed;
-                name_changed = true;
-            }
-        }
+        let name_changed = apply_managed_agent_name_update(record, input.name);
         apply_model_provider_prompt_update(
             record,
             input.model,
@@ -952,7 +946,10 @@ pub async fn update_managed_agent(
                 &record.relay_url,
                 &relay_ws_url_with_override(&state),
             );
-            let display_name = record.name.clone();
+            let display_name = record
+                .display_name
+                .clone()
+                .unwrap_or_else(|| record.name.clone());
             // Avatar fallback derives from the EFFECTIVE harness (persona-wins),
             // not the frozen snapshot, so an inherited harness picks the right
             // default avatar.

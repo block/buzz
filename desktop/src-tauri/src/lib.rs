@@ -562,7 +562,6 @@ pub fn run() {
             }
 
             try_regenerate_nest(&app_handle);
-
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
@@ -728,6 +727,10 @@ pub fn run() {
             install_acp_runtime,
             save_custom_harness,
             delete_custom_harness,
+            preview_remote_agency,
+            list_remote_agencies,
+            store_remote_agency_bearer_token,
+            save_remote_agency_binding,
             connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
