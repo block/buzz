@@ -199,11 +199,21 @@ Widget _buildTestable({
       for (final entry in threadReplies.entries)
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
-        ).overrideWith((ref) async => entry.value),
+        ).overrideWith(
+          () => _FakeThreadRepliesNotifier(
+            ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+            entry.value,
+          ),
+        ),
       for (final entry in pendingThreadReplies.entries)
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
-        ).overrideWith((ref) => entry.value),
+        ).overrideWith(
+          () => _FakeThreadRepliesNotifier(
+            ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+            entry.value,
+          ),
+        ),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -2693,6 +2703,16 @@ class _ErrorMessagesNotifier extends ChannelMessagesNotifier {
   @override
   AsyncValue<List<NostrEvent>> build() =>
       AsyncError('Connection failed', StackTrace.current);
+}
+
+class _FakeThreadRepliesNotifier extends ThreadRepliesNotifier {
+  final Future<List<NostrEvent>> _replies;
+
+  _FakeThreadRepliesNotifier(super.args, FutureOr<List<NostrEvent>> replies)
+    : _replies = Future.value(replies);
+
+  @override
+  Future<List<NostrEvent>> build() => _replies;
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
