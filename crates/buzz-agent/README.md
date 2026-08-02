@@ -144,6 +144,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `BUZZ_AGENT_WEB_SEARCH` | `0` | Set to a nonzero number to enable OpenAI-hosted web search. Requires `provider=openai`, `OPENAI_COMPAT_API=responses`, and the canonical `https://api.openai.com/v1` origin. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |

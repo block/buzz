@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+use url::Url;
 
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
 use crate::config::{
@@ -1056,7 +1057,7 @@ fn responses_body(
         }
     }
 
-    let tools_json: Vec<Value> = tools
+    let mut tools_json: Vec<Value> = tools
         .iter()
         .map(|t| {
             json!({
@@ -1067,6 +1068,13 @@ fn responses_body(
             })
         })
         .collect();
+    if cfg.web_search {
+        tools_json.push(json!({
+            "type": "web_search",
+            "external_web_access": true,
+            "search_context_size": "medium",
+        }));
+    }
 
     let mut body = json!({
         "model": effective_model,
@@ -1080,6 +1088,9 @@ fn responses_body(
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
         body["tool_choice"] = json!("auto");
+    }
+    if cfg.web_search {
+        body["include"] = json!(["web_search_call.action.sources"]);
     }
     body
 }
@@ -1156,11 +1167,176 @@ fn databricks_v2_path(route: DatabricksV2Route) -> &'static str {
     }
 }
 
+#[derive(Debug)]
+struct WebSearchSource {
+    url: String,
+    title: String,
+}
+
+fn is_safe_web_url(raw: &str) -> bool {
+    Url::parse(raw)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+}
+
+fn collect_web_search_sources(v: &Value) -> Result<Option<Vec<WebSearchSource>>, AgentError> {
+    let mut used = false;
+    let mut seen_urls = BTreeSet::new();
+    let mut sources = Vec::new();
+
+    for item in v
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if item.get("type").and_then(Value::as_str) != Some("web_search_call") {
+            continue;
+        }
+        used = true;
+        let item_sources = item
+            .get("action")
+            .and_then(|action| action.get("sources"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| AgentError::Llm("web search sources missing".into()))?;
+
+        for source in item_sources {
+            let url = source
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| AgentError::Llm("web search source URL missing".into()))?;
+            if !is_safe_web_url(url) {
+                return Err(AgentError::Llm("web search source URL unsafe".into()));
+            }
+            if seen_urls.insert(url.to_owned()) {
+                sources.push(WebSearchSource {
+                    url: url.to_owned(),
+                    title: source
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or(url)
+                        .to_owned(),
+                });
+            }
+        }
+    }
+
+    if !used {
+        return Ok(None);
+    }
+    if sources.is_empty() {
+        return Err(AgentError::Llm("web search sources missing".into()));
+    }
+    Ok(Some(sources))
+}
+
+fn char_index_to_byte(text: &str, index: usize) -> Option<usize> {
+    if index == text.chars().count() {
+        Some(text.len())
+    } else {
+        text.char_indices().nth(index).map(|(byte, _)| byte)
+    }
+}
+
+fn render_web_search_text(
+    text: &str,
+    annotations: Option<&Vec<Value>>,
+    sources: &[WebSearchSource],
+) -> Result<(String, bool), AgentError> {
+    let mut citations = Vec::new();
+    for annotation in annotations.into_iter().flatten() {
+        if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
+            continue;
+        }
+        let start = annotation
+            .get("start_index")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| char_index_to_byte(text, index))
+            .ok_or_else(|| AgentError::Llm("web search citation range malformed".into()))?;
+        let end = annotation
+            .get("end_index")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| char_index_to_byte(text, index))
+            .ok_or_else(|| AgentError::Llm("web search citation range malformed".into()))?;
+        if start >= end {
+            return Err(AgentError::Llm(
+                "web search citation range malformed".into(),
+            ));
+        }
+        let url = annotation
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| AgentError::Llm("web search citation URL missing".into()))?;
+        if !is_safe_web_url(url) {
+            return Err(AgentError::Llm("web search citation URL unsafe".into()));
+        }
+        let source_index = sources
+            .iter()
+            .position(|source| source.url == url)
+            .ok_or_else(|| {
+                AgentError::Llm("web search citation URL not present in sources".into())
+            })?;
+        citations.push((start, end, source_index));
+    }
+
+    citations.sort_unstable_by_key(|(start, _, _)| *start);
+    let mut rendered = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end, source_index) in citations {
+        if start < cursor {
+            return Err(AgentError::Llm(
+                "web search citation range malformed".into(),
+            ));
+        }
+        rendered.push_str(&text[cursor..start]);
+        rendered.push_str(&format!(
+            "[[{}]]({})",
+            source_index + 1,
+            sources[source_index].url
+        ));
+        cursor = end;
+    }
+    rendered.push_str(&text[cursor..]);
+    Ok((rendered, cursor != 0))
+}
+
+fn escape_markdown_title(title: &str) -> String {
+    let mut escaped = String::with_capacity(title.len());
+    for character in title.chars() {
+        if matches!(character, '\\' | '[' | ']' | '*' | '_' | '`' | '<' | '>') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn append_web_search_sources(text: &mut String, sources: &[WebSearchSource]) {
+    use std::fmt::Write as _;
+
+    text.push_str("\n\n### Sources");
+    for (index, source) in sources.iter().enumerate() {
+        let _ = write!(
+            text,
+            "\n{}. [{}]({})",
+            index + 1,
+            escape_markdown_title(&source.title),
+            source.url
+        );
+    }
+}
+
 fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
     let mut saw_function_call = false;
+    let web_search_sources = collect_web_search_sources(&v)?;
+    let mut saw_web_search_citation = false;
 
     for item in v
         .get("output")
@@ -1182,7 +1358,17 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                         Some("output_text" | "text")
                     ) {
                         if let Some(t) = p.get("text").and_then(Value::as_str) {
-                            text.push_str(t);
+                            if let Some(sources) = web_search_sources.as_deref() {
+                                let (rendered, has_citation) = render_web_search_text(
+                                    t,
+                                    p.get("annotations").and_then(Value::as_array),
+                                    sources,
+                                )?;
+                                saw_web_search_citation |= has_citation;
+                                text.push_str(&rendered);
+                            } else {
+                                text.push_str(t);
+                            }
                         }
                     }
                 }
@@ -1232,6 +1418,13 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
             // Unknown types ignored for forward-compat.
             _ => {}
         }
+    }
+
+    if let Some(sources) = web_search_sources.as_deref() {
+        if !saw_web_search_citation {
+            return Err(AgentError::Llm("web search citations missing".into()));
+        }
+        append_web_search_sources(&mut text, sources);
     }
 
     let stop = match v.get("status").and_then(Value::as_str) {
@@ -2362,6 +2555,7 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            web_search: false,
             prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
@@ -3068,6 +3262,146 @@ mod tests {
             "Responses tool schema is flat"
         );
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn responses_body_enables_hosted_web_search_without_displacing_functions() {
+        let tools = vec![ToolDef {
+            name: "dev__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let mut cfg = cfg_responses();
+        cfg.web_search = true;
+
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("find sources".into())],
+            &tools,
+            "model",
+            None,
+        );
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["web_search_call.action.sources"])
+        );
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "dev__shell");
+        assert_eq!(
+            body["tools"][1],
+            serde_json::json!({
+                "type": "web_search",
+                "external_web_access": true,
+                "search_context_size": "medium",
+            })
+        );
+    }
+
+    #[test]
+    fn parse_responses_renders_unicode_citations_and_consulted_sources() {
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {"sources": [
+                        {"url": "https://one.example/a", "title": "First [source] & *stars*"},
+                        {"url": "https://two.example/b", "title": "Second"},
+                        {"url": "https://one.example/a", "title": "Ignored duplicate"}
+                    ]}
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Café cite",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "start_index": 5,
+                            "end_index": 9,
+                            "url": "https://one.example/a",
+                            "title": "First [source] & *stars*"
+                        }]
+                    }]
+                }
+            ]
+        });
+
+        let parsed = parse_responses(response).unwrap();
+        assert_eq!(
+            parsed.text,
+            "Café [[1]](https://one.example/a)\n\n### Sources\n1. [First \\[source\\] & \\*stars\\*](https://one.example/a)\n2. [Second](https://two.example/b)"
+        );
+    }
+
+    #[test]
+    fn parse_responses_rejects_invalid_web_search_terminal_results() {
+        for (name, response, expected_error) in [
+            (
+                "missing sources",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+                    ]
+                }),
+                "web search sources missing",
+            ),
+            (
+                "missing citations",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"sources": [{"url": "https://one.example/a", "title": "One"}]}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+                    ]
+                }),
+                "web search citations missing",
+            ),
+            (
+                "malformed character range",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"sources": [{"url": "https://one.example/a", "title": "One"}]}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": [{"type": "url_citation", "start_index": 6, "end_index": 5, "url": "https://one.example/a"}]}]}
+                    ]
+                }),
+                "web search citation range malformed",
+            ),
+            (
+                "unsafe source URL",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"sources": [{"url": "javascript:alert(1)", "title": "Bad"}]}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": [{"type": "url_citation", "start_index": 0, "end_index": 6, "url": "javascript:alert(1)"}]}]}
+                    ]
+                }),
+                "web search source URL unsafe",
+            ),
+            (
+                "citation not in sources",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"sources": [{"url": "https://one.example/a", "title": "One"}]}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": [{"type": "url_citation", "start_index": 0, "end_index": 6, "url": "https://two.example/b"}]}]}
+                    ]
+                }),
+                "web search citation URL not present in sources",
+            ),
+        ] {
+            let error = parse_responses(response).unwrap_err();
+            assert!(
+                error.to_string().contains(expected_error),
+                "{name}: unexpected error {error}"
+            );
+        }
     }
 
     #[test]

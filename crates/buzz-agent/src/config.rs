@@ -740,6 +740,9 @@ pub struct Config {
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
+    /// Enable OpenAI-hosted web search. This is fail-closed and is only
+    /// available on the first-party OpenAI Responses API endpoint.
+    pub web_search: bool,
     /// Prefer mesh-llm's virtual `mesh` model when the configured/effective
     /// OpenAI model is `auto` and the live model catalog advertises it.
     /// Set by Buzz's relay-mesh provider via
@@ -837,6 +840,7 @@ impl Config {
             base_url,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
+            web_search: parse_env("BUZZ_AGENT_WEB_SEARCH", 0u8)? != 0,
             prefer_mesh_for_auto: parse_env("BUZZ_AGENT_PREFER_MESH_FOR_AUTO", 0u8)? != 0,
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 32_768)?,
@@ -886,6 +890,7 @@ impl Config {
             system_prompt: String::new(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            web_search: false,
             prefer_mesh_for_auto: false,
             max_rounds: 0,
             max_output_tokens: 1,
@@ -973,6 +978,24 @@ impl Config {
                 "config: BUZZ_AGENT_MCP_RESTART_MAX_MS must be >= BUZZ_AGENT_MCP_RESTART_BASE_MS"
                     .into(),
             );
+        }
+        if self.web_search {
+            if self.provider != Provider::OpenAi {
+                return Err(
+                    "config: BUZZ_AGENT_WEB_SEARCH requires BUZZ_AGENT_PROVIDER=openai".into(),
+                );
+            }
+            if self.openai_api != OpenAiApi::Responses {
+                return Err(
+                    "config: BUZZ_AGENT_WEB_SEARCH requires OPENAI_COMPAT_API=responses".into(),
+                );
+            }
+            if self.base_url.trim_end_matches('/') != "https://api.openai.com/v1" {
+                return Err(
+                    "config: BUZZ_AGENT_WEB_SEARCH requires OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1"
+                        .into(),
+                );
+            }
         }
         // Provider-level effort validation (fail-fast, clear error).
         // `none`/`minimal` are not Anthropic values — rejected at startup.
@@ -1901,6 +1924,35 @@ mod tests {
         cfg.tool_timeout = Duration::from_secs(1);
         cfg.mcp_init_timeout = Duration::from_secs(1);
         cfg
+    }
+
+    #[test]
+    fn web_search_requires_first_party_openai_responses_endpoint() {
+        let mut cfg = make_config_for_validation(Provider::OpenAi, None);
+        cfg.web_search = true;
+        cfg.openai_api = OpenAiApi::Responses;
+        cfg.base_url = "https://api.openai.com/v1/".into();
+        assert!(
+            cfg.validate().is_ok(),
+            "canonical trailing slash is allowed"
+        );
+
+        cfg.provider = Provider::OpenRouter;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("BUZZ_AGENT_WEB_SEARCH requires BUZZ_AGENT_PROVIDER=openai"),
+            "{err}"
+        );
+
+        cfg.provider = Provider::OpenAi;
+        cfg.openai_api = OpenAiApi::Chat;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API=responses"), "{err}");
+
+        cfg.openai_api = OpenAiApi::Responses;
+        cfg.base_url = "https://gateway.example/v1".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("https://api.openai.com/v1"), "{err}");
     }
 
     #[test]
