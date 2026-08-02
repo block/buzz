@@ -30,6 +30,7 @@ const _sheetHeightFactor = 0.62;
 void showEmojiPicker({
   required BuildContext context,
   required void Function(String emoji) onSelect,
+  bool includeCustomEmoji = true,
 }) {
   showModalBottomSheet<void>(
     context: context,
@@ -37,6 +38,7 @@ void showEmojiPicker({
     showDragHandle: true,
     backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) => EmojiPickerSheet(
+      includeCustomEmoji: includeCustomEmoji,
       onSelect: (emoji) {
         Navigator.of(sheetContext).pop();
         onSelect(emoji);
@@ -47,13 +49,20 @@ void showEmojiPicker({
 
 class EmojiPickerSheet extends HookConsumerWidget {
   final void Function(String emoji) onSelect;
+  final bool includeCustomEmoji;
 
-  const EmojiPickerSheet({super.key, required this.onSelect});
+  const EmojiPickerSheet({
+    super.key,
+    required this.onSelect,
+    this.includeCustomEmoji = true,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final dataset = ref.watch(emojiDatasetOrEmptyProvider);
-    final customEmoji = ref.watch(customEmojiListProvider);
+    final customEmoji = includeCustomEmoji
+        ? ref.watch(customEmojiListProvider)
+        : const <CustomEmoji>[];
     final recent = ref.watch(recentEmojiProvider);
 
     final searchController = useTextEditingController();

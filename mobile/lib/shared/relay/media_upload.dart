@@ -242,6 +242,19 @@ class MediaUploadService {
     );
   }
 
+  /// Converts a bounded profile image to JPEG before upload.
+  ///
+  /// Avatar callers should resize at selection time. Re-encoding here keeps
+  /// PNG and device-specific gallery formats from producing oversized uploads.
+  Future<BlobDescriptor> uploadProfileImage(XFile image) async {
+    final bytes = await image.readAsBytes();
+    final jpegBytes = await _transcodeImageToJpeg(bytes);
+    if (jpegBytes.isEmpty) {
+      throw Exception('failed to convert profile image for upload');
+    }
+    return _uploadPreparedBytes(jpegBytes, mimeType: 'image/jpeg');
+  }
+
   Future<bool> clipboardHasImage() async {
     return await _mediaUploadPlatformChannel.invokeMethod<bool>(
           _clipboardHasImageMethod,

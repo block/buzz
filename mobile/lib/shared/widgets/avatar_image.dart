@@ -6,6 +6,47 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import '../relay/relay.dart';
 
+const emojiAvatarDataUrlPrefix = 'data:image/svg+xml,';
+
+@immutable
+class EmojiAvatarDescriptor {
+  final String emoji;
+  final String color;
+
+  const EmojiAvatarDescriptor({required this.emoji, required this.color});
+}
+
+/// Build the same self-contained emoji avatar format used by Desktop.
+String emojiAvatarDataUrl(String emoji, String color) {
+  if (!RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(color)) {
+    throw ArgumentError.value(color, 'color', 'must be a six-digit hex color');
+  }
+  final escaped = emoji
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+  final svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" '
+      'viewBox="0 0 512 512"><rect width="512" height="512" rx="256" '
+      'fill="$color"/><text x="50%" y="56%" dominant-baseline="middle" '
+      'text-anchor="middle" font-size="258">$escaped</text></svg>';
+  return '$emojiAvatarDataUrlPrefix${Uri.encodeComponent(svg)}';
+}
+
+/// Parse emoji avatars produced by Mobile or Desktop.
+EmojiAvatarDescriptor? parseEmojiAvatarDataUrl(String? value) {
+  final url = value?.trim();
+  if (url == null || !url.startsWith(emojiAvatarDataUrlPrefix)) return null;
+
+  try {
+    final data = UriData.parse(url);
+    if (data.mimeType != 'image/svg+xml') return null;
+    return _parseEmojiAvatar(utf8.decode(data.contentAsBytes()));
+  } on FormatException {
+    return null;
+  }
+}
+
 /// A circular avatar that supports both remote URLs and inline image data.
 ///
 /// Flutter's [NetworkImage] only loads network URLs, while desktop browsers also
@@ -122,7 +163,14 @@ sealed class _AvatarSource {
       if (data.mimeType == 'image/svg+xml') {
         final Uint8List bytes = data.contentAsBytes();
         final svg = utf8.decode(bytes);
-        return _parseEmojiAvatar(svg) ?? _SvgAvatarSource(svg);
+        final emojiAvatar = _parseEmojiAvatar(svg);
+        if (emojiAvatar != null) {
+          return _EmojiAvatarSource(
+            emojiAvatar.emoji,
+            _parseHexColor(emojiAvatar.color)!,
+          );
+        }
+        return _SvgAvatarSource(svg);
       }
       return _RasterDataAvatarSource(data.contentAsBytes());
     } on FormatException {
@@ -131,12 +179,14 @@ sealed class _AvatarSource {
   }
 }
 
-_EmojiAvatarSource? _parseEmojiAvatar(String svg) {
+EmojiAvatarDescriptor? _parseEmojiAvatar(String svg) {
   final colorValue = RegExp(
     r'<rect\b[^>]*\sfill="([^"]+)"',
   ).firstMatch(svg)?[1];
   final emojiValue = RegExp(r'<text\b[^>]*>(.*?)</text>').firstMatch(svg)?[1];
-  if (colorValue == null || emojiValue == null) return null;
+  if (colorValue == null || emojiValue == null || emojiValue.isEmpty) {
+    return null;
+  }
 
   final color = _parseHexColor(colorValue);
   if (color == null) return null;
@@ -144,7 +194,7 @@ _EmojiAvatarSource? _parseEmojiAvatar(String svg) {
       .replaceAll('&gt;', '>')
       .replaceAll('&lt;', '<')
       .replaceAll('&amp;', '&');
-  return _EmojiAvatarSource(emoji, color);
+  return EmojiAvatarDescriptor(emoji: emoji, color: colorValue);
 }
 
 Color? _parseHexColor(String value) {

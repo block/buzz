@@ -18,6 +18,24 @@ void main() {
     ),
   );
 
+  test('builds and parses the Desktop-compatible emoji avatar format', () {
+    final url = emojiAvatarDataUrl('🐝<&', '#F4B942');
+    final svg = utf8.decode(UriData.parse(url).contentAsBytes());
+
+    expect(url, startsWith(emojiAvatarDataUrlPrefix));
+    expect(svg, contains('🐝&lt;&amp;'));
+    expect(parseEmojiAvatarDataUrl(url)?.emoji, '🐝<&');
+    expect(parseEmojiAvatarDataUrl(url)?.color, '#F4B942');
+  });
+
+  test('rejects unsafe colors and unrelated data images', () {
+    expect(
+      () => emojiAvatarDataUrl('🐝', 'red" onload="alert(1)'),
+      throwsArgumentError,
+    );
+    expect(parseEmojiAvatarDataUrl('data:image/png;base64,aGVsbG8='), isNull);
+  });
+
   testWidgets('renders raccoon percent-encoded SVG data avatar', (
     tester,
   ) async {
