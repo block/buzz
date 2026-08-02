@@ -528,7 +528,7 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
   await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
 
   const pastedAvatarUrl = await page.evaluate(
-    () => new URL("/buzz.svg", window.location.href).href,
+    () => new URL("/orbit.svg", window.location.href).href,
   );
   await page.getByTestId("profile-avatar-url").click();
   await page.keyboard.insertText(pastedAvatarUrl);
