@@ -1179,7 +1179,7 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
 /// agent-only mentions must not force flattening. When a participant cannot be
 /// classified (no profile fetched), it is treated as human — humans must not
 /// lose thread visibility to a misclassification.
-fn turn_is_human_facing(
+pub(crate) fn turn_is_human_facing(
     sender_pubkey: &str,
     thread_tags: &ThreadTags,
     profile_lookup: Option<&PromptProfileLookup>,
@@ -1206,7 +1206,7 @@ fn turn_is_human_facing(
 ///
 /// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
 /// (intentional for agent coordination).
-fn resolve_reply_anchor(
+pub(crate) fn resolve_reply_anchor(
     sender_pubkey: &str,
     thread_tags: &ThreadTags,
     triggering_event_id: &str,
