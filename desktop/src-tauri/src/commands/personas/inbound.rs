@@ -108,6 +108,9 @@ fn reconcile_inbound_persona_event_blocking(
     let inbound_persona = (kind == KIND_PERSONA)
         .then(|| persona_from_event(&event))
         .transpose()?;
+    if let Some(persona) = &inbound_persona {
+        validate_inbound_persona_definition(persona)?;
+    }
     let d_tag = match &inbound_persona {
         Some(persona) => persona_d_tag(persona),
         None => event_d_tag(&event)?,
@@ -180,6 +183,14 @@ fn reconcile_inbound_persona_event_blocking(
     let _ = app.emit("agents-data-changed", ());
 
     Ok(())
+}
+
+fn validate_inbound_persona_definition(persona: &AgentDefinition) -> Result<(), String> {
+    crate::managed_agents::validate_agent_definition_text(
+        &persona.display_name,
+        &persona.system_prompt,
+    )
+    .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))
 }
 
 /// Parse an inbound wire event and enforce the signature gate. Everything

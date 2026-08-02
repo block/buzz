@@ -4,7 +4,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
-const UUID: &str = "11111111-2222-3333-4444-555555555555";
+const UUID: &str = "11111111-2222-3333-4444-555555555555"; // sadscan:disable sq.pii.cc.visa -- fixed test UUID
 
 /// A local in-app persona: `source_team_persona_slug` is None, so its d-tag
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
@@ -672,4 +672,15 @@ fn inbound_gate_accepts_validly_signed_event() {
         .unwrap();
     let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
     assert_eq!(parsed.pubkey, keys.public_key());
+}
+
+#[test]
+fn inbound_persona_rejects_invisible_definition_text() {
+    let mut inbound = inbound_for("unsafe", "Remote");
+    inbound.system_prompt = "Review\u{200B} code.".to_string();
+
+    let error = validate_inbound_persona_definition(&inbound)
+        .expect_err("relay sync must reject invisible instructions");
+
+    assert!(error.contains("U+200B"));
 }

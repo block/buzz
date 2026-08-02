@@ -165,6 +165,12 @@ pub(super) fn prepare_persona_publication_at(
     let mut scoped_persona = persona.clone();
     scoped_persona.shared =
         shared_override.unwrap_or_else(|| retained_persona_is_shared(existing.as_ref()));
+    if scoped_persona.shared {
+        crate::managed_agents::validate_agent_definition_text(
+            &scoped_persona.display_name,
+            &scoped_persona.system_prompt,
+        )?;
+    }
     let event = build_persona_event(&scoped_persona)?
         .custom_created_at(monotonic_created_at(
             existing.as_ref().map(|row| row.created_at),
@@ -395,5 +401,19 @@ mod tests {
         let error = prepare_persona_publication_at(dir.path(), &keys, &persona(), Some(true))
             .expect_err("a directory cannot be opened as the retention database");
         assert!(error.contains("failed to open retention db"));
+    }
+
+    #[test]
+    fn shared_publication_rejects_invisible_definition_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = nostr::Keys::generate();
+        let db_path = dir.path().join("retention.sqlite3");
+        let mut unsafe_persona = persona();
+        unsafe_persona.system_prompt = "Review\u{200B} the catalog.".to_string();
+
+        let error = prepare_persona_publication_at(&db_path, &keys, &unsafe_persona, Some(true))
+            .expect_err("sharing must reject an invisible instruction character");
+
+        assert!(error.contains("U+200B"));
     }
 }
