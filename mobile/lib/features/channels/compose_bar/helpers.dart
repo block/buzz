@@ -90,6 +90,38 @@ void _insertTriggerAtCursor(
   focusNode.requestFocus();
 }
 
+/// Mention candidates referenced by [text]: suggestion-picked entries first,
+/// then hand-typed channel-member names that were never picked — mirrors
+/// desktop's `extractMentionPubkeys` member scan, so a typed `@Name` still
+/// notifies its target. Picked entries keep precedence for a name, and the
+/// typed scan is members-only, so it can never trigger the non-member invite
+/// prompt on its own.
+List<MentionCandidate> _selectedMentionCandidates({
+  required String text,
+  required Map<String, MentionCandidate> picked,
+  required Iterable<MentionCandidate> members,
+}) {
+  final selected = [
+    for (final entry in picked.entries)
+      if (hasMention(text, entry.key)) entry.value,
+  ];
+  final pickedNames = {
+    for (final name in picked.keys) name.trim().toLowerCase(),
+  };
+  final pickedPubkeys = {
+    for (final candidate in picked.values) candidate.pubkey.toLowerCase(),
+  };
+  for (final candidate in members) {
+    if (!candidate.isMember) continue;
+    if (pickedPubkeys.contains(candidate.pubkey.toLowerCase())) continue;
+    final name = candidate.displayName?.trim();
+    if (name == null || name.isEmpty) continue;
+    if (pickedNames.contains(name.toLowerCase())) continue;
+    if (hasMention(text, name)) selected.add(candidate);
+  }
+  return selected;
+}
+
 bool hasMention(String text, String name) {
   final pattern = RegExp(
     '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',

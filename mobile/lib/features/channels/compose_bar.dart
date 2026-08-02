@@ -432,11 +432,16 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
 
-      // Extract pubkeys for mentions present in the final text.
-      final selectedMentions = <MentionCandidate>[
-        for (final entry in mentionMap.value.entries)
-          if (hasMention(text, entry.key)) entry.value,
-      ];
+      // Mention candidates present in the final text — picked from the
+      // suggestion list or hand-typed member names (see
+      // _selectedMentionCandidates in compose_bar/helpers.dart).
+      final selectedMentions = _selectedMentionCandidates(
+        text: text,
+        picked: mentionMap.value,
+        members: ref.read(
+          mentionCandidatesProvider((channelId: channelId, query: '')),
+        ),
+      );
       final pubkeys = LinkedHashSet<String>.from(
         selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
       ).toList();

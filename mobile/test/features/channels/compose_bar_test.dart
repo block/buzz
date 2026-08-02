@@ -2289,6 +2289,54 @@ void main() {
       ]);
     });
 
+    testWidgets('send resolves a hand-typed member mention without a '
+        'suggestion tap', (tester) async {
+      final signer = nostr.Keys.generate();
+      const memberPubkey =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      String? sentContent;
+      List<String> sentMentionPubkeys = const <String>[];
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          members: [
+            ChannelMember(
+              pubkey: memberPubkey,
+              role: 'member',
+              joinedAt: DateTime(2024),
+              displayName: 'Fable',
+            ),
+          ],
+          channels: [_makeCurrentChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMentionPubkeys = mentionPubkeys;
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      // Type the whole message in one edit — the mention never goes through
+      // the suggestion list, mirroring a user who types the name by hand.
+      await tester.enterText(
+        find.byType(TextField),
+        'hey @Fable are you there',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pumpAndSettle();
+
+      expect(sentContent, 'hey @Fable are you there');
+      expect(sentMentionPubkeys, [memberPubkey]);
+    });
+
     testWidgets(
       'renders chips only for selected agents outside code and composition',
       (tester) async {
