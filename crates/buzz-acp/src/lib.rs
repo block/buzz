@@ -3354,10 +3354,13 @@ fn handle_prompt_result(
 
     match result.outcome {
         // Successful prompt — return agent to pool.
-        PromptOutcome::Ok(_) => {
+        PromptOutcome::Ok(ref stop_reason) => {
+            // Surface the StopReason — `outcome_label` collapses every Ok to
+            // "ok", hiding refusals and turn-limit stops.
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
+                stop_reason = ?stop_reason,
                 "agent_returned"
             );
             pool.return_agent(result.agent);
