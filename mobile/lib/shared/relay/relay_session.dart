@@ -50,10 +50,21 @@ class _LiveSubscription {
 }
 
 class _PendingEvent {
+  final NostrEvent event;
   final Completer<NostrEvent> completer;
-  final Timer timeout;
+  final Duration acknowledgementTimeout;
+  final DateTime deadline;
+  final bool retryOnReconnect;
+  bool wasSent = false;
+  Timer? timeout;
 
-  _PendingEvent({required this.completer, required this.timeout});
+  _PendingEvent({
+    required this.event,
+    required this.completer,
+    required this.acknowledgementTimeout,
+    required this.deadline,
+    required this.retryOnReconnect,
+  });
 }
 
 class _BufferedEvent {
@@ -87,6 +98,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
   static const _eventBatchMs = 16;
+  static const _reconnectPublishTimeout = Duration(seconds: 30);
   static const _reconnectReplaySkewSeconds = 5;
   static const _maxRecentDeliveryKeys = 5000;
 
@@ -105,6 +117,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _paused = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
+  RelayAuthRejectedException? _authRejectedError;
 
   @override
   SessionState build() {
@@ -114,6 +127,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // Reset disposed flag — build() may re-run on the same Notifier instance
     // after a provider dependency changes (e.g. auth completing).
     _disposed = false;
+    _authRejectedError = null;
 
     ref.onDispose(_dispose);
 
@@ -250,25 +264,43 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
   }) {
-    final completer = Completer<NostrEvent>();
-
-    final timer = Timer(timeout, () {
-      final pending = _pendingEvents.remove(event.id);
-      if (pending != null && !pending.completer.isCompleted) {
-        pending.completer.completeError(
-          TimeoutException(
-            'Event ${event.id} not acknowledged within $timeout',
-          ),
-        );
-      }
-    });
-
-    _pendingEvents[event.id] = _PendingEvent(
-      completer: completer,
-      timeout: timer,
+    if (_paused) {
+      return Future.error(
+        Exception('Cannot publish while app is in background'),
+      );
+    }
+    final authRejectedError = _authRejectedError;
+    if (authRejectedError != null) return Future.error(authRejectedError);
+    final retryOnReconnect = event.kind == EventKind.streamMessage;
+    final deadline = DateTime.now().add(
+      retryOnReconnect ? _reconnectPublishTimeout : timeout,
     );
+    final completer = Completer<NostrEvent>();
+    final pending = _PendingEvent(
+      event: event,
+      completer: completer,
+      acknowledgementTimeout: timeout,
+      deadline: deadline,
+      retryOnReconnect: retryOnReconnect,
+    );
+    _pendingEvents[event.id] = pending;
 
-    _socket?.send(['EVENT', event.toJson()]);
+    if (state.status == SessionStatus.connected) {
+      _sendPendingEvent(pending);
+    } else {
+      _armPendingTimeout(
+        event.id,
+        _reconnectPublishTimeout,
+        'Event ${event.id} could not reconnect within '
+        '$_reconnectPublishTimeout',
+      );
+    }
+    if (!_paused && state.status == SessionStatus.disconnected) {
+      _reconnectTimer?.cancel();
+      _reconnectDelayMs = _baseReconnectDelayMs;
+      final config = ref.read(relayConfigProvider);
+      unawaited(_connect(config));
+    }
     return completer.future;
   }
 
@@ -307,6 +339,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
+    _authRejectedError = null;
     await _socket?.disconnect();
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
@@ -375,22 +408,40 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleConnected(int generation) {
     if (_disposed || generation != _connectionGeneration) return;
     _hasConnectedOnce = true;
+    _authRejectedError = null;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
+    _replayPendingEvents();
     _replayLiveSubscriptions();
   }
 
   void _handleDisconnected(int generation, Object? error) {
     if (_disposed || generation != _connectionGeneration) return;
     _cancelAllHistory(error);
-    _rejectAllPending(error);
     _eventBuffer.clear();
     _flushTimer?.cancel();
     _flushTimer = null;
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
+      _authRejectedError = error;
+      _rejectAllPending(error);
       state = const SessionState(status: SessionStatus.disconnected);
       return;
+    }
+    final nonRetryable = [
+      for (final entry in _pendingEvents.entries)
+        if (entry.value.wasSent && !entry.value.retryOnReconnect) entry.key,
+    ];
+    for (final eventId in nonRetryable) {
+      _rejectPendingEvent(eventId, error ?? Exception('Connection lost'));
+    }
+    for (final eventId in _pendingEvents.keys) {
+      _armPendingTimeout(
+        eventId,
+        _reconnectPublishTimeout,
+        'Event $eventId could not reconnect within '
+        '$_reconnectPublishTimeout',
+      );
     }
     _scheduleReconnect();
   }
@@ -423,6 +474,56 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           ? sub.filter.copyWithSince(since)
           : sub.filter;
       _sendReq(entry.key, filter);
+    }
+  }
+
+  /// Re-submit unacknowledged events after a transient reconnect.
+  ///
+  /// Events retain their original signed ID, so relay-side duplicate handling
+  /// makes this safe when the first publish was stored but its OK frame was
+  /// lost with the connection.
+  void _replayPendingEvents() {
+    for (final pending in _pendingEvents.values) {
+      if (!pending.wasSent || pending.retryOnReconnect) {
+        _sendPendingEvent(pending);
+      }
+    }
+  }
+
+  void _sendPendingEvent(_PendingEvent pending) {
+    pending.wasSent = true;
+    _armPendingTimeout(
+      pending.event.id,
+      pending.acknowledgementTimeout,
+      'Event ${pending.event.id} not acknowledged within '
+      '${pending.acknowledgementTimeout}',
+    );
+    _sendEvent(pending.event);
+  }
+
+  void _armPendingTimeout(String eventId, Duration timeout, String message) {
+    final pending = _pendingEvents[eventId];
+    if (pending == null) return;
+    final remaining = pending.deadline.difference(DateTime.now());
+    final boundedTimeout = remaining < timeout ? remaining : timeout;
+    pending.timeout?.cancel();
+    pending.timeout = Timer(
+      boundedTimeout.isNegative ? Duration.zero : boundedTimeout,
+      () {
+        final expired = _pendingEvents.remove(eventId);
+        if (expired != null && !expired.completer.isCompleted) {
+          expired.completer.completeError(TimeoutException(message));
+        }
+      },
+    );
+  }
+
+  void _rejectPendingEvent(String eventId, Object error) {
+    final pending = _pendingEvents.remove(eventId);
+    if (pending == null) return;
+    pending.timeout?.cancel();
+    if (!pending.completer.isCompleted) {
+      pending.completer.completeError(error);
     }
   }
 
@@ -537,7 +638,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     final pending = _pendingEvents.remove(eventId);
     if (pending == null) return;
-    pending.timeout.cancel();
+    pending.timeout?.cancel();
 
     if (accepted) {
       // We don't have the full event here; create a minimal placeholder.
@@ -618,6 +719,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _socket?.send(['CLOSE', subId]);
   }
 
+  void _sendEvent(NostrEvent event) {
+    _socket?.send(['EVENT', event.toJson()]);
+  }
+
   void _unsubscribe(String subId) {
     _liveSubscriptions.remove(subId);
     _recentDeliveryKeys.removeWhere((key) => key.startsWith('$subId:'));
@@ -636,7 +741,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _rejectAllPending(Object? error) {
     for (final entry in _pendingEvents.values) {
-      entry.timeout.cancel();
+      entry.timeout?.cancel();
       if (!entry.completer.isCompleted) {
         entry.completer.completeError(error ?? Exception('Connection lost'));
       }

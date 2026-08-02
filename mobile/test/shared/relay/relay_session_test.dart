@@ -154,6 +154,167 @@ void main() {
     expect(session.state.reconnectAttempt, 1);
   });
 
+  test(
+    'replays an unacknowledged publish after a transient reconnect',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+
+      final published = session.publish(_messageEvent());
+      expect(socket.sent, [
+        ['EVENT', _messageEvent().toJson()],
+      ]);
+
+      session.debugHandleDisconnected(Exception('connection lost'));
+      expect(session.state.status, SessionStatus.reconnecting);
+
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _messageEvent().toJson()],
+        ['EVENT', _messageEvent().toJson()],
+      ]);
+
+      session.debugHandleMessage([
+        'OK',
+        _messageEvent().id,
+        true,
+        'duplicate:',
+      ]);
+      await expectLater(published, completes);
+    },
+  );
+
+  test(
+    'buffers a publish while reconnecting until the socket returns',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+      session.debugHandleDisconnected(Exception('connection lost'));
+
+      final published = session.publish(_messageEvent());
+      expect(socket.sent, isEmpty);
+
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _messageEvent().toJson()],
+      ]);
+
+      session.debugHandleMessage(['OK', _messageEvent().id, true, '']);
+      await expectLater(published, completes);
+    },
+  );
+
+  test(
+    'does not replay a publish already acknowledged before reconnect',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+
+      final published = session.publish(_messageEvent());
+      session.debugHandleMessage(['OK', _messageEvent().id, true, '']);
+      await published;
+
+      session.debugHandleDisconnected(Exception('connection lost'));
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _messageEvent().toJson()],
+      ]);
+    },
+  );
+
+  test(
+    'auth rejection fails pending publishes without replaying them',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+
+      final published = session.publish(_messageEvent());
+      session.debugHandleDisconnected(
+        const RelayAuthRejectedException('restricted: access revoked'),
+      );
+      await expectLater(published, throwsA(isA<RelayAuthRejectedException>()));
+
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _messageEvent().toJson()],
+      ]);
+    },
+  );
+
+  test('does not replay response-bearing events after disconnect', () async {
+    final session = RelaySessionNotifier();
+    final socket = _ControlledRelaySocket(
+      wsUrl: 'wss://relay.example',
+      nsec: null,
+      onMessage: (_) {},
+      onConnected: () {},
+      onDisconnected: (_) {},
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+    session.debugAttachSocketForTest(socket);
+
+    final published = session.publish(_event());
+    session.debugHandleDisconnected(Exception('connection lost'));
+    await expectLater(published, throwsException);
+
+    session.debugHandleConnected();
+    expect(socket.sent, [
+      ['EVENT', _event().toJson()],
+    ]);
+  });
+
   test('classifies relay internal auth errors as transient', () {
     expect(
       classifyRelayAuthFailure(
@@ -402,6 +563,7 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 class _ControlledRelaySocket extends RelaySocket {
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
+  final List<List<dynamic>> sent = [];
 
   _ControlledRelaySocket({
     required super.wsUrl,
@@ -417,6 +579,9 @@ class _ControlledRelaySocket extends RelaySocket {
 
   @override
   void dispose() {}
+
+  @override
+  void send(List<dynamic> payload) => sent.add(payload);
 
   void connectSuccessfully() => _connected();
 
@@ -447,6 +612,20 @@ NostrEvent _event() {
       ['h', _channelId],
     ],
     content: 'hello',
+    sig: 'sig',
+  );
+}
+
+NostrEvent _messageEvent() {
+  return const NostrEvent(
+    id: 'message-1',
+    pubkey: 'alice',
+    createdAt: 20,
+    kind: EventKind.streamMessage,
+    tags: [
+      ['h', _channelId],
+    ],
+    content: 'en di?',
     sig: 'sig',
   );
 }
