@@ -63,3 +63,36 @@ there is no separate unsigned grant store.
 This compatibility boundary makes the policy safe to evaluate in a controlled
 pilot, but it is not a signal to activate it in production without positive
 and negative authorization tests against the exact deployed relay image.
+
+## Verification, rollout, and rollback
+
+The ignored end-to-end test drives the real Git credential helper and Smart
+HTTP transport with two disposable actors:
+
+```text
+cargo build -p buzz-relay --bin buzz-relay \
+  -p git-credential-nostr --bin git-credential-nostr
+RELAY_HTTP_URL=http://127.0.0.1:3000 \
+GIT_CREDENTIAL_NOSTR_BIN="$PWD/target/debug/git-credential-nostr" \
+  cargo test -p buzz-test-client --test e2e_git \
+  explicit_push_grants_enforce_actor_ref_and_expiry_over_smart_http \
+  -- --ignored --exact --nocapture
+```
+
+Run it against an isolated database, Redis, object store, and Git directory.
+Before production activation, repeat the same positive and negative pushes
+against the exact candidate image: both actors' own prefixes must pass, while
+`main`, the other actor's prefix, a foreign actor, and an expired grant must
+all fail without creating refs.
+
+Rollback is an image rollback to the previously pinned relay build. Keep the
+owner-only `buzz-protect` baseline in every opted-in announcement: an older
+relay then denies the granted non-owner actors. Do not automatically remove
+the policy and grant tags during rollback, because returning a repository to
+legacy channel-role authorization can expand write access and requires an
+explicit human decision.
+
+The fork maintenance surface is intentionally limited to the core policy
+parser/evaluator, the relay authorization adapter, tests, and this contract.
+It adds no database migration, unsigned grant store, or alternate Git
+transport, so rebases and rollback remain localized.
