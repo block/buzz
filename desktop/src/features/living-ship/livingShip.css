@@ -20,7 +20,7 @@
 
 .living-ship-header h1 {
   margin-top: 0.2rem;
-  @apply text-2xl;
+  font-size: var(--text-2xl);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -28,7 +28,7 @@
 .living-ship-header p {
   margin-top: 0.25rem;
   color: #a9bfd0;
-  @apply text-sm;
+  font-size: var(--text-sm);
 }
 
 .living-ship-kicker {
@@ -36,7 +36,7 @@
   align-items: center;
   gap: 0.4rem;
   color: #72d7dd;
-  @apply text-2xs;
+  font-size: var(--text-2xs);
   font-weight: 700;
   letter-spacing: 0.13em;
   text-transform: uppercase;
@@ -51,7 +51,7 @@
   justify-content: flex-end;
   gap: 0.5rem 1rem;
   color: #c6d6df;
-  @apply text-2xs;
+  font-size: var(--text-2xs);
 }
 
 .living-ship-legend span {
@@ -118,7 +118,7 @@
   background: transparent;
   color: #fff2cd;
   cursor: pointer;
-  @apply text-3xs;
+  font-size: var(--text-3xs);
   font-weight: 800;
   letter-spacing: 0.05em;
   text-align: left;
@@ -164,7 +164,7 @@
 
 .living-ship-personnel-title {
   color: #d6e2e8;
-  @apply text-2xs;
+  font-size: var(--text-2xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -173,7 +173,7 @@
 .living-ship-personnel-subtitle {
   margin-top: 0.15rem;
   color: #8fa6b6;
-  @apply text-3xs;
+  font-size: var(--text-3xs);
 }
 
 .living-ship-agent {
@@ -213,7 +213,7 @@
   border-radius: 0.18rem;
   background: rgb(3 14 28 / 88%);
   color: #f5f5ec;
-  @apply text-3xs;
+  font-size: var(--text-3xs);
   font-weight: 800;
   line-height: 1;
   text-overflow: ellipsis;
@@ -273,20 +273,20 @@
 .living-ship-details h2 {
   margin-top: 0.15rem;
   color: #fff6df;
-  @apply text-base;
+  font-size: var(--text-base);
   font-weight: 700;
 }
 
 .living-ship-details p,
 .living-ship-details-hint {
   color: #b9cad5;
-  @apply text-xs;
+  font-size: var(--text-xs);
   line-height: 1.45;
 }
 
 .living-ship-details-eyebrow {
   color: #72d7dd;
-  @apply text-3xs;
+  font-size: var(--text-3xs);
   font-weight: 800;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -306,7 +306,7 @@
 
 .living-ship-details dt,
 .living-ship-details dd {
-  @apply text-2xs;
+  font-size: var(--text-2xs);
 }
 
 .living-ship-details dt {
@@ -322,7 +322,7 @@
   gap: 0.4rem;
   margin-top: 0.65rem;
   color: #e4c7fa;
-  @apply text-2xs;
+  font-size: var(--text-2xs);
 }
 
 .living-ship-activity-button {
@@ -337,7 +337,7 @@
   border-radius: 0.3rem;
   background: #123c50;
   color: #e7ffff;
-  @apply text-2xs;
+  font-size: var(--text-2xs);
   font-weight: 700;
 }
 
@@ -361,7 +361,7 @@
   justify-content: center;
   padding: 2rem;
   color: #a9bfd0;
-  @apply text-sm;
+  font-size: var(--text-sm);
 }
 
 .living-ship-error {

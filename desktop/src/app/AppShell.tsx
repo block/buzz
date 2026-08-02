@@ -133,6 +133,7 @@ export function AppShell() {
     goProjects,
     goPulse,
     goSettings,
+    goShip,
     goWorkflows,
     closeSettings,
     openSearchHit,
@@ -162,7 +163,6 @@ export function AppShell() {
     ? locationSearchSection
     : DEFAULT_SETTINGS_SECTION;
   const startupReady = useDeferredStartup();
-
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
@@ -256,7 +256,6 @@ export function AppShell() {
       return;
     }
     hasRestoredCommunityDestinationRef.current = true;
-
     // Restoration belongs to an explicit community transition. Cold boot and
     // reconnect remounts must preserve the route the user explicitly opened.
     if (!consumePendingCommunityRestore(activeCommunityId)) {
@@ -888,6 +887,7 @@ export function AppShell() {
                           searchChannels={channels}
                           searchFocusRequest={searchFocusRequest}
                           onSelectHome={() => void goHome()}
+                          onSelectShip={() => void goShip()}
                           onSelectPlans={() => void goPlans()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}

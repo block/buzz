@@ -13,6 +13,13 @@ test("deriveShellRoute_selectsCommandConsoleForConsolePath", () => {
   });
 });
 
+test("deriveShellRoute_selectsLivingShipForShipPath", () => {
+  assert.deepEqual(deriveShellRoute("/ship"), {
+    selectedChannelId: null,
+    selectedView: "ship",
+  });
+});
+
 test("battle rhythm route selects its own sidebar destination", () => {
   assert.deepEqual(deriveShellRoute("/battle-rhythm"), {
     selectedChannelId: null,

@@ -34,6 +34,7 @@ import {
 import {
   AppSidebarPinnedHeader,
   AppSidebarPrimaryMenu,
+  type SidebarSelectedView,
 } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
 import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
@@ -98,17 +99,7 @@ type AppSidebarProps = {
   selfPresenceStatus: PresenceStatus;
   errorMessage?: string;
   selectedChannelId: string | null;
-  selectedView:
-    | "home"
-    | "channel"
-    | "messages"
-    | "agents"
-    | "console"
-    | "workflows"
-    | "pulse"
-    | "plans"
-    | "projects"
-    | "battleRhythm";
+  selectedView: SidebarSelectedView;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   communities: Community[];
@@ -153,6 +144,7 @@ type AppSidebarProps = {
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
+  onSelectShip: () => void;
   onSelectChannel: (channelId: string) => void;
   onOpenSearchResult: (hit: SearchHit) => void;
   /**
@@ -225,6 +217,7 @@ export function AppSidebar({
   onSelectPulse,
   onSelectWorkflows,
   onSelectHome,
+  onSelectShip,
   onSelectChannel,
   onOpenSearchResult,
   searchChannels,
@@ -621,6 +614,7 @@ export function AppSidebar({
                 onSelectBattleRhythm={onSelectBattleRhythm}
                 onSelectCommandConsole={onSelectCommandConsole}
                 onSelectHome={onSelectHome}
+                onSelectShip={onSelectShip}
                 onSelectPlans={onSelectPlans}
                 onSelectProjects={onSelectProjects}
                 onSelectPulse={onSelectPulse}
