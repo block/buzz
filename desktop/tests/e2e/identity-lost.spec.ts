@@ -125,6 +125,56 @@ test("lost boot offers phone recovery with a single-use QR", async ({
   ).toBe(true);
 });
 
+test("recovery turns relay failures into actionable copy", async ({ page }) => {
+  await installMockBridge(
+    page,
+    { identityLost: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
+
+  await page.evaluate(async () => {
+    await window.__TAURI_INTERNALS__?.invoke?.("plugin:event|emit", {
+      event: "pairing-error",
+      payload: { message: "failed to send sas-confirm" },
+    });
+  });
+
+  await expect(
+    page.getByText(
+      "This pairing code expired or lost its connection. Create a new code and try again.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+});
+
+test("desktop refreshes recovery codes before the relay expires them", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await installMockBridge(
+    page,
+    { identityLost: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
+
+  const recoveryStarts = () =>
+    page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          ({ command }) => command === "start_identity_recovery_pairing",
+        ).length,
+    );
+  await expect.poll(recoveryStarts).toBe(1);
+
+  await page.clock.fastForward(90_000);
+  await expect.poll(recoveryStarts).toBe(2);
+  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
+});
+
 test("importing a key from lost mode shows the relaunch-required screen", async ({
   page,
 }) => {

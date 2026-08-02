@@ -189,7 +189,7 @@ pub async fn confirm_pairing_sas(pairing: State<'_, PairingHandle>) -> Result<()
 
     tx.send(sas_confirm_json)
         .await
-        .map_err(|_| "failed to send sas-confirm")?;
+        .map_err(|_| "Pairing code expired. Create a new code and try again.")?;
 
     let mode = *pairing.mode.lock().map_err(|e| e.to_string())?;
     if mode == PairingMode::SendIdentity {

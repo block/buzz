@@ -16,6 +16,24 @@ import { StyledQrCode } from "@/shared/ui/styled-qr-code";
 
 type Step = "loading" | "qr" | "sas" | "receiving" | "done" | "error";
 
+// Refresh before the pairing relay's two-minute connection cap so Desktop never
+// leaves a code on screen after its publishing channel has closed.
+const QR_REFRESH_MS = 90_000;
+
+function recoveryErrorMessage(message: string): string {
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes("sas-confirm") ||
+    normalized.includes("relay connection closed") ||
+    normalized.includes("websocket") ||
+    normalized.includes("expired") ||
+    normalized.includes("timed out")
+  ) {
+    return "This pairing code expired or lost its connection. Create a new code and try again.";
+  }
+  return message;
+}
+
 export function IdentityRecoveryPairing({
   onRecovered,
 }: {
@@ -67,7 +85,7 @@ export function IdentityRecoveryPairing({
     listen<{ message: string }>("pairing-error", ({ payload }) => {
       if (!disposed && active.current) {
         active.current = false;
-        setError(payload.message);
+        setError(recoveryErrorMessage(payload.message));
         setStep("error");
       }
     }).then((unlisten) => (disposed ? unlisten() : unlisteners.push(unlisten)));
@@ -87,6 +105,12 @@ export function IdentityRecoveryPairing({
     };
   }, [onRecovered, start]);
 
+  React.useEffect(() => {
+    if (step !== "qr") return;
+    const timer = window.setTimeout(() => void start(), QR_REFRESH_MS);
+    return () => window.clearTimeout(timer);
+  }, [start, step]);
+
   async function copyPairingCode() {
     if (!qrUri) return;
     try {
@@ -104,8 +128,13 @@ export function IdentityRecoveryPairing({
     try {
       await confirmPairingSas();
     } catch (cause) {
+      if (!active.current) return;
       setError(
-        cause instanceof Error ? cause.message : "Could not confirm recovery.",
+        recoveryErrorMessage(
+          cause instanceof Error
+            ? cause.message
+            : "Could not confirm recovery.",
+        ),
       );
       setStep("error");
     }
