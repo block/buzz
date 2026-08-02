@@ -446,6 +446,9 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
+            // Setup mode has no dispatch loop, so there is no thread
+            // participation to follow — mention gating stays strict.
+            None,
         )
         .await
         .is_some();
