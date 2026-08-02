@@ -670,7 +670,7 @@ async fn event_confirmed_by_id(rest: &RestClient, event: &nostr::Event) -> bool 
 async fn submit_signed_agent_output(rest: &RestClient, event: &nostr::Event) -> bool {
     const ATTEMPTS: u8 = 3;
     for attempt in 1..=ATTEMPTS {
-        match rest.submit_event(event).await {
+        match rest.submit_event_once(event).await {
             Ok(response)
                 if response
                     .get("accepted")

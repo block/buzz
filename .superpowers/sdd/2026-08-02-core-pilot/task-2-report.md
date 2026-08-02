@@ -10,7 +10,7 @@ Implementation commit: `1ab0721481bcc4d3ac19bcb8aab65ddacb0a3a1a`
 
 ## GREEN evidence
 
-- `cargo test -p buzz-acp` — 668 unit tests and 9 lifecycle integration tests passed.
+- `cargo test -p buzz-acp --lib` — 669 unit tests passed.
 - `cargo fmt --check` passed.
 - `cargo clippy -p buzz-acp --all-targets -- -D warnings` passed.
 
@@ -20,8 +20,9 @@ Implementation commit: `1ab0721481bcc4d3ac19bcb8aab65ddacb0a3a1a`
 - `crates/buzz-acp/src/acp.rs` — bounded per-prompt agent-message capture and invalidation.
 - `crates/buzz-acp/src/pool.rs` — trusted batch-last targeting, signing, terminal gating, exact-ID confirmation/retry, and one pending event.
 - `crates/buzz-acp/src/lib.rs` — public policy re-export and runtime wiring.
+- `crates/buzz-acp/src/relay.rs` — single-attempt durable submission, preventing an unconfirmed transport retry.
 
 ## Concerns
 
 - Publishing is intentionally local-pilot-only: one pending signed event is retained in memory, so it is not durable across process restart.
-- The retry/confirmation behavior is unit-covered at the signed-event and policy boundaries; it has not been exercised against a live relay in this task.
+- The single-attempt durable submission is unit-tested; full relay behavior remains unexercised against a production relay in this task.
