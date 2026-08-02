@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
@@ -50,10 +51,12 @@ type SettingsViewProps = SettingsPanelProps & {
 
 const settingsNavGroups: Array<{
   label: string;
+  translationKey: string;
   sections: SettingsSection[];
 }> = [
   {
     label: "Personal",
+    translationKey: "settings.personal",
     sections: [
       "profile",
       "appearance",
@@ -66,10 +69,12 @@ const settingsNavGroups: Array<{
   },
   {
     label: "Communities",
+    translationKey: "settings.communities",
     sections: ["hosted-communities", "channel-templates", "community-members"],
   },
   {
     label: "App",
+    translationKey: "settings.app",
     sections: ["agents", "compute", "experimental", "mobile", "updates"],
   },
 ];
@@ -83,7 +88,9 @@ function SettingsSectionButton({
   onSelect: (section: SettingsSection) => void;
   section: (typeof settingsSections)[number];
 }) {
+  const { t } = useTranslation();
   const Icon = section.icon;
+  const label = t(section.translationKey, section.label);
 
   return (
     <SidebarMenuItem>
@@ -92,7 +99,7 @@ function SettingsSectionButton({
         data-testid={`settings-nav-${section.value}`}
         isActive={active}
         onClick={() => onSelect(section.value)}
-        tooltip={section.label}
+        tooltip={label}
         type="button"
       >
         <Icon
@@ -103,7 +110,7 @@ function SettingsSectionButton({
               : "text-sidebar-foreground/70",
           )}
         />
-        <SidebarMenuLabel>{section.label}</SidebarMenuLabel>
+        <SidebarMenuLabel>{label}</SidebarMenuLabel>
       </SidebarMenuButton>
     </SidebarMenuItem>
   );
@@ -126,6 +133,7 @@ export function SettingsView({
   onSetSoundForSlot,
   section,
 }: SettingsViewProps) {
+  const { t } = useTranslation();
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
@@ -226,11 +234,11 @@ export function SettingsView({
               <SidebarMenuButton
                 data-testid="settings-back-to-app"
                 onClick={onClose}
-                tooltip="Back to app"
+                tooltip={t("settings.backToApp")}
                 type="button"
               >
                 <ArrowLeft className="h-4 w-4" />
-                <span>Back to app</span>
+                <span>{t("settings.backToApp")}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
@@ -243,7 +251,7 @@ export function SettingsView({
               data-testid="community-access-loading"
             >
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Checking invite permissions…
+              {t("settings.checkingPermissions")}
             </div>
           ) : null}
           {myMembershipQuery.isError ? (
@@ -253,7 +261,7 @@ export function SettingsView({
             >
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
-                Invite settings could not be checked.
+                {t("settings.inviteCheckFailed")}
               </div>
               <button
                 className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
@@ -261,7 +269,7 @@ export function SettingsView({
                 type="button"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                Try again
+                {t("common.retry")}
               </button>
             </div>
           ) : null}
@@ -277,9 +285,13 @@ export function SettingsView({
           ) : null}
           {visibleNavGroups.map((group) => (
             <SidebarGroup key={group.label}>
-              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+              <SidebarGroupLabel>
+                {t(group.translationKey, group.label)}
+              </SidebarGroupLabel>
               <SidebarGroupContent>
-                <SidebarMenu aria-label={`${group.label} settings sections`}>
+                <SidebarMenu
+                  aria-label={`${t(group.translationKey, group.label)} settings sections`}
+                >
                   {group.sections.map((entry) => (
                     <SettingsSectionButton
                       active={entry.value === section}

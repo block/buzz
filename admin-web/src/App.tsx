@@ -6,7 +6,9 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { ApiFailure, request } from "./api";
+import { currentLanguage, setLanguage, type SupportedLanguage } from "./i18n";
 import type {
   FeedbackDetail,
   FeedbackSummary,
@@ -67,17 +69,18 @@ function StateView<T>({
   resource: ReturnType<typeof useResource<T>>;
   children: (data: T) => ReactNode;
 }) {
+  const { t } = useTranslation();
   if (resource.loading && !resource.data)
-    return <div className="state">Loading…</div>;
+    return <div className="state">{t("loading")}</div>;
   if (resource.error && !resource.data) {
     const forbidden =
       resource.error instanceof ApiFailure && resource.error.status === 403;
     return (
       <div className="state error" role="alert">
-        <h2>{forbidden ? "Access denied" : "Could not load data"}</h2>
+        <h2>{forbidden ? t("accessDenied") : t("loadFailed")}</h2>
         <p>{resource.error.message}</p>
         <button type="button" onClick={resource.refetch}>
-          Retry
+          {t("retry")}
         </button>
       </div>
     );
@@ -86,15 +89,16 @@ function StateView<T>({
 }
 
 function Reports() {
+  const { t } = useTranslation();
   const resource = useResource(
     () => request<Report[]>("/reports?status=open&limit=100"),
     "reports",
   );
   return (
     <Page
-      eyebrow="Moderation"
-      title="Open reports"
-      description="Review reports across every Buzz community."
+      eyebrow={t("moderation")}
+      title={t("openReports")}
+      description={t("openReportsDescription")}
     >
       <StateView resource={resource}>
         {(reports) =>
@@ -118,7 +122,7 @@ function Reports() {
                       </code>
                     </div>
                     <div className="record-date">
-                      <span>Submitted</span>
+                      <span>{t("submitted")}</span>
                       <time>{date(report.createdAt)}</time>
                     </div>
                     <ArrowIcon />
@@ -136,15 +140,16 @@ function Reports() {
 }
 
 function ReportDetail({ id }: { id: string }) {
+  const { t } = useTranslation();
   const resource = useResource(
     () => request<ReportDetailData>(`/reports/${id}`),
     id,
   );
   return (
     <Page
-      eyebrow="Moderation"
-      title="Report detail"
-      description="The full report as submitted to the relay."
+      eyebrow={t("moderation")}
+      title={t("reportDetail")}
+      description={t("reportDetailDescription")}
       back="/reports"
     >
       <StateView resource={resource}>
@@ -160,48 +165,45 @@ function ReportDetail({ id }: { id: string }) {
               </div>
             </div>
             <dl>
-              <dt>Status</dt>
+              <dt>{t("status")}</dt>
               <dd>
                 <span className="status">{report.status}</span>
               </dd>
-              <dt>Reporter</dt>
+              <dt>{t("reporter")}</dt>
               <dd>
                 <code>{report.reporterPubkey}</code>
               </dd>
-              <dt>Target</dt>
+              <dt>{t("target")}</dt>
               <dd>
                 <code>{report.target}</code>
               </dd>
               {report.targetKind === "event" ? (
                 <>
-                  <dt>Message</dt>
+                  <dt>{t("message")}</dt>
                   <dd>
                     {report.message ? (
                       <div className="reported-message">
                         {report.message.deletedAt ? (
-                          <span className="status">Deleted</span>
+                          <span className="status">{t("deleted")}</span>
                         ) : null}
                         <p>{report.message.content}</p>
                         <div className="reported-message-meta">
-                          <span>Author</span>
+                          <span>{t("author")}</span>
                           <code>{report.message.authorPubkey}</code>
-                          <span>Created</span>
+                          <span>{t("created")}</span>
                           <time>{date(report.message.createdAt)}</time>
                         </div>
                       </div>
                     ) : (
                       <p className="message-unavailable">
-                        Message content is unavailable. It may have expired or
-                        been removed from event storage.
+                        {t("messageUnavailable")}
                       </p>
                     )}
                   </dd>
                 </>
               ) : null}
-              <dt>Note</dt>
-              <dd className="sensitive">
-                {report.note ?? "No note provided."}
-              </dd>
+              <dt>{t("note")}</dt>
+              <dd className="sensitive">{report.note ?? t("noNote")}</dd>
             </dl>
           </article>
         )}
@@ -211,6 +213,7 @@ function ReportDetail({ id }: { id: string }) {
 }
 
 function FeedbackList() {
+  const { t } = useTranslation();
   const resource = useResource(
     () => request<FeedbackSummary[]>("/feedback"),
     "feedback",
@@ -235,9 +238,9 @@ function FeedbackList() {
 
   return (
     <Page
-      eyebrow="Product"
-      title="Feedback"
-      description="Recent product feedback from across Buzz."
+      eyebrow={t("product")}
+      title={t("feedback")}
+      description={t("feedbackDescription")}
     >
       <StateView resource={resource}>
         {(items) => {
@@ -255,24 +258,24 @@ function FeedbackList() {
                 <>
                   <div className="feedback-filters">
                     <label className="search-field">
-                      <span>Search feedback</span>
+                      <span>{t("searchFeedback")}</span>
                       <div>
                         <SearchIcon />
                         <input
                           type="search"
-                          placeholder="Search feedback"
+                          placeholder={t("searchFeedback")}
                           value={query}
                           onChange={(event) => setQuery(event.target.value)}
                         />
                       </div>
                     </label>
                     <label>
-                      <span>Community</span>
+                      <span>{t("community")}</span>
                       <select
                         value={community}
                         onChange={(event) => setCommunity(event.target.value)}
                       >
-                        <option value="all">All communities</option>
+                        <option value="all">{t("allCommunities")}</option>
                         {communities.map((host) => (
                           <option key={host} value={host}>
                             {host}
@@ -281,33 +284,36 @@ function FeedbackList() {
                       </select>
                     </label>
                     <label>
-                      <span>Received</span>
+                      <span>{t("received")}</span>
                       <select
                         value={timeRange}
                         onChange={(event) => setTimeRange(event.target.value)}
                       >
-                        <option value="all">Any time</option>
-                        <option value="day">Last 24 hours</option>
-                        <option value="week">Last 7 days</option>
-                        <option value="month">Last 30 days</option>
+                        <option value="all">{t("anyTime")}</option>
+                        <option value="day">{t("lastDay")}</option>
+                        <option value="week">{t("lastWeek")}</option>
+                        <option value="month">{t("lastMonth")}</option>
                       </select>
                     </label>
                     <label>
-                      <span>Status</span>
+                      <span>{t("status")}</span>
                       <select
                         value={statusFilter}
                         onChange={(event) =>
                           setStatusFilter(event.target.value)
                         }
                       >
-                        <option value="all">Any status</option>
-                        <option value="pending">Needs action</option>
-                        <option value="acted-on">Acted on</option>
+                        <option value="all">{t("anyStatus")}</option>
+                        <option value="pending">{t("needsAction")}</option>
+                        <option value="acted-on">{t("actedOn")}</option>
                       </select>
                     </label>
                   </div>
                   <p className="result-count" aria-live="polite">
-                    {filtered.length} of {items.length} submissions
+                    {t("submissionCount", {
+                      filtered: filtered.length,
+                      total: items.length,
+                    })}
                   </p>
                   {filtered.length ? (
                     <div className="cards">
@@ -338,13 +344,13 @@ function FeedbackList() {
                               checked={statuses[item.id] ?? false}
                               onChange={(event) => updateStatus(item.id, event)}
                             />
-                            Acted on
+                            {t("actedOn")}
                             <span className="visually-hidden">
                               feedback from {item.communityHost}
                             </span>
                           </label>
                           <div className="record-date">
-                            <span>Received</span>
+                            <span>{t("received")}</span>
                             <time>{date(item.receivedAt)}</time>
                           </div>
                           <Link
@@ -360,7 +366,7 @@ function FeedbackList() {
                       ))}
                     </div>
                   ) : (
-                    <div className="state">No matching feedback.</div>
+                    <div className="state">{t("noMatchingFeedback")}</div>
                   )}
                 </>
               )}
@@ -420,17 +426,18 @@ function FeedbackResults({
 }
 
 function FeedbackDetailView({ id }: { id: string }) {
+  const { t } = useTranslation();
   const resource = useResource(
     () => request<FeedbackDetail>(`/feedback/${id}`),
     id,
   );
   return (
     <Page
-      eyebrow="Product"
-      title="Feedback detail"
-      description="The complete feedback submission and its source."
+      eyebrow={t("product")}
+      title={t("feedbackDetail")}
+      description={t("feedbackDetailDescription")}
       back="/feedback"
-      backLabel="Back to feedback"
+      backLabel={t("backToFeedback")}
     >
       <StateView resource={resource}>
         {(feedback) => {
@@ -452,11 +459,11 @@ function FeedbackDetailView({ id }: { id: string }) {
                 </div>
               </div>
               <dl>
-                <dt>Feedback</dt>
+                <dt>{t("feedback")}</dt>
                 <dd className="sensitive feedback-body">{body}</dd>
                 {attachments.length ? (
                   <>
-                    <dt>Attachments</dt>
+                    <dt>{t("attachments")}</dt>
                     <dd className="attachments">
                       {attachments.map((attachment) => (
                         <Attachment
@@ -467,17 +474,17 @@ function FeedbackDetailView({ id }: { id: string }) {
                     </dd>
                   </>
                 ) : null}
-                <dt>Submitted by</dt>
+                <dt>{t("submittedBy")}</dt>
                 <dd>
                   <code>{feedback.submitterPubkey}</code>
                 </dd>
-                <dt>Event</dt>
+                <dt>{t("event")}</dt>
                 <dd>
                   <code>{feedback.eventId}</code>
                 </dd>
-                <dt>Created</dt>
+                <dt>{t("created")}</dt>
                 <dd>{date(feedback.eventCreatedAt)}</dd>
-                <dt>Received</dt>
+                <dt>{t("received")}</dt>
                 <dd>{date(feedback.receivedAt)}</dd>
               </dl>
             </article>
@@ -660,12 +667,13 @@ function Page({
   backLabel?: string;
   children: ReactNode;
 }) {
+  const { t } = useTranslation();
   return (
     <section>
       <header className="page-title">
         {back ? (
           <Link href={back} className="back-link">
-            <ArrowIcon /> {backLabel ?? "Back to reports"}
+            <ArrowIcon /> {backLabel ?? t("backToReports")}
           </Link>
         ) : null}
         <p>{eyebrow}</p>
@@ -678,7 +686,8 @@ function Page({
 }
 
 function Empty() {
-  return <div className="state">No records.</div>;
+  const { t } = useTranslation();
+  return <div className="state">{t("noRecords")}</div>;
 }
 
 function short(value: string) {
@@ -724,15 +733,16 @@ function FeedbackIcon() {
 }
 
 function CategoryTag({ category }: { category?: string }) {
+  const { t } = useTranslation();
   const labels: Record<string, string> = {
-    bug: "Bug",
-    praise: "Praise",
-    "needs-work": "Needs work",
+    bug: t("bug"),
+    praise: t("praise"),
+    "needs-work": t("needsWork"),
   };
   return (
     <span className="tag">
       <CategoryIcon category={category} />
-      {category ? (labels[category] ?? category) : "Uncategorized"}
+      {category ? (labels[category] ?? category) : t("uncategorized")}
     </span>
   );
 }
@@ -798,6 +808,7 @@ function ArrowIcon() {
 }
 
 export function App() {
+  const { t } = useTranslation();
   const { path } = usePath();
   const report = path.match(/^\/reports\/([^/]+)$/);
   const feedback = path.match(/^\/feedback\/([^/]+)$/);
@@ -818,16 +829,27 @@ export function App() {
             <BuzzMark />
           </span>
           <span>
-            Buzz <b>Admin</b>
+            Buzz <b>{t("admin")}</b>
           </span>
         </Link>
         <nav>
           <Link href="/reports" className="nav-link" activeWhenNested>
-            <ReportIcon /> Reports
+            <ReportIcon /> {t("reports")}
           </Link>
           <Link href="/feedback" className="nav-link" activeWhenNested>
-            <FeedbackIcon /> Feedback
+            <FeedbackIcon /> {t("feedback")}
           </Link>
+          <select
+            aria-label={t("language")}
+            className="language-picker"
+            onChange={(event) =>
+              void setLanguage(event.currentTarget.value as SupportedLanguage)
+            }
+            value={currentLanguage()}
+          >
+            <option value="pt-BR">PT-BR</option>
+            <option value="en-US">EN-US</option>
+          </select>
         </nav>
       </header>
       <main>{content}</main>

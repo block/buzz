@@ -106,13 +106,23 @@ pub fn split_sentences(text: &str) -> Vec<String> {
 /// 5. Emoji stripped
 /// 6. Numbers → words (integers 0–999, times HH:MM)
 /// 7. Excess whitespace collapsed
+#[cfg(test)]
 pub fn preprocess_for_tts(text: &str) -> String {
+    preprocess_for_tts_language(text, "en-US")
+}
+
+pub fn preprocess_for_tts_language(text: &str, language: &str) -> String {
     let s = strip_fenced_code_blocks(text);
     let s = strip_inline_code(&s);
     let s = strip_urls(&s);
     let s = strip_markdown_markers(&s);
     let s = strip_emoji(&s);
-    let s = expand_numbers(&s);
+    let s = if language == "pt-BR" {
+        s.replace("code block omitted", "bloco de código omitido")
+            .replace("link omitted", "link omitido")
+    } else {
+        expand_numbers(&s)
+    };
     let s = collapse_whitespace(&s);
     // Filter trivially short results — ".", ",", etc. would be spoken as
     // "period", "comma" by TTS. Agents that have nothing relevant to say
@@ -547,6 +557,15 @@ mod tests {
     fn strips_bold_italic() {
         let out = preprocess_for_tts("**bold** and *italic* and _under_");
         assert_eq!(out, "bold and italic and under");
+    }
+
+    #[test]
+    fn localizes_omitted_content_for_portuguese_tts() {
+        let input = "Veja https://example.com.\n```rust\nfn main() {}\n```";
+        let out = preprocess_for_tts_language(input, "pt-BR");
+        assert!(out.contains("link omitido"), "got: {out}");
+        assert!(out.contains("bloco de código omitido"), "got: {out}");
+        assert!(!out.contains("link omitted"), "got: {out}");
     }
 
     #[test]

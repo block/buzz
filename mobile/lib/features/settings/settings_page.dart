@@ -15,9 +15,12 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import 'accent_picker_page.dart';
 import 'theme_picker_page.dart';
+import '../../l10n/app_localizations.dart';
+import '../../shared/i18n/locale_provider.dart';
 
 part 'settings_page/appearance_section.dart';
 part 'settings_page/connection_section.dart';
+part 'settings_page/language_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
   const SettingsPage({super.key, required this.profileHeader});
@@ -30,7 +33,9 @@ class SettingsPage extends HookConsumerWidget {
     final packageInfo = useFuture(packageInfoFuture);
 
     return FrostedScaffold(
-      appBar: const FrostedAppBar(title: Text('Settings')),
+      appBar: FrostedAppBar(
+        title: Text(AppLocalizations.of(context).settingsTitle),
+      ),
       body: Column(
         children: [
           Expanded(
@@ -42,6 +47,7 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 const _AppearanceSection(),
+                const _LanguageSection(),
                 const _ConnectionSection(),
                 const _RemoveCommunitySection(),
               ],

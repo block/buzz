@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronDown, Play, Trash2, Upload, Volume2 } from "lucide-react";
 
 import { invokeTauri } from "@/shared/api/tauri";
@@ -35,6 +36,7 @@ export type TtsSettings = {
   version: number;
   agentTextToSpeech: boolean;
   voicePreferences: string[];
+  speechLanguage: "pt-BR" | "en-US";
 };
 
 type TtsVoiceMutation = {
@@ -43,6 +45,7 @@ type TtsVoiceMutation = {
 };
 
 export function VoiceSettingsCard() {
+  const { t } = useTranslation();
   const [settings, setSettings] = React.useState<TtsSettings | null>(null);
   const [registry, setRegistry] = React.useState<VoiceRegistryEntry[]>([]);
   const [busy, setBusy] = React.useState(false);
@@ -128,6 +131,26 @@ export function VoiceSettingsCard() {
     }
   }, []);
 
+  const saveSpeechLanguage = React.useCallback(
+    async (language: "pt-BR" | "en-US") => {
+      setBusy(true);
+      setError(null);
+      try {
+        const saved = await invokeTauri<TtsSettings>("set_speech_language", {
+          language,
+        });
+        setSettings(saved);
+      } catch (saveError) {
+        setError(
+          saveError instanceof Error ? saveError.message : t("voice.saveError"),
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [t],
+  );
+
   const importPocketVoice = React.useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -183,11 +206,52 @@ export function VoiceSettingsCard() {
   return (
     <section className="min-w-0" data-testid="settings-voice">
       <SettingsSectionHeader
-        title="Voice"
-        description="Choose whether Buzz reads new agent responses aloud during an active huddle."
+        title={t("voice.title")}
+        description={t("voice.description")}
       />
 
       <div className="flex flex-col gap-4">
+        <SettingsOptionGroup>
+          <SettingsOptionRow>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">{t("voice.language")}</p>
+              <p className="text-sm text-muted-foreground">
+                {t("voice.languageDescription")}
+              </p>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  className="min-w-40 justify-between"
+                  data-testid="speech-language-selector"
+                  disabled={!settings || busy}
+                  variant="outline"
+                >
+                  {settings?.speechLanguage === "pt-BR"
+                    ? "Português (Brasil)"
+                    : "English (US)"}
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuRadioGroup
+                  onValueChange={(language) =>
+                    void saveSpeechLanguage(language as "pt-BR" | "en-US")
+                  }
+                  value={settings?.speechLanguage}
+                >
+                  <DropdownMenuRadioItem value="pt-BR">
+                    Português (Brasil)
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="en-US">
+                    English (US)
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </SettingsOptionRow>
+        </SettingsOptionGroup>
+
         <SettingsOptionGroup>
           <SettingsOptionRow>
             <div className="min-w-0">
@@ -195,10 +259,10 @@ export function VoiceSettingsCard() {
                 className="text-sm font-medium"
                 htmlFor="agent-text-to-speech-switch"
               >
-                Agent text to speech
+                {t("voice.agentTts")}
               </label>
               <p className="text-sm text-muted-foreground">
-                Read new agent messages aloud in the order they arrive.
+                {t("voice.agentTtsDescription")}
               </p>
             </div>
             <Switch
@@ -213,116 +277,130 @@ export function VoiceSettingsCard() {
           </SettingsOptionRow>
         </SettingsOptionGroup>
 
-        <div
-          aria-disabled={!enabled}
-          className={cn(
-            "transition-opacity",
-            !enabled && "pointer-events-none opacity-45",
-          )}
-          data-testid="pocket-voice-controls"
-        >
+        {settings?.speechLanguage === "pt-BR" ? (
           <SettingsOptionGroup>
             <SettingsOptionRow>
               <div className="min-w-0">
-                <p className="text-sm font-medium">Pocket TTS voice</p>
+                <p className="text-sm font-medium">Piper — Faber</p>
                 <p className="text-sm text-muted-foreground">
-                  Voice files stay private on this device.
+                  {t("voice.portugueseLocal")}
                 </p>
               </div>
-
-              <div className="flex shrink-0 items-center gap-2">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      aria-label={`Pocket TTS voice: ${selectedVoice?.displayName ?? "Mary"}`}
-                      className="min-w-32 justify-between"
-                      data-testid="pocket-voice-selector"
-                      disabled={controlsDisabled}
-                      variant="outline"
-                    >
-                      {selectedVoice
-                        ? voiceOptionLabel(selectedVoice, voices)
-                        : "Mary"}
-                      <ChevronDown className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    className="max-h-80 overflow-y-auto"
-                  >
-                    <DropdownMenuRadioGroup
-                      onValueChange={(voiceKey) => {
-                        if (settings) void savePocketVoice(voiceKey);
-                      }}
-                      value={selectedVoice?.key}
-                    >
-                      {voices.map((voice) => (
-                        <DropdownMenuRadioItem
-                          key={voice.key}
-                          value={voice.key}
-                        >
-                          {voiceOptionLabel(voice, voices)}
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </DropdownMenuRadioGroup>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                <Button
-                  aria-label={`Preview ${selectedVoice?.displayName ?? "Mary"}`}
-                  data-testid="pocket-voice-preview"
-                  disabled={controlsDisabled || previewing || !selectedVoice}
-                  onClick={() => {
-                    if (!selectedVoice) return;
-                    setPreviewing(true);
-                    setError(null);
-                    void invokeTauri<void>("preview_pocket_voice", {
-                      voiceKey: selectedVoice.key,
-                    })
-                      .catch((previewError) => {
-                        setError(
-                          previewError instanceof Error
-                            ? previewError.message
-                            : "Voice preview could not be played.",
-                        );
-                      })
-                      .finally(() => setPreviewing(false));
-                  }}
-                  size="sm"
-                  variant="outline"
-                >
-                  {previewing ? (
-                    <Volume2 className="h-4 w-4 animate-pulse" />
-                  ) : (
-                    <Play className="h-4 w-4" />
-                  )}
-                  Preview
-                </Button>
-                <Button
-                  data-testid="pocket-voice-import"
-                  disabled={controlsDisabled}
-                  onClick={() => void importPocketVoice()}
-                  size="sm"
-                  variant="outline"
-                >
-                  <Upload className="h-4 w-4" />
-                  Add voice
-                </Button>
-                {selectedVoice?.key.startsWith("pocket:imported:") && (
-                  <Button
-                    aria-label={`Delete ${selectedVoice.displayName}`}
-                    data-testid="pocket-voice-delete"
-                    disabled={controlsDisabled}
-                    onClick={() => setDeleteCandidate(selectedVoice)}
-                    size="icon"
-                    variant="ghost"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                )}
-              </div>
+              <span className="text-sm text-muted-foreground">pt-BR</span>
             </SettingsOptionRow>
           </SettingsOptionGroup>
-        </div>
+        ) : (
+          <div
+            aria-disabled={!enabled}
+            className={cn(
+              "transition-opacity",
+              !enabled && "pointer-events-none opacity-45",
+            )}
+            data-testid="pocket-voice-controls"
+          >
+            <SettingsOptionGroup>
+              <SettingsOptionRow>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{t("voice.pocket")}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {t("voice.localOnly")}
+                  </p>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-2">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        aria-label={`Pocket TTS voice: ${selectedVoice?.displayName ?? "Mary"}`}
+                        className="min-w-32 justify-between"
+                        data-testid="pocket-voice-selector"
+                        disabled={controlsDisabled}
+                        variant="outline"
+                      >
+                        {selectedVoice
+                          ? voiceOptionLabel(selectedVoice, voices)
+                          : "Mary"}
+                        <ChevronDown className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      className="max-h-80 overflow-y-auto"
+                    >
+                      <DropdownMenuRadioGroup
+                        onValueChange={(voiceKey) => {
+                          if (settings) void savePocketVoice(voiceKey);
+                        }}
+                        value={selectedVoice?.key}
+                      >
+                        {voices.map((voice) => (
+                          <DropdownMenuRadioItem
+                            key={voice.key}
+                            value={voice.key}
+                          >
+                            {voiceOptionLabel(voice, voices)}
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <Button
+                    aria-label={`Preview ${selectedVoice?.displayName ?? "Mary"}`}
+                    data-testid="pocket-voice-preview"
+                    disabled={controlsDisabled || previewing || !selectedVoice}
+                    onClick={() => {
+                      if (!selectedVoice) return;
+                      setPreviewing(true);
+                      setError(null);
+                      void invokeTauri<void>("preview_pocket_voice", {
+                        voiceKey: selectedVoice.key,
+                      })
+                        .catch((previewError) => {
+                          setError(
+                            previewError instanceof Error
+                              ? previewError.message
+                              : "Voice preview could not be played.",
+                          );
+                        })
+                        .finally(() => setPreviewing(false));
+                    }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    {previewing ? (
+                      <Volume2 className="h-4 w-4 animate-pulse" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    )}
+                    {t("voice.preview")}
+                  </Button>
+                  <Button
+                    data-testid="pocket-voice-import"
+                    disabled={controlsDisabled}
+                    onClick={() => void importPocketVoice()}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <Upload className="h-4 w-4" />
+                    {t("voice.add")}
+                  </Button>
+                  {selectedVoice?.key.startsWith("pocket:imported:") && (
+                    <Button
+                      aria-label={`Delete ${selectedVoice.displayName}`}
+                      data-testid="pocket-voice-delete"
+                      disabled={controlsDisabled}
+                      onClick={() => setDeleteCandidate(selectedVoice)}
+                      size="icon"
+                      variant="ghost"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+              </SettingsOptionRow>
+            </SettingsOptionGroup>
+          </div>
+        )}
 
         {error && (
           <p
@@ -342,17 +420,21 @@ export function VoiceSettingsCard() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete imported voice?</AlertDialogTitle>
+            <AlertDialogTitle>{t("voice.deleteConfirm")}</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteCandidate
-                ? `${deleteCandidate.displayName} and its local audio file will be removed.`
-                : "This imported voice and its local audio file will be removed."}
+                ? t("voice.deleteDescription", {
+                    name: deleteCandidate.displayName,
+                  })
+                : t("voice.deleteDescription", { name: t("voice.pocket") })}
               {selectedVoice?.key === deleteCandidate?.key &&
                 " Mary will be selected instead."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={busy}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               data-testid="confirm-pocket-voice-delete"
@@ -364,7 +446,7 @@ export function VoiceSettingsCard() {
                 }
               }}
             >
-              Delete voice
+              {t("voice.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

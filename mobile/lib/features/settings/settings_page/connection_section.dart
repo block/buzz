@@ -9,11 +9,11 @@ class _ConnectionSection extends ConsumerWidget {
     final nsec = config.nsec;
 
     return AppListCard(
-      label: 'Connection',
+      label: AppLocalizations.of(context).connection,
       children: [
         AppListRow(
           icon: LucideIcons.server,
-          title: 'Connected to',
+          title: AppLocalizations.of(context).connectedTo,
           subtitle: config.baseUrl,
         ),
         if (nsec != null && nsec.isNotEmpty) _IdentityRow(nsec: nsec),
@@ -33,7 +33,7 @@ class _RemoveCommunitySection extends ConsumerWidget {
       children: [
         AppListRow(
           icon: LucideIcons.logOut,
-          title: 'Remove community',
+          title: AppLocalizations.of(context).removeCommunity,
           titleColor: context.colors.error,
           onTap: () => _confirmRemoveCommunity(context, ref),
         ),
@@ -54,7 +54,7 @@ class _IdentityRow extends StatelessWidget {
 
     return AppListRow(
       icon: LucideIcons.key,
-      title: 'Identity (pubkey)',
+      title: AppLocalizations.of(context).identityPubkey,
       subtitle: pubkey,
       subtitleStyle: context.textTheme.bodySmall?.copyWith(
         color: context.colors.onSurfaceVariant,
@@ -65,7 +65,11 @@ class _IdentityRow extends StatelessWidget {
       trailing: IconButton(
         icon: const Icon(LucideIcons.copy, size: 16),
         onPressed: () async {
-          await copyToClipboard(context, pubkey, message: 'Pubkey copied');
+          await copyToClipboard(
+            context,
+            pubkey,
+            message: AppLocalizations.of(context).pubkeyCopied,
+          );
         },
       ),
     );
@@ -76,15 +80,12 @@ void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
   showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
-      title: const Text('Remove Community'),
-      content: const Text(
-        'This will disconnect this community. You will need '
-        'to scan a new pairing code to reconnect.',
-      ),
+      title: Text(AppLocalizations.of(context).removeCommunityTitle),
+      content: Text(AppLocalizations.of(context).removeCommunityDescription),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text('Cancel'),
+          child: Text(AppLocalizations.of(context).cancel),
         ),
         FilledButton(
           onPressed: () {
@@ -95,7 +96,7 @@ void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
             ref.read(authProvider.notifier).signOut();
           },
           style: FilledButton.styleFrom(backgroundColor: ctx.colors.error),
-          child: const Text('Remove'),
+          child: Text(AppLocalizations.of(context).remove),
         ),
       ],
     ),

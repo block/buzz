@@ -457,8 +457,7 @@ pub fn run() {
                 );
             }
 
-            // Store the AppHandle so huddle commands can emit `huddle-state-changed`
-            // events via `huddle::emit_huddle_state` without threading the handle
+            // Store the AppHandle so huddle commands can emit state changes
             // through every call site.
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
@@ -466,6 +465,7 @@ pub fn run() {
 
             let (tts_settings, tts_settings_load_error) =
                 huddle::tts_settings::load_for_app(&app_handle);
+            huddle::tts_settings::apply_model_language(&tts_settings);
             if let Ok(mut guard) = state.huddle_audio.tts.lock() {
                 *guard = tts_settings.clone();
             }
@@ -476,8 +476,7 @@ pub fn run() {
                 huddle.tts_enabled = tts_settings.agent_text_to_speech;
             }
 
-            // Bring up the runtime-owned shared-compute coordinator before
-            // saved agents are restored. Its lifetime is tied to the app, not
+            // Bring up the shared-compute coordinator before saved agents are restored.
             // a UI mount; it publishes discovery and reconciles membership for
             // MeshLLM's native admission and transport.
             #[cfg(feature = "mesh-llm")]
@@ -895,6 +894,7 @@ pub fn run() {
             huddle::tts_settings::get_tts_settings,
             huddle::tts_settings::list_voice_registry,
             huddle::tts_settings::set_pocket_voice,
+            huddle::tts_settings::set_speech_language,
             huddle::tts_settings::preview_pocket_voice,
             huddle::tts_settings::import_pocket_voice,
             huddle::tts_settings::delete_pocket_voice,
