@@ -99,6 +99,14 @@ impl Session {
             args.push("-i".into());
             args.push(identity.clone());
         }
+        // Only when configured. Absent, `ssh` reads its own default
+        // (`~/.ssh/known_hosts`) and the argv is byte-identical to what it was
+        // before this option existed — the host-key policy above is unchanged
+        // either way, this only says *which file* it is checked against.
+        if let Some(known_hosts) = &config.known_hosts_file {
+            args.push("-o".into());
+            args.push(format!("UserKnownHostsFile={known_hosts}"));
+        }
         args.push("--".into());
         args.push(config.target());
         // The remote argv, in full. Everything else arrives on stdin.
@@ -306,8 +314,68 @@ mod tests {
             user: Some("ubuntu".into()),
             port: Some(2222),
             identity_file: Some("/home/me/.ssh/id_ed25519".into()),
+            known_hosts_file: None,
             buzz_acp_path: None,
         }
+    }
+
+    /// Set, it becomes one `-o UserKnownHostsFile=…`. Unset, the argv must be
+    /// **byte-identical** to what it was before the option existed — an
+    /// optional field that perturbs the default connection is not optional.
+    #[test]
+    fn a_known_hosts_file_is_forwarded_only_when_configured() {
+        let Ok(default) = Session::new(&config("vps"), false) else {
+            return; // no ssh client in this environment
+        };
+        assert!(
+            !default
+                .args
+                .iter()
+                .any(|a| a.contains("UserKnownHostsFile")),
+            "{:?}",
+            default.args
+        );
+
+        let mut with_file = config("vps");
+        with_file.known_hosts_file = Some("/home/me/.ssh/known_hosts.buzz".into());
+        let Ok(session) = Session::new(&with_file, false) else {
+            return;
+        };
+        assert!(session
+            .args
+            .windows(2)
+            .any(|w| w == ["-o", "UserKnownHostsFile=/home/me/.ssh/known_hosts.buzz"]));
+
+        // The only difference is that one pair — the host-key policy, batch
+        // mode, port and identity are untouched.
+        let added: Vec<_> = session
+            .args
+            .iter()
+            .filter(|a| !default.args.contains(a))
+            .collect();
+        assert_eq!(
+            added,
+            vec!["UserKnownHostsFile=/home/me/.ssh/known_hosts.buzz"]
+        );
+    }
+
+    /// The desktop drops a config key whose word-split contains `key`, so the
+    /// obvious `ssh_host_key_file` spelling would arrive as `None` with no
+    /// error anywhere. Pinned here as well as in the schema test, because this
+    /// is the field the name protects.
+    #[test]
+    fn the_known_hosts_field_is_read_from_the_name_the_desktop_forwards() {
+        let request = serde_json::json!({
+            "provider_config": {
+                "ssh_host": "vps",
+                "ssh_known_hosts_file": "/etc/ssh/ssh_known_hosts",
+            }
+        });
+        let parsed = SshConfig::from_request(&request).unwrap();
+        assert_eq!(
+            parsed.known_hosts_file.as_deref(),
+            Some("/etc/ssh/ssh_known_hosts")
+        );
     }
 
     #[test]

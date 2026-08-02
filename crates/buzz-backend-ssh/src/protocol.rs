@@ -138,6 +138,16 @@ pub struct SshConfig {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub identity_file: Option<String>,
+    /// A `UserKnownHostsFile` for this connection, when the deploying user's
+    /// host keys do not live at `~/.ssh/known_hosts`.
+    ///
+    /// Optional, and absent it changes nothing: `ssh` reads its own default,
+    /// so the argv is byte-identical to what it has always been. Named
+    /// `ssh_known_hosts_file` for the same reason `identity_file` is not
+    /// `ssh_key_path` — the desktop's `validate_provider_config` word-splits
+    /// the key and drops anything containing `key`, so `ssh_host_key_file`
+    /// would vanish silently on the way in.
+    pub known_hosts_file: Option<String>,
     pub buzz_acp_path: Option<String>,
 }
 
@@ -183,6 +193,7 @@ impl SshConfig {
             user: string("ssh_user"),
             port,
             identity_file: string("ssh_identity_file"),
+            known_hosts_file: string("ssh_known_hosts_file"),
             buzz_acp_path: string("buzz_acp_path"),
         })
     }
@@ -248,6 +259,11 @@ pub fn info_response() -> serde_json::Value {
                     "title": "SSH identity file (optional)",
                     "description": "Defaults to your ~/.ssh/config and agent",
                 },
+                "ssh_known_hosts_file": {
+                    "type": "string",
+                    "title": "SSH known hosts file (optional)",
+                    "description": "Defaults to your ~/.ssh/known_hosts",
+                },
                 "buzz_acp_path": {
                     "type": "string",
                     "title": "buzz-acp path on the server (optional)",
@@ -302,14 +318,17 @@ mod tests {
         let info = info_response();
         let properties = info["config_schema"]["properties"].as_object().unwrap();
         assert!(properties.contains_key("ssh_identity_file"));
+        assert!(properties.contains_key("ssh_known_hosts_file"));
         for key in properties.keys() {
             assert!(
                 !desktop_rejects_key(key),
                 "config key {key:?} would be rejected by validate_provider_config"
             );
         }
-        // The name this field must never have.
+        // The names these fields must never have: both would be word-split into
+        // a forbidden `key` and dropped by the desktop with no error anywhere.
         assert!(desktop_rejects_key("ssh_key_path"));
+        assert!(desktop_rejects_key("ssh_host_key_file"));
     }
 
     /// The desktop's pre-secret gate rejects an absent or non-integer
