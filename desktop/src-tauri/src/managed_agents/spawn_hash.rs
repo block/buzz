@@ -86,6 +86,11 @@ pub(crate) fn spawn_config_hash(
                     env: Default::default(),
                     guardian_policy:
                         crate::managed_agents::readiness::GuardianPermissionPolicy::Monitor,
+                    guardian_protection:
+                        crate::managed_agents::readiness::guardian_runtime_protection(
+                            "custom",
+                            crate::managed_agents::HarnessSource::Custom,
+                        ),
                 }
             });
     let runtime_meta = known_acp_runtime(&descriptor.command);

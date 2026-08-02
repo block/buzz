@@ -292,6 +292,10 @@ pub fn build_managed_agent_summary(
             args,
             env: Default::default(),
             guardian_policy: crate::managed_agents::readiness::GuardianPermissionPolicy::Monitor,
+            guardian_protection: crate::managed_agents::readiness::guardian_runtime_protection(
+                "custom",
+                crate::managed_agents::HarnessSource::Custom,
+            ),
         }
     });
     let effective_mcp_command = known_acp_runtime(&descriptor.command)
@@ -425,6 +429,7 @@ pub fn spawn_agent_child(
                     crate::managed_agents::user_facing_harness_error(&e)
                 )
             })?;
+    crate::managed_agents::readiness::validate_guardian_launch(&descriptor)?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 

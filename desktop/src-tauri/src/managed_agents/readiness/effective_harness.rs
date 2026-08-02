@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use crate::managed_agents::types::{
+    GuardianProtectionLevel, GuardianRuntimeProtection, HarnessSource,
+};
 use crate::managed_agents::{
     discovery::known_acp_runtime, normalize_agent_args, types::ManagedAgentRecord,
 };
@@ -14,6 +17,9 @@ pub(crate) struct EffectiveHarnessDescriptor {
     pub env: BTreeMap<String, String>,
     /// Resolved separately so generic environment layering cannot weaken it.
     pub guardian_policy: GuardianPermissionPolicy,
+    /// Bound to the resolved catalog source so a custom executable cannot gain
+    /// protection merely by borrowing a built-in command name.
+    pub guardian_protection: GuardianRuntimeProtection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,6 +34,49 @@ impl GuardianPermissionPolicy {
             Self::Monitor => "default",
             Self::Lockdown => "dont-ask",
         }
+    }
+}
+
+pub(crate) fn guardian_runtime_protection(
+    runtime_id: &str,
+    source: HarnessSource,
+) -> GuardianRuntimeProtection {
+    // Buzz Agent's permission boundary is owned and tested in this repository.
+    // Every external adapter remains unqualified until an exact-version,
+    // host-mode and side-effect conformance result is published.
+    if source == HarnessSource::Builtin && runtime_id == "buzz-agent" {
+        return GuardianRuntimeProtection {
+            level: GuardianProtectionLevel::L2,
+            summary: "Buzz permission gate tested; native tool coverage is not claimed".to_string(),
+            lockdown_allowed: true,
+        };
+    }
+
+    GuardianRuntimeProtection {
+        level: GuardianProtectionLevel::L0,
+        summary: if source == HarnessSource::Custom {
+            "Unsupported until this custom runtime has a signed conformance result".to_string()
+        } else {
+            "Protection qualification pending for this exact runtime and host mode".to_string()
+        },
+        lockdown_allowed: false,
+    }
+}
+
+pub(crate) fn validate_guardian_launch(
+    descriptor: &EffectiveHarnessDescriptor,
+) -> Result<(), String> {
+    if descriptor.guardian_policy != GuardianPermissionPolicy::Lockdown {
+        return Ok(());
+    }
+
+    if descriptor.guardian_protection.lockdown_allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "Guardian Lockdown refused to launch {}: {}",
+            descriptor.command, descriptor.guardian_protection.summary
+        ))
     }
 }
 
@@ -73,6 +122,13 @@ pub(crate) fn resolve_effective_harness_descriptor(
             .unwrap_or("");
         crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id)
     };
+    let guardian_protection = if harness_def.is_some() {
+        guardian_runtime_protection("custom", HarnessSource::Custom)
+    } else {
+        runtime_meta
+            .map(|runtime| guardian_runtime_protection(runtime.id, HarnessSource::Builtin))
+            .unwrap_or_else(|| guardian_runtime_protection("custom", HarnessSource::Custom))
+    };
     let args = {
         let record_args = record.agent_args.clone();
         let instance_has_args = record_args.iter().any(|arg| !arg.trim().is_empty());
@@ -112,12 +168,17 @@ pub(crate) fn resolve_effective_harness_descriptor(
         args,
         env: effective_env.env,
         guardian_policy,
+        guardian_protection,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_guardian_policy, GuardianPermissionPolicy};
+    use super::{
+        guardian_runtime_protection, resolve_guardian_policy, validate_guardian_launch,
+        EffectiveHarnessDescriptor, GuardianPermissionPolicy,
+    };
+    use crate::managed_agents::types::{GuardianProtectionLevel, HarnessSource};
     use std::collections::BTreeMap;
 
     fn layer(value: &str) -> BTreeMap<String, String> {
@@ -154,5 +215,57 @@ mod tests {
             resolve_guardian_policy([&env]),
             GuardianPermissionPolicy::Lockdown
         );
+    }
+
+    #[test]
+    fn only_buzz_agent_is_currently_lockdown_qualified() {
+        let buzz = guardian_runtime_protection("buzz-agent", HarnessSource::Builtin);
+        assert_eq!(buzz.level, GuardianProtectionLevel::L2);
+        assert!(buzz.lockdown_allowed);
+
+        let codex = guardian_runtime_protection("codex", HarnessSource::Builtin);
+        assert_eq!(codex.level, GuardianProtectionLevel::L0);
+        assert!(!codex.lockdown_allowed);
+    }
+
+    fn descriptor(command: &str, policy: GuardianPermissionPolicy) -> EffectiveHarnessDescriptor {
+        EffectiveHarnessDescriptor {
+            command: command.to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            guardian_policy: policy,
+            guardian_protection: guardian_runtime_protection(command, HarnessSource::Builtin),
+        }
+    }
+
+    #[test]
+    fn lockdown_refuses_unqualified_runtime_before_spawn() {
+        let error =
+            validate_guardian_launch(&descriptor("codex-acp", GuardianPermissionPolicy::Lockdown))
+                .unwrap_err();
+        assert!(error.contains("Lockdown refused"));
+    }
+
+    #[test]
+    fn monitor_and_qualified_lockdown_remain_available() {
+        assert!(validate_guardian_launch(&descriptor(
+            "codex-acp",
+            GuardianPermissionPolicy::Monitor,
+        ))
+        .is_ok());
+        assert!(validate_guardian_launch(&descriptor(
+            "buzz-agent",
+            GuardianPermissionPolicy::Lockdown,
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn custom_binary_cannot_borrow_buzz_agent_qualification() {
+        let mut custom = descriptor("buzz-agent", GuardianPermissionPolicy::Lockdown);
+        custom.guardian_protection =
+            guardian_runtime_protection("buzz-agent", HarnessSource::Custom);
+
+        assert!(validate_guardian_launch(&custom).is_err());
     }
 }

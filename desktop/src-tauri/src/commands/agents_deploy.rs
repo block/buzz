@@ -227,6 +227,10 @@ mod tests {
                 ("SECRET_FROM_PERSONA".into(), "secret".into()),
             ]),
             guardian_policy: GuardianPermissionPolicy::Monitor,
+            guardian_protection: crate::managed_agents::readiness::guardian_runtime_protection(
+                "custom",
+                crate::managed_agents::HarnessSource::Custom,
+            ),
         };
         let teams: Vec<TeamRecord> = serde_json::from_value(serde_json::json!([{
             "id": "team-1", "name": "Team", "instructions": "Coordinate", "persona_ids": [], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"

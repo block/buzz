@@ -54,7 +54,8 @@ mod cli_login;
 pub(crate) mod cli_probe;
 mod effective_harness;
 pub(crate) use effective_harness::{
-    resolve_effective_harness_descriptor, EffectiveHarnessDescriptor, GuardianPermissionPolicy,
+    guardian_runtime_protection, resolve_effective_harness_descriptor, validate_guardian_launch,
+    EffectiveHarnessDescriptor, GuardianPermissionPolicy,
 };
 
 // ── EffectiveAgentEnv ─────────────────────────────────────────────────────────

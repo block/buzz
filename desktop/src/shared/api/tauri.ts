@@ -199,6 +199,11 @@ export type RawAcpRuntimeCatalogEntry = {
   auth_status: AuthStatus;
   login_hint?: string;
   source: "builtin" | "preset" | "custom";
+  guardian_protection?: {
+    level: "l0" | "l1" | "l2" | "l3";
+    summary: string;
+    lockdown_allowed: boolean;
+  };
   /**
    * Definition-level env vars for `source: custom` entries.
    * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
@@ -758,6 +763,17 @@ export function fromRawAcpRuntimeCatalogEntry(
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
     source: entry.source,
+    guardianProtection: entry.guardian_protection
+      ? {
+          level: entry.guardian_protection.level,
+          summary: entry.guardian_protection.summary,
+          lockdownAllowed: entry.guardian_protection.lockdown_allowed,
+        }
+      : {
+          level: "l0",
+          summary: "Protection status unavailable",
+          lockdownAllowed: false,
+        },
     // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
     // Absent when empty (Rust serialization skips empty BTreeMap) — default to {}.
     definitionEnv: entry.definition_env ?? {},

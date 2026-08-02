@@ -536,6 +536,11 @@ export type AcpRuntimeCatalogEntry = {
    * UI — only "custom" entries can be edited or deleted.
    */
   source: "builtin" | "preset" | "custom";
+  guardianProtection: {
+    level: "l0" | "l1" | "l2" | "l3";
+    summary: string;
+    lockdownAllowed: boolean;
+  };
   /**
    * Definition-level environment variables for `source: custom` entries.
    *
