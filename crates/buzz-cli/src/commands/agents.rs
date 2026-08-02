@@ -1,6 +1,7 @@
 use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
 use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identity_request};
 use nostr::PublicKey;
+use nostr::{EventBuilder, Kind};
 use serde_json::json;
 
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
@@ -11,6 +12,43 @@ use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::PublishProfile {
+            name,
+            agent_type,
+            channels,
+            channel_ids,
+            capabilities,
+            status,
+            respond_to,
+        } => {
+            if !matches!(status.as_str(), "online" | "away" | "offline") {
+                return Err(CliError::Usage(
+                    "--status must be online, away, or offline".into(),
+                ));
+            }
+            if !channel_ids.is_empty() && channel_ids.len() != channels.len() {
+                return Err(CliError::Usage(
+                    "--channel-ids must have the same number of entries as --channels".into(),
+                ));
+            }
+            let mut content = json!({
+                "name": name,
+                "agent_type": agent_type,
+                "channels": channels,
+                "channel_ids": channel_ids,
+                "capabilities": capabilities,
+                "status": status,
+                "channel_add_policy": "owner_only",
+            });
+            if let Some(mode) = respond_to {
+                content["respond_to"] = mode.to_wire().into();
+            }
+            let event = client
+                .sign_event(EventBuilder::new(Kind::Custom(10100), content.to_string()).tags([]))?;
+            let response = client.submit_event(event).await?;
+            println!("{}", response);
+            Ok(())
+        }
         AgentsCmd::DraftCreate {
             channel,
             display_name,
