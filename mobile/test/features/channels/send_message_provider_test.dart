@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/send_message_provider.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -65,6 +66,115 @@ void main() {
     await expectLater(result, throwsException);
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
+  });
+
+  test(
+    'tags every other DM participant without visible mention text',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final author = nostr.Keys.generate();
+      final recipient = nostr.Keys.generate().public;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: author.nsec),
+        fetchMembers: (_) async => [
+          ChannelMember(
+            pubkey: author.public,
+            role: 'member',
+            joinedAt: DateTime.utc(2026),
+          ),
+          ChannelMember(
+            pubkey: recipient,
+            role: 'member',
+            joinedAt: DateTime.utc(2026),
+          ),
+        ],
+        readUserCache: () => const {},
+        addLocalMessage: (_, __) {},
+        completeLocalMessage: (_, __) {},
+        removeLocalMessage: (_, __) {},
+      );
+
+      final result = send(channelId: _channelId, content: 'hi', isDm: true);
+      await session.published;
+
+      expect(
+        session.event.tags.any(
+          (tag) => tag.length >= 2 && tag[0] == 'p' && tag[1] == recipient,
+        ),
+        isTrue,
+      );
+      expect(
+        session.event.tags.any(
+          (tag) => tag.length >= 2 && tag[0] == 'p' && tag[1] == author.public,
+        ),
+        isFalse,
+      );
+      session.accept();
+      await result;
+    },
+  );
+
+  test('keeps the DM recipient tag on thread replies', () async {
+    final session = _PendingPublishRelaySession();
+    final author = nostr.Keys.generate();
+    final recipient = nostr.Keys.generate().public;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(session: session, nsec: author.nsec),
+      fetchMembers: (_) async => [
+        ChannelMember(
+          pubkey: author.public,
+          role: 'member',
+          joinedAt: DateTime.utc(2026),
+        ),
+        ChannelMember(
+          pubkey: recipient,
+          role: 'bot',
+          joinedAt: DateTime.utc(2026),
+        ),
+      ],
+      readUserCache: () => const {},
+      addLocalMessage: (_, __) {},
+      completeLocalMessage: (_, __) {},
+      removeLocalMessage: (_, __) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'and in this thread?',
+      parentEventId: 'parent-event-id',
+      rootEventId: 'root-event-id',
+      isDm: true,
+    );
+    await session.published;
+
+    expect(
+      session.event.tags.any(
+        (tag) => tag.length >= 2 && tag[0] == 'p' && tag[1] == recipient,
+      ),
+      isTrue,
+    );
+    expect(
+      session.event.tags.any(
+        (tag) =>
+            tag.length >= 4 &&
+            tag[0] == 'e' &&
+            tag[1] == 'root-event-id' &&
+            tag[3] == 'root',
+      ),
+      isTrue,
+    );
+    expect(
+      session.event.tags.any(
+        (tag) =>
+            tag.length >= 4 &&
+            tag[0] == 'e' &&
+            tag[1] == 'parent-event-id' &&
+            tag[3] == 'reply',
+      ),
+      isTrue,
+    );
+    session.accept();
+    await result;
   });
 }
 
