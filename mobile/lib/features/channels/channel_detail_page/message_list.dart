@@ -6,7 +6,9 @@ class _MessageList extends HookConsumerWidget {
   final String? initialMessageId;
   final String? initialThreadRootId;
   final int? initialChannelReadAt;
+  final Set<String> initialOrdinaryUnreadMessageIds;
   final Set<String> initialForcedUnreadMessageIds;
+  final bool isInitialChannelForcedUnread;
   final bool hasInitialUnread;
   final String channelId;
   final String? currentPubkey;
@@ -21,7 +23,9 @@ class _MessageList extends HookConsumerWidget {
     required this.initialMessageId,
     required this.initialThreadRootId,
     required this.initialChannelReadAt,
+    required this.initialOrdinaryUnreadMessageIds,
     required this.initialForcedUnreadMessageIds,
+    required this.isInitialChannelForcedUnread,
     required this.hasInitialUnread,
     required this.channelId,
     required this.currentPubkey,
@@ -83,6 +87,15 @@ class _MessageList extends HookConsumerWidget {
           return () => cancelled = true;
         }
 
+        final ordinaryUnread = entries
+            .where(
+              (entry) =>
+                  initialOrdinaryUnreadMessageIds.contains(entry.message.id) ||
+                  (isInitialChannelForcedUnread &&
+                      (readAt == null || entry.message.createdAt > readAt)),
+            )
+            .map((entry) => entry.message)
+            .firstOrNull;
         final forcedUnread = entries
             .where(
               (entry) =>
@@ -90,24 +103,22 @@ class _MessageList extends HookConsumerWidget {
             )
             .map((entry) => entry.message)
             .firstOrNull;
-        final unread = entries
-            .where(
-              (entry) => readAt == null || entry.message.createdAt > readAt,
-            )
-            .map((entry) => entry.message)
-            .firstOrNull;
-        final candidates = [forcedUnread, unread].nonNulls.toList()
+        final candidates = [ordinaryUnread, forcedUnread].nonNulls.toList()
           ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
         oldestUnreadMessageId.value =
             candidates.firstOrNull?.id ??
-            (readAt == null ? entries.first.message.id : null);
+            (readAt == null && initialOrdinaryUnreadMessageIds.isEmpty
+                ? entries.first.message.id
+                : null);
         return null;
       },
       [
         hasInitialUnread,
         hasUnreadDeepLink,
         initialChannelReadAt,
+        initialOrdinaryUnreadMessageIds,
         initialForcedUnreadMessageIds,
+        isInitialChannelForcedUnread,
         entries.length,
         notifier.reachedOldest,
         unreadBoundaryLoadFailed.value,

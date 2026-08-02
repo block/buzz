@@ -32,6 +32,7 @@ import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
 import 'channels_provider.dart';
+import 'unread_badge/observed_unread_event.dart';
 import 'compose_bar.dart';
 import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
@@ -43,6 +44,7 @@ import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
 import 'read_state/deferred_read_state_update.dart';
+import 'read_state/read_state_format.dart';
 import 'read_state/read_state_provider.dart';
 import 'read_state/read_state_time.dart';
 import 'reaction_row.dart';
@@ -133,11 +135,32 @@ class ChannelDetailPage extends HookConsumerWidget {
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
+    final channelsNotifier = ref.read(channelsProvider.notifier);
     final initialChannelReadAtRef = useRef<int?>(null);
+    final initialOrdinaryUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final initialForcedUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final didCaptureInitialReadAt = useRef(false);
     if (readState.isReady && !didCaptureInitialReadAt.value) {
-      initialChannelReadAtRef.value = readState.effectiveTimestamp(channel.id);
+      final channelReadAt = readState.effectiveTimestamp(channel.id);
+      initialChannelReadAtRef.value = channelReadAt;
+      initialOrdinaryUnreadMessageIdsRef.value = {
+        for (final event
+            in channelsNotifier
+                    .observedUnreadEventsByChannel[channel.id]
+                    ?.values ??
+                const <ObservedUnreadEvent>[])
+          if (event.createdAt >
+              (observedUnreadEventReadAt(
+                    event,
+                    channelReadAt,
+                    (rootId) =>
+                        readState.effectiveTimestamp(threadContextKey(rootId)),
+                    (messageId) =>
+                        readState.effectiveTimestamp(msgContextKey(messageId)),
+                  ) ??
+                  0))
+            event.id,
+      };
       initialForcedUnreadMessageIdsRef.value = {
         for (final entry in readState.forcedUnreadContexts.entries)
           if (entry.value == channel.id && entry.key.startsWith('msg:'))
@@ -146,6 +169,8 @@ class ChannelDetailPage extends HookConsumerWidget {
       didCaptureInitialReadAt.value = true;
     }
     final initialChannelReadAt = initialChannelReadAtRef.value;
+    final initialOrdinaryUnreadMessageIds =
+        initialOrdinaryUnreadMessageIdsRef.value;
     final initialForcedUnreadMessageIds =
         initialForcedUnreadMessageIdsRef.value;
     final currentPubkey = ref
@@ -407,17 +432,19 @@ class ChannelDetailPage extends HookConsumerWidget {
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
                               initialChannelReadAt: initialChannelReadAt,
+                              initialOrdinaryUnreadMessageIds:
+                                  initialOrdinaryUnreadMessageIds,
                               initialForcedUnreadMessageIds:
                                   initialForcedUnreadMessageIds,
+                              isInitialChannelForcedUnread: readState
+                                  .isForcedUnread(channel.id),
                               hasInitialUnread:
                                   readState.isReady &&
-                                  (readState.locallyForcedChannelIds.contains(
-                                        channel.id,
-                                      ) ||
-                                      (readTimestamp != null &&
-                                          (initialChannelReadAt == null ||
-                                              readTimestamp >
-                                                  initialChannelReadAt))),
+                                  (readState.isForcedUnread(channel.id) ||
+                                      initialForcedUnreadMessageIds
+                                          .isNotEmpty ||
+                                      initialOrdinaryUnreadMessageIds
+                                          .isNotEmpty),
                               channelId: channel.id,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,

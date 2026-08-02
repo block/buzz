@@ -22,6 +22,7 @@ import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
@@ -1160,6 +1161,21 @@ void main() {
             createdAt: 1000 + i,
           ),
       ];
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -1172,6 +1188,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: messages,
+          channelsNotifier: channelsNotifier,
           readStateNotifier: readState,
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
@@ -1203,8 +1220,8 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsOneWidget,
       );
-      expect(find.byTooltip('Jump to latest message'), findsOneWidget);
-      expect(find.byIcon(LucideIcons.chevronDown), findsOneWidget);
+      expect(find.text('Latest'), findsOneWidget);
+      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
     });
 
     testWidgets('loads history through the oldest unread boundary', (
@@ -1238,6 +1255,7 @@ void main() {
           pubkey: 'self',
           contexts: {_channelId: 1020},
           version: 0,
+          forcedUnreadContexts: {_channelId: _channelId},
         ),
       );
 
@@ -1284,6 +1302,7 @@ void main() {
           pubkey: 'self',
           contexts: {_channelId: 1020},
           version: 0,
+          forcedUnreadContexts: {_channelId: _channelId},
         ),
       );
 
@@ -1346,6 +1365,54 @@ void main() {
 
       expect(findRichText('Message 5'), findsOneWidget);
       expect(findRichText('Message 20'), findsNothing);
+    });
+
+    testWidgets('ignores newer events absent from observed unread state', (
+      tester,
+    ) async {
+      final messages = [
+        _textMsg(
+          id: 'read-message',
+          pubkey: 'alice',
+          content: 'Already read',
+          createdAt: 1000,
+        ),
+        _textMsg(
+          id: 'self-message',
+          pubkey: 'self',
+          content: 'My own newer message',
+          createdAt: 1100,
+        ),
+        _systemMsg(
+          id: 'system-message',
+          payload: const {'type': 'channel_created'},
+          createdAt: 1200,
+        ),
+      ];
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1000},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
     });
 
     testWidgets('can jump back to latest after a non-drag user scroll', (
@@ -3450,7 +3517,19 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
   List<Channel> _channels;
-  _FakeChannelsNotifier(this._channels);
+  final Map<String, Map<String, ObservedUnreadEvent>> _observedUnread;
+
+  _FakeChannelsNotifier(
+    this._channels, {
+    Map<String, List<ObservedUnreadEvent>> observedUnread = const {},
+  }) : _observedUnread = {
+         for (final entry in observedUnread.entries)
+           entry.key: {for (final event in entry.value) event.id: event},
+       };
+
+  @override
+  Map<String, Map<String, ObservedUnreadEvent>>
+  get observedUnreadEventsByChannel => _observedUnread;
 
   @override
   Future<List<Channel>> build() => SynchronousFuture(_channels);
