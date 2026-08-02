@@ -12,6 +12,7 @@ name = "buzz-node"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = { workspace = true }
 buzz-core = { workspace = true }
 buzz-ws-client = { workspace = true }
 chrono = { workspace = true }
@@ -24,7 +25,6 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }

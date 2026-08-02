@@ -1082,6 +1082,7 @@ dependencies = [
 name = "buzz-node"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "buzz-core",
  "buzz-ws-client",
  "chrono",
@@ -1094,7 +1095,6 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
  "zeroize",

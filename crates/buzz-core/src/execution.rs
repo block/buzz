@@ -841,7 +841,18 @@ pub enum ExecutionCommand {
     /// Create or reconcile one workload from a safe specification.
     Deploy {
         /// Desired workload configuration.
-        workload: WorkloadSpec,
+        workload: Box<WorkloadSpec>,
+        /// Highest node-assigned receipt sequence the owner observed for this
+        /// workload before issuing the deploy.
+        ///
+        /// Receipt sequences are assigned by the node and increase strictly
+        /// per owner and workload, so a deploy carrying a sequence at or above
+        /// a removal's receipt sequence proves it was issued after the owner
+        /// observed that removal — it cannot be a stale replay from before the
+        /// removal. Nodes use this to clear removal tombstones on deliberate
+        /// redeploys while still rejecting stale deploy commands.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes_removal: Option<u64>,
     },
     /// Start an existing workload.
     Start {
@@ -886,7 +897,7 @@ impl ExecutionCommand {
     /// Return the workload targeted by this command.
     pub fn workload_id(&self) -> &WorkloadId {
         match self {
-            Self::Deploy { workload } => &workload.workload_id,
+            Self::Deploy { workload, .. } => &workload.workload_id,
             Self::Start { workload_id }
             | Self::Stop { workload_id }
             | Self::Restart { workload_id }
@@ -900,7 +911,7 @@ impl ExecutionCommand {
     /// Validate command payload fields at a supplied clock instant.
     pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ExecutionValidationError> {
         match self {
-            Self::Deploy { workload } => workload.validate(),
+            Self::Deploy { workload, .. } => workload.validate(),
             Self::Start { .. } | Self::Stop { .. } | Self::Restart { .. } | Self::Remove { .. } => {
                 Ok(())
             }

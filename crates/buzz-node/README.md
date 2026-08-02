@@ -42,15 +42,33 @@ The service reconnects with exponential backoff up to 30 seconds, drains
 in-flight command work before a connection attempt is retried, logs lifecycle
 and relay failures through `tracing`, and exits cleanly on Ctrl-C or SIGTERM.
 
+While connected, the node publishes an ephemeral kind:20001 presence
+heartbeat every 60 seconds over its WebSocket connection — the same presence
+mechanism members and managed agents use. The relay keeps that presence in
+Redis with a 180-second TTL and clears it on clean disconnect, so Desktop
+derives node availability from live presence rather than announcement
+freshness: a node with a Ready announcement and live presence shows as
+connected, a Ready node without presence shows as unavailable within roughly
+three minutes of an unclean drop, and a graceful shutdown (which publishes an
+`offline` presence before disconnecting) flips immediately. The kind:30630
+announcement itself stays slow-moving capability and pairing state; it is
+only republished when owners or workload status change.
+
 With a local relay already running, verify the standalone contract with:
 
 ```bash
 ./scripts/smoke-buzz-node.sh ws://localhost:3000
 ```
 
-Use the same relay hostname as Desktop. Local relay tenants are host-scoped,
-so `localhost:3000` and `127.0.0.1:3000` are separate communities.
+The relay URL must use the same host as the Desktop community it should join;
+relay communities are scoped by host.
 
-Pair an owner with `buzz-node pair --qr <desktop-qr-uri>` before running the
-node. Command payloads contain only safe workload data and credential
-references; credential material remains node-local.
+Pair an owner with `buzz-node pair --qr <desktop-qr-uri>`. Pairing runs as a
+separate process and persists the owner attestation to `owners.json` in the
+shared data directory; a node started afterwards announces it immediately. An
+already-running `buzz-node run` process re-reads `owners.json` every few
+seconds and, when the paired owners change, republishes its replaceable
+announcement with the updated attestations and starts authorizing commands
+from the new owner — no restart required. Command payloads contain only safe
+workload data and credential references; credential material remains
+node-local.

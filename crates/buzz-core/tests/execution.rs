@@ -131,7 +131,8 @@ fn command_envelope_round_trips_and_carries_only_credential_references() {
         issued_at,
         issued_at + Duration::minutes(5),
         ExecutionCommand::Deploy {
-            workload: workload(),
+            supersedes_removal: None,
+            workload: Box::new(workload()),
         },
     )
     .expect("valid command");
@@ -186,7 +187,8 @@ fn envelope_rejects_expiry_and_malformed_payloads() {
         issued_at,
         issued_at + Duration::minutes(5),
         ExecutionCommand::Deploy {
-            workload: workload(),
+            supersedes_removal: None,
+            workload: Box::new(workload()),
         },
     )
     .unwrap();
@@ -235,7 +237,8 @@ fn commands_cover_lifecycle_and_provider_authentication_without_secrets() {
     .unwrap();
     let commands = [
         ExecutionCommand::Deploy {
-            workload: workload(),
+            supersedes_removal: None,
+            workload: Box::new(workload()),
         },
         ExecutionCommand::Start {
             workload_id: workload_id(),

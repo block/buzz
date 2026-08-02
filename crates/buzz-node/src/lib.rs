@@ -1,6 +1,8 @@
+#![deny(unsafe_code)]
+
 //! Runtime-neutral relay client for a standalone Buzz execution node.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::fs::File;
@@ -18,6 +20,7 @@ use buzz_core::execution::{
 };
 use buzz_core::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
+    KIND_PRESENCE_UPDATE,
 };
 use chrono::{DateTime, Utc};
 use nostr::{nips::nip44, Event, EventBuilder, Keys, Kind, PublicKey, Tag, ToBech32};
@@ -167,7 +170,7 @@ impl NodeIdentity {
 }
 
 /// Durable owner allowlist established through NIP-AB pairing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OwnerStore {
     owners: Vec<String>,
     #[serde(default)]
@@ -182,6 +185,18 @@ impl OwnerStore {
             return Ok(Self::default());
         }
         Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+    }
+
+    /// Reload the allowlist from disk and report whether it changed.
+    ///
+    /// `buzz-node pair` runs as a separate process and persists new owner
+    /// attestations to `owners.json` while `buzz-node run` keeps serving. A
+    /// running node polls with this method so a completed pairing takes
+    /// effect — refreshed announcement and command authorization — without a
+    /// restart. Returns `Ok(None)` when the on-disk contents match `self`.
+    pub fn reload_if_changed(&self, data_dir: &Path) -> Result<Option<Self>, NodeError> {
+        let latest = Self::load(data_dir)?;
+        Ok((latest != *self).then_some(latest))
     }
 
     /// Add an owner public key and persist the updated allowlist.
@@ -316,6 +331,21 @@ pub fn build_announcement_with_workloads_and_attestations(
     .map_err(|error| NodeError::Identity(error.to_string()))
 }
 
+/// Build the ephemeral kind:20001 presence event a node publishes as its
+/// liveness heartbeat.
+///
+/// The content is a bare status string (`"online"`, `"offline"`) — the same
+/// shape members and managed agents publish — so the relay's presence handler
+/// stores it in Redis (short TTL) and synthesizes it back on presence
+/// queries. Ephemeral kinds are rejected by the relay's HTTP bridge, so the
+/// event must be published over the node's WebSocket connection.
+pub fn build_presence_event(identity: &NodeIdentity, status: &str) -> Result<Event, NodeError> {
+    EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+        .tags([])
+        .sign_with_keys(&identity.keys)
+        .map_err(|error| NodeError::Identity(error.to_string()))
+}
+
 /// Payload sent by the existing Desktop NIP-AB pairing flow.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -365,8 +395,41 @@ pub fn parse_desktop_pairing_payload(payload: &str) -> Result<DesktopPairingPayl
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FakeWorkloadRuntime {
     workloads: BTreeMap<WorkloadId, RuntimeWorkload>,
-    removed_workloads: BTreeSet<WorkloadId>,
+    /// Removal tombstones keyed by workload, valued by the node-assigned
+    /// receipt sequence of the removal. A tombstone blocks deploys that
+    /// cannot prove they were issued after the owner observed the removal
+    /// (a stale or replayed deploy must not resurrect a removed workload),
+    /// while a deploy carrying `supersedes_removal` at or above the recorded
+    /// sequence clears the tombstone. Legacy persisted tombstones carry
+    /// sequence `0` and are cleared by any new deploy.
+    #[serde(default, deserialize_with = "deserialize_removed_workloads")]
+    removed_workloads: BTreeMap<WorkloadId, u64>,
     deploy_invocations: usize,
+}
+
+/// Accept both the current sequenced tombstone map and the legacy persisted
+/// shape (a plain list of workload ids). Legacy entries migrate to sequence
+/// `0`, which any new deploy may clear.
+fn deserialize_removed_workloads<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<WorkloadId, u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RemovedWorkloadsCompat {
+        Sequenced(BTreeMap<WorkloadId, u64>),
+        Legacy(Vec<WorkloadId>),
+    }
+
+    Ok(match RemovedWorkloadsCompat::deserialize(deserializer)? {
+        RemovedWorkloadsCompat::Sequenced(map) => map,
+        RemovedWorkloadsCompat::Legacy(list) => list
+            .into_iter()
+            .map(|workload_id| (workload_id, 0))
+            .collect(),
+    })
 }
 
 /// Encrypted local state proving a provider subscription has been authenticated.
@@ -479,9 +542,25 @@ impl FakeWorkloadRuntime {
     }
 
     /// Reconcile a deploy request into the fake runtime.
-    pub fn deploy(&mut self, workload: &WorkloadSpec) -> Result<WorkloadLifecycle, SafeErrorCode> {
-        if self.removed_workloads.contains(&workload.workload_id) {
-            return Err(SafeErrorCode::Conflict);
+    ///
+    /// A removal tombstone rejects the deploy unless the deploy proves it was
+    /// issued after the owner observed the removal: `supersedes_removal` must
+    /// be at or above the removal's node-assigned receipt sequence. A stale or
+    /// replayed deploy from before the removal cannot carry that sequence,
+    /// because the node had not assigned it yet. Legacy tombstones persisted
+    /// without a sequence (recorded as `0`) are cleared by any new deploy.
+    pub fn deploy(
+        &mut self,
+        workload: &WorkloadSpec,
+        supersedes_removal: Option<u64>,
+    ) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        if let Some(&removal_sequence) = self.removed_workloads.get(&workload.workload_id) {
+            let supersedes = removal_sequence == 0
+                || supersedes_removal.is_some_and(|sequence| sequence >= removal_sequence);
+            if !supersedes {
+                return Err(SafeErrorCode::Conflict);
+            }
+            self.removed_workloads.remove(&workload.workload_id);
         }
         let is_new = !self.workloads.contains_key(&workload.workload_id);
         self.workloads.insert(
@@ -518,13 +597,24 @@ impl FakeWorkloadRuntime {
     /// Remove an existing workload.
     pub fn remove(&mut self, workload_id: &WorkloadId) -> Result<WorkloadLifecycle, SafeErrorCode> {
         if self.workloads.remove(workload_id).is_some() {
-            self.removed_workloads.insert(workload_id.clone());
+            self.removed_workloads
+                .entry(workload_id.clone())
+                .or_insert(0);
             return Ok(WorkloadLifecycle::Removed);
         }
-        if self.removed_workloads.contains(workload_id) {
+        if self.removed_workloads.contains_key(workload_id) {
             return Ok(WorkloadLifecycle::Removed);
         }
         Err(SafeErrorCode::WorkloadNotFound)
+    }
+
+    /// Record the node-assigned receipt sequence of a successful removal on
+    /// its tombstone, so later deploys can prove they supersede it. Keeps the
+    /// highest sequence when a removal is repeated idempotently.
+    fn record_removal_sequence(&mut self, workload_id: &WorkloadId, sequence: u64) {
+        if let Some(removal_sequence) = self.removed_workloads.get_mut(workload_id) {
+            *removal_sequence = (*removal_sequence).max(sequence);
+        }
     }
 
     fn transition(
@@ -560,7 +650,7 @@ impl FakeWorkloadRuntime {
                 })
             })
             .collect();
-        statuses.extend(self.removed_workloads.iter().filter_map(|workload_id| {
+        statuses.extend(self.removed_workloads.keys().filter_map(|workload_id| {
             sequences.get(workload_id).and_then(|sequence| {
                 WorkloadStatus::new(workload_id.clone(), WorkloadLifecycle::Removed, *sequence).ok()
             })
@@ -971,7 +1061,10 @@ fn execute(
     let accepted = next_receipt(state, owner, envelope, ReceiptOutcome::Accepted)?;
     let runtime = state.runtimes.entry(owner.to_string()).or_default();
     let (outcome, detail) = match &envelope.command {
-        ExecutionCommand::Deploy { workload } => (runtime.deploy(workload), None),
+        ExecutionCommand::Deploy {
+            workload,
+            supersedes_removal,
+        } => (runtime.deploy(workload, *supersedes_removal), None),
         ExecutionCommand::Start { workload_id } => (runtime.start(workload_id), None),
         ExecutionCommand::Stop { workload_id } => (runtime.stop(workload_id), None),
         ExecutionCommand::Restart { workload_id } => (runtime.restart(workload_id), None),
@@ -1027,10 +1120,19 @@ fn execute(
         Ok(_) => ReceiptOutcome::Succeeded,
         Err(error) => ReceiptOutcome::Failed { error },
     };
-    Ok(vec![
-        accepted,
-        next_receipt_with_detail(state, owner, envelope, outcome, detail)?,
-    ])
+    let terminal = next_receipt_with_detail(state, owner, envelope, outcome, detail)?;
+    // The removal tombstone must remember the sequence of the removal's
+    // terminal receipt: that is the sequence the owner observes (in the
+    // receipt and in the announced workload status) and echoes back in a
+    // deliberate redeploy to prove it is not a stale replay.
+    if matches!(envelope.command, ExecutionCommand::Remove { .. })
+        && matches!(terminal.outcome, ReceiptOutcome::Succeeded)
+    {
+        if let Some(runtime) = state.runtimes.get_mut(owner) {
+            runtime.record_removal_sequence(envelope.command.workload_id(), terminal.sequence);
+        }
+    }
+    Ok(vec![accepted, terminal])
 }
 
 fn next_receipt(
@@ -1295,6 +1397,43 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn owner_store_reload_detects_pairing_written_by_another_process() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let running = OwnerStore::load(&dir).expect("initial load");
+        assert!(running
+            .reload_if_changed(&dir)
+            .expect("reload unchanged store")
+            .is_none());
+
+        // Simulate `buzz-node pair` persisting a new attestation out-of-process.
+        let owner = Keys::generate();
+        let _ = paired_owner_store(&owner, &node, &dir);
+
+        let refreshed = running
+            .reload_if_changed(&dir)
+            .expect("reload after pairing")
+            .expect("pairing change detected");
+        assert_eq!(refreshed.owners(), &[owner.public_key().to_hex()]);
+        assert_eq!(refreshed.attestations().len(), 1);
+        assert!(refreshed
+            .reload_if_changed(&dir)
+            .expect("reload refreshed store")
+            .is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn owner_store_reload_treats_missing_file_as_unchanged_empty_store() {
+        let dir = temp_dir();
+        assert!(OwnerStore::default()
+            .reload_if_changed(&dir)
+            .expect("reload missing file")
+            .is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn deploy_command_event(
         owner: &Keys,
         node: &NodeIdentity,
@@ -1335,7 +1474,10 @@ mod tests {
             node.node_id().expect("node id"),
             now,
             now + Duration::minutes(5),
-            ExecutionCommand::Deploy { workload },
+            ExecutionCommand::Deploy {
+                supersedes_removal: None,
+                workload: Box::new(workload),
+            },
         )
         .expect("command");
         let event = deploy_command_event(&owner, &node, &command);
@@ -1395,15 +1537,18 @@ mod tests {
             now,
             now + Duration::minutes(5),
             ExecutionCommand::Deploy {
-                workload: WorkloadSpec::agent(
-                    WorkloadId::random(),
-                    "Research agent",
-                    "fake-runtime",
-                    None,
-                    None,
-                    Vec::new(),
-                )
-                .expect("workload"),
+                supersedes_removal: None,
+                workload: Box::new(
+                    WorkloadSpec::agent(
+                        WorkloadId::random(),
+                        "Research agent",
+                        "fake-runtime",
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("workload"),
+                ),
             },
         )
         .expect("command");
@@ -1468,7 +1613,8 @@ mod tests {
         };
         let commands = [
             ExecutionCommand::Deploy {
-                workload: workload.clone(),
+                supersedes_removal: None,
+                workload: Box::new(workload.clone()),
             },
             ExecutionCommand::Stop {
                 workload_id: workload_id.clone(),
@@ -1530,20 +1676,23 @@ mod tests {
             now,
             now + Duration::minutes(5),
             ExecutionCommand::Deploy {
-                workload: WorkloadSpec::agent(
-                    WorkloadId::random(),
-                    "Original",
-                    "fake-runtime",
-                    None,
-                    None,
-                    Vec::new(),
-                )
-                .expect("workload"),
+                supersedes_removal: None,
+                workload: Box::new(
+                    WorkloadSpec::agent(
+                        WorkloadId::random(),
+                        "Original",
+                        "fake-runtime",
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("workload"),
+                ),
             },
         )
         .expect("command");
         let mut conflicting = first.clone();
-        if let ExecutionCommand::Deploy { workload } = &mut conflicting.command {
+        if let ExecutionCommand::Deploy { workload, .. } = &mut conflicting.command {
             workload.display_name = "Changed".into();
         }
         let controller = ExecutionController::default();
@@ -1608,15 +1757,18 @@ mod tests {
             now,
             now + Duration::minutes(5),
             ExecutionCommand::Deploy {
-                workload: WorkloadSpec::agent(
-                    workload_id.clone(),
-                    "Auth agent",
-                    "fake-runtime",
-                    None,
-                    None,
-                    Vec::new(),
-                )
-                .expect("workload"),
+                supersedes_removal: None,
+                workload: Box::new(
+                    WorkloadSpec::agent(
+                        workload_id.clone(),
+                        "Auth agent",
+                        "fake-runtime",
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("workload"),
+                ),
             },
         )
         .expect("deploy command");
@@ -1916,15 +2068,18 @@ mod tests {
                 now,
                 now + Duration::minutes(5),
                 ExecutionCommand::Deploy {
-                    workload: WorkloadSpec::agent(
-                        WorkloadId::random(),
-                        name,
-                        "fake-runtime",
-                        None,
-                        None,
-                        Vec::new(),
-                    )
-                    .expect("workload"),
+                    supersedes_removal: None,
+                    workload: Box::new(
+                        WorkloadSpec::agent(
+                            WorkloadId::random(),
+                            name,
+                            "fake-runtime",
+                            None,
+                            None,
+                            Vec::new(),
+                        )
+                        .expect("workload"),
+                    ),
                 },
             )
             .expect("command")
@@ -1993,15 +2148,18 @@ mod tests {
             now,
             now + Duration::minutes(5),
             ExecutionCommand::Deploy {
-                workload: WorkloadSpec::agent(
-                    WorkloadId::random(),
-                    "Research agent",
-                    "fake-runtime",
-                    None,
-                    None,
-                    Vec::new(),
-                )
-                .expect("workload"),
+                supersedes_removal: None,
+                workload: Box::new(
+                    WorkloadSpec::agent(
+                        WorkloadId::random(),
+                        "Research agent",
+                        "fake-runtime",
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("workload"),
+                ),
             },
         )
         .expect("command");
@@ -2024,6 +2182,246 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn terminal_receipt(owner: &Keys, node: &NodeIdentity, events: &[Event]) -> ExecutionReceipt {
+        let plaintext = nip44::decrypt(
+            owner.secret_key(),
+            &node.keys.public_key(),
+            &events[1].content,
+        )
+        .expect("decrypt terminal receipt");
+        serde_json::from_str(&plaintext).expect("terminal receipt")
+    }
+
+    #[tokio::test]
+    async fn redeploy_after_observed_removal_succeeds_and_stale_deploy_stays_blocked() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let owners = paired_owner_store(&owner, &node, &dir);
+        let workload_id = WorkloadId::random();
+        let workload = WorkloadSpec::agent(
+            workload_id.clone(),
+            "Movable agent",
+            "fake-runtime",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload");
+        let now = Utc::now();
+        let envelope = |command| {
+            ExecutionCommandEnvelope::new(
+                node.node_id().expect("node id"),
+                now,
+                now + Duration::minutes(5),
+                command,
+            )
+            .expect("command")
+        };
+        let controller = ExecutionController::load(&dir).expect("controller");
+
+        let deploy = envelope(ExecutionCommand::Deploy {
+            supersedes_removal: None,
+            workload: Box::new(workload.clone()),
+        });
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &deploy),
+                now,
+            )
+            .await
+            .expect("initial deploy");
+
+        let remove = envelope(ExecutionCommand::Remove {
+            workload_id: workload_id.clone(),
+        });
+        let remove_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &remove),
+                now,
+            )
+            .await
+            .expect("remove");
+        let removal = terminal_receipt(&owner, &node, &remove_events);
+        assert_eq!(removal.outcome, ReceiptOutcome::Succeeded);
+
+        // A deploy that cannot prove it observed the removal — no sequence, or
+        // one from before the removal receipt — is a potential stale replay
+        // and must stay in conflict.
+        for supersedes_removal in [None, Some(removal.sequence - 1)] {
+            let stale = envelope(ExecutionCommand::Deploy {
+                supersedes_removal,
+                workload: Box::new(workload.clone()),
+            });
+            let events = controller
+                .handle_command_event(
+                    &node,
+                    &owners,
+                    TEST_RELAY_AUTHORITY,
+                    &deploy_command_event(&owner, &node, &stale),
+                    now,
+                )
+                .await
+                .expect("stale deploy handled");
+            assert_eq!(
+                terminal_receipt(&owner, &node, &events).outcome,
+                ReceiptOutcome::Failed {
+                    error: SafeErrorCode::Conflict
+                }
+            );
+        }
+        assert_eq!(controller.runtime().await.workload_count(), 0);
+
+        // A deliberate redeploy echoes the removal receipt's sequence. Restart
+        // the controller first so the sequenced tombstone is proven to
+        // round-trip through persisted state.
+        let restarted = ExecutionController::load(&dir).expect("restart controller");
+        let redeploy = envelope(ExecutionCommand::Deploy {
+            supersedes_removal: Some(removal.sequence),
+            workload: Box::new(workload.clone()),
+        });
+        let events = restarted
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &redeploy),
+                now,
+            )
+            .await
+            .expect("redeploy");
+        assert_eq!(
+            terminal_receipt(&owner, &node, &events).outcome,
+            ReceiptOutcome::Succeeded
+        );
+        assert_eq!(restarted.runtime().await.workload_count(), 1);
+        let statuses = restarted.workload_statuses().await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].lifecycle, WorkloadLifecycle::Running);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_tombstone_state_is_cleared_by_any_new_deploy() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let owners = paired_owner_store(&owner, &node, &dir);
+        let owner_hex = owner.public_key().to_hex();
+        let workload_id = WorkloadId::random();
+        // The exact persisted shape written by earlier builds: tombstones as a
+        // plain list of workload ids, without removal sequences.
+        let legacy_state = format!(
+            r#"{{
+                "runtimes": {{
+                    "{owner_hex}": {{
+                        "workloads": {{}},
+                        "removed_workloads": ["{workload_id}"],
+                        "deploy_invocations": 1
+                    }}
+                }},
+                "credentials": {{}},
+                "processed": [],
+                "conflicts": [],
+                "next_sequences": {{ "{owner_hex}": {{ "{workload_id}": 14 }} }}
+            }}"#,
+            workload_id = workload_id.as_str(),
+        );
+        fs::write(dir.join("execution-state.json"), legacy_state).expect("legacy state");
+
+        let controller = ExecutionController::load(&dir).expect("load legacy state");
+        let now = Utc::now();
+        let deploy = ExecutionCommandEnvelope::new(
+            node.node_id().expect("node id"),
+            now,
+            now + Duration::minutes(5),
+            ExecutionCommand::Deploy {
+                supersedes_removal: None,
+                workload: Box::new(
+                    WorkloadSpec::agent(
+                        workload_id.clone(),
+                        "Legacy agent",
+                        "fake-runtime",
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("workload"),
+                ),
+            },
+        )
+        .expect("command");
+        let events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &deploy),
+                now,
+            )
+            .await
+            .expect("deploy over legacy tombstone");
+        assert_eq!(
+            terminal_receipt(&owner, &node, &events).outcome,
+            ReceiptOutcome::Succeeded
+        );
+        assert_eq!(controller.runtime().await.workload_count(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn removal_tombstones_round_trip_and_accept_the_legacy_shape() {
+        let workload_id = WorkloadId::random();
+        let workload = WorkloadSpec::agent(
+            workload_id.clone(),
+            "Round-trip agent",
+            "fake-runtime",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload");
+        let mut runtime = FakeWorkloadRuntime::default();
+        runtime.deploy(&workload, None).expect("deploy");
+        runtime.remove(&workload_id).expect("remove");
+        runtime.record_removal_sequence(&workload_id, 4);
+
+        let encoded = serde_json::to_value(&runtime).expect("serialize runtime");
+        assert_eq!(encoded["removed_workloads"][workload_id.as_str()], 4);
+        let decoded: FakeWorkloadRuntime =
+            serde_json::from_value(encoded).expect("decode sequenced runtime");
+        assert!(matches!(
+            decoded.clone().deploy(&workload, None),
+            Err(SafeErrorCode::Conflict)
+        ));
+        assert!(matches!(
+            decoded.clone().deploy(&workload, Some(3)),
+            Err(SafeErrorCode::Conflict)
+        ));
+        assert_eq!(
+            decoded.clone().deploy(&workload, Some(4)),
+            Ok(WorkloadLifecycle::Running)
+        );
+
+        let legacy = serde_json::json!({
+            "workloads": {},
+            "removed_workloads": [workload_id.as_str()],
+            "deploy_invocations": 1
+        });
+        let mut legacy_runtime: FakeWorkloadRuntime =
+            serde_json::from_value(legacy).expect("decode legacy runtime");
+        assert_eq!(
+            legacy_runtime.deploy(&workload, None),
+            Ok(WorkloadLifecycle::Running)
+        );
+    }
+
     #[tokio::test]
     async fn expired_command_is_rejected_without_runtime_side_effects() {
         let dir = temp_dir();
@@ -2036,15 +2434,18 @@ mod tests {
             issued_at,
             issued_at + Duration::minutes(1),
             ExecutionCommand::Deploy {
-                workload: WorkloadSpec::agent(
-                    WorkloadId::random(),
-                    "Expired agent",
-                    "fake-runtime",
-                    None,
-                    None,
-                    Vec::new(),
-                )
-                .expect("workload"),
+                supersedes_removal: None,
+                workload: Box::new(
+                    WorkloadSpec::agent(
+                        WorkloadId::random(),
+                        "Expired agent",
+                        "fake-runtime",
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("workload"),
+                ),
             },
         )
         .expect("command");

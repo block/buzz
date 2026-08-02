@@ -1836,7 +1836,12 @@ async fn ingest_event_inner(
         ));
     }
 
-    if auth.is_http() && (kind_u32 == KIND_GIFT_WRAP || kind_u32 == KIND_PRESENCE_UPDATE) {
+    if auth.is_http()
+        && (kind_u32 == KIND_GIFT_WRAP
+            || kind_u32 == KIND_PRESENCE_UPDATE
+            || kind_u32 == KIND_EXECUTION_NODE_COMMAND
+            || kind_u32 == KIND_EXECUTION_NODE_RECEIPT)
+    {
         return Err(IngestError::Rejected(format!(
             "invalid: kind {kind_u32} is only accepted via WebSocket"
         )));

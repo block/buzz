@@ -1,31 +1,47 @@
+#![deny(unsafe_code)]
+
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{bail, Context, Result};
 use buzz_core::kind::{KIND_EXECUTION_NODE_COMMAND, KIND_PAIRING};
 use buzz_core::pairing::session::PairingSession;
 use buzz_core::pairing::{qr::decode_qr, types::PayloadType, PairingError};
 use buzz_core::tenant::relay_url_authority;
 use buzz_node::{
-    build_announcement_with_workloads_and_attestations, parse_desktop_pairing_payload,
-    DesktopPairingPayload, ExecutionController, NodeConfig, NodeError, NodeIdentity, OwnerStore,
+    build_announcement_with_workloads_and_attestations, build_presence_event,
+    parse_desktop_pairing_payload, DesktopPairingPayload, ExecutionController, NodeConfig,
+    NodeError, NodeIdentity, OwnerStore,
 };
 use clap::{Parser, Subcommand};
 use futures_util::stream::FuturesUnordered;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use nostr::{Event, EventBuilder, EventId, RelayUrl};
-use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio::time::{sleep, timeout};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::time::sleep;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
+
+/// How long to wait for each relay message during the interactive pairing
+/// flow — Desktop-side SAS confirmation involves a human, so be generous.
+const PAIRING_EVENT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How often a running node re-reads `owners.json` to pick up pairings
+/// completed by a separate `buzz-node pair` process without a restart.
+const OWNER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often a connected node refreshes its kind:20001 presence heartbeat.
+/// Matches the cadence members and managed agents use; the relay keeps
+/// presence in Redis with a 180-second TTL, so 60 seconds keeps a healthy
+/// node online with two missed ticks of margin.
+const PRESENCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -59,20 +75,18 @@ async fn main() {
         Command::Pair { qr } => pair_node(qr).await,
     };
     if let Err(error) = result {
-        eprintln!("error: {error}");
+        eprintln!("error: {error:#}");
         std::process::exit(1);
     }
 }
 
-async fn run_node() -> Result<(), NodeError> {
+async fn run_node() -> Result<()> {
     let config = NodeConfig::from_env()?;
     let identity = NodeIdentity::load_or_create(&config.data_dir)?;
-    let owners = OwnerStore::load(&config.data_dir)?;
+    let mut owners = OwnerStore::load(&config.data_dir)?;
     let relay_authority = relay_url_authority(&config.relay_url);
     if relay_authority.is_empty() {
-        return Err(NodeError::InvalidConfiguration(
-            "configured relay URL has no valid authority".into(),
-        ));
+        bail!("configured relay URL has no valid authority");
     }
     let mut controller = ExecutionController::load_with_concurrency(
         &config.data_dir,
@@ -81,7 +95,7 @@ async fn run_node() -> Result<(), NodeError> {
     let relay_connected = Arc::new(AtomicBool::new(false));
     let health_listener = TcpListener::bind(config.health_addr)
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(format!("health listener: {error}")))?;
+        .with_context(|| format!("bind health listener on {}", config.health_addr))?;
     let health_task = tokio::spawn(serve_health(health_listener, relay_connected.clone()));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let shutdown_task = tokio::spawn(async move {
@@ -96,13 +110,13 @@ async fn run_node() -> Result<(), NodeError> {
         let connection_shutdown = shutdown_rx.clone();
         tokio::select! {
             changed = shutdown_rx.changed() => {
-                changed.map_err(|_| NodeError::InvalidConfiguration("shutdown signal closed".into()))?;
+                changed.context("shutdown signal listener closed")?;
                 break Ok(());
             }
             result = run_connection(
                 &config,
                 &identity,
-                &owners,
+                &mut owners,
                 &mut controller,
                 &relay_authority,
                 &relay_connected,
@@ -110,10 +124,10 @@ async fn run_node() -> Result<(), NodeError> {
             ) => {
                 relay_connected.store(false, Ordering::Release);
                 if let Err(error) = result {
-                    warn!(%error, ?retry_delay, "execution node relay connection ended");
+                    warn!(error = format!("{error:#}"), ?retry_delay, "execution node relay connection ended");
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
-                            changed.map_err(|_| NodeError::InvalidConfiguration("shutdown signal closed".into()))?;
+                            changed.context("shutdown signal listener closed")?;
                             break Ok(());
                         }
                         _ = sleep(retry_delay) => {
@@ -150,37 +164,29 @@ async fn shutdown_signal() -> io::Result<()> {
 async fn run_connection(
     config: &NodeConfig,
     identity: &NodeIdentity,
-    owners: &OwnerStore,
+    owners: &mut OwnerStore,
     controller: &mut ExecutionController,
     relay_authority: &str,
     relay_connected: &AtomicBool,
     mut shutdown: watch::Receiver<bool>,
-) -> Result<(), NodeError> {
+) -> Result<()> {
+    refresh_owner_store(owners, config);
     let mut connection = buzz_ws_client::NostrWsConnection::connect(&config.relay_url)
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+        .with_context(|| format!("connect to relay {}", config.relay_url))?;
     connection
         .authenticate(&identity.keys, config.auth_tag.as_ref())
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+        .context("authenticate with relay")?;
 
-    let workloads = controller.workload_statuses().await;
-    let announcement = build_announcement_with_workloads_and_attestations(
-        identity,
-        &config.display_name,
-        &workloads,
-        owners.attestations(),
-    )?;
-    let response = connection
-        .send_event(announcement)
-        .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+    let response =
+        publish_node_announcement(&mut connection, controller, identity, owners, config).await?;
     if !response.accepted {
-        return Err(NodeError::InvalidConfiguration(format!(
-            "relay rejected node announcement: {}",
-            response.message
-        )));
+        bail!("relay rejected node announcement: {}", response.message);
     }
+    // Establish presence immediately so Desktop sees the node as connected
+    // before the first heartbeat tick fires.
+    publish_node_presence(&mut connection, identity, "online").await?;
 
     let node_pubkey = identity.keys.public_key().to_hex();
     connection
@@ -190,26 +196,55 @@ async fn run_connection(
             { "kinds": [KIND_EXECUTION_NODE_COMMAND], "#p": [node_pubkey] }
         ]))
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+        .context("subscribe to execution commands")?;
     connection
         .wait_for_eose("execution-node", Duration::from_secs(10))
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+        .context("wait for execution subscription EOSE")?;
     info!(node = %identity.keys.public_key().to_hex(), "execution node connected");
     relay_connected.store(true, Ordering::Release);
 
+    let mut owner_refresh = tokio::time::interval(OWNER_REFRESH_INTERVAL);
+    owner_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Start one full interval out — the initial "online" above already covers
+    // the first window.
+    let mut presence_heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + PRESENCE_HEARTBEAT_INTERVAL,
+        PRESENCE_HEARTBEAT_INTERVAL,
+    );
+    presence_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut work = FuturesUnordered::new();
     loop {
         tokio::select! {
+            _ = presence_heartbeat.tick() => {
+                publish_node_presence(&mut connection, identity, "online").await?;
+            }
+            _ = owner_refresh.tick() => {
+                if refresh_owner_store(owners, config) {
+                    let response =
+                        publish_node_announcement(&mut connection, controller, identity, owners, config)
+                            .await
+                            .context("publish refreshed node announcement")?;
+                    if !response.accepted {
+                        warn!(message = %response.message, "relay rejected refreshed node announcement");
+                    }
+                }
+            }
             changed = shutdown.changed() => {
-                changed.map_err(|_| NodeError::InvalidConfiguration("shutdown signal closed".into()))?;
+                changed.context("shutdown signal listener closed")?;
                 while let Some(result) = work.next().await {
                     publish_work_result(&mut connection, controller, identity, owners, config, result).await?;
+                }
+                // Best-effort: the relay also clears presence on the clean
+                // disconnect below, so a failure here only delays the flip
+                // until the Redis TTL expires.
+                if let Err(error) = publish_node_presence(&mut connection, identity, "offline").await {
+                    warn!(error = format!("{error:#}"), "failed to publish offline presence");
                 }
                 connection
                     .disconnect()
                     .await
-                    .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+                    .context("close relay connection")?;
                 return Ok(());
             }
             result = connection.next_event(Duration::from_secs(300)) => match result {
@@ -239,14 +274,12 @@ async fn run_connection(
                 }
                 Ok(buzz_ws_client::RelayMessage::Closed { message, .. }) => {
                     while work.next().await.is_some() {}
-                    return Err(NodeError::InvalidConfiguration(format!(
-                        "execution subscription closed: {message}"
-                    )));
+                    bail!("execution subscription closed: {message}");
                 }
                 Ok(_) => {}
                 Err(error) => {
                     while work.next().await.is_some() {}
-                    return Err(NodeError::InvalidConfiguration(error.to_string()));
+                    return Err(anyhow::Error::new(error).context("receive relay message"));
                 }
             },
             Some(result) = work.next(), if !work.is_empty() => {
@@ -256,6 +289,71 @@ async fn run_connection(
     }
 }
 
+/// Reload the owner store from disk, replacing `owners` when a separate
+/// `buzz-node pair` process persisted a new pairing. Returns whether the
+/// store changed; load failures keep the current store and are logged.
+fn refresh_owner_store(owners: &mut OwnerStore, config: &NodeConfig) -> bool {
+    match owners.reload_if_changed(&config.data_dir) {
+        Ok(Some(latest)) => {
+            *owners = latest;
+            info!(
+                owner_count = owners.owners().len(),
+                "owner store changed on disk; refreshing node announcement with updated attestations"
+            );
+            true
+        }
+        Ok(None) => false,
+        Err(error) => {
+            warn!(%error, "failed to reload owner store from disk");
+            false
+        }
+    }
+}
+
+/// Build and publish the node's replaceable announcement (NIP-33 LWW on the
+/// node's `d` tag) reflecting current workloads and owner attestations.
+async fn publish_node_announcement(
+    connection: &mut buzz_ws_client::NostrWsConnection,
+    controller: &ExecutionController,
+    identity: &NodeIdentity,
+    owners: &OwnerStore,
+    config: &NodeConfig,
+) -> Result<buzz_ws_client::OkResponse> {
+    let workloads = controller.workload_statuses().await;
+    let announcement = build_announcement_with_workloads_and_attestations(
+        identity,
+        &config.display_name,
+        &workloads,
+        owners.attestations(),
+    )?;
+    connection
+        .send_event(announcement)
+        .await
+        .context("publish node announcement")
+}
+
+/// Publish the node's ephemeral kind:20001 presence heartbeat over the
+/// relay WebSocket (the HTTP bridge rejects ephemeral kinds).
+///
+/// Transport failures propagate so the connection loop reconnects; a relay
+/// rejection is only logged because presence is best-effort and the next
+/// heartbeat tick retries within the Redis presence TTL.
+async fn publish_node_presence(
+    connection: &mut buzz_ws_client::NostrWsConnection,
+    identity: &NodeIdentity,
+    status: &str,
+) -> Result<()> {
+    let event = build_presence_event(identity, status)?;
+    let response = connection
+        .send_event(event)
+        .await
+        .context("publish node presence")?;
+    if !response.accepted {
+        warn!(status, message = %response.message, "relay rejected node presence update");
+    }
+    Ok(())
+}
+
 async fn publish_work_result(
     connection: &mut buzz_ws_client::NostrWsConnection,
     controller: &ExecutionController,
@@ -263,7 +361,7 @@ async fn publish_work_result(
     owners: &OwnerStore,
     config: &NodeConfig,
     result: Result<Result<(EventId, Vec<Event>), NodeError>, tokio::task::JoinError>,
-) -> Result<(), NodeError> {
+) -> Result<()> {
     let (event_id, receipts) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
@@ -279,22 +377,14 @@ async fn publish_work_result(
         let response = connection
             .send_event(receipt)
             .await
-            .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+            .context("publish execution receipt")?;
         if !response.accepted {
             warn!(event_id = %response.event_id, message = %response.message, "relay rejected execution receipt");
         }
     }
-    let workloads = controller.workload_statuses().await;
-    let announcement = build_announcement_with_workloads_and_attestations(
-        identity,
-        &config.display_name,
-        &workloads,
-        owners.attestations(),
-    )?;
-    let response = connection
-        .send_event(announcement)
+    let response = publish_node_announcement(connection, controller, identity, owners, config)
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+        .context("publish node status announcement")?;
     if !response.accepted {
         warn!(event_id = %event_id, message = %response.message, "relay rejected execution-node status announcement");
     }
@@ -341,7 +431,7 @@ async fn handle_health_request(
     stream.write_all(response.as_bytes()).await
 }
 
-async fn pair_node(qr_arg: Option<String>) -> Result<(), NodeError> {
+async fn pair_node(qr_arg: Option<String>) -> Result<()> {
     let config = NodeConfig::from_env()?;
     let identity = NodeIdentity::load_or_create(&config.data_dir)?;
     let qr_uri = match qr_arg {
@@ -349,77 +439,64 @@ async fn pair_node(qr_arg: Option<String>) -> Result<(), NodeError> {
         None => {
             print!("Paste the Desktop pairing QR URI: ");
             io::stdout().flush()?;
-            read_line().map_err(NodeError::Storage)?
+            read_line()?
         }
     };
-    let qr =
-        decode_qr(qr_uri.trim()).map_err(|error| NodeError::PairingPayload(error.to_string()))?;
+    let qr = decode_qr(qr_uri.trim()).context("invalid pairing QR URI")?;
     let relay_url = qr
         .relays
         .first()
-        .ok_or_else(|| NodeError::PairingPayload("QR URI contains no relay URL".into()))?
+        .context("QR URI contains no relay URL")?
         .clone();
-    let (mut session, offer) = PairingSession::new_target(&qr)
-        .map_err(|error| NodeError::PairingPayload(error.to_string()))?;
-    let (ws, _) = connect_async(&relay_url)
-        .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
-    let (mut write, mut read) = ws.split();
-    handle_pairing_auth(&mut read, &mut write, &session, &relay_url).await?;
+    let (mut session, offer) =
+        PairingSession::new_target(&qr).context("initialize pairing session")?;
+    let mut connection = connect_pairing_relay(&session, &relay_url).await?;
 
-    let subscription = serde_json::json!([
-        "REQ",
-        "pair",
-        { "kinds": [KIND_PAIRING], "#p": [session.pubkey().to_hex()] }
-    ]);
-    write
-        .send(Message::Text(subscription.to_string().into()))
+    connection
+        .send_raw(&serde_json::json!([
+            "REQ",
+            "pair",
+            { "kinds": [KIND_PAIRING], "#p": [session.pubkey().to_hex()] }
+        ]))
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
-    wait_for_eose(&mut read, "pair").await?;
-    publish_event(&mut write, &offer).await?;
+        .context("subscribe to pairing events")?;
+    connection
+        .wait_for_eose("pair", Duration::from_secs(10))
+        .await
+        .context("wait for pairing subscription EOSE")?;
+    publish_pairing_event(&mut connection, offer).await?;
 
-    let sas = session
-        .sas_code()
-        .ok_or_else(|| NodeError::PairingPayload("pairing SAS was not derived".into()))?;
+    let sas = session.sas_code().context("pairing SAS was not derived")?;
     println!("Pairing offer sent. SAS code: {sas}");
     print!("Does Desktop show the same SAS? [y/n]: ");
     io::stdout().flush()?;
 
     loop {
-        let event = next_pairing_event(&mut read, "pair").await?;
+        let event = next_pairing_event(&mut connection, "pair").await?;
         if session.handle_abort(&event).is_ok() {
-            return Err(NodeError::PairingPayload("Desktop aborted pairing".into()));
+            bail!("Desktop aborted pairing");
         }
         match session.handle_sas_confirm(&event) {
             Ok(_) => break,
             Err(PairingError::TranscriptMismatch) => {
-                return Err(NodeError::PairingPayload(
-                    "pairing transcript mismatch".into(),
-                ));
+                bail!("pairing transcript mismatch");
             }
             Err(_) => {}
         }
     }
 
-    if !read_yes_no().map_err(NodeError::Storage)? {
-        return Err(NodeError::PairingPayload(
-            "SAS mismatch — pairing aborted".into(),
-        ));
+    if !read_yes_no()? {
+        bail!("SAS mismatch — pairing aborted");
     }
     session
         .confirm_target_sas()
-        .map_err(|error| NodeError::PairingPayload(error.to_string()))?;
+        .context("confirm pairing SAS")?;
 
     let payload: Zeroizing<String> = loop {
-        let event = next_pairing_event(&mut read, "pair").await?;
+        let event = next_pairing_event(&mut connection, "pair").await?;
         match session.handle_payload(&event) {
             Ok((PayloadType::Custom, payload)) => break payload,
-            Ok(_) => {
-                return Err(NodeError::PairingPayload(
-                    "expected custom pairing payload".into(),
-                ))
-            }
+            Ok(_) => bail!("expected custom pairing payload"),
             Err(_) => {}
         }
     };
@@ -432,25 +509,19 @@ async fn pair_node(qr_arg: Option<String>) -> Result<(), NodeError> {
     if expected_relay_authority.is_empty()
         || relay_url_authority(&relay_url) != expected_relay_authority
     {
-        return Err(NodeError::PairingPayload(
-            "pairing payload relay does not match the configured relay".into(),
-        ));
+        bail!("pairing payload relay does not match the configured relay");
     }
-    let mut nsec = nsec
-        .take()
-        .ok_or_else(|| NodeError::PairingPayload("pairing payload is missing nsec".into()))?;
+    let mut nsec = nsec.take().context("pairing payload is missing nsec")?;
     let owner_keys = match nostr::Keys::parse(&nsec) {
         Ok(keys) => keys,
         Err(error) => {
             zeroize::Zeroize::zeroize(&mut nsec);
-            return Err(NodeError::PairingPayload(error.to_string()));
+            return Err(anyhow::Error::new(error).context("parse pairing payload nsec"));
         }
     };
     zeroize::Zeroize::zeroize(&mut nsec);
     if owner_keys.public_key().to_hex() != owner_pubkey {
-        return Err(NodeError::PairingPayload(
-            "pairing payload owner identity does not match nsec".into(),
-        ));
+        bail!("pairing payload owner identity does not match nsec");
     }
     let node_id = identity.node_id()?;
     let node_attestation = buzz_core::execution::ExecutionNodeAttestation::sign(
@@ -465,119 +536,85 @@ async fn pair_node(qr_arg: Option<String>) -> Result<(), NodeError> {
         &expected_relay_authority,
         &config.data_dir,
     )?;
-    publish_event(
-        &mut write,
-        &session
-            .send_complete()
-            .map_err(|error| NodeError::PairingPayload(error.to_string()))?,
-    )
-    .await?;
+    let complete = session
+        .send_complete()
+        .context("build pairing complete event")?;
+    publish_pairing_event(&mut connection, complete).await?;
     println!(
         "Paired owner {} with node {}.",
         owner_pubkey,
         identity.keys.public_key()
     );
+    println!(
+        "A running `buzz-node run` process picks up the new pairing within {} seconds and re-announces automatically; no restart needed.",
+        OWNER_REFRESH_INTERVAL.as_secs()
+    );
     Ok(())
 }
 
-async fn handle_pairing_auth<R, W>(
-    read: &mut R,
-    write: &mut W,
+/// Connects to the pairing relay and completes NIP-42 authentication with the
+/// ephemeral pairing session key instead of the node's own identity.
+async fn connect_pairing_relay(
     session: &PairingSession,
     relay_url: &str,
-) -> Result<(), NodeError>
-where
-    R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
-    let challenge = match timeout(Duration::from_secs(3), async {
-        loop {
-            let message = read
-                .next()
-                .await
-                .ok_or_else(|| NodeError::InvalidConfiguration("relay closed during auth".into()))?
-                .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
-            if let Message::Text(text) = message {
-                let value: Value = serde_json::from_str(&text)?;
-                if value[0] == "AUTH" {
-                    if let Some(challenge) = value[1].as_str() {
-                        break Ok::<String, NodeError>(challenge.to_string());
-                    }
-                }
-            }
-        }
-    })
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(NodeError::InvalidConfiguration(
-                "relay authentication timed out".into(),
-            ))
-        }
-    };
-    let relay = RelayUrl::parse(relay_url)
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+) -> Result<buzz_ws_client::NostrWsConnection> {
+    let mut connection = buzz_ws_client::NostrWsConnection::connect(relay_url)
+        .await
+        .with_context(|| format!("connect to pairing relay {relay_url}"))?;
+    let challenge = connection
+        .auth_challenge(Duration::from_secs(
+            buzz_ws_client::connection::AUTH_CHALLENGE_TIMEOUT_SECS,
+        ))
+        .await
+        .context("wait for relay AUTH challenge")?;
+    let relay = RelayUrl::parse(relay_url).context("parse pairing relay URL")?;
     let auth = session
         .sign_event(EventBuilder::auth(challenge, relay))
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
-    write
-        .send(Message::Text(
-            serde_json::json!(["AUTH", auth]).to_string().into(),
-        ))
+        .context("sign pairing AUTH event")?;
+    connection
+        .authenticate_with_event(auth)
         .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
+        .context("authenticate pairing session with relay")?;
+    Ok(connection)
+}
+
+async fn next_pairing_event(
+    connection: &mut buzz_ws_client::NostrWsConnection,
+    subscription: &str,
+) -> Result<Event> {
+    loop {
+        match connection
+            .next_event(PAIRING_EVENT_TIMEOUT)
+            .await
+            .context("receive pairing event")?
+        {
+            buzz_ws_client::RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == subscription => return Ok(*event),
+            buzz_ws_client::RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == subscription => {
+                bail!("pairing subscription closed: {message}");
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn publish_pairing_event(
+    connection: &mut buzz_ws_client::NostrWsConnection,
+    event: Event,
+) -> Result<()> {
+    let response = connection
+        .send_event(event)
+        .await
+        .context("publish pairing event")?;
+    if !response.accepted {
+        bail!("relay rejected pairing event: {}", response.message);
+    }
     Ok(())
-}
-
-async fn wait_for_eose<R>(read: &mut R, subscription: &str) -> Result<(), NodeError>
-where
-    R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    loop {
-        let event = read
-            .next()
-            .await
-            .ok_or_else(|| NodeError::InvalidConfiguration("relay closed before EOSE".into()))?
-            .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
-        if let Message::Text(text) = event {
-            let value: Value = serde_json::from_str(&text)?;
-            if value[0] == "EOSE" && value[1] == subscription {
-                return Ok(());
-            }
-        }
-    }
-}
-
-async fn next_pairing_event<R>(read: &mut R, subscription: &str) -> Result<Event, NodeError>
-where
-    R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    loop {
-        let message = read
-            .next()
-            .await
-            .ok_or_else(|| NodeError::InvalidConfiguration("relay closed during pairing".into()))?
-            .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
-        if let Message::Text(text) = message {
-            let value: Value = serde_json::from_str(&text)?;
-            if value[0] == "EVENT" && value[1] == subscription {
-                return serde_json::from_value(value[2].clone()).map_err(NodeError::from);
-            }
-        }
-    }
-}
-
-async fn publish_event<W>(write: &mut W, event: &Event) -> Result<(), NodeError>
-where
-    W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
-{
-    write
-        .send(Message::Text(
-            serde_json::json!(["EVENT", event]).to_string().into(),
-        ))
-        .await
-        .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))
 }
 
 fn read_line() -> io::Result<String> {

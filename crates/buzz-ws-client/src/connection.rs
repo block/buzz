@@ -73,10 +73,32 @@ impl NostrWsConnection {
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
         let challenge = self
-            .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
+            .auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
             .await?;
-
         let auth_event = build_auth_event(&challenge, &self.relay_url, keys, auth_tag)?;
+        self.authenticate_with_event(auth_event).await
+    }
+
+    /// Waits up to `timeout_dur` for the relay's NIP-42 AUTH challenge and
+    /// returns it for external signing.
+    ///
+    /// Use this together with [`Self::authenticate_with_event`] when the AUTH
+    /// event must be signed by something other than a local [`Keys`] pair —
+    /// for example an ephemeral NIP-AB pairing session key. Callers with
+    /// plain [`Keys`] should prefer [`Self::authenticate`].
+    pub async fn auth_challenge(&mut self, timeout_dur: Duration) -> Result<String, WsClientError> {
+        self.wait_for_auth_challenge(timeout_dur).await
+    }
+
+    /// Completes NIP-42 authentication with a pre-signed AUTH event.
+    ///
+    /// Sends the event as an `["AUTH", …]` frame and waits for the relay's OK
+    /// response. The event must sign the challenge returned by
+    /// [`Self::auth_challenge`] for this connection.
+    pub async fn authenticate_with_event(
+        &mut self,
+        auth_event: Event,
+    ) -> Result<(), WsClientError> {
         let event_id = auth_event.id.to_hex();
 
         self.send_raw(&json!(["AUTH", auth_event])).await?;
