@@ -1,8 +1,14 @@
 import * as React from "react";
 import {
   AlertTriangle,
+  Bot,
   ChevronDown,
   ChevronRight,
+  Grid2X2,
+  ImageIcon,
+  List,
+  Music2,
+  Newspaper,
   RefreshCw,
 } from "lucide-react";
 
@@ -10,6 +16,7 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
   AgentPersona,
   ManagedAgent,
@@ -19,6 +26,7 @@ import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelConte
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -112,6 +120,9 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     [personas, agents],
   );
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
+  const [remoteView, setRemoteView] = React.useState<"cards" | "list">(
+    "cards",
+  );
   const {
     fileInputRef,
     isDragOver,
@@ -234,17 +245,54 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       {remoteAgents.length > 0 ? (
         <section className="space-y-3" data-testid="remote-agents-section">
           <div>
-            <h2 className="font-semibold text-foreground text-lg">
-              Remote / DGX agents
-            </h2>
-            <p className="text-secondary-foreground text-sm">
-              Agents running on your relay or another machine.
-            </p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="font-semibold text-foreground text-lg">
+                  Remote / DGX agents
+                </h2>
+                <p className="text-secondary-foreground text-sm">
+                  Agents running on your relay or another machine.
+                </p>
+              </div>
+              <div
+                aria-label="Remote agent view"
+                className="flex shrink-0 rounded-lg border border-border/70 p-0.5"
+                role="group"
+              >
+                <Button
+                  aria-label="Show remote agents as cards"
+                  aria-pressed={remoteView === "cards"}
+                  className="h-7 w-7"
+                  onClick={() => setRemoteView("cards")}
+                  size="icon"
+                  variant={remoteView === "cards" ? "secondary" : "ghost"}
+                >
+                  <Grid2X2 className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  aria-label="Show remote agents as a list"
+                  aria-pressed={remoteView === "list"}
+                  className="h-7 w-7"
+                  onClick={() => setRemoteView("list")}
+                  size="icon"
+                  variant={remoteView === "list" ? "secondary" : "ghost"}
+                >
+                  <List className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
           </div>
-          <div className={IDENTITY_CARD_GRID_CLASS}>
+          <div
+            className={
+              remoteView === "cards"
+                ? IDENTITY_CARD_GRID_CLASS
+                : "grid w-full grid-cols-1 gap-2"
+            }
+          >
             {remoteAgents.map((agent) => (
               <RemoteAgentCard
                 agent={agent}
+                compact={remoteView === "list"}
                 key={agent.pubkey}
                 onOpenProfile={onOpenAgentProfile}
               />
@@ -273,18 +321,34 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
 function RemoteAgentCard({
   agent,
+  compact,
   onOpenProfile,
 }: {
   agent: RelayAgent;
+  compact: boolean;
   onOpenProfile: (pubkey: string) => void;
 }) {
   const profileQuery = useUserProfileQuery(agent.pubkey);
   const statusLabel = agent.status === "online" ? "Online" : agent.status;
+  const avatarUrl = profileQuery.data?.avatarUrl;
 
   return (
     <AgentIdentityCard
       ariaLabel={`${agent.name} remote agent profile`}
-      avatarUrl={profileQuery.data?.avatarUrl}
+      avatar={
+        avatarUrl ? (
+          <ProfileAvatar
+            avatarUrl={avatarUrl}
+            className="h-full w-full border-[3px] border-background bg-muted shadow-none"
+            iconClassName="h-8 w-8"
+            label={agent.name}
+          />
+        ) : (
+          <RemoteAgentIcon seed={agent.pubkey} type={agent.agentType} />
+        )
+      }
+      avatarUrl={avatarUrl}
+      compact={compact}
       dataTestId={`remote-agent-${agent.pubkey}`}
       label={agent.name}
       modelLabel={agent.agentType || "DGX agent"}
@@ -296,6 +360,31 @@ function RemoteAgentCard({
       }
     />
   );
+}
+
+function RemoteAgentIcon({ seed, type }: { seed: string; type: string }) {
+  const normalizedType = type.toLowerCase();
+  const Icon = normalizedType.includes("image")
+    ? ImageIcon
+    : normalizedType.includes("music") || normalizedType.includes("audio")
+      ? Music2
+      : normalizedType.includes("news") || normalizedType.includes("research")
+        ? Newspaper
+        : [Bot, ImageIcon, Music2, Newspaper][stableIconIndex(seed)];
+
+  return (
+    <span className="flex h-full w-full items-center justify-center rounded-full border-[3px] border-background bg-primary/15 text-primary shadow-sm">
+      <Icon className="h-10 w-10" />
+    </span>
+  );
+}
+
+function stableIconIndex(seed: string) {
+  let hash = 0;
+  for (const character of seed) {
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  }
+  return hash % 4;
 }
 
 function AgentPersonaCard({
