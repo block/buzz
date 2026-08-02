@@ -246,10 +246,13 @@ one.
   Start; that is resurrection working as designed, not a violation.
 
   **Lifetime is owner policy, not law.** The inactivity bound is the
-  harness's opt-in self-stop (§Auto-Stop, default disabled); the Kubernetes
-  binding opts in with a 2h schema default because a pod is metered compute
-  with nobody watching it. An owner may configure `inactivity_seconds: 0` —
-  **no inactivity bound** — declaring an indefinitely-lived agent. That is
+  harness's opt-in self-stop (§Auto-Stop, default disabled). An owner may
+  always choose **no inactivity bound** — declaring an indefinitely-lived
+  agent. How that choice is expressed is per-binding: the Kubernetes
+  binding opts in with a 2h schema default because a pod is metered
+  compute with nobody watching it, and spells "no bound" as its
+  `inactivity_seconds: 0` field (§Pod shape); a hand launcher simply never
+  sets the reaper env. Either way it is
   a legitimate, explicit choice, not a conformance failure: the invariant
   was never "every instance terminates" (a continuously active agent is
   intentionally unbounded — that is the product); it is "termination, once
@@ -931,14 +934,17 @@ I5's enforcement point. A new harness knob:
   the default inactivity bound and semantically unrelated). Sharing a flag or
   env name with any of them is how the bug ships.
 
-The harness exiting MUST terminate the container, and — equally load-bearing
-— the harness MUST be the container's **signal-receiving process** (PID 1 or
-the target of the substrate's termination signal). A wrapper that runs the
-harness as a child without forwarding signals silently voids both I5's
+The harness exiting MUST terminate the substrate's unit of execution, and —
+equally load-bearing — the substrate's termination signal MUST reach the
+harness process itself; any wrapper MUST forward it. A wrapper that runs
+the harness as a child without forwarding signals silently voids both I5's
 substrate half *and* the graceful-shutdown budget: the termination signal
 lands on the wrapper, the harness never learns to shut down, and the
 force-kill leaves presence stale-online — exactly the staleness window the
-grace period exists to close. See §K8s Entrypoint for the concrete rule.
+grace period exists to close. This binding's realization — the harness as
+the container's signal-receiving process (PID 1 or the signal target) — is
+§K8s Entrypoint's `exec` rule and §Pod shape ([L3], L1 item 3 for the
+universal form).
 With the supervisor policy that matches the lifetime policy (this
 binding's [L3] mapping — bounded → `Never`, indefinite → `OnFailure`
 after both prerequisites, §Pod shape; the universal rule is I5's),
