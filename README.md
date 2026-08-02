@@ -163,21 +163,38 @@ git clone https://github.com/block/buzz.git && cd buzz
 just setup && just build
 ```
 
-`just setup` runs `just bootstrap` automatically — it copies `.env.example` to `.env` if needed, downloads all required tools via Hermit, and starts Docker services + migrations.
+`just setup` runs `just bootstrap` automatically — it copies `.env.example` to `.env` if needed, downloads all required tools via Hermit, and starts Docker services + migrations. The main `just` recipes prepend the repo's `bin/` shims, so supported flows use the pinned toolchain even when your shell is not already Hermit-activated. Activation is still useful before running ad hoc `cargo`, `pnpm`, or `node` commands by hand.
 
 **Every day:**
 ```bash
 . ./bin/activate-hermit
-just dev   # starts the relay + desktop app together
+just dev   # starts the relay + Tauri desktop app together
 ```
 
 Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
 
-For a split-terminal workflow (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another.
+For a frontend-only split-terminal preview (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another. `desktop-dev` opens the React app in a normal browser; it is useful for fast UI iteration, but it is not the full desktop pilot because Tauri-native features are absent.
 
 Want a single-node / VPS relay instead of the local-dev stack? Use the production Compose bundle in [`deploy/compose/`](deploy/compose/README.md) (`docker compose` + Postgres, Redis, MinIO, optional Caddy/TLS). The root [`docker-compose.yml`](docker-compose.yml) is for day-to-day development only.
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
+
+### Steve's local pilot notes
+
+The upstream default remains `ws://localhost:3000`, but Steve's local pilot uses `localhost:3030` for active work so port `3000` can stay available for other local apps and old archive checks.
+If you are continuing Steve's pilot, start with:
+
+```bash
+./scripts/buzz-pilot-smoke.sh
+```
+
+The old `localhost:3000` pilot community is archive/reference only.
+The active `localhost:3030` `buzz-pilot` channel contains a Day 0 summary of the old archive, not a raw-message migration.
+As of Monday, July 27, 2026, the Day 0 pilot channels on `localhost:3030` are intended to stay durable for continuity and should not auto-archive after idle time.
+If you need to verify or repair who can manage those channels, start with `./scripts/audit-day0-channel-authority.sh`.
+If ordinary Buzz-authorized membership repair is unavailable, export a Buzz write identity for proof with `BUZZ_PILOT_PROOF_PRIVATE_KEY` or `BUZZ_PRIVATE_KEY`, then run `./scripts/repair-day0-channel-authority.sh --allow-local-fallback`. The helper derives the target pubkey from that identity, creates a fresh backup before the local-only fallback, and then proves the repaired path.
+Agent task updates should go to the `agent-runs` channel through `scripts/post-pilot-agent-update.sh`, with Slack kept optional and advisory-only.
+See [`AGENTS.md`](AGENTS.md), [`CONCEPTS.md`](CONCEPTS.md), and [`docs/pilots/buzz-local-continuity-runbook.md`](docs/pilots/buzz-local-continuity-runbook.md) before touching local Buzz data.
 
 ---
 
@@ -259,7 +276,8 @@ All defaults work out of the box. Override via `.env`. Full reference in [`.env.
 ```bash
 just setup          # Docker, migrations, desktop deps
 just relay          # Run the relay
-just dev            # Run the desktop app
+just dev            # Run relay + Tauri desktop app
+just desktop-dev    # Run browser-only frontend preview
 just build          # Build the Rust workspace
 just check          # fmt + clippy + desktop check
 just test-unit      # Unit tests (no infra required)
