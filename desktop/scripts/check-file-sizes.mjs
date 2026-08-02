@@ -296,7 +296,9 @@ const overrides = new Map([
   // Buzz-managed Node path helpers and resolution tests moved to
   // managed_node_paths.rs and discovery/tests/managed_path_resolution.rs;
   // ratcheting 1366 -> 1392 after adding the managed-path probes to discovery.
-  ["src-tauri/src/managed_agents/discovery.rs", 1393],
+  // +5: the Hermes KnownAcpRuntime entry — one element of the static catalog
+  // array, so there is nothing to split out of it.
+  ["src-tauri/src/managed_agents/discovery.rs", 1398],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -307,6 +309,8 @@ const overrides = new Map([
   // None regression, .cmd shim resolution, no-git-bash error hint.
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
   // Managed-path resolution test split to discovery/tests/managed_path_resolution.rs.
+  // Hermes runtime registration tests split to discovery/tests/hermes_runtime.rs,
+  // holding this file at its existing limit rather than ratcheting it again.
   ["src-tauri/src/managed_agents/discovery/tests.rs", 1273],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
