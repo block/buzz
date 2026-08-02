@@ -1,6 +1,8 @@
 use tauri::AppHandle;
 
-use crate::commands::execution_nodes::remove_execution_workload_for_managed_agent;
+use crate::commands::execution_nodes::{
+    managed_agent_execution_target, remove_execution_workload_for_managed_agent,
+};
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -101,17 +103,13 @@ fn collect_remote_deployed(
 fn collect_execution_node_targets(
     agents: &[ManagedAgentRecord],
     cascade: &std::collections::HashSet<String>,
-) -> Vec<(String, String)> {
-    agents
+) -> Result<Vec<(String, String)>, String> {
+    let targets: Result<Vec<_>, String> = agents
         .iter()
         .filter(|agent| cascade.contains(&agent.pubkey))
-        .filter_map(|agent| match (&agent.backend, &agent.backend_agent_id) {
-            (crate::managed_agents::BackendKind::ExecutionNode { node_id }, Some(workload_id)) => {
-                Some((node_id.clone(), workload_id.clone()))
-            }
-            _ => None,
-        })
-        .collect()
+        .map(managed_agent_execution_target)
+        .collect();
+    Ok(targets?.into_iter().flatten().collect())
 }
 
 /// Remove cascade agents from `agents` and persist via the injectable `save`.
@@ -168,7 +166,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 remote_deployed.join(", ")
             ));
         }
-        Ok(collect_execution_node_targets(&agents, &cascade))
+        Ok(collect_execution_node_targets(&agents, &cascade)?)
     })
     .await
     .map_err(|error| format!("persona deletion preflight failed: {error}"))??;

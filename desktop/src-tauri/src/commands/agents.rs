@@ -2,7 +2,8 @@ use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
 
 use super::execution_nodes::{
-    remove_execution_workload_for_managed_agent, start_execution_workload_for_managed_agent,
+    managed_agent_execution_target, remove_execution_workload_for_managed_agent,
+    start_execution_workload_for_managed_agent,
 };
 use crate::{
     app_state::AppState,
@@ -1331,12 +1332,9 @@ pub async fn delete_managed_agent(
         records
             .iter()
             .find(|record| record.pubkey == pubkey)
-            .and_then(|record| match (&record.backend, &record.backend_agent_id) {
-                (BackendKind::ExecutionNode { node_id }, Some(workload_id)) => {
-                    Some((node_id.clone(), workload_id.clone()))
-                }
-                _ => None,
-            })
+            .map(managed_agent_execution_target)
+            .transpose()?
+            .flatten()
     };
     if let Some((node_id, workload_id)) = execution_target {
         remove_execution_workload_for_managed_agent(&state, &node_id, &workload_id).await?;

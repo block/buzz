@@ -21,7 +21,7 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         load_global_agent_config, load_managed_agents, load_personas, save_managed_agents,
-        BackendKind,
+        BackendKind, ManagedAgentRecord,
     },
     relay::{query_relay, relay_ws_url_with_override, SubmitEventResponse},
 };
@@ -140,6 +140,27 @@ pub struct SubmitExecutionAuthenticationInput {
     pub response: String,
 }
 
+/// Resolve the durable cleanup identity for an execution-node managed agent.
+///
+/// The stable fallback is intentional: deployment is a remote side effect
+/// followed by a local projection, so a save failure or a concurrent delete
+/// can leave the record without `backend_agent_id` even though the node has
+/// accepted the workload. Deletion must still address the same workload.
+pub(crate) fn managed_agent_execution_target(
+    record: &ManagedAgentRecord,
+) -> Result<Option<(String, String)>, String> {
+    let BackendKind::ExecutionNode { node_id } = &record.backend else {
+        return Ok(None);
+    };
+    let workload_id = match record.backend_agent_id.as_deref() {
+        Some(value) => buzz_core_pkg::execution::WorkloadId::new(value.to_string())
+            .map_err(|error| format!("invalid stored execution workload id: {error}"))?,
+        None => buzz_core_pkg::execution::WorkloadId::stable_for_agent(&record.pubkey)
+            .map_err(|error| format!("invalid managed-agent identity: {error}"))?,
+    };
+    Ok(Some((node_id.clone(), workload_id.as_str().to_string())))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum WorkloadLifecycleOperation {
     Start,
@@ -241,31 +262,17 @@ pub async fn deploy_managed_agent_to_execution_node(
             .runtime
             .clone()
             .ok_or_else(|| "managed agent has no persisted runtime".to_string())?;
-        match &record.backend {
-            BackendKind::ExecutionNode {
-                node_id: bound_node_id,
-            } if bound_node_id == node_id.as_str() => {}
-            BackendKind::ExecutionNode { .. } => {
-                return Err("managed agent is bound to a different execution node".into())
-            }
-            _ => return Err("managed agent is not configured for an execution node".into()),
+        let (bound_node_id, stored_workload_id) = managed_agent_execution_target(record)?
+            .ok_or_else(|| "managed agent is not configured for an execution node".to_string())?;
+        if bound_node_id != node_id.as_str() {
+            return Err("managed agent is bound to a different execution node".into());
         }
         let relay_url = crate::relay::effective_agent_relay_url(
             &record.relay_url,
             &relay_ws_url_with_override(&state),
         );
-        let workload_id = record
-            .backend_agent_id
-            .as_deref()
-            .map(|value| {
-                buzz_core_pkg::execution::WorkloadId::new(value.to_string())
-                    .map_err(|error| format!("invalid stored execution workload id: {error}"))
-            })
-            .transpose()?
-            .unwrap_or(
-                buzz_core_pkg::execution::WorkloadId::stable_for_agent(&record.pubkey)
-                    .map_err(|error| format!("invalid managed-agent identity: {error}"))?,
-            );
+        let workload_id = buzz_core_pkg::execution::WorkloadId::new(stored_workload_id)
+            .map_err(|error| format!("invalid managed-agent workload id: {error}"))?;
         let mut workload = WorkloadSpec::agent(
             workload_id,
             record.name.clone(),
@@ -315,17 +322,33 @@ pub async fn deploy_managed_agent_to_execution_node(
         None => return Err("execution node did not confirm workload deployment".into()),
     }
 
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let record = records
-        .iter_mut()
-        .find(|record| record.pubkey == input.pubkey)
-        .ok_or_else(|| format!("managed agent {} disappeared", input.pubkey))?;
-    record.backend_agent_id = Some(response.workload_id.as_str().to_string());
-    save_managed_agents(&app, &records)?;
+    let persist_result = (|| -> Result<(), String> {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let record = records
+            .iter_mut()
+            .find(|record| record.pubkey == input.pubkey)
+            .ok_or_else(|| format!("managed agent {} disappeared", input.pubkey))?;
+        record.backend_agent_id = Some(response.workload_id.as_str().to_string());
+        save_managed_agents(&app, &records)
+    })();
+    if let Err(persist_error) = persist_result {
+        let cleanup_result = remove_execution_workload_for_managed_agent(
+            &state,
+            node_id.as_str(),
+            response.workload_id.as_str(),
+        )
+        .await;
+        return match cleanup_result {
+            Ok(()) => Err(persist_error),
+            Err(cleanup_error) => Err(format!(
+                "{persist_error}; remote workload cleanup also failed: {cleanup_error}"
+            )),
+        };
+    }
     Ok(response)
 }
 
