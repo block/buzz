@@ -56,6 +56,13 @@ class _PendingEvent {
   _PendingEvent({required this.completer, required this.timeout});
 }
 
+class _QueuedEvent {
+  final NostrEvent event;
+  final _PendingEvent pending;
+
+  _QueuedEvent({required this.event, required this.pending});
+}
+
 class _BufferedEvent {
   final String subId;
   final NostrEvent event;
@@ -93,6 +100,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySocket? _socket;
   final Map<String, _HistorySubscription> _historySubscriptions = {};
   final Map<String, _LiveSubscription> _liveSubscriptions = {};
+  final Map<String, _QueuedEvent> _queuedEvents = {};
   final Map<String, _PendingEvent> _pendingEvents = {};
   final List<_BufferedEvent> _eventBuffer = [];
   final Set<String> _recentDeliveryKeys = {};
@@ -105,24 +113,23 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _paused = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
+  int? _connectionFingerprint;
 
   @override
   SessionState build() {
-    final config = ref.watch(relayConfigProvider);
-    final authState = ref.watch(authProvider);
-
-    // Reset disposed flag — build() may re-run on the same Notifier instance
-    // after a provider dependency changes (e.g. auth completing).
     _disposed = false;
 
     ref.onDispose(_dispose);
+    ref.listen(relayConfigProvider, (_, config) {
+      _syncConnection(config, ref.read(authProvider));
+    });
+    ref.listen(authProvider, (_, authState) {
+      _syncConnection(ref.read(relayConfigProvider), authState);
+    });
 
-    // Auto-connect when authenticated and we have a signing key (NIP-42 AUTH).
-    final isAuthenticated = authState.value?.status == AuthStatus.authenticated;
-    if (isAuthenticated && config.nsec != null) {
-      // Schedule connection after build completes.
-      Future.microtask(() => _connect(config));
-    }
+    final config = ref.read(relayConfigProvider);
+    final authState = ref.read(authProvider);
+    Future.microtask(() => _syncConnection(config, authState));
 
     return const SessionState(status: SessionStatus.disconnected);
   }
@@ -250,10 +257,25 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
   }) {
+    if (_disposed) {
+      return Future.error(StateError('Relay session is disposed'));
+    }
+    if (_paused) {
+      return Future.error(StateError('Cannot publish while app is paused'));
+    }
+    if (_queuedEvents.containsKey(event.id) ||
+        _pendingEvents.containsKey(event.id)) {
+      return Future.error(
+        StateError('Event ${event.id} is already awaiting publication'),
+      );
+    }
+
     final completer = Completer<NostrEvent>();
 
     final timer = Timer(timeout, () {
-      final pending = _pendingEvents.remove(event.id);
+      final pending =
+          _queuedEvents.remove(event.id)?.pending ??
+          _pendingEvents.remove(event.id);
       if (pending != null && !pending.completer.isCompleted) {
         pending.completer.completeError(
           TimeoutException(
@@ -263,12 +285,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
     });
 
-    _pendingEvents[event.id] = _PendingEvent(
-      completer: completer,
-      timeout: timer,
-    );
+    final pending = _PendingEvent(completer: completer, timeout: timer);
 
-    _socket?.send(['EVENT', event.toJson()]);
+    _queuedEvents[event.id] = _QueuedEvent(event: event, pending: pending);
+    _flushQueuedEvents();
     return completer.future;
   }
 
@@ -323,6 +343,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _paused = true;
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
+    _rejectAllQueued(Exception('App moved to background'));
     _rejectAllPending(Exception('App moved to background'));
     _socket?.disconnect();
     state = const SessionState(status: SessionStatus.disconnected);
@@ -344,6 +365,35 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
     _connect(config);
+  }
+
+  void _syncConnection(RelayConfig config, AsyncValue<AuthState> authState) {
+    if (_disposed) return;
+    final authStatus = authState.value?.status;
+    if (authStatus == AuthStatus.unknown || authState.isLoading) return;
+
+    if (authStatus == AuthStatus.authenticated && config.nsec != null) {
+      final fingerprint = Object.hash(config.wsUrl, config.nsec);
+      if (_connectionFingerprint == fingerprint &&
+          _socket != null &&
+          state.status != SessionStatus.disconnected) {
+        return;
+      }
+      _connectionFingerprint = fingerprint;
+      _reconnectTimer?.cancel();
+      _connect(config);
+      return;
+    }
+
+    _connectionFingerprint = null;
+    _connectionGeneration++;
+    _reconnectTimer?.cancel();
+    _socket?.dispose();
+    _socket = null;
+    _cancelAllHistory(Exception('Relay session is not authenticated'));
+    _rejectAllQueued(Exception('Relay session is not authenticated'));
+    _rejectAllPending(Exception('Relay session is not authenticated'));
+    state = const SessionState(status: SessionStatus.disconnected);
   }
 
   Future<void> _connect(RelayConfig config) async {
@@ -377,6 +427,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
+    _flushQueuedEvents();
     _replayLiveSubscriptions();
   }
 
@@ -389,6 +440,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _flushTimer = null;
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
+      _rejectAllQueued(error);
       state = const SessionState(status: SessionStatus.disconnected);
       return;
     }
@@ -644,13 +696,40 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _pendingEvents.clear();
   }
 
+  void _flushQueuedEvents() {
+    if (state.status != SessionStatus.connected) return;
+    final socket = _socket;
+    if (socket == null || socket.state != SocketState.connected) return;
+
+    for (final entry in _queuedEvents.entries.toList()) {
+      final queued = entry.value;
+      if (!socket.trySend(['EVENT', queued.event.toJson()])) return;
+      _queuedEvents.remove(entry.key);
+      _pendingEvents[entry.key] = queued.pending;
+    }
+  }
+
+  void _rejectAllQueued(Object? error) {
+    for (final entry in _queuedEvents.values) {
+      entry.pending.timeout.cancel();
+      if (!entry.pending.completer.isCompleted) {
+        entry.pending.completer.completeError(
+          error ?? Exception('Connection lost before event was sent'),
+        );
+      }
+    }
+    _queuedEvents.clear();
+  }
+
   void _dispose() {
     _disposed = true;
+    _connectionFingerprint = null;
     _connectionGeneration++;
     _reconnectTimer?.cancel();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
     _cancelAllHistory(null);
+    _rejectAllQueued(null);
     _rejectAllPending(null);
     _recentDeliveryKeys.clear();
     _socket?.dispose();
