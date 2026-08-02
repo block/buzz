@@ -1846,6 +1846,36 @@ async fn author_type_label(
     }
 }
 
+// Freshness window: deliberately asymmetric.
+
+//
+// NIP-59 instructs gift-wrap (kind 1059) clients to randomize `created_at`
+// into the past — canonically up to two days — to thwart time-analysis
+// attacks. The wrap's timestamp is meaningless for ordering/retention (the
+// inner seal/rumor timestamps are end-to-end encrypted), so gift wrap gets
+// a wide PAST bound (2 days). Most kinds keep the tight ±15 min window.
+// NIP-59 never randomizes into the FUTURE, so the future bound stays tight
+// (15 min) for all kinds: an event pinned far into the future is almost
+// always a client bug or an attempt to float to the top of time-ordered
+// feeds. See block/buzz#4192.
+const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+const GIFT_WRAP_MAX_PAST_DRIFT_SECS: i64 = 2 * 24 * 60 * 60; // 2 days
+/// Decide whether `event_ts` falls inside the asymmetric freshness window for
+/// `kind_u32` relative to `now` (both unix seconds). See the comment above.
+fn timestamp_within_freshness_window(kind_u32: u32, event_ts: i64, now: i64) -> bool {
+    let (max_past, max_future) = if kind_u32 == KIND_GIFT_WRAP {
+        (GIFT_WRAP_MAX_PAST_DRIFT_SECS, MAX_TIMESTAMP_DRIFT_SECS)
+    } else {
+        (MAX_TIMESTAMP_DRIFT_SECS, MAX_TIMESTAMP_DRIFT_SECS)
+    };
+    let drift = event_ts - now; // positive = future, negative = past
+    if drift >= 0 {
+        drift <= max_future
+    } else {
+        -drift <= max_past
+    }
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -1973,25 +2003,9 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes for most kinds
-    // NIP-59 instructs gift-wrap (kind 1059) clients to randomize `created_at`
-    // into the past — canonically up to two days — to thwart time-analysis
-    // attacks. Applying the tight ±15 min freshness window to the outer wrap
-    // rejects every spec-following NIP-17 DM. The wrap's timestamp is
-    // deliberately meaningless for ordering or retention, and the inner
-    // seal/rumor timestamps are end-to-end encrypted, so a wider window is
-    // safe here. We still bound it (2 days + 15 min skew) to reject
-    // implausibly stale wraps rather than skipping the check altogether.
-    // See block/buzz#4192.
-    const MAX_GIFT_WRAP_TIMESTAMP_DRIFT_SECS: i64 = 2 * 24 * 60 * 60 + 900;
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    let max_drift_secs = if kind_u32 == KIND_GIFT_WRAP {
-        MAX_GIFT_WRAP_TIMESTAMP_DRIFT_SECS
-    } else {
-        MAX_TIMESTAMP_DRIFT_SECS
-    };
-    if (event_ts - now).abs() > max_drift_secs {
+    if !timestamp_within_freshness_window(kind_u32, event_ts, now) {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -3819,6 +3833,46 @@ mod tests {
             let event = make_link_preview_event(title, site, description);
             assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
         }
+    }
+
+    #[test]
+    fn non_gift_wrap_window_is_symmetric_15min() {
+        let now = 1_000_000;
+        let kind = 1u32; // not gift wrap
+        assert!(timestamp_within_freshness_window(kind, now, now)); // exact
+        assert!(timestamp_within_freshness_window(kind, now - 900, now)); // past edge
+        assert!(timestamp_within_freshness_window(kind, now + 900, now)); // future edge
+        assert!(!timestamp_within_freshness_window(kind, now - 901, now)); // past over
+        assert!(!timestamp_within_freshness_window(kind, now + 901, now)); // future over
+    }
+
+    #[test]
+    fn gift_wrap_window_allows_2d_past() {
+        let now = 2_000_000;
+        let kind = KIND_GIFT_WRAP;
+        let two_days = 2 * 24 * 60 * 60;
+        assert!(timestamp_within_freshness_window(kind, now, now));
+        assert!(timestamp_within_freshness_window(kind, now - two_days, now)); // past edge
+        assert!(!timestamp_within_freshness_window(
+            kind,
+            now - two_days - 1,
+            now
+        )); // past over
+    }
+
+    #[test]
+    fn gift_wrap_future_bound_stays_tight() {
+        // NIP-59 only randomizes into the past, so the 2-day allowance must NOT
+        // extend to the future side for gift-wrap either.
+        let now = 2_000_000;
+        let kind = KIND_GIFT_WRAP;
+        assert!(timestamp_within_freshness_window(kind, now + 900, now)); // 15min future OK
+        assert!(!timestamp_within_freshness_window(kind, now + 901, now)); // future over 15min
+        assert!(!timestamp_within_freshness_window(
+            kind,
+            now + 2 * 24 * 60 * 60,
+            now
+        )); // 2d future rejected
     }
 
     fn make_dummy_event() -> Event {
