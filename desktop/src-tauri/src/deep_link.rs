@@ -136,6 +136,46 @@ fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
     }))
 }
 
+fn is_safe_repo_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+/// Parse a stable repository artifact link. The ref is deliberately a full
+/// commit hash so the file the user opens cannot drift after it is shared.
+fn parse_repo_deep_link(url: &Url) -> Option<serde_json::Value> {
+    let repo_id = optional_non_empty_param(url, "repo")?;
+    let owner = optional_non_empty_param(url, "owner");
+    let commit = optional_non_empty_param(url, "ref")?;
+    let path = optional_non_empty_param(url, "path")?;
+
+    let repo_valid = !repo_id.starts_with('.')
+        && !repo_id.contains("..")
+        && repo_id.len() <= 64
+        && repo_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    let owner_valid = owner.as_deref().is_none_or(|value| {
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    let commit_valid =
+        matches!(commit.len(), 40 | 64) && commit.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !repo_valid || !owner_valid || !commit_valid || !is_safe_repo_path(&path) {
+        return None;
+    }
+
+    Some(serde_json::json!({
+        "repoId": repo_id,
+        "owner": owner.map(|value| value.to_ascii_lowercase()),
+        "ref": commit.to_ascii_lowercase(),
+        "path": path,
+    }))
+}
+
 /// Parse the query string of a `buzz://join?…` URL into the JSON payload
 /// emitted on `deep-link-join`. Requires a ws(s) `relay` URL and a non-empty
 /// `code`; returns `None` otherwise so the frontend never sees a half-formed
@@ -366,6 +406,14 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             activate_main_window(app);
             let _ = app.emit("deep-link-message", payload);
         }
+        Some("repo") => {
+            let Some(payload) = parse_repo_deep_link(&url) else {
+                eprintln!("buzz-desktop: invalid repo deep link: {url_str}");
+                return;
+            };
+            activate_main_window(app);
+            let _ = app.emit("deep-link-repo", payload);
+        }
         Some("nostr-bind") => match parse_nostr_bind_deep_link(&url) {
             Ok(payload) => {
                 activate_main_window(app);
@@ -390,7 +438,8 @@ mod tests {
 
     use super::{
         parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        parse_nostr_bind_deep_link, parse_repo_deep_link, PendingCommunityDeepLink,
+        PendingCommunityDeepLinks,
     };
 
     fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
@@ -525,6 +574,31 @@ mod tests {
         let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
         let payload = parse_message_deep_link(&url).expect("required params present");
         assert!(payload["threadRootId"].is_null());
+    }
+
+    #[test]
+    fn parse_repo_deep_link_extracts_pinned_artifact() {
+        let owner = "a".repeat(64);
+        let commit = "b".repeat(40);
+        let url = Url::parse(&format!(
+            "buzz://repo?repo=boosh&owner={owner}&ref={commit}&path=reports%2Fweekly.html"
+        ))
+        .unwrap();
+        let payload = parse_repo_deep_link(&url).unwrap();
+        assert_eq!(payload["repoId"], "boosh");
+        assert_eq!(payload["owner"], owner);
+        assert_eq!(payload["ref"], commit);
+        assert_eq!(payload["path"], "reports/weekly.html");
+    }
+
+    #[test]
+    fn parse_repo_deep_link_rejects_traversal_and_short_refs() {
+        for raw in [
+            "buzz://repo?repo=boosh&ref=abc123&path=README.md",
+            "buzz://repo?repo=boosh&ref=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&path=..%2Fsecret",
+        ] {
+            assert!(parse_repo_deep_link(&Url::parse(raw).unwrap()).is_none());
+        }
     }
 
     #[test]

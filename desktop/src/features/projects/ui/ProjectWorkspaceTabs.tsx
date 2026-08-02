@@ -115,6 +115,7 @@ export function WorkspaceTabs({
   localSnapshot,
   localSnapshotError,
   localSnapshotLoading,
+  initialFilePath,
   project,
   repoDiff,
   repoDiffError,
@@ -151,6 +152,7 @@ export function WorkspaceTabs({
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
+  initialFilePath?: string;
   project: Project;
   repoDiff: ProjectRepoDiff | null | undefined;
   repoDiffError: unknown;
@@ -200,7 +202,9 @@ export function WorkspaceTabs({
       (pullRequest) => pullRequest.id === selectedPullRequestId,
     ) ?? null;
   const isPullRequestSelected = Boolean(selectedPullRequest);
-  const [selectedTab, setSelectedTab] = React.useState("overview");
+  const [selectedTab, setSelectedTab] = React.useState(
+    initialFilePath ? "files" : "overview",
+  );
   const [pullRequestCommentTarget, setPullRequestCommentTarget] =
     React.useState<{
       anchor: ProjectPullRequestCommentAnchor;
@@ -477,6 +481,7 @@ export function WorkspaceTabs({
           fallbackAuthorPubkey={project.owner}
           files={files}
           isLoading={displayedSnapshotLoading}
+          initialFilePath={initialFilePath}
           profiles={profiles}
           snapshot={displayedSnapshot}
           sourceControls={sourceControls}

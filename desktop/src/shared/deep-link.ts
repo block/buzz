@@ -25,6 +25,13 @@ export type MessageDeepLinkPayload = {
   threadRootId: string | null;
 };
 
+export type RepoDeepLinkPayload = {
+  repoId: string;
+  owner: string | null;
+  ref: string;
+  path: string;
+};
+
 export type NostrBindDeepLinkPayload = {
   challengeId: string;
   nonce: string;
@@ -161,6 +168,14 @@ export function listenForMessageDeepLinks(
   onOpen: (payload: MessageDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
+    onOpen(event.payload);
+  });
+}
+
+export function listenForRepoDeepLinks(
+  onOpen: (payload: RepoDeepLinkPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<RepoDeepLinkPayload>("deep-link-repo", (event) => {
     onOpen(event.payload);
   });
 }

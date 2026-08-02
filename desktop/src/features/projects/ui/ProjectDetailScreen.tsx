@@ -90,7 +90,7 @@ type ProjectDetailScreenProps = {
   projectId: string;
   pullRequestId?: string;
   issueId?: string;
-};
+} & Partial<Record<"filePath" | "repoRef", string>>;
 
 const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
   "profile",
@@ -99,7 +99,8 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
 ] as const;
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
-  const { commitHash, projectId, pullRequestId, issueId } = props;
+  const { commitHash, filePath, projectId, pullRequestId, repoRef, issueId } =
+    props;
   const { goChannel, goProject, goProjects } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const mainInsetRef = useMainInsetRef();
@@ -214,6 +215,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     activeBranch,
     selectedTag ? null : selectedBranchPullRequest,
     activeTag,
+    repoRef,
   );
   const repoDiffQuery = useProjectRepoDiffQuery(
     project,
@@ -909,7 +911,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
               </section>
 
               <WorkspaceTabs
-                key={`${project.id}:${tabsResetKey}`}
+                key={`${project.id}:${repoRef ?? "branch"}:${filePath ?? "root"}:${tabsResetKey}`}
                 commitDiff={commitDiffQuery.data}
                 commitDiffError={commitDiffQuery.error}
                 commitDiffLoading={commitDiffQuery.isLoading}
@@ -938,6 +940,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshot={localRepoSnapshotQuery.data}
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
+                initialFilePath={filePath}
                 onBranchChange={handleBranchChange}
                 onOpenMergeRecoveryTerminal={handleOpenMergeRecoveryTerminal}
                 onOpenTerminal={() => {
@@ -966,7 +969,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 snapshot={repoSnapshotQuery.data}
                 snapshotError={repoSnapshotQuery.error}
                 snapshotLoading={repoSnapshotQuery.isLoading}
-                sourceControls={filesSourceControls}
+                sourceControls={repoRef ? undefined : filesSourceControls}
                 viewerGitIdentity={viewerGitIdentity}
               />
             </div>

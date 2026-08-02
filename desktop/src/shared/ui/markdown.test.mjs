@@ -534,10 +534,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
+import { isRepoLink } from "../../features/projects/lib/repoLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 function messageLinkUrlTransform(value, key) {
-  if (key === "href" && isMessageLink(value)) {
+  if (key === "href" && (isMessageLink(value) || isRepoLink(value))) {
     return value;
   }
   return defaultUrlTransform(value);
@@ -559,6 +560,13 @@ test("messageLinkUrlTransform: preserves buzz://message href", () => {
   );
   // HTML-encoded `&` in attributes is fine — the browser decodes back to `&`.
   assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
+});
+
+test("messageLinkUrlTransform: preserves pinned buzz://repo href", () => {
+  const html = renderMarkdown(
+    `[Open report](buzz://repo?repo=boosh&owner=${"a".repeat(64)}&ref=${"b".repeat(40)}&path=reports%2Fweekly.html)`,
+  );
+  assert.match(html, /href="buzz:\/\/repo\?repo=boosh/);
 });
 
 test("messageLinkUrlTransform: preserves buzz://message autolink href", () => {

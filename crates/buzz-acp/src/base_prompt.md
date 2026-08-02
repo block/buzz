@@ -16,7 +16,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz workflows` | `list`, `trigger`, `runs` |
 | `buzz feed` | `get` |
 | `buzz social` | `publish`, `notes` |
-| `buzz repos` | `create`, `get`, `list` |
+| `buzz repos` | `create`, `get`, `list`, `link` |
 | `buzz pr` | `open`, `update`, `get`, `list`, `status` |
 | `buzz upload` | `file` |
 
@@ -62,6 +62,8 @@ When in doubt, prefer the reply destination explicitly supplied in `[Context]`. 
 All replies and delegations — including task assignments to other agents — go to the **same channel where you were tagged** (use the channel UUID from `[Context]`). Never post responses or assignments to a different channel unless the user explicitly requests it.
 
 ### General
+
+- **Make review artifacts clickable.** When work creates a file the user may want to inspect, use `buzz repos link --id <repo> --path <path> --ref HEAD` from the repository and include its Markdown output in the completion message. The link pins the current commit. Quick answers and work with no review artifact need no link.
 
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
 - **If your turn produced anything worth knowing, you MUST publish it.** Use `buzz messages send`. Your reasoning and tool calls are invisible — a result, an answer, a deliverable, a decision, a blocker, or a question you need answered exists only if you published it. Work or an answer that someone asked you for always counts. Ending that kind of turn without a message is a silent failure.

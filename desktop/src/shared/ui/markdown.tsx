@@ -1297,7 +1297,6 @@ function ExternalLinkAnchor({
   const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
-
   const anchor = (
     <a
       {...anchorProps}
@@ -1306,6 +1305,11 @@ function ExternalLinkAnchor({
         isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
       )}
       href={href}
+      onClick={(event) => {
+        if (!href?.startsWith("buzz://repo?")) return;
+        event.preventDefault();
+        void openUrl(href);
+      }}
       onContextMenuCapture={(event) => {
         if (!href) return;
         event.preventDefault();
@@ -1317,7 +1321,6 @@ function ExternalLinkAnchor({
       {children}
     </a>
   );
-
   return (
     <>
       <MaskedLinkTooltip disabled={isLinearLink} href={href} label={label}>
@@ -1426,9 +1429,6 @@ function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://message?channel=…&id=…` links so a click navigates
-    // in-app instead of opening the URL in the OS browser. http(s) links
-    // continue to use the existing target="_blank" behavior.
     if (href) {
       const messageLinkTarget = resolveMessageLinkRenderTarget({
         href,

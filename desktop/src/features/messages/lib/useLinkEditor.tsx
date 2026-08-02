@@ -69,7 +69,7 @@ type LinkCardState = {
  */
 export function useLinkEditor(richText: UseRichTextEditorResult) {
   const { getLinkSelectionInfo, applyLink, removeLink } = richText;
-  const { goChannel } = useAppNavigation();
+  const { goChannel, goProject } = useAppNavigation();
   const [draft, setDraft] = React.useState<DraftState | null>(null);
   const [cardState, setCardState] = React.useState<LinkCardState | null>(null);
   const cardContentRef = React.useRef<HTMLDivElement>(null);
@@ -258,9 +258,14 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
             messageId: link.messageId,
             threadRootId: link.threadRootId,
           }),
+        openRepoLink: (link) =>
+          void goProject(link.projectId, {
+            filePath: link.path,
+            repoRef: link.ref,
+          }),
       });
     },
-    [cardState, goChannel],
+    [cardState, goChannel, goProject],
   );
 
   const refreshCardRect = React.useCallback(() => {

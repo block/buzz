@@ -569,15 +569,15 @@ async function fetchProjectRepoSnapshot(
   branchName?: string | null,
   pullRequest?: ProjectPullRequest | null,
   tag?: { name: string; commit: string } | null,
+  targetCommit?: string | null,
 ): Promise<ProjectRepoSnapshot | null> {
   const cloneUrl = pullRequest?.cloneUrls[0] ?? project.cloneUrls[0];
   if (!cloneUrl) return null;
-
   return getProjectRepoSnapshot({
     cloneUrl,
     defaultBranch: branchName ?? project.defaultBranch,
     baseBranch: project.defaultBranch,
-    targetCommit: tag?.commit ?? pullRequest?.commit ?? null,
+    targetCommit: targetCommit ?? tag?.commit ?? pullRequest?.commit ?? null,
     targetRef: tag
       ? `refs/tags/${tag.name}`
       : pullRequest
@@ -718,6 +718,7 @@ export function useProjectRepoSnapshotQuery(
   branchName?: string | null,
   pullRequest?: ProjectPullRequest | null,
   tag?: { name: string; commit: string } | null,
+  targetCommit?: string | null,
 ) {
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
 
@@ -731,15 +732,16 @@ export function useProjectRepoSnapshotQuery(
       pullRequest?.id ?? "none",
       pullRequest?.commit ?? "none",
       tag?.name ?? "no-tag",
-      tag?.commit ?? "no-tag-commit",
+      targetCommit ?? tag?.commit ?? "no-tag-commit",
     ],
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
       return fetchProjectRepoSnapshot(
         project,
         selectedBranch,
-        pullRequest,
-        tag,
+        targetCommit ? null : pullRequest,
+        targetCommit ? null : tag,
+        targetCommit,
       );
     },
     staleTime: 30_000,

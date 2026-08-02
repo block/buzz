@@ -6,17 +6,22 @@ import { openPopoverLink } from "./openPopoverLink.ts";
 const CHANNEL = "f570339f-8f8a-4e08-a779-8d954aa44109";
 const MESSAGE =
   "b04819ffc1f7c8ffb49c6d30b5899f470198264680d02e78894a658e30a9059f";
+const OWNER = "a".repeat(64);
+const COMMIT = "b".repeat(40);
 
 function makeSpies() {
   const external = [];
   const inApp = [];
+  const repos = [];
   return {
     handlers: {
       openExternal: (url) => external.push(url),
       openMessageLink: (link) => inApp.push(link),
+      openRepoLink: (link) => repos.push(link),
     },
     external,
     inApp,
+    repos,
   };
 }
 
@@ -26,6 +31,24 @@ test("buzz://message deep-link routes in-app, not the OS opener", () => {
   assert.equal(external.length, 0);
   assert.deepEqual(inApp, [
     { channelId: CHANNEL, messageId: MESSAGE, threadRootId: null },
+  ]);
+});
+
+test("buzz://repo deep-link routes in-app, not the OS opener", () => {
+  const { handlers, external, repos } = makeSpies();
+  openPopoverLink(
+    `buzz://repo?repo=boosh&owner=${OWNER}&ref=${COMMIT}&path=reports%2Fweekly.html`,
+    handlers,
+  );
+  assert.equal(external.length, 0);
+  assert.deepEqual(repos, [
+    {
+      projectId: `${OWNER}:boosh`,
+      repoId: "boosh",
+      owner: OWNER,
+      ref: COMMIT,
+      path: "reports/weekly.html",
+    },
   ]);
 });
 

@@ -17,6 +17,7 @@ import {
   FileVideo,
   FolderGit2,
   Package,
+  Play,
   Settings,
   Terminal,
 } from "lucide-react";
@@ -33,6 +34,7 @@ import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
+import { Button } from "@/shared/ui/button";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   PROJECT_DETAIL_PANEL_CLASS,
@@ -549,6 +551,8 @@ function FileContentPanel({
   onOpenPath: (path: string) => void;
 }) {
   const language = languageForPath(file.path);
+  const isHtml = /\.html?$/i.test(file.path);
+  const [runningHtml, setRunningHtml] = React.useState(false);
   const pathSegments = file.path.split("/").filter(Boolean);
   const fileName = pathSegments[pathSegments.length - 1] ?? file.path;
   const directorySegments = pathSegments.slice(0, -1);
@@ -575,6 +579,21 @@ function FileContentPanel({
         <span className="min-w-0 flex-1 truncate px-1.5 py-1 font-mono text-xs text-foreground">
           {fileName}
         </span>
+        {isHtml && file.previewContent ? (
+          <Button
+            onClick={() => setRunningHtml((current) => !current)}
+            size="xs"
+            type="button"
+            variant="outline"
+          >
+            {runningHtml ? (
+              <CodeXml className="h-3.5 w-3.5" />
+            ) : (
+              <Play className="h-3.5 w-3.5" />
+            )}
+            {runningHtml ? "Show source" : "Run HTML"}
+          </Button>
+        ) : null}
         <div className="hidden shrink-0 items-center gap-3 text-2xs text-muted-foreground sm:flex">
           <span>Last changed {formatLastChangedAt(file.lastChangedAt)}</span>
           <span>{formatFileSize(file.size)}</span>
@@ -586,7 +605,15 @@ function FileContentPanel({
       <div className="border-border/50 border-b bg-muted/10 px-4 py-2 text-2xs text-muted-foreground sm:hidden">
         Last changed {formatLastChangedAt(file.lastChangedAt)}
       </div>
-      {file.previewContent ? (
+      {file.previewContent && isHtml && runningHtml ? (
+        <iframe
+          className="h-[70vh] w-full border-0 bg-white"
+          referrerPolicy="no-referrer"
+          sandbox="allow-scripts"
+          srcDoc={file.previewContent}
+          title={`${fileName} (sandboxed)`}
+        />
+      ) : file.previewContent ? (
         <pre className="max-h-[36rem] overflow-auto bg-background/60 p-4">
           {language ? (
             <SyntaxHighlightedCode
@@ -618,6 +645,7 @@ export function RepositoryFilesPanel({
   profiles,
   fallbackAuthorPubkey,
   sourceControls,
+  initialFilePath,
 }: {
   files: ProjectRepoFile[];
   snapshot: ProjectRepoSnapshot | null | undefined;
@@ -627,6 +655,8 @@ export function RepositoryFilesPanel({
   fallbackAuthorPubkey?: string;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
+  /** Open this exact file once the pinned snapshot has loaded. */
+  initialFilePath?: string;
 }) {
   const [currentPath, setCurrentPath] = React.useState("");
   const [selectedFile, setSelectedFile] =
@@ -672,12 +702,21 @@ export function RepositoryFilesPanel({
     () => files.map((file) => file.path).join("\0"),
     [files],
   );
+  const initialFile = React.useMemo(
+    () =>
+      initialFilePath
+        ? files.find((file) => file.path === initialFilePath)
+        : undefined,
+    [files, initialFilePath],
+  );
 
   React.useEffect(() => {
     if (!filesKey) return;
-    setCurrentPath("");
-    setSelectedFile(null);
-  }, [filesKey]);
+    setCurrentPath(
+      initialFile ? initialFile.path.split("/").slice(0, -1).join("/") : "",
+    );
+    setSelectedFile(initialFile ?? null);
+  }, [filesKey, initialFile]);
 
   // Loading/error/empty states keep the header controls visible — the
   // remote/local toggle must stay reachable when one source fails to load.

@@ -109,6 +109,8 @@ export function useAppNavigation() {
         commitHash?: string;
         pullRequestId?: string;
         issueId?: string;
+        filePath?: string;
+        repoRef?: string;
       },
     ) =>
       commitNavigation(
@@ -125,6 +127,8 @@ export function useAppNavigation() {
               ? { pullRequestId: behavior.pullRequestId }
               : {}),
             ...(behavior?.issueId ? { issueId: behavior.issueId } : {}),
+            ...(behavior?.filePath ? { filePath: behavior.filePath } : {}),
+            ...(behavior?.repoRef ? { repoRef: behavior.repoRef } : {}),
           },
         },
         behavior,

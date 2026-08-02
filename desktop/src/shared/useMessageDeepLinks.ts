@@ -1,10 +1,13 @@
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { listenForMessageDeepLinks } from "@/shared/deep-link";
+import {
+  listenForMessageDeepLinks,
+  listenForRepoDeepLinks,
+} from "@/shared/deep-link";
 
 /**
- * Subscribe to `buzz://message` deep links emitted by the Tauri backend
+ * Subscribe to message and repository deep links emitted by the Tauri backend
  * and route them through the app's navigation helpers.
  *
  * Lives in a hook (not inline in `AppShell`) so it can be unit-tested
@@ -18,20 +21,29 @@ import { listenForMessageDeepLinks } from "@/shared/deep-link";
  * resolve the target (works for both stream replies and forum threads).
  */
 export function useMessageDeepLinks() {
-  const { goChannel } = useAppNavigation();
+  const { goChannel, goProject } = useAppNavigation();
 
   React.useEffect(() => {
     let cancelled = false;
-    const unlistenPromise = listenForMessageDeepLinks((payload) => {
+    const messageUnlisten = listenForMessageDeepLinks((payload) => {
       if (cancelled) return;
       void goChannel(payload.channelId, {
         messageId: payload.messageId,
         threadRootId: payload.threadRootId,
       });
     });
+    const repoUnlisten = listenForRepoDeepLinks((payload) => {
+      if (cancelled) return;
+      void goProject(
+        payload.owner ? `${payload.owner}:${payload.repoId}` : payload.repoId,
+        { filePath: payload.path, repoRef: payload.ref },
+      );
+    });
     return () => {
       cancelled = true;
-      void unlistenPromise.then((fn) => fn());
+      void Promise.all([messageUnlisten, repoUnlisten]).then((unlistens) => {
+        for (const unlisten of unlistens) unlisten();
+      });
     };
-  }, [goChannel]);
+  }, [goChannel, goProject]);
 }

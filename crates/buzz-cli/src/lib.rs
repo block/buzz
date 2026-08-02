@@ -1156,6 +1156,24 @@ pub enum ReposCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Create a clickable Markdown link to a file at an exact git commit.
+    Link {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Owner pubkey. Required only when the repository identifier is ambiguous.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Repository-relative file path.
+        #[arg(long)]
+        path: String,
+        /// Git ref to resolve to an exact commit.
+        #[arg(long = "ref", default_value = "HEAD")]
+        git_ref: String,
+        /// Markdown link label. Defaults to Open report for HTML, otherwise View file.
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Bind (or rebind) one of your repositories to a channel.
     ///
     /// The `buzz-channel` tag on the announcement is the git ACL: the relay
@@ -2104,7 +2122,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "get", "link", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2167,7 +2185,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

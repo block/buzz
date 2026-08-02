@@ -1,8 +1,11 @@
+use std::{collections::BTreeSet, process::Command};
+
 use buzz_core::{
     git_perms::{parse_protection_tag, parse_protection_tags, RefPattern},
     kind::KIND_GIT_REPO_ANNOUNCEMENT,
 };
 use nostr::{Event, EventBuilder, Tag, Timestamp};
+use url::Url;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
@@ -27,6 +30,144 @@ async fn fetch_own_repo_announcement(
     let mut events = parse_events(&raw)?;
     events.sort_by_key(|event| std::cmp::Reverse(event.created_at));
     Ok(events.into_iter().next())
+}
+
+fn validate_artifact_path(path: &str) -> Result<(), CliError> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(CliError::Usage(
+            "--path must be a safe repository-relative file path".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_git_commit(git_ref: &str) -> Result<String, CliError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("{git_ref}^{{commit}}")])
+        .output()
+        .map_err(|error| CliError::Other(format!("failed to run git rev-parse: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CliError::Usage(format!(
+            "could not resolve --ref {git_ref:?} to a commit: {stderr}"
+        )));
+    }
+    let commit = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CliError::Other(
+            "git returned an invalid full commit hash".into(),
+        ));
+    }
+    Ok(commit)
+}
+
+fn ensure_path_exists_at_commit(commit: &str, path: &str) -> Result<(), CliError> {
+    let object = format!("{commit}:{path}");
+    let output = Command::new("git")
+        .args(["cat-file", "-e", &object])
+        .output()
+        .map_err(|error| CliError::Other(format!("failed to run git cat-file: {error}")))?;
+    if !output.status.success() {
+        return Err(CliError::NotFound(format!(
+            "file {path:?} does not exist at commit {commit}"
+        )));
+    }
+    Ok(())
+}
+
+fn default_artifact_label(path: &str) -> &'static str {
+    let path = path.to_ascii_lowercase();
+    if path.ends_with(".html") || path.ends_with(".htm") {
+        "Open report"
+    } else {
+        "View file"
+    }
+}
+
+fn build_artifact_markdown_link(
+    repo_id: &str,
+    owner: &str,
+    commit: &str,
+    path: &str,
+    label: Option<&str>,
+) -> Result<String, CliError> {
+    validate_repo_id(repo_id)?;
+    crate::validate::validate_hex64(owner)?;
+    validate_artifact_path(path)?;
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CliError::Usage("commit must be a full git hash".into()));
+    }
+    let mut url = Url::parse("buzz://repo")
+        .map_err(|error| CliError::Other(format!("failed to build repo link: {error}")))?;
+    url.query_pairs_mut()
+        .append_pair("repo", repo_id)
+        .append_pair("owner", &owner.to_ascii_lowercase())
+        .append_pair("ref", &commit.to_ascii_lowercase())
+        .append_pair("path", path);
+    let label = label
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_artifact_label(path));
+    Ok(format!("[{label}]({url})"))
+}
+
+async fn resolve_repo_owner(
+    client: &BuzzClient,
+    repo_id: &str,
+    owner: Option<&str>,
+) -> Result<String, CliError> {
+    validate_repo_id(repo_id)?;
+    if let Some(owner) = owner {
+        crate::validate::validate_hex64(owner)?;
+    }
+    let mut filter = serde_json::json!({
+        "kinds": [KIND_GIT_REPO_ANNOUNCEMENT],
+        "#d": [repo_id],
+        "limit": 100,
+    });
+    if let Some(owner) = owner {
+        filter["authors"] = serde_json::json!([owner]);
+    }
+    let events = parse_events(&client.query(&filter).await?)?;
+    let owners: BTreeSet<String> = events
+        .into_iter()
+        .map(|event| event.pubkey.to_hex())
+        .collect();
+    match owners.len() {
+        0 => Err(CliError::NotFound(format!(
+            "repository {repo_id:?} was not found"
+        ))),
+        1 => Ok(owners.into_iter().next().expect("one owner")),
+        _ => Err(CliError::Usage(format!(
+            "repository {repo_id:?} has multiple owners; pass --owner <hex-pubkey>"
+        ))),
+    }
+}
+
+async fn cmd_link_repo(
+    client: &BuzzClient,
+    repo_id: &str,
+    owner: Option<&str>,
+    path: &str,
+    git_ref: &str,
+    label: Option<&str>,
+) -> Result<(), CliError> {
+    validate_artifact_path(path)?;
+    let commit = resolve_git_commit(git_ref)?;
+    ensure_path_exists_at_commit(&commit, path)?;
+    let owner = resolve_repo_owner(client, repo_id, owner).await?;
+    println!(
+        "{}",
+        build_artifact_markdown_link(repo_id, &owner, &commit, path, label)?
+    );
+    Ok(())
 }
 
 fn repo_id_from_event(event: &Event) -> Result<&str, CliError> {
@@ -443,6 +584,23 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         }
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+        ReposCmd::Link {
+            id,
+            owner,
+            path,
+            git_ref,
+            label,
+        } => {
+            cmd_link_repo(
+                client,
+                &id,
+                owner.as_deref(),
+                &path,
+                &git_ref,
+                label.as_deref(),
+            )
+            .await
+        }
         ReposCmd::Bind { id, channel } => cmd_bind_repo(client, &id, &channel).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
@@ -477,8 +635,9 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::{
-        build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        build_artifact_markdown_link, build_create_announcement, build_protection_tag,
+        build_updated_repo_announcement, protection_rules_json, validate_artifact_path,
+        validate_write_response, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -491,6 +650,38 @@ mod tests {
 
     fn tag(parts: &[&str]) -> Tag {
         Tag::parse(parts.iter().copied()).expect("valid test tag")
+    }
+
+    #[test]
+    fn artifact_link_is_owner_qualified_and_commit_pinned() {
+        let owner = "a".repeat(64);
+        let commit = "b".repeat(40);
+        let link = build_artifact_markdown_link(
+            "boosh",
+            &owner,
+            &commit,
+            "reports/weekly report.html",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            link,
+            format!(
+                "[Open report](buzz://repo?repo=boosh&owner={owner}&ref={commit}&path=reports%2Fweekly+report.html)"
+            )
+        );
+    }
+
+    #[test]
+    fn artifact_path_rejects_traversal_and_absolute_paths() {
+        for path in [
+            "../secret",
+            "/etc/passwd",
+            "reports//weekly.html",
+            "reports\\weekly.html",
+        ] {
+            assert!(validate_artifact_path(path).is_err());
+        }
     }
 
     #[test]
