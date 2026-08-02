@@ -451,6 +451,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
     // Construct outside the lock — this spawns the TTS worker thread and
     // loads ONNX sessions (~200ms). If this fails, clear the sentinel.
     let constructed_voice = initial_voice.clone();
+    let playback_speed = state.tts_playback_speed.clone();
     let constructed = tokio::task::spawn_blocking(move || {
         tts::TtsPipeline::new_with_voice(
             model_dir,
@@ -458,6 +459,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
             tts_cancel,
             &initial_voice,
             output_device,
+            playback_speed,
         )
     })
     .await;

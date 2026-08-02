@@ -29,6 +29,7 @@ pub mod audio_output;
 pub mod jitter;
 pub mod models;
 pub mod pipeline;
+pub mod playback_speed;
 pub mod playout;
 pub mod pocket;
 pub mod preprocessing;

@@ -9,3 +9,10 @@ debug = "line-tables-only"
 # cmake_minimum_required < 3.5; audiopus_sys's vendored opus declares 3.1.
 # Same workaround CI uses. A value already set in the environment wins.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+# MSVC otherwise reports the legacy C++98 value for `__cplusplus`, even when
+# cc-rs selects C++14. sstretch uses that macro to gate its C++11
+# `std::make_unique` polyfill, which collides with the MSVC standard library.
+# Match sherpa-onnx's static MSVC runtime so both native audio libraries can
+# link into the same Tauri binary without LNK2038 RuntimeLibrary mismatches.
+CXXFLAGS_x86_64_pc_windows_msvc = "/Zc:__cplusplus /MT"

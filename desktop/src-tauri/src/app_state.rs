@@ -54,12 +54,11 @@ pub struct AppState {
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
     pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
-    /// Tauri app handle — stored after setup so huddle commands can emit
-    /// `huddle-state-changed` events without needing the handle threaded
-    /// through every call site.
-    ///
+    /// Tauri app handle, stored after setup so huddle commands can emit
+    /// `huddle-state-changed` without threading it through every call site.
     /// Set once during `setup()` in `lib.rs`; never cleared.
     pub app_handle: Mutex<Option<AppHandle>>,
+    pub tts_playback_speed: crate::huddle::playback_speed::PlaybackSpeedControl,
     /// Port of the localhost media streaming proxy (set during setup).
     pub media_proxy_port: AtomicU16,
     /// Set when identity resolution detected a "keyring-locked" state: the
@@ -219,6 +218,7 @@ pub fn build_app_state() -> AppState {
         huddle_state: Mutex::new(HuddleState::default()),
         huddle_audio: Default::default(),
         app_handle: Mutex::new(None),
+        tts_playback_speed: crate::huddle::playback_speed::PlaybackSpeedControl::default(),
         media_proxy_port: AtomicU16::new(0),
         prevent_sleep: Arc::new(Mutex::new(
             crate::prevent_sleep::PreventSleepState::default(),

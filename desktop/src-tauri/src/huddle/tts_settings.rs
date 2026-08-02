@@ -614,6 +614,7 @@ pub async fn preview_pocket_voice(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
+    let playback_speed = state.tts_playback_speed.clone();
     let voice_name = pocket_voice_reference(&app, std::slice::from_ref(&voice_key))?;
     tokio::task::spawn_blocking(move || {
         let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -624,6 +625,7 @@ pub async fn preview_pocket_voice(
             cancel,
             &voice_name,
             output_device,
+            playback_speed,
         )?;
         pipeline.speak("Hello! This is how I’ll read agent responses.".to_string())?;
         let started = std::time::Instant::now();

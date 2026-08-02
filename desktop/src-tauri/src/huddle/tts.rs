@@ -47,6 +47,7 @@ use std::{
     time::Duration,
 };
 
+use super::playback_speed::{process_complete_playback_chunk, PlaybackSpeedControl};
 use super::pocket::{
     load_text_to_speech, load_voice_style, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
@@ -167,6 +168,7 @@ impl TtsPipeline {
         cancel: Arc<AtomicBool>,
         voice: &str,
         output_device: Option<String>,
+        playback_speed: PlaybackSpeedControl,
     ) -> Result<Self, String> {
         let (text_tx, text_rx) = mpsc::sync_channel::<QueuedText>(TEXT_QUEUE_DEPTH);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -204,6 +206,7 @@ impl TtsPipeline {
                     ),
                     output_device,
                     startup_tx,
+                    playback_speed,
                 )
             })
             .map_err(|e| format!("failed to spawn tts-worker thread: {e}"))?;
@@ -310,6 +313,7 @@ fn tts_worker(
     control_state: WorkerControlState,
     output_device: Option<String>,
     startup_tx: mpsc::SyncSender<Result<(), String>>,
+    playback_speed: PlaybackSpeedControl,
 ) {
     let (selected_voice, voice_generation, voice_change_ack) = voice_state;
     let (tts_active, shutdown, cancel_signals) = control_state;
@@ -710,7 +714,8 @@ fn tts_worker(
                 );
                 continue;
             }
-            let mut playback_audio = PlaybackChunkAudio::new();
+            let mut playback_units = Vec::with_capacity(model_chunks.len());
+            let mut first_model_unit_index = None;
             for model_chunk in &model_chunks {
                 let chunk_index = model_unit_index;
                 model_unit_index += 1;
@@ -754,21 +759,8 @@ fn tts_worker(
                 }
                 match synthesis {
                     Ok(samples) if !samples.is_empty() => {
-                        if let Some(prepared) = playback_audio.push(
-                            samples,
-                            chunk_index,
-                            &mut first_append,
-                            silence_buf_len,
-                            player.empty(),
-                        ) {
-                            if !append_audio(prepared, route_id) {
-                                first_append = true;
-                                synthesis_outcome = "cancelled";
-                                break 'playback_chunks;
-                            }
-                            appended_audio = true;
-                            last_route_id = route_id;
-                        }
+                        first_model_unit_index.get_or_insert(chunk_index);
+                        playback_units.push(samples);
                     }
                     Ok(_) => {
                         eprintln!(
@@ -784,16 +776,39 @@ fn tts_worker(
                     }
                 }
             }
-            if let Some(prepared) =
-                playback_audio.finish(&mut first_append, silence_buf_len, player.empty())
-            {
-                if !append_audio(prepared, route_id) {
-                    first_append = true;
-                    synthesis_outcome = "cancelled";
-                    break 'playback_chunks;
+            if let Some(chunk_index) = first_model_unit_index {
+                let speed = playback_speed.get();
+                let samples =
+                    match process_complete_playback_chunk(&playback_units, speed, SAMPLE_RATE) {
+                        Ok(processed) => processed,
+                        Err(error) => {
+                            eprintln!(
+                                "buzz-desktop: TTS playback-speed processing failed at \
+                             {speed:.2}x: {error}; using 1x playback"
+                            );
+                            playback_units.into_iter().flatten().collect()
+                        }
+                    };
+                let mut playback_audio = PlaybackChunkAudio::new();
+                let completed_audio = playback_audio.push(
+                    samples,
+                    chunk_index,
+                    &mut first_append,
+                    silence_buf_len,
+                    player.empty(),
+                );
+                debug_assert!(completed_audio.is_none());
+                if let Some(prepared) =
+                    playback_audio.finish(&mut first_append, silence_buf_len, player.empty())
+                {
+                    if !append_audio(prepared, route_id) {
+                        first_append = true;
+                        synthesis_outcome = "cancelled";
+                        break 'playback_chunks;
+                    }
+                    appended_audio = true;
+                    last_route_id = route_id;
                 }
-                appended_audio = true;
-                last_route_id = route_id;
             }
             if synthesis_outcome == "failed" {
                 break 'playback_chunks;
@@ -905,6 +920,9 @@ fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
+#[path = "tts_playback_speed_tests.rs"]
+mod playback_speed_tests;
 #[cfg(test)]
 #[path = "tts_tests.rs"]
 mod tests;

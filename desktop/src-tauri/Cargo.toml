@@ -131,6 +131,7 @@ regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 axum = "0.8"
 rodio = "0.22"
+ssstretch = "0.1.0"
 earshot = "1.0"
 rubato = "3.0"
 audioadapter-buffers = "3.0"

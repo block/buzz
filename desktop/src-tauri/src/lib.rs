@@ -414,6 +414,7 @@ pub fn run() {
             // that will be lost on restart, as that silently breaks channel
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
+            huddle::playback_speed::load_playback_speed(&app_handle, &state.tts_playback_speed);
             if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
                 eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
                 std::process::exit(1);
@@ -909,6 +910,8 @@ pub fn run() {
             list_audio_output_devices,
             set_audio_output_device,
             get_audio_output_device,
+            huddle::playback_speed::get_tts_playback_speed,
+            huddle::playback_speed::set_tts_playback_speed,
             start_pairing,
             confirm_pairing_sas,
             cancel_pairing,
