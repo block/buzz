@@ -1,6 +1,8 @@
 import * as React from "react";
+import { listen } from "@tauri-apps/api/event";
 
 import {
+  cancelGuardianNumbatInstall,
   deactivateGuardianNumbat,
   getGuardianNumbatStatus,
   installGuardianNumbat,
@@ -21,12 +23,39 @@ const actionLabels: Record<LifecycleAction, string> = {
   uninstall: "Uninstall",
 };
 
+type InstallProgress = {
+  downloadedBytes: number;
+  totalBytes: number;
+};
+
 export function GuardianNumbatSettingsCard() {
   const [status, setStatus] = React.useState<GuardianNumbatStatus | null>(null);
   const [busy, setBusy] = React.useState<LifecycleAction | "loading" | null>(
     "loading",
   );
   const [error, setError] = React.useState<string | null>(null);
+  const [installProgress, setInstallProgress] =
+    React.useState<InstallProgress | null>(null);
+
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<InstallProgress>(
+      "guardian-numbat-install-progress",
+      (event) => {
+        if (!disposed) setInstallProgress(event.payload);
+      },
+    )
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const refresh = React.useCallback(async () => {
     setBusy("loading");
@@ -35,7 +64,9 @@ export function GuardianNumbatSettingsCard() {
       setStatus(await getGuardianNumbatStatus());
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Guardian status is unavailable.",
+        cause instanceof Error
+          ? cause.message
+          : "Guardian status is unavailable.",
       );
     } finally {
       setBusy(null);
@@ -62,6 +93,7 @@ export function GuardianNumbatSettingsCard() {
     }
     setBusy(action);
     setError(null);
+    if (action === "install") setInstallProgress(null);
     try {
       setStatus(await operation());
     } catch (cause) {
@@ -73,6 +105,19 @@ export function GuardianNumbatSettingsCard() {
       setStatus(await getGuardianNumbatStatus().catch(() => status));
     } finally {
       setBusy(null);
+      if (action === "install") setInstallProgress(null);
+    }
+  };
+
+  const cancelInstall = async () => {
+    try {
+      await cancelGuardianNumbatInstall();
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Guardian could not cancel the installation.",
+      );
     }
   };
 
@@ -99,22 +144,72 @@ export function GuardianNumbatSettingsCard() {
             {status?.version ? (
               <div className="text-xs text-muted-foreground">
                 Version {status.version} · {status.target}
-                {status.digestSuffix ? ` · SHA-256 …${status.digestSuffix}` : ""}
+                {status.digestSuffix
+                  ? ` · SHA-256 …${status.digestSuffix}`
+                  : ""}
               </div>
             ) : null}
           </div>
-          <Button disabled={busy !== null} onClick={() => void refresh()} variant="outline">
+          <Button
+            disabled={busy !== null}
+            onClick={() => void refresh()}
+            variant="outline"
+          >
             Refresh
           </Button>
         </SettingsOptionRow>
+        {busy === "install" && installProgress ? (
+          <SettingsOptionRow className="block border-t border-border/50">
+            <div className="space-y-2">
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>Downloading verified Numbat</span>
+                <span>
+                  {Math.round(
+                    (installProgress.downloadedBytes /
+                      Math.max(1, installProgress.totalBytes)) *
+                      100,
+                  )}
+                  %
+                </span>
+              </div>
+              <div
+                aria-label="Numbat download progress"
+                aria-valuemax={installProgress.totalBytes}
+                aria-valuemin={0}
+                aria-valuenow={installProgress.downloadedBytes}
+                className="h-2 overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+              >
+                <div
+                  className="h-full bg-primary transition-[width]"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      (installProgress.downloadedBytes /
+                        Math.max(1, installProgress.totalBytes)) *
+                        100,
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+          </SettingsOptionRow>
+        ) : null}
         <SettingsOptionRow className="flex-wrap justify-end border-t border-border/50">
           {!active ? (
-            <Button
-              disabled={busy !== null}
-              onClick={() => void run("install", installGuardianNumbat)}
-            >
-              {busy === "install" ? "Installing…" : actionLabels.install}
-            </Button>
+            <>
+              {busy === "install" ? (
+                <Button onClick={() => void cancelInstall()} variant="outline">
+                  Cancel install
+                </Button>
+              ) : null}
+              <Button
+                disabled={busy !== null}
+                onClick={() => void run("install", installGuardianNumbat)}
+              >
+                {busy === "install" ? "Installing…" : actionLabels.install}
+              </Button>
+            </>
           ) : (
             <>
               <Button
@@ -129,14 +224,18 @@ export function GuardianNumbatSettingsCard() {
                 onClick={() => void run("deactivate", deactivateGuardianNumbat)}
                 variant="outline"
               >
-                {busy === "deactivate" ? "Deactivating…" : actionLabels.deactivate}
+                {busy === "deactivate"
+                  ? "Deactivating…"
+                  : actionLabels.deactivate}
               </Button>
               <Button
                 disabled={busy !== null}
                 onClick={() => void run("uninstall", uninstallGuardianNumbat)}
                 variant="destructive"
               >
-                {busy === "uninstall" ? "Uninstalling…" : actionLabels.uninstall}
+                {busy === "uninstall"
+                  ? "Uninstalling…"
+                  : actionLabels.uninstall}
               </Button>
             </>
           )}

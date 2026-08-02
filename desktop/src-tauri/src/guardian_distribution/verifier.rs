@@ -5,12 +5,15 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::io::Write;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub(crate) async fn fetch_verified_artifact_to<W: Write>(
+pub(crate) async fn fetch_verified_artifact_to<W: Write, F: FnMut(u64, u64)>(
     artifact: &Artifact,
     output: W,
+    progress: F,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     validate_authorized_url(artifact)?;
     fetch_verified_to(
@@ -18,6 +21,8 @@ pub(crate) async fn fetch_verified_artifact_to<W: Write>(
         output,
         artifact.archive_size,
         &artifact.archive_sha256,
+        progress,
+        cancel,
     )
     .await
 }
@@ -42,11 +47,13 @@ fn validate_authorized_url(artifact: &Artifact) -> Result<(), String> {
     Ok(())
 }
 
-async fn fetch_verified_to<W: Write>(
+async fn fetch_verified_to<W: Write, F: FnMut(u64, u64)>(
     url: &str,
     output: W,
     expected_size: u64,
     expected_sha256: &str,
+    progress: F,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -68,11 +75,12 @@ async fn fetch_verified_to<W: Write>(
         .timeout(DOWNLOAD_TIMEOUT)
         .build()
         .map_err(|e| format!("failed to build Guardian download client: {e}"))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Guardian download failed: {e}"))?;
+    let response = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err("Guardian download cancelled".into()),
+        response = client.get(url).send() => response
+            .map_err(|e| format!("Guardian download failed: {e}"))?,
+    };
     if !response.status().is_success() {
         return Err(format!(
             "Guardian download returned HTTP {}",
@@ -85,19 +93,36 @@ async fn fetch_verified_to<W: Write>(
     {
         return Err("Guardian download Content-Length mismatch".into());
     }
-    verify_response_stream(response, output, expected_size, expected_sha256).await
+    verify_response_stream(
+        response,
+        output,
+        expected_size,
+        expected_sha256,
+        progress,
+        cancel,
+    )
+    .await
 }
 
-async fn verify_response_stream<W: Write>(
+async fn verify_response_stream<W: Write, F: FnMut(u64, u64)>(
     response: reqwest::Response,
     mut output: W,
     expected_size: u64,
     expected_sha256: &str,
+    mut progress: F,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let mut stream = response.bytes_stream();
     let mut hash = Sha256::new();
     let mut total = 0u64;
-    while let Some(chunk) = stream.next().await {
+    progress(0, expected_size);
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err("Guardian download cancelled".into()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else { break };
         let chunk = chunk.map_err(|e| format!("download read failed: {e}"))?;
         total = total
             .checked_add(chunk.len() as u64)
@@ -109,6 +134,7 @@ async fn verify_response_stream<W: Write>(
         output
             .write_all(&chunk)
             .map_err(|e| format!("staging write failed: {e}"))?;
+        progress(total, expected_size);
     }
     finish_verification(output, hash, total, expected_size, expected_sha256)
 }
@@ -234,6 +260,8 @@ mod tests {
             &mut output,
             7,
             "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d",
+            |_, _| {},
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -249,17 +277,44 @@ mod tests {
         )
         .await;
         let digest = "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d";
-        assert!(
-            fetch_verified_to(&format!("{base}/redirect"), Vec::new(), 7, digest)
-                .await
-                .unwrap_err()
-                .contains("redirect")
-        );
-        assert!(
-            fetch_verified_to(&format!("{base}/wrong-length"), Vec::new(), 7, digest)
-                .await
-                .unwrap_err()
-                .contains("Content-Length")
-        );
+        assert!(fetch_verified_to(
+            &format!("{base}/redirect"),
+            Vec::new(),
+            7,
+            digest,
+            |_, _| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err()
+        .contains("redirect"));
+        assert!(fetch_verified_to(
+            &format!("{base}/wrong-length"),
+            Vec::new(),
+            7,
+            digest,
+            |_, _| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err()
+        .contains("Content-Length"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_before_network_or_staging_work() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = fetch_verified_to(
+            "http://127.0.0.1:1/unused",
+            Vec::new(),
+            1,
+            &"0".repeat(64),
+            |_, _| panic!("cancelled download must not report progress"),
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Guardian download cancelled");
     }
 }

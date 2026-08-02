@@ -733,6 +733,7 @@ pub fn run() {
             read_numbat_findings,
             guardian_distribution::commands::get_guardian_numbat_status,
             guardian_distribution::commands::install_guardian_numbat,
+            guardian_distribution::commands::cancel_guardian_numbat_install,
             guardian_distribution::commands::activate_guardian_numbat,
             guardian_distribution::commands::deactivate_guardian_numbat,
             guardian_distribution::commands::rollback_guardian_numbat,

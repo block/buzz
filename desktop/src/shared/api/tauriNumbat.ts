@@ -48,6 +48,10 @@ export function installGuardianNumbat(): Promise<GuardianNumbatStatus> {
   return invokeTauri<GuardianNumbatStatus>("install_guardian_numbat");
 }
 
+export function cancelGuardianNumbatInstall(): Promise<boolean> {
+  return invokeTauri<boolean>("cancel_guardian_numbat_install");
+}
+
 export function deactivateGuardianNumbat(): Promise<GuardianNumbatStatus> {
   return invokeTauri<GuardianNumbatStatus>("deactivate_guardian_numbat");
 }

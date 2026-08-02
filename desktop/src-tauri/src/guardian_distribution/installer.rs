@@ -7,11 +7,14 @@ use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
 };
+use tokio_util::sync::CancellationToken;
 
-pub(crate) async fn install_current(
+pub(crate) async fn install_current<F: FnMut(u64, u64)>(
     component_root: &Path,
     target: &str,
     buzz_version: &str,
+    mut progress: F,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let manifest = builtin_manifest()?;
     let artifact = manifest.artifact_for(std::env::consts::OS, std::env::consts::ARCH)?;
@@ -42,7 +45,10 @@ pub(crate) async fn install_current(
         ensure_existing_directory(parent, "version directory")?;
 
         let mut archive = create_private_file(&archive_path)?;
-        fetch_verified_artifact_to(artifact, &mut archive).await?;
+        fetch_verified_artifact_to(artifact, &mut archive, &mut progress, cancel).await?;
+        if cancel.is_cancelled() {
+            return Err("Guardian installation cancelled".into());
+        }
         archive
             .sync_all()
             .map_err(|error| format!("sync Guardian download: {error}"))?;
@@ -57,6 +63,7 @@ pub(crate) async fn install_current(
             &manifest.license,
             manifest.limits,
         )?;
+        ensure_not_cancelled(cancel)?;
         make_binary_executable(&stage_path.join(&artifact.binary_path))?;
 
         let receipt = InstalledReceipt {
@@ -75,6 +82,7 @@ pub(crate) async fn install_current(
         let staged_receipt = stage_path.join("receipt.json");
         receipt.write_to(&staged_receipt)?;
         load_verified_receipt(component_root, &staged_receipt)?;
+        ensure_not_cancelled(cancel)?;
         fs::rename(&stage_path, &final_path)
             .map_err(|error| format!("publish Guardian version atomically: {error}"))?;
         let published_receipt = final_path.join("receipt.json");
@@ -88,6 +96,14 @@ pub(crate) async fn install_current(
         let _ = fs::remove_dir_all(&stage_path);
     }
     result
+}
+
+fn ensure_not_cancelled(cancel: &CancellationToken) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        Err("Guardian installation cancelled".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn create_private_file(path: &Path) -> Result<File, String> {
@@ -157,9 +173,15 @@ mod tests {
     #[ignore = "downloads the pinned upstream release artifact"]
     async fn real_release_installs_verifies_and_activates_atomically() {
         let root = tempfile::tempdir().unwrap();
-        install_current(root.path(), "integration-target", "test")
-            .await
-            .unwrap();
+        install_current(
+            root.path(),
+            "integration-target",
+            "test",
+            |_, _| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let (receipt, binary) = load_active_receipt(root.path()).unwrap().unwrap();
         assert_eq!(receipt.version, "0.1.2");
         assert_eq!(receipt.target, "integration-target");

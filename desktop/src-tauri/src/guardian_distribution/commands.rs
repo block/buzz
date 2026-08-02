@@ -9,11 +9,20 @@ use crate::managed_agents::managed_agents_base_dir;
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
+use tokio_util::sync::CancellationToken;
 
 static LIFECYCLE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static INSTALL_CANCEL: OnceLock<Mutex<Option<CancellationToken>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuardianInstallProgress {
+    downloaded_bytes: u64,
+    total_bytes: u64,
+}
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -71,9 +80,49 @@ pub(crate) async fn install_guardian_numbat(
     let target = current_target();
     let root = component_root(&app)?;
     let previous = active_receipt_path(&root)?;
-    install_current(&root, &target, env!("CARGO_PKG_VERSION")).await?;
+    let cancel = CancellationToken::new();
+    {
+        let mut active = install_cancel_slot()
+            .lock()
+            .map_err(|_| "Guardian install cancellation state is unavailable")?;
+        *active = Some(cancel.clone());
+    }
+    let progress_app = app.clone();
+    let install_result = install_current(
+        &root,
+        &target,
+        env!("CARGO_PKG_VERSION"),
+        move |downloaded_bytes, total_bytes| {
+            let _ = progress_app.emit(
+                "guardian-numbat-install-progress",
+                GuardianInstallProgress {
+                    downloaded_bytes,
+                    total_bytes,
+                },
+            );
+        },
+        &cancel,
+    )
+    .await;
+    install_cancel_slot()
+        .lock()
+        .map_err(|_| "Guardian install cancellation state is unavailable")?
+        .take();
+    install_result?;
     finish_activation(&app, &root, previous.as_deref())?;
     Ok(status_from_root(&root, target))
+}
+
+#[tauri::command]
+pub(crate) fn cancel_guardian_numbat_install() -> Result<bool, String> {
+    let active = install_cancel_slot()
+        .lock()
+        .map_err(|_| "Guardian install cancellation state is unavailable")?;
+    let Some(cancel) = active.as_ref() else {
+        return Ok(false);
+    };
+    cancel.cancel();
+    Ok(true)
 }
 
 #[tauri::command]
@@ -129,6 +178,10 @@ pub(crate) async fn uninstall_guardian_numbat(
 
 fn lifecycle_lock() -> &'static tokio::sync::Mutex<()> {
     LIFECYCLE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn install_cancel_slot() -> &'static Mutex<Option<CancellationToken>> {
+    INSTALL_CANCEL.get_or_init(|| Mutex::new(None))
 }
 
 fn active_receipt_path(root: &Path) -> Result<Option<PathBuf>, String> {
