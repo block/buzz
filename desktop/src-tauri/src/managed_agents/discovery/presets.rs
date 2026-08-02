@@ -118,15 +118,6 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli: None,
     },
     PresetHarness {
-        id: "grok",
-        label: "Grok Build",
-        command: "grok",
-        args: &["agent", "--always-approve", "stdio"],
-        install_instructions_url: "https://build.x.ai/docs",
-        install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
-        underlying_cli: None,
-    },
-    PresetHarness {
         id: "opencode",
         label: "OpenCode",
         command: "opencode",

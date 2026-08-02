@@ -9,6 +9,7 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
     HarnessSource,
 };
+mod grok;
 mod presets;
 mod runtime_metadata;
 #[macro_use]
@@ -74,7 +75,6 @@ fn common_binary_paths() -> &'static [PathBuf] {
         paths
     })
 }
-
 const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
         id: "goose",
@@ -111,6 +111,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    grok::RUNTIME,
     KnownAcpRuntime {
         id: "claude",
         label: "Claude Code",
@@ -443,6 +444,7 @@ pub fn try_record_agent_command(
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "grok" => Some(grok::default_args()),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,

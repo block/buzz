@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **Grok Build** (via its native `grok agent stdio` mode).
 
 ## Prerequisites
 
@@ -267,9 +267,9 @@ Buzz Desktop supports registering any ACP-speaking agent tool as a selectable ru
 
 ### How it works
 
-**Tier-1 — compiled-in runtimes** (Goose, Claude Code, Codex, Buzz Agent): have auto-installers, auth probes, and first-class onboarding. Their IDs (`goose`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden.
+**Tier-1 — compiled-in runtimes** (Goose, Grok Build, Claude Code, Codex, Buzz Agent): have auto-installers and first-class onboarding; CLI-authenticated runtimes also expose auth probes. Their IDs (`goose`, `grok`, `claude`, `codex`, `buzz-agent`) are reserved and cannot be overridden.
 
-**Tier-2 — preset catalog** (Cursor, Oh My Pi, Grok Build, OpenCode, Kimi Code, Amp, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
+**Tier-2 — preset catalog** (Cursor, Oh My Pi, OpenCode, Kimi Code, Amp, Hermes Agent, OpenClaw): static `HarnessDefinition` entries in `desktop/src-tauri/src/managed_agents/discovery.rs` (`PRESET_HARNESSES`). They are always present in the runtime catalog, PATH-probed for availability, not editable or deletable by the user. Displayed with bundled logos; if not installed, a docs link appears instead.
 
 > **Note — OpenClaw:** `openclaw acp` is a Gateway-backed bridge; PATH availability shows "Available" even when the OpenClaw Gateway daemon is not running. This is expected tier-2 semantics (same class as a preset with unconfigured auth). The Gateway URL is configured via `OPENCLAW_GATEWAY_URL` (or the equivalent env var from OpenClaw's docs) — set it in the agent's **env vars** in Edit Agent, not in the definition env (the preset definition carries no env entries). Note that `openclaw acp` executes tools inside the Gateway daemon, not the Desktop process, so Desktop-injected `BUZZ_*` env vars do NOT reach the execution locus unless you also set them on the Gateway's own environment.
 
@@ -318,7 +318,7 @@ To add a new runtime to the tier-2 gallery:
 4. **Add a bundled logo** (64×64 PNG or optimised SVG) to `desktop/public/harness-logos/<id>.png` and add a corresponding entry to `PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`. Record the source and license in `desktop/public/harness-logos/CREDITS.md`. Only bundle a mark whose upstream license permits redistribution; skipping this step is caught by `presetLogos.test.mjs`, which asserts every `PRESET_HARNESSES` id has a mapped logo that exists on disk.
 5. Run `cargo test --lib` and `just desktop-typecheck` to verify everything compiles.
 
-The built-in `BUILTIN_IDS` set (`goose`, `claude`, `codex`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
+The built-in `BUILTIN_IDS` set (`goose`, `grok`, `claude`, `codex`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
 
 ## Using Any ACP Agent
 
