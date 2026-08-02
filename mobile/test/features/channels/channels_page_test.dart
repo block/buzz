@@ -135,6 +135,13 @@ void main() {
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
+    expect(find.byTooltip('Sort Channels'), findsOneWidget);
+    expect(find.byTooltip('Sort DMs'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Sort Channels'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sort: Recent'), findsOneWidget);
+    expect(find.text('Sort: A–Z'), findsOneWidget);
 
     for (final label in ['general', 'Alice']) {
       final text = tester.widget<Text>(find.text(label));

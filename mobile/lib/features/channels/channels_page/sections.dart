@@ -18,6 +18,8 @@ class _CustomChannelSection extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
+  final ChannelSortMode sortMode;
+  final ValueChanged<ChannelSortMode> onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
   final void Function(Channel channel) onMarkChannelRead;
 
@@ -37,6 +39,8 @@ class _CustomChannelSection extends StatelessWidget {
     required this.onDelete,
     required this.onMoveUp,
     required this.onMoveDown,
+    required this.sortMode,
+    required this.onSortModeChange,
     required this.onSelectChannel,
     required this.onMarkChannelRead,
   });
@@ -57,6 +61,8 @@ class _CustomChannelSection extends StatelessWidget {
           onDelete: onDelete,
           onMoveUp: onMoveUp,
           onMoveDown: onMoveDown,
+          sortMode: sortMode,
+          onSortModeChange: onSortModeChange,
         ),
         _AnimatedSectionBody(
           expanded: expanded,
@@ -92,6 +98,8 @@ class _CustomSectionHeader extends ConsumerWidget {
   final VoidCallback onDelete;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
+  final ChannelSortMode sortMode;
+  final ValueChanged<ChannelSortMode> onSortModeChange;
 
   const _CustomSectionHeader({
     required this.section,
@@ -103,6 +111,8 @@ class _CustomSectionHeader extends ConsumerWidget {
     required this.onDelete,
     required this.onMoveUp,
     required this.onMoveDown,
+    required this.sortMode,
+    required this.onSortModeChange,
   });
 
   @override
@@ -208,6 +218,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                           label: 'Move down',
                         ),
                       ),
+                      ..._sortMenuItems(sortMode),
                       PopupMenuItem(
                         value: 'delete',
                         padding: _sectionMenuItemPadding,
@@ -226,6 +237,10 @@ class _CustomSectionHeader extends ConsumerWidget {
                       onMoveUp();
                     case 'move_down':
                       onMoveDown();
+                    case _kSortRecentMenuValue:
+                      onSortModeChange(ChannelSortMode.recent);
+                    case _kSortAlphaMenuValue:
+                      onSortModeChange(ChannelSortMode.alpha);
                     case 'delete':
                       onDelete();
                   }
@@ -320,6 +335,23 @@ class _SectionNameDialog extends HookWidget {
   }
 }
 
+const _kSortRecentMenuValue = 'sort_recent';
+const _kSortAlphaMenuValue = 'sort_alpha';
+
+List<PopupMenuEntry<String>> _sortMenuItems(ChannelSortMode current) => [
+  const PopupMenuDivider(),
+  CheckedPopupMenuItem(
+    value: _kSortRecentMenuValue,
+    checked: current == ChannelSortMode.recent,
+    child: const Text('Sort: Recent'),
+  ),
+  CheckedPopupMenuItem(
+    value: _kSortAlphaMenuValue,
+    checked: current == ChannelSortMode.alpha,
+    child: const Text('Sort: A–Z'),
+  ),
+];
+
 class _ChannelSection extends StatelessWidget {
   final String title;
   final IconData icon;
@@ -332,6 +364,8 @@ class _ChannelSection extends StatelessWidget {
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final String emptyLabel;
+  final ChannelSortMode? sortMode;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
@@ -346,6 +380,8 @@ class _ChannelSection extends StatelessWidget {
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.emptyLabel,
+    this.sortMode,
+    this.onSortModeChange,
     required this.onSelectChannel,
   });
 
@@ -360,6 +396,8 @@ class _ChannelSection extends StatelessWidget {
           icon: icon,
           expanded: expanded,
           onToggle: onToggle,
+          sortMode: sortMode,
+          onSortModeChange: onSortModeChange,
         ),
         _AnimatedSectionBody(
           expanded: expanded,
@@ -454,12 +492,16 @@ class _SectionHeader extends StatelessWidget {
   final IconData icon;
   final bool expanded;
   final VoidCallback onToggle;
+  final ChannelSortMode? sortMode;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _SectionHeader({
     required this.label,
     required this.icon,
     required this.expanded,
     required this.onToggle,
+    this.sortMode,
+    this.onSortModeChange,
   });
 
   @override
@@ -494,6 +536,44 @@ class _SectionHeader extends StatelessWidget {
               ),
             ),
             const Spacer(),
+            if (sortMode case final mode?) ...[
+              Builder(
+                builder: (buttonContext) => IconButton(
+                  key: ValueKey('sort-menu-$label'),
+                  tooltip: 'Sort $label',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(
+                    LucideIcons.arrowUpDown,
+                    size: _kChannelIconSize,
+                    color: sectionColor,
+                  ),
+                  onPressed: () async {
+                    final value = await showAnchoredPopover<String>(
+                      context: buttonContext,
+                      width: 216,
+                      alignment: AnchoredPopoverAlignment.end,
+                      color: context.colors.surface,
+                      elevation: 4,
+                      shadowColor: context.colors.shadow.withValues(
+                        alpha: 0.18,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(Radii.md),
+                        side: BorderSide(color: context.colors.outline),
+                      ),
+                      surfaceKey: ValueKey('sort-popover-$label'),
+                      items: _sortMenuItems(mode),
+                    );
+                    if (value == _kSortRecentMenuValue) {
+                      onSortModeChange?.call(ChannelSortMode.recent);
+                    } else if (value == _kSortAlphaMenuValue) {
+                      onSortModeChange?.call(ChannelSortMode.alpha);
+                    }
+                  },
+                ),
+              ),
+              const SizedBox(width: Grid.quarter),
+            ],
             _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
