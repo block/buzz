@@ -22,6 +22,11 @@ const OBSERVER_BUFFER_CAP: usize = 1_000;
 pub struct ObserverContext {
     /// Buzz channel UUID for the current turn, when channel-scoped.
     pub channel_id: Option<String>,
+    /// NIP-10 root event ID for the independent thread, when present.
+    /// This is intentionally optional so older top-level observer frames keep
+    /// their existing shape while new threaded turns can be correlated by the
+    /// desktop Activity panel without relying on message text.
+    pub thread_root_id: Option<String>,
     /// ACP session ID associated with the current turn, once known.
     pub session_id: Option<String>,
     /// Local UUID for one prompt turn.
@@ -67,6 +72,9 @@ pub struct ObserverEvent {
     pub agent_index: Option<usize>,
     /// Buzz channel UUID for channel-scoped events.
     pub channel_id: Option<String>,
+    /// NIP-10 root event ID for thread-scoped events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_root_id: Option<String>,
     /// ACP session ID when known.
     pub session_id: Option<String>,
     /// Local UUID for one prompt turn.
@@ -114,6 +122,7 @@ impl ObserverHandle {
             kind: kind.into(),
             agent_index,
             channel_id: context.channel_id.clone(),
+            thread_root_id: context.thread_root_id.clone(),
             session_id: context.session_id.clone(),
             turn_id: context.turn_id.clone(),
             started_at: context.started_at.clone(),
@@ -144,6 +153,7 @@ pub fn context_for(
 ) -> ObserverContext {
     ObserverContext {
         channel_id: channel_id.map(|id| id.to_string()),
+        thread_root_id: None,
         session_id,
         turn_id,
         started_at: None,
@@ -159,6 +169,41 @@ pub fn context_for_turn(
 ) -> ObserverContext {
     ObserverContext {
         channel_id: channel_id.map(|id| id.to_string()),
+        thread_root_id: None,
+        session_id,
+        turn_id: Some(turn_id),
+        started_at: Some(started_at),
+    }
+}
+
+/// Build observer context for a specific channel thread.
+pub fn context_for_thread(
+    channel_id: Option<uuid::Uuid>,
+    thread_root_id: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+) -> ObserverContext {
+    ObserverContext {
+        channel_id: channel_id.map(|id| id.to_string()),
+        thread_root_id,
+        session_id,
+        turn_id,
+        started_at: None,
+    }
+}
+
+/// Attach the authoritative start timestamp to a thread-scoped observer
+/// context.
+pub fn context_for_turn_thread(
+    channel_id: Option<uuid::Uuid>,
+    thread_root_id: Option<String>,
+    session_id: Option<String>,
+    turn_id: String,
+    started_at: String,
+) -> ObserverContext {
+    ObserverContext {
+        channel_id: channel_id.map(|id| id.to_string()),
+        thread_root_id,
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),

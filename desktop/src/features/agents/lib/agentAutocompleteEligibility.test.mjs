@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   coalesceAgentAutocompleteCandidates,
+  getExplicitlyNonInvocableAgentPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
@@ -241,6 +242,15 @@ test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
     }),
     true,
   );
+});
+
+test("getExplicitlyNonInvocableAgentPubkeys: ignores sparse profiles", () => {
+  const result = getExplicitlyNonInvocableAgentPubkeys([
+    { pubkey: PUB_A, respondTo: null },
+    { pubkey: PUB_B, respondTo: "allowlist" },
+  ]);
+
+  assert.deepEqual([...result], [PUB_B]);
 });
 
 test("coalesceAgentAutocompleteCandidates: merges agents with the same persona id", () => {

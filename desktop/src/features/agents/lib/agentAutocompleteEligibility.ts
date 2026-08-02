@@ -54,6 +54,22 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+/**
+ * Return relay-directory agents whose invocation policy is explicitly known.
+ * A kind:10100 profile is also used for the public channel-add policy, so an
+ * older or managed agent may publish only `channel_add_policy` and omit
+ * `respond_to`. Sparse profiles are unknown, not an explicit exclusion.
+ */
+export function getExplicitlyNonInvocableAgentPubkeys(
+  relayAgents: readonly RelayAgent[] | undefined,
+) {
+  return new Set(
+    (relayAgents ?? [])
+      .filter((agent) => agent.respondTo !== null)
+      .map((agent) => normalizePubkey(agent.pubkey)),
+  );
+}
+
 export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,

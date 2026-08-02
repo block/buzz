@@ -152,7 +152,7 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 | Command | Effect |
 |---------|--------|
 | `!shutdown` | Gracefully exits the harness. |
-| `!cancel` | Cancels the current in-flight turn for that channel, if any. |
+| `!cancel` | Cancels the current in-flight turn for that channel, if any. A command posted in a thread targets that thread; a channel-root command retains the legacy fallback when no thread identity is available. |
 | `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
 
 Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
@@ -203,7 +203,7 @@ buzz-acp --agents 2 --heartbeat-interval 300 \
 
 ### Shared Identity
 
-All N agents authenticate as the **same Nostr bot identity** — users see one bot regardless of how many agents are running. The same channel is never processed by two agents simultaneously (the queue enforces this). Cross-channel message ordering is not guaranteed when N>1.
+All N agents authenticate as the **same Nostr bot identity** — users see one bot regardless of how many agents are running. Each unthreaded channel stream is serialized, while distinct NIP-10 threads in the same channel may be processed concurrently when agents are available. Cross-thread and cross-channel message ordering is not guaranteed when N>1.
 
 ### Heartbeat Semantics
 
@@ -252,12 +252,12 @@ Forum event kinds:
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
-3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
-4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
+3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue by `(channel, thread root)`; top-level events use the channel key.
+4. **Prompting** — When events are pending and no prompt is in flight for that thread, drains all queued events for the oldest ready thread into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
 
-Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
+Each thread has at most one prompt in flight. Distinct threads in one channel, and threads in different channels, can be processed concurrently when agents > 1. Observer frames carry `channelId` plus `threadRootId` so Buzz Desktop can keep each Activity stream separate.
 
 > **Note:** On startup, the harness replays all unprocessed @mentions since the last run. Expect a burst of activity if there are stale events in the channel.
 

@@ -651,14 +651,14 @@ Standalone binary that bridges Buzz relay events to AI agents via the [Agent Com
 Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent (goose/codex/claude)
 ```
 
-`buzz-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and queues `@mention` events per channel. At most one prompt is in-flight per channel. Queued events are batched into a single prompt sent via `session/prompt` over ACP.
+`buzz-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and queues `@mention` events by `(channel, NIP-10 thread root)`. Top-level events retain a channel-scoped key. At most one prompt is in-flight per thread; separate threads in one channel can run concurrently when agents are available. Queued events for one key are batched into a single prompt sent via `session/prompt` over ACP.
 
 **Key modules:**
 
 | Module | LOC | Responsibility |
 |--------|-----|---------------|
 | `relay.rs` | 3,143 | WebSocket + REST relay connection, NIP-42 auth |
-| `queue.rs` | 2,565 | Per-channel event queue, batching, dedup |
+| `queue.rs` | 2,565 | Per-thread event queue, batching, dedup |
 | `main.rs` | 2,457 | Event loop, pool orchestration, heartbeat |
 | `pool.rs` | 2,253 | N-agent pool, claim/return lifecycle |
 | `config.rs` | 1,903 | CLI/env/TOML configuration |
@@ -667,7 +667,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent 
 
 **Key behaviors:**
 - Pool of 1–32 agent subprocesses with claim/return lifecycle.
-- Per-channel queuing: at most one prompt in-flight per channel; subsequent @mentions queue until the agent responds.
+- Per-thread queuing: at most one prompt in-flight per `(channel, thread root)`; subsequent @mentions in that thread queue until the agent responds, while other threads may run in parallel.
 - Crash recovery: agent subprocess crashes are detected and the agent is respawned.
 - Depends on `buzz-core` (kind constants) and `buzz-sdk` (relay/REST utilities).
 

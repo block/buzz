@@ -37,7 +37,7 @@ use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup, ThreadTags,
+    PromptProfile, PromptProfileLookup, QueueKey, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -52,6 +52,8 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Exact thread routing identity for this in-flight prompt.
+    pub queue_key: Option<QueueKey>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -111,6 +113,9 @@ impl SessionState {
         match source {
             PromptSource::Channel(cid) => {
                 self.invalidate_channel(cid);
+            }
+            PromptSource::Thread { channel_id, .. } => {
+                self.invalidate_channel(channel_id);
             }
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
@@ -233,7 +238,37 @@ pub struct PromptResult {
 #[derive(Debug)]
 pub enum PromptSource {
     Channel(Uuid),
+    /// A reply turn scoped to the NIP-10 root event. This retains the channel
+    /// variant for backwards-compatible tests and heartbeat/session helpers,
+    /// while letting the main loop complete and control the exact thread.
+    Thread {
+        channel_id: Uuid,
+        root_event_id: String,
+    },
     Heartbeat,
+}
+
+impl PromptSource {
+    pub fn channel_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Channel(channel_id) | Self::Thread { channel_id, .. } => Some(*channel_id),
+            Self::Heartbeat => None,
+        }
+    }
+
+    pub fn queue_key(&self) -> Option<QueueKey> {
+        match self {
+            Self::Channel(channel_id) => Some(QueueKey::channel(*channel_id)),
+            Self::Thread {
+                channel_id,
+                root_event_id,
+            } => Some(QueueKey {
+                channel_id: *channel_id,
+                thread_root_id: Some(root_event_id.clone()),
+            }),
+            Self::Heartbeat => None,
+        }
+    }
 }
 
 /// Apply state effects for Race 1, where a control signal arrives just after the
@@ -643,8 +678,7 @@ impl AgentPool {
         &mut self.task_map
     }
 
-    /// Try to send a goose-native steer request to the in-flight task for
-    /// `channel_id`.
+    /// Try to send a goose-native steer request to the exact in-flight thread.
     ///
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
@@ -667,13 +701,13 @@ impl AgentPool {
     /// event and let normal dispatch handle delivery.
     pub fn send_steer(
         &mut self,
-        channel_id: Uuid,
+        queue_key: &QueueKey,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|m| m.queue_key.as_ref() == Some(queue_key))
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
@@ -1348,20 +1382,30 @@ pub async fn run_prompt_task(
 ) {
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
-        Some(b) => PromptSource::Channel(b.channel_id),
+        Some(b) => match b.queue_key().thread_root_id {
+            Some(root_event_id) => PromptSource::Thread {
+                channel_id: b.channel_id,
+                root_event_id,
+            },
+            None => PromptSource::Channel(b.channel_id),
+        },
         None => PromptSource::Heartbeat,
     };
-    let observer_channel_id = match &source {
-        PromptSource::Channel(channel_id) => Some(*channel_id),
-        PromptSource::Heartbeat => None,
+    let observer_channel_id = source.channel_id();
+    let observer_thread_root_id = match &source {
+        PromptSource::Thread { root_event_id, .. } => Some(root_event_id.clone()),
+        _ => None,
     };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
-    agent.acp.set_observer_context(observer::context_for_turn(
-        observer_channel_id,
-        None,
-        turn_id.clone(),
-        turn_started_at.clone(),
-    ));
+    agent
+        .acp
+        .set_observer_context(observer::context_for_turn_thread(
+            observer_channel_id,
+            observer_thread_root_id.clone(),
+            None,
+            turn_id.clone(),
+            turn_started_at.clone(),
+        ));
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
@@ -1370,7 +1414,7 @@ pub async fn run_prompt_task(
         "turn_started",
         serde_json::json!({
             "source": match &source {
-                PromptSource::Channel(_) => "channel",
+                PromptSource::Channel(_) | PromptSource::Thread { .. } => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
             "triggeringEventIds": triggering_event_ids,
@@ -1385,6 +1429,7 @@ pub async fn run_prompt_task(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
         observer_channel_id,
+        observer_thread_root_id.clone(),
         turn_id.clone(),
     );
 
@@ -1404,8 +1449,9 @@ pub async fn run_prompt_task(
     let liveness = run_turn_liveness(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
-        observer::context_for_turn(
+        observer::context_for_turn_thread(
             observer_channel_id,
+            observer_thread_root_id.clone(),
             None,
             turn_id.clone(),
             turn_started_at.clone(),
@@ -1451,8 +1497,13 @@ pub async fn run_prompt_task(
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
     if ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
-            (&source, ctx.agent_owner_pubkey.as_ref())
+        if let (
+            PromptSource::Channel(cid)
+            | PromptSource::Thread {
+                channel_id: cid, ..
+            },
+            Some(owner_pk),
+        ) = (&source, ctx.agent_owner_pubkey.as_ref())
         {
             let is_new_channel_session = !agent.state.sessions.contains_key(cid);
             if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
@@ -1505,7 +1556,11 @@ pub async fn run_prompt_task(
     // Channel name for the session title, from the same single resolve the
     // canvas DM check uses — see `resolve_new_session_channel_context`.
     let mut title_channel: Option<String> = None;
-    if let PromptSource::Channel(cid) = &source {
+    if let PromptSource::Channel(cid)
+    | PromptSource::Thread {
+        channel_id: cid, ..
+    } = &source
+    {
         let is_new_channel_session = !agent.state.sessions.contains_key(cid);
         let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
         let needs_title = is_new_channel_session && ctx.session_title.is_some();
@@ -1526,14 +1581,20 @@ pub async fn run_prompt_task(
     // The core section to fold into the system prompt for this turn's session.
     // Channel-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Channel(cid)
+        | PromptSource::Thread {
+            channel_id: cid, ..
+        } => agent.state.core_sections.get(cid).cloned(),
         PromptSource::Heartbeat => None,
     };
 
     // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
     // Prefer the committed cache; fall back to pending (for new sessions being created now).
     let agent_canvas: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent
+        PromptSource::Channel(cid)
+        | PromptSource::Thread {
+            channel_id: cid, ..
+        } => agent
             .state
             .canvas_sections
             .get(cid)
@@ -1543,7 +1604,10 @@ pub async fn run_prompt_task(
     };
 
     let (session_id, is_new_session) = match &source {
-        PromptSource::Channel(cid) => {
+        PromptSource::Channel(cid)
+        | PromptSource::Thread {
+            channel_id: cid, ..
+        } => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
             } else {
@@ -1659,7 +1723,13 @@ pub async fn run_prompt_task(
     );
 
     if is_new_session {
-        if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
+        if let (
+            PromptSource::Channel(cid)
+            | PromptSource::Thread {
+                channel_id: cid, ..
+            },
+            Some(ref initial_msg),
+        ) = (&source, &ctx.initial_message)
         {
             tracing::info!(
                 target: "pool::session",
@@ -2093,7 +2163,10 @@ pub async fn run_prompt_task(
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
                     match &source {
-                        PromptSource::Channel(cid) => {
+                        PromptSource::Channel(cid)
+                        | PromptSource::Thread {
+                            channel_id: cid, ..
+                        } => {
                             let count = agent.state.turn_counts.entry(*cid).or_insert(0);
                             *count += 1;
                             *count >= limit
@@ -3334,6 +3407,10 @@ fn classify_control_cancel_failure(
 fn prompt_label(source: &PromptSource) -> String {
     match source {
         PromptSource::Channel(cid) => format!("channel {cid}"),
+        PromptSource::Thread {
+            channel_id,
+            root_event_id,
+        } => format!("channel {channel_id} thread {root_event_id}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
     }
 }
@@ -3549,6 +3626,7 @@ struct TurnCompletionGuard {
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
     channel_id: Option<uuid::Uuid>,
+    thread_root_id: Option<String>,
     turn_id: String,
 }
 
@@ -3557,12 +3635,14 @@ impl TurnCompletionGuard {
         observer: Option<observer::ObserverHandle>,
         agent_index: Option<usize>,
         channel_id: Option<uuid::Uuid>,
+        thread_root_id: Option<String>,
         turn_id: String,
     ) -> Self {
         Self {
             observer,
             agent_index,
             channel_id,
+            thread_root_id,
             turn_id,
         }
     }
@@ -3571,7 +3651,12 @@ impl TurnCompletionGuard {
 impl Drop for TurnCompletionGuard {
     fn drop(&mut self) {
         if let Some(observer) = self.observer.take() {
-            let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
+            let context = observer::context_for_thread(
+                self.channel_id,
+                self.thread_root_id.clone(),
+                None,
+                Some(self.turn_id.clone()),
+            );
             observer.emit(
                 "turn_completed",
                 self.agent_index,
