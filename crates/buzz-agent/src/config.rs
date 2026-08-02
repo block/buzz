@@ -801,7 +801,12 @@ impl Config {
                     env("OPENAI_COMPAT_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
+                // Desktop keeps OPENAI_COMPAT_BASE_URL canonical; fall back to
+                // the generic OpenAI SDK OPENAI_BASE_URL for CLI/native agents.
+                resolve_openai_compat_base_url(
+                    env("OPENAI_COMPAT_BASE_URL").as_deref(),
+                    env("OPENAI_BASE_URL").as_deref(),
+                ),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
@@ -1070,6 +1075,32 @@ fn parse_openai_api(raw: Option<&str>) -> Result<OpenAiApi, String> {
     }
 }
 
+/// Default OpenAI-compatible base URL used when neither
+/// `OPENAI_COMPAT_BASE_URL` nor `OPENAI_BASE_URL` is set to a non-blank value.
+/// Kept as `…/v1` so path joining (`{base}/chat/completions`, `{base}/models`)
+/// and `is_openai_host` Auto→Responses routing stay correct.
+pub const DEFAULT_OPENAI_COMPAT_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// Resolve the OpenAI-compatible HTTP base URL.
+///
+/// Precedence (first non-blank after trim wins):
+/// 1. `OPENAI_COMPAT_BASE_URL` — canonical for the Buzz desktop / agent surface
+/// 2. `OPENAI_BASE_URL` — generic OpenAI SDK env var for CLI/native agents
+/// 3. [`DEFAULT_OPENAI_COMPAT_BASE_URL`]
+///
+/// Pure (env-free) so unit tests do not mutate process-global environment.
+fn resolve_openai_compat_base_url(
+    openai_compat_base_url: Option<&str>,
+    openai_base_url: Option<&str>,
+) -> String {
+    for candidate in [openai_compat_base_url, openai_base_url] {
+        if let Some(trimmed) = candidate.map(str::trim).filter(|s| !s.is_empty()) {
+            return trimmed.to_owned();
+        }
+    }
+    DEFAULT_OPENAI_COMPAT_BASE_URL.to_owned()
+}
+
 /// `true` when `base_url` is an official OpenAI host. Hosts on
 /// `*.openai.com` get Responses under `Auto`; everything else (vLLM,
 /// Ollama, OpenRouter, Block Gateway, …) gets Chat Completions.
@@ -1327,6 +1358,74 @@ mod tests {
         ] {
             assert_eq!(is_openai_host(url), want, "url={url}");
         }
+    }
+
+    #[test]
+    fn openai_compat_base_url_prefers_native_over_generic() {
+        // Desktop/canonical OPENAI_COMPAT_BASE_URL wins over the generic
+        // OpenAI SDK variable OPENAI_BASE_URL when both are non-blank.
+        assert_eq!(
+            resolve_openai_compat_base_url(
+                Some("https://native.example/v1"),
+                Some("https://generic.example/v1"),
+            ),
+            "https://native.example/v1"
+        );
+    }
+
+    #[test]
+    fn openai_compat_base_url_falls_back_to_generic() {
+        assert_eq!(
+            resolve_openai_compat_base_url(None, Some("https://generic.example/v1")),
+            "https://generic.example/v1"
+        );
+        assert_eq!(
+            resolve_openai_compat_base_url(Some(""), Some("https://generic.example/v1")),
+            "https://generic.example/v1"
+        );
+    }
+
+    #[test]
+    fn openai_compat_base_url_blank_values_fall_through() {
+        // Empty and whitespace-only values are treated as unset so a blank
+        // native override cannot block the generic fallback or the default.
+        assert_eq!(
+            resolve_openai_compat_base_url(Some("   "), Some("https://generic.example/v1")),
+            "https://generic.example/v1"
+        );
+        assert_eq!(
+            resolve_openai_compat_base_url(Some("https://native.example/v1"), Some("  ")),
+            "https://native.example/v1"
+        );
+        assert_eq!(
+            resolve_openai_compat_base_url(Some(""), Some(" \t ")),
+            DEFAULT_OPENAI_COMPAT_BASE_URL
+        );
+        assert_eq!(
+            resolve_openai_compat_base_url(Some("  https://native.example/v1  "), None),
+            "https://native.example/v1"
+        );
+    }
+
+    #[test]
+    fn openai_compat_base_url_defaults_to_openai() {
+        assert_eq!(
+            resolve_openai_compat_base_url(None, None),
+            DEFAULT_OPENAI_COMPAT_BASE_URL
+        );
+        assert_eq!(
+            resolve_openai_compat_base_url(None, Some("")),
+            DEFAULT_OPENAI_COMPAT_BASE_URL
+        );
+    }
+
+    #[test]
+    fn openai_compat_base_url_default_remains_openai_host_for_auto_routing() {
+        // Path joining and Auto→Responses routing depend on the default
+        // resolving to an official OpenAI host (`…/v1` base).
+        let default = resolve_openai_compat_base_url(None, None);
+        assert_eq!(default, "https://api.openai.com/v1");
+        assert!(is_openai_host(&default));
     }
 
     #[test]

@@ -142,7 +142,8 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
 | `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
+| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Canonical OpenAI-compatible endpoint. Point at vLLM, llama.cpp, Ollama, or another compatible gateway. |
+| `OPENAI_BASE_URL` | — | Generic OpenAI SDK fallback when `OPENAI_COMPAT_BASE_URL` is blank or unset. The canonical variable wins when both are set. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
