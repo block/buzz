@@ -55,13 +55,20 @@ export function getMentionableAgentPubkeys({
 }
 
 export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
+  mentionableAgentPubkeys: ReadonlySet<string>,
 ) {
-  return (
-    candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
-  );
+  if (candidate.isAgent !== true) return true;
+  const pubkey = normalizePubkey(candidate.pubkey);
+  if (managedAgentPubkeys.has(pubkey)) return true;
+  // A channel member whose relay-published policy (kind:30177, possibly
+  // owned by a different identity) makes them mentionable is admitted too —
+  // this is what lets a bot member of a shared channel be @-mentioned
+  // regardless of who owns/hosts it. Non-members are never admitted here:
+  // that's the relay-directory-only case (listed, but not actually added to
+  // any shared channel), which stays hidden.
+  return candidate.isMember === true && mentionableAgentPubkeys.has(pubkey);
 }
 
 export function shouldHideAgentFromMentions({

@@ -138,11 +138,13 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
 
 test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
+  const mentionableAgentPubkeys = new Set();
 
   assert.equal(
     isAgentIdentityInManagedList(
       { isAgent: false, pubkey: PUB_B },
       managedAgentPubkeys,
+      mentionableAgentPubkeys,
     ),
     true,
   );
@@ -150,6 +152,7 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_A.toUpperCase() },
       managedAgentPubkeys,
+      mentionableAgentPubkeys,
     ),
     true,
   );
@@ -157,8 +160,39 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_B },
       managedAgentPubkeys,
+      mentionableAgentPubkeys,
     ),
     false,
+  );
+});
+
+test("isAgentIdentityInManagedList: admits a channel-member agent shared by another owner", () => {
+  const managedAgentPubkeys = new Set();
+  const mentionableAgentPubkeys = new Set([PUB_B]);
+
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    true,
+    "a bot channel member whose relay policy makes them mentionable must be admitted even when not locally managed",
+  );
+});
+
+test("isAgentIdentityInManagedList: still drops a non-member agent even if mentionable via the relay directory", () => {
+  const managedAgentPubkeys = new Set();
+  const mentionableAgentPubkeys = new Set([PUB_B]);
+
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, isMember: false, pubkey: PUB_B },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    false,
+    "relay-directory presence alone (no channel membership) must not admit a candidate — preserves the existing 'relay-only agents stay hidden' e2e behavior",
   );
 });
 
