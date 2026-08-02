@@ -154,8 +154,17 @@ export function startCommunityOnboarding(
   const relayUrl = canonicalRelayUrl(input.relayUrl);
   const existing = loadCommunityOnboardingTransaction(storage);
   if (existing?.relayUrl === relayUrl) {
+    // Resuming keeps the stored stage so a link opened mid-flow cannot rewind
+    // progress — except for a membership-recovery redeem, which is the user
+    // explicitly saying "claim this code now". That one has to re-enter
+    // `claiming`: the relay denied membership, so every later stage is
+    // unreachable, and parking the new code on the stored stage leaves
+    // `useClaimInvite` idle and the redeem button looking dead.
+    const isRecoveryRedeem =
+      input.source === "membership-recovery" && !!input.inviteCode?.trim();
     const updated = {
       ...existing,
+      stage: isRecoveryRedeem ? ("claiming" as const) : existing.stage,
       firstCommunityPage:
         input.firstCommunityPage ?? existing.firstCommunityPage,
       inviteCode: input.inviteCode?.trim() || existing.inviteCode,
