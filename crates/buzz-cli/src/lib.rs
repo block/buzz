@@ -218,6 +218,12 @@ enum Cmd {
     /// Create, get, list, and set status on git issues (NIP-34)
     #[command(subcommand)]
     Issues(IssuesCmd),
+    /// Create, list, and manage Kanban boards
+    #[command(subcommand)]
+    Boards(BoardsCmd),
+    /// Create, list, and move Kanban cards
+    #[command(subcommand)]
+    Cards(CardsCmd),
     /// Open, update, list, and set status on git pull requests (NIP-34)
     #[command(subcommand)]
     Pr(PrCmd),
@@ -1553,6 +1559,142 @@ pub enum IssuesCmd {
 }
 
 #[derive(Subcommand)]
+pub enum BoardsCmd {
+    /// Create a Kanban board (kind:31001, NIP-33 replaceable)
+    Create {
+        /// Board title
+        #[arg(long)]
+        name: String,
+        /// Optional description, markdown ('-' to read from stdin)
+        #[arg(long)]
+        description: Option<String>,
+        /// Explicit column set "Name:wip,Name2" (overrides --template)
+        #[arg(long)]
+        columns: Option<String>,
+        /// Starter column template: kanban | sprint | sales | blank
+        #[arg(long, value_parser = ["kanban", "sprint", "sales", "blank"])]
+        template: Option<String>,
+    },
+    /// Get a board by id
+    Get {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+    },
+    /// List the signed-in user's boards
+    List,
+    /// Update a board's title/description
+    Update {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// New title
+        #[arg(long)]
+        name: Option<String>,
+        /// New description, markdown
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Add a column to a board
+    AddColumn {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// New column name
+        #[arg(long)]
+        name: String,
+        /// Advisory WIP limit
+        #[arg(long)]
+        wip: Option<u32>,
+    },
+    /// Rename a board column (stable colid keeps card order)
+    RenameColumn {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// Column id (colid)
+        #[arg(long)]
+        column: String,
+        /// New column name
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CardsCmd {
+    /// Create a Kanban card (kind:31002, NIP-33 replaceable)
+    Create {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// Destination column id (defaults to the board's first column)
+        #[arg(long)]
+        column: Option<String>,
+        /// Card title
+        #[arg(long)]
+        title: String,
+        /// Card body, markdown
+        #[arg(long)]
+        body: Option<String>,
+        /// Label — repeatable (NIP-32 namespaced to 'kanban')
+        #[arg(long = "label")]
+        label: Vec<String>,
+        /// Assignee pubkey — repeatable
+        #[arg(long = "assignee")]
+        assignee: Vec<String>,
+    },
+    /// List cards on a board, sorted by column then rank
+    List {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// Filter to a single column id
+        #[arg(long)]
+        column: Option<String>,
+    },
+    /// Get a card by id
+    Get {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// Card id (d-tag)
+        #[arg(long)]
+        card: String,
+    },
+    /// Move a card to a column (replaces the card event — LWW via NIP-33)
+    Move {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// Card id (d-tag)
+        #[arg(long)]
+        card: String,
+        /// Destination column id
+        #[arg(long)]
+        column: String,
+        /// Explicit rank (defaults to the tail of the destination column)
+        #[arg(long)]
+        rank: Option<String>,
+    },
+    /// Update a card's title/body
+    Update {
+        /// Board id (d-tag)
+        #[arg(long)]
+        board: String,
+        /// Card id (d-tag)
+        #[arg(long)]
+        card: String,
+        /// New title
+        #[arg(long)]
+        title: Option<String>,
+        /// New body, markdown
+        #[arg(long)]
+        body: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum UploadCmd {
     /// Upload a file to the relay's Blossom store
     File {
@@ -1867,6 +2009,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
+        Cmd::Boards(sub) => commands::boards::dispatch(sub, &client).await,
+        Cmd::Cards(sub) => commands::cards::dispatch(sub, &client).await,
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
@@ -1960,7 +2104,9 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "boards",
             "canvas",
+            "cards",
             "channels",
             "dms",
             "emoji",
