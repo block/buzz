@@ -145,8 +145,8 @@ bind at the same layer. Three contracts, nested:
    is not "non-conforming" for lacking pods.
 
 The desktop is therefore one launcher among many, and the provider protocol
-is the *desktop's* door to substrates, not the only door. Conformance items
-below name their layer explicitly.
+is the *desktop's* door to substrates, not the only door. §Conformance
+carries one checklist per layer.
 
 ## Invariants
 
@@ -170,12 +170,17 @@ dropped the property and said so (§Non-Goals, M1). A conforming
 implementation that is not small is evidence of a spec bug; report it as
 one.
 
-- **(I1) Identity fail-closed.** No deploy request is ever emitted with an
-  empty or missing private key. Enforced at payload construction: if keyring
-  hydration left the nsec empty, `build_deploy_payload` refuses (mirroring
-  local spawn's `spawn_key_refusal`). Boundary: a provider that *discards*
-  the key and launches an identityless pod is a broken provider; I1 governs
-  what `D` sends, not what `P` does with it.
+- **(I1) Identity fail-closed.** No agent is ever launched with an empty or
+  missing private key: whatever assembles the harness environment — desktop,
+  provider, bash script — MUST refuse rather than launch identityless
+  (§Launchers, layer 1). In the provider path this is enforced at payload
+  construction: if keyring hydration left the nsec empty,
+  `build_deploy_payload` refuses (mirroring local spawn's
+  `spawn_key_refusal`), so no deploy request is ever emitted with an empty
+  key. Boundary: a provider that *discards* the key and launches an
+  identityless pod is a broken provider; the payload rule governs what `D`
+  sends, not what `P` does with it — which is why the property also binds
+  at `P`'s env assembly and at every non-provider launcher.
 
 - **(I2) No secrets in configuration.** `provider_config` — the persisted,
   schema-rendered, UI-visible settings object — MUST NOT carry secrets.
@@ -637,15 +642,27 @@ annotation-verified objects proceed.
 **Auto-repair is fenced to Buzz-authored, positively identified residue
 (normative).** The destructive rows below (delete residue, replace a
 never-started body, GC a Secret) are legitimate *only because* every object
-they touch is one this protocol created and can prove it created — the
-identity label, the full-pubkey annotation, the create-intent fingerprint
-are ownership evidence, not decoration. The vision's rule that a
-never-started body is substrate-operator residue survives with one
-qualifier: *Buzz-authored* create-state (a Secret our provider wrote, a pod
-carrying our verified annotations) is the reconciler's to clear, because it
-is state the user cannot reasonably clear themselves; *substrate* wreckage —
-anything unowned, unannotated, or ambiguously identified — still fails
-closed to the operator. A provider that cannot positively identify an
+they touch carries positive **protocol ownership evidence** — and identity
+evidence alone is not ownership evidence. The identity label, the
+full-pubkey annotation, and the create-intent fingerprint prove "matches
+our schema for this public identity"; all three are public, so any cluster
+writer can reproduce them on an object this provider never created. Every
+object this provider creates therefore also carries an explicit
+management marker — `app.kubernetes.io/managed-by: buzz-backend-kubernetes`
+plus a binding schema-version label (§Pod shape) — and **no destructive
+repair or GC action fires unless the marker is present**, on top of the
+annotation check and the UID+`resourceVersion` fence every delete already
+requires. This is protocol evidence, not cryptographic proof: a cluster
+writer can forge metadata by definition, and an actor with write access to
+the namespace can already delete the pod outright — the marker's job is
+making *accidental* schema collisions and third-party objects fail closed,
+not defeating a hostile admin. The vision's rule that a never-started body
+is substrate-operator residue survives with one qualifier: *Buzz-authored*
+create-state (a Secret our provider wrote, a pod carrying our verified
+annotations and marker) is the reconciler's to clear, because it is state
+the user cannot reasonably clear themselves; *substrate* wreckage —
+anything unowned, unmarked, unannotated, or ambiguously identified — still
+fails closed to the operator. A provider that cannot positively identify an
 object as its own output does not repair around it; it reports it.
 
 **Step 2 — reconcile.** Ordered rules, evaluated against the verified
@@ -836,12 +853,16 @@ can yield two live instances in one scope.
   The requirement is therefore stated as a budget, not a sum (Known
   Defect 7): **the harness MUST bound its total shutdown tail — every
   post-signal segment, including per-slot reaping — under one shared
-  deadline no greater than the declared grace budget**, degrading (skip
-  remaining per-slot waits, force-kill, best-effort presence `offline`,
-  close) rather than overrunning. The binding declares the budget
-  (§K8s Grace: 60s); anyone re-deriving "~37s" from the segment constants
-  is reading numbers without their variables. The desktop's local stop
-  command rejects remote agents.
+  deadline no greater than the declared grace budget**, and the budget
+  MUST include a **reserved finalization slice**: a tail portion held back
+  for presence `offline` publish and relay close, which child cleanup may
+  never consume — child reaping degrades first (skip remaining per-slot
+  waits, force-kill), because a shared deadline without the reservation
+  can legally spend all 60s reaping children and hit SIGKILL before the
+  one action the grace period exists to protect. The binding declares the
+  budget (§K8s Grace: 60s); anyone re-deriving "~37s" from the segment
+  constants is reading numbers without their variables. The desktop's
+  local stop command rejects remote agents.
 - **Delete** with a live `backend_agent_id` requires `force_remote_delete:
   true` from the UI's orphan-warning confirmation — a buggy IPC caller
   cannot silently orphan substrate objects.
@@ -1053,13 +1074,11 @@ regardless of `HOME`.
   - **Indefinite lifetime (`inactivity_seconds: 0`): `OnFailure`** — once
     the harness exit-code contract is pinned (I5 ordering rule; until
     then the provider MUST refuse the combination rather than ship
-    `OnFailure` against an undefended exit convention). An indefinite
-    agent's owner has declared continuous need; leaving it dead after its
-    first 3am crash until a human notices is exactly backwards.
-    `OnFailure` restarts the *in-place* abnormal deaths — process crash,
-    container OOM-kill — and honors the intentional ones (clean exit
-    completes the pod): resurrection-after-accident without
-    resurrection-after-intent. **Honest limit:** `restartPolicy` is
+    `OnFailure` against an undefended exit convention). `OnFailure`
+    restarts the *in-place* abnormal deaths — process crash, container
+    OOM-kill — and honors the intentional ones (clean exit completes the
+    pod): I5's intent-vs-accident distinction, realized. **Honest
+    limit:** `restartPolicy` is
     kubelet-level and cannot survive *node-level* loss — a drain or
     API-initiated eviction deletes a bare pod outright, and no
     restart policy reschedules a deleted pod. Full "continuous need"
@@ -1075,6 +1094,13 @@ regardless of `HOME`.
     for reconciliation and GC. 128 bits is collision-*resistant*, not
     collision-free, which is why the annotation check below is normative,
     not decorative
+  - label `app.kubernetes.io/managed-by: buzz-backend-kubernetes` and label
+    `buzz.block.xyz/binding-version: <schema-version>` — the **management
+    marker** (§Deploy State Machine auto-repair fence): present on every
+    pod and Secret this provider creates, and **required before any
+    destructive repair or GC action**. Identity labels/annotations prove
+    identity; the marker asserts protocol ownership — without it, an object
+    that merely matches our schema fails closed to the operator
   - annotation `buzz.block.xyz/agent-pubkey-full: <full-64-hex>` —
     **load-bearing**: per §Deploy State Machine step 1, every label-selected
     object's annotation MUST equal the derived pubkey before the provider
@@ -1085,7 +1111,8 @@ regardless of `HOME`.
     never-started pods
   - Secret name: `buzz-agent-<first-12-hex>-<gen>`, where `<gen>` is a random
     per-create-attempt **generation token** — unique, never reused, carrying
-    the same label and annotation. The pod's `envFrom` references this exact
+    the same labels (identity + management marker) and annotation. The
+    pod's `envFrom` references this exact
     Secret name. Deterministic pod name + unique Secret name is what makes
     payload and Secret atomic at the pod-spec boundary (§K8s Secrets)
 - **Deletion semantics the reconciler must respect.** A Kubernetes `DELETE`
@@ -1116,8 +1143,9 @@ regardless of `HOME`.
   default parallelism at `c1bca1b56`), so no fixed grace can be proven
   sufficient by adding segment timeouts. The two halves of the requirement:
   the binding *declares* the budget here, and the harness *enforces* it —
-  one shared deadline across the entire post-signal path, degrading rather
-  than overrunning (§Stop, Known Defect 7). Until the harness enforcement
+  one shared deadline across the entire post-signal path, with a reserved
+  finalization slice for presence `offline` and relay close, child cleanup
+  degrading first (§Stop, Known Defect 7). Until the harness enforcement
   lands, 60s is an operational margin that the worst case can exceed.
 - **Hardening defaults (normative).** The workload is a prompted coding
   agent running repository and tool code while holding an nsec; the pod MUST
@@ -1200,10 +1228,14 @@ the *current* generation is the one referenced by the existing pod's
 GC is a **preflight reconciliation pass**, not a post-deploy afterthought:
 on every deploy, after identity derivation and before the state transition,
 the provider deletes terminated pods (and their referenced Secrets) that
-match the pubkey label **and pass the full-pubkey annotation check**, plus
-annotation-verified orphan Secrets whose generation token no existing pod
+match the pubkey label, **pass the full-pubkey annotation check, and carry
+the management marker** (§Pod shape; the auto-repair fence applies to GC
+identically), plus
+annotation-verified, marker-bearing orphan Secrets whose generation token
+no existing pod
 references (§K8s Secrets). It never touches the current generation.
-Mismatched annotations are never GC'd (§Deploy State Machine step 1).
+Mismatched annotations are never GC'd (§Deploy State Machine step 1), and
+an unmarked object is never GC'd regardless of its labels.
 
 **Orphan-Secret age gate (normative).** An unreferenced Secret is
 GC-eligible only when its server-assigned `creationTimestamp` is older than
@@ -1305,15 +1337,46 @@ path). v1 ships no Windows binary [DECISION B]; desktop bundling into the
 
 ## Conformance
 
-Each item names its layer per §Launchers: **[L1]** agent/harness contract
-(every launcher), **[L2]** provider/deployer contract, **[L3]** binding
-policy. A non-provider launcher (bash script, systemd unit) owes only the
-[L1] items; a provider on a different substrate owes [L1] + [L2] and writes
-its own [L3] realization.
+Obligations are split by layer per §Launchers: the **[L1] agent/harness
+contract** binds every launcher; the **[L2] provider/deployer contract**
+binds provider-managed launches; the **[L3] binding policy** here is the
+Kubernetes binding's own. A non-provider launcher (bash script, systemd
+unit) owes only the L1 items; a provider on a different substrate owes
+L1 + L2 and writes its own L3 realization of the generic L3 property.
 
-A provider is conforming iff:
+### [L1] Launcher conformance — every launcher
 
-1. **[L2]** `info` and `deploy` implement the wire contract (§Provider
+A launcher — desktop, provider-deployed pod, systemd unit, bash script —
+is conforming iff:
+
+1. It launches the harness with a **valid, nonempty identity**: a
+   parseable private key, a relay URL, and an auth tag or resolved owner
+   pubkey — refusing to launch rather than launching identityless (I1's
+   property, enforced wherever the env is assembled).
+2. It does not suppress the harness's promises on a remote agent:
+   presence stays enabled (`BUZZ_ACP_NO_PRESENCE` never set — remotely,
+   presence is the only signal, I3), and the inactivity knob
+   (`BUZZ_ACP_EXIT_AFTER_INACTIVITY`) carries the owner's *deliberate*
+   lifetime policy, never an accidental passthrough of user env (I5; the
+   reserved-key rule is the provider path's realization of this).
+3. The substrate's **termination signal reaches the harness process**,
+   with enough grace for its full graceful shutdown before force-kill (I3
+   staleness minimization). "Allows" is not enough — a wrapper that
+   swallows the signal conforms to nothing.
+4. Intentional termination (owner `!shutdown`, inactivity reap) exits
+   through the harness's graceful path under the **pinned clean-exit
+   contract** (intentional exit ⇒ exit code 0 — Known Defect 6 until the
+   contract lands).
+5. Any supervisor the launcher configures **never restarts an intentional
+   clean exit** (I5). `Restart=always` and equivalents are non-conforming
+   at this layer no matter what the substrate calls them.
+
+### [L2] Provider conformance — provider-managed launches
+
+A provider is conforming iff, in addition to deploying only L1-conforming
+invocations:
+
+1. `info` and `deploy` implement the wire contract (§Provider
    Protocol), including one-JSON-in/one-JSON-out and in-band
    `{"ok": false}` errors. **Exit codes carry exactly one bit** — zero =
    the operation's output is trustworthy, nonzero = failure regardless of
@@ -1321,15 +1384,15 @@ A provider is conforming iff:
    provider MUST exit nonzero on any crash path and MUST NOT encode
    structured meaning in nonzero values, because `D` discards partial
    output rather than interpreting codes.
-2. **[L2]** It never requests or accepts credentials through
+2. It never requests or accepts credentials through
    `provider_config` (I2).
-3. **[L2]** It builds agent identity env from top-level payload fields, never
+3. It builds agent identity env from top-level payload fields, never
    from `env_vars` (reserved-key rule), applies §Launch data mechanically —
    three-tier precedence, host-resolved re-derivation, no re-merge of
    legacy `env_vars`, no provider-side model/provider mapping — and refuses
    a deploy that resolves neither `auth_tag` nor `launch.owner_pubkey`, or
    whose provider is `relay-mesh`.
-4. **[L2]** `deploy` implements the reconciliation loop (I4), stated
+4. `deploy` implements the reconciliation loop (I4), stated
    substrate-neutrally: identity derived from the nsec before any
    mutation; candidates verified by **full-identity evidence** before any
    action; live (= **started**: the harness process confirmed running, not
@@ -1341,31 +1404,43 @@ A provider is conforming iff:
    authorize a destruction uses most-recent semantics; every destructive
    write is **fenced to the exact observation that authorized it**
    (compare-and-delete — the write fails if the object changed since the
-   read); same-status-code conflicts discriminated by a **machine-readable
+   read) and touches only objects carrying the provider's **management
+   marker** (the auto-repair fence, §Deploy State Machine);
+   same-status-code conflicts discriminated by a **machine-readable
    conflict discriminator**, never the status code alone; success only on
    confirmed harness start; conflicts converge by re-entry;
-   delete-of-absent is success. The Kubernetes realization of each term —
-   full-pubkey annotation, container `state.running`,
-   `resourceVersion`-unset quorum reads, UID+`resourceVersion` delete
-   preconditions, `Status.reason` as the 409 discriminator — is specified
-   in §Deploy State Machine and is the binding's [L3]; a provider for
-   another substrate MUST supply equivalents, not skip the term.
-5. **[L3]** The deployed invocation realizes the lifetime policy the owner
-   chose (I5): a bounded-lifetime agent gets a working inactivity bound; an
-   indefinite agent (`inactivity_seconds: 0`) gets no bound and — only
-   under the pinned exit-code contract — accident-only restart. In both
-   cases the substrate never restarts an instance that exited
-   *intentionally*.
-6. **[L1]** The harness is the deployed container's **signal-receiving
-   process**, and the termination path delivers the termination signal to
-   it with enough grace for its full graceful shutdown before force-kill
-   (I3 staleness minimization). "Allows" is not enough — a wrapper that
-   swallows the signal conforms to nothing.
-7. **[L2]** It emits no secret material in any output (belt to `D`'s
+   delete-of-absent is success.
+5. It emits no secret material in any output (belt to `D`'s
    redaction suspenders).
+6. **Generic L3 obligation:** its binding *documents* how it realizes each
+   L2 term on its substrate, and how the owner's lifetime policy (bounded
+   vs indefinite) and clean-exit restart behavior are realized there —
+   stating the properties in its own vocabulary, not skipping them.
+
+### [L3] Kubernetes binding conformance — this binding
+
+The realization the two lists above require, in this binding's vocabulary:
+
+1. Each L2 item-4 term maps to the mechanism in §Deploy State Machine:
+   full-pubkey annotation for identity evidence, container `state.running`
+   for "started", `resourceVersion`-unset quorum reads for most-recent
+   semantics, UID+`resourceVersion` delete preconditions for fencing,
+   `Status.reason` as the 409 discriminator, and the
+   `app.kubernetes.io/managed-by` + binding-version labels as the
+   management marker.
+2. The deployed invocation realizes the lifetime policy the owner chose
+   (I5) through this binding's `inactivity_seconds` field: `> 0` →
+   a working inactivity bound and `restartPolicy: Never`; `0` (the
+   blessed indefinite opt-in) → no bound and `restartPolicy: OnFailure`,
+   **only after the pinned exit-code contract lands** — until then the
+   provider MUST refuse the combination (I5 ordering rule).
+3. The harness is the deployed container's **signal-receiving process**
+   (PID 1 or the target of the pod's termination signal — §K8s
+   Entrypoint's `exec` rule), and `terminationGracePeriodSeconds` carries
+   the declared grace budget (§Pod shape).
 
 Conformance is testable without mechanization: a fake-provider harness can
-exercise items 1–3 and 7 over the wire contract — including the pre-secret
+exercise L2 items 1–3 and 5 over the wire contract — including the pre-secret
 negotiation gate (§Discovery): an incompatible **or absent**
 `protocol_version` MUST be rejected before any request carrying
 `private_key_nsec` is sent; a **same-inode content rewrite** of the
@@ -1375,9 +1450,9 @@ resolved binary after resolution MUST NOT reach the deploy invocation
 different file between the gate's checks and process spawn — likewise
 MUST NOT redirect the nsec (both cases are exactly what path+metadata
 comparison misses) — and an envtest/kind suite
-can drive item 4's reconciler against a real apiserver — concurrent
+can drive L2 item 4's reconciler against a real apiserver — concurrent
 deploys, a deletion-marked pod, terminal restart, an annotation-mismatch
-collision, and SIGTERM→presence-offline for items 5–6. Three families of
+collision, and SIGTERM→presence-offline for the L3 items. Three families of
 cases are mandatory because they were the review-found failure modes:
 **startup discrimination** (slow-but-valid scheduling → poll-then-succeed;
 `Unschedulable` during scale-from-zero → observed until the autoscaler
@@ -1385,6 +1460,8 @@ provisions capacity, then success — never delete, **including when
 provisioning completes only after the 600s deadline**: the original pod
 identity and `creationTimestamp` survive the expired call and become the
 no-op winner on a later deploy, the case that pins the anti-livelock rule;
+a label-and-annotation-matching object **without the management marker** →
+never deleted, never GC'd, reported (the auto-repair fence under test);
 referenced Secret *confirmed absent* → preconditioned delete-recreate or
 actionable error, never silent success or no-op; a **never-started winner
 is repairable** — pod exists, Secret absent, container never started: a
@@ -1505,7 +1582,8 @@ Desktop- and harness-side, discovered during this design:
    parallelism of 24 (`types.rs:725`), ~197s at the harness cap of 32
    (`config.rs:292`), against the binding's
    60s grace. The fix is one shared deadline across the entire post-signal
-   path, degrading rather than overrunning (§Stop); natural home is the
+   path with a reserved finalization slice for presence `offline` and
+   relay close, child cleanup degrading first (§Stop); natural home is the
    same harness change as the I5 reaper (defect 4).
 
 ## Implementation Correspondence
