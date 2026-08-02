@@ -5,6 +5,7 @@
 //! a successful launch producing a document that the harness cannot parse.
 
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -79,12 +80,7 @@ impl McpLaunchConfigDocument {
 
         let mut names = HashSet::with_capacity(self.servers.len());
         for (index, server) in self.servers.iter().enumerate() {
-            let ConfiguredMcpServer::Stdio {
-                name,
-                command,
-                args,
-                env,
-            } = server;
+            let name = server.name();
             if !valid_mcp_server_name(name) {
                 return Err(McpConfigError::Invalid(format!(
                     "MCP server {} has invalid name '{}': use 1 to {MCP_SERVER_NAME_MAX_BYTES} ASCII letters, digits, underscores, or hyphens, without '__'",
@@ -92,11 +88,54 @@ impl McpLaunchConfigDocument {
                     name
                 )));
             }
-            if !names.insert(name.as_str()) {
+            if !names.insert(name) {
                 return Err(McpConfigError::Invalid(format!(
                     "duplicate MCP server name '{name}'"
                 )));
             }
+            let ConfiguredMcpServer::Stdio {
+                command, args, env, ..
+            } = server
+            else {
+                let ConfiguredMcpServer::Http {
+                    url,
+                    url_env_file,
+                    url_env_name,
+                    headers,
+                    ..
+                } = server
+                else {
+                    continue;
+                };
+                if url_env_file.is_some() != url_env_name.is_some()
+                    || usize::from(!url.is_empty()) + usize::from(url_env_file.is_some()) != 1
+                {
+                    return Err(McpConfigError::Invalid(format!(
+                        "remote MCP server '{name}' requires exactly one complete URL source"
+                    )));
+                }
+                if headers.len() > MCP_SERVER_MAX_ENV {
+                    return Err(McpConfigError::Invalid(format!(
+                        "remote MCP server '{name}' has too many headers ({}, max {MCP_SERVER_MAX_ENV})",
+                        headers.len()
+                    )));
+                }
+                for header in headers {
+                    if header.name.trim().is_empty()
+                        || header.name.contains(['\r', '\n', '\0'])
+                        || header.env_file.is_some() != header.env_name.is_some()
+                        || usize::from(!header.value.is_empty())
+                            + usize::from(header.value_file.is_some())
+                            + usize::from(header.env_file.is_some())
+                            != 1
+                    {
+                        return Err(McpConfigError::Invalid(format!(
+                            "remote MCP server '{name}' has an invalid header configuration"
+                        )));
+                    }
+                }
+                continue;
+            };
             if command.trim().is_empty() || command.contains('\0') {
                 return Err(McpConfigError::Invalid(format!(
                     "MCP server '{name}' command must not be blank and must contain no NUL bytes"
@@ -185,6 +224,69 @@ pub enum ConfiguredMcpServer {
         #[serde(deserialize_with = "deserialize_mcp_env")]
         env: BTreeMap<String, String>,
     },
+    /// A remote Streamable HTTP MCP server.
+    Http {
+        /// Stable ACP identifier for this server.
+        name: String,
+        /// Literal URL. Exactly one of this and the `url_env_*` pair is required.
+        #[serde(default)]
+        url: String,
+        /// Protected environment file containing the URL.
+        #[serde(default)]
+        url_env_file: Option<PathBuf>,
+        /// Variable name to read from `url_env_file`.
+        #[serde(default)]
+        url_env_name: Option<String>,
+        /// Headers sent to the remote server.
+        #[serde(default)]
+        headers: Vec<McpHttpHeaderConfig>,
+    },
+}
+
+impl ConfiguredMcpServer {
+    /// Stable name supplied to ACP for this server.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Stdio { name, .. } | Self::Http { name, .. } => name,
+        }
+    }
+}
+
+/// Header attached to requests for a remote HTTP MCP server.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHttpHeaderConfig {
+    /// HTTP header name.
+    pub name: String,
+    /// Literal header value.
+    #[serde(default)]
+    pub value: String,
+    /// File containing the entire header value.
+    #[serde(default)]
+    pub value_file: Option<PathBuf>,
+    /// Protected environment file containing a named value.
+    #[serde(default)]
+    pub env_file: Option<PathBuf>,
+    /// Variable selected from `env_file`.
+    #[serde(default)]
+    pub env_name: Option<String>,
+    /// Public prefix prepended after resolving the configured value.
+    #[serde(default)]
+    pub value_prefix: String,
+}
+
+impl std::fmt::Debug for McpHttpHeaderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpHttpHeaderConfig")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .field("value_file", &self.value_file)
+            .field("env_file", &self.env_file)
+            .field("env_name", &self.env_name)
+            .field("value_prefix", &self.value_prefix)
+            .finish()
+    }
 }
 
 struct RedactedMcpEnv<'a>(&'a BTreeMap<String, String>);
@@ -213,6 +315,20 @@ impl std::fmt::Debug for ConfiguredMcpServer {
                 .field("command", command)
                 .field("arg_count", &args.len())
                 .field("env", &RedactedMcpEnv(env))
+                .finish(),
+            Self::Http {
+                name,
+                url: _,
+                url_env_file,
+                url_env_name,
+                headers,
+            } => formatter
+                .debug_struct("Http")
+                .field("name", name)
+                .field("url", &"[REDACTED]")
+                .field("url_env_file", url_env_file)
+                .field("url_env_name", url_env_name)
+                .field("headers", headers)
                 .finish(),
         }
     }
@@ -353,11 +469,36 @@ mod tests {
         for content in [
             br#"{"version":1,"servers":[{"name":"one","command":"mcp","args":[],"env":{}}]}"#
                 .as_slice(),
-            br#"{"version":1,"servers":[{"name":"one","transport":"http","url":"https://example.test"}]}"#
+            br#"{"version":1,"servers":[{"name":"one","transport":"tcp","url":"https://example.test"}]}"#
                 .as_slice(),
         ] {
             assert!(parse_mcp_config_document(content).is_err());
         }
+    }
+
+    #[test]
+    fn http_transport_round_trips_in_the_shared_document() {
+        let document = McpLaunchConfigDocument::new(vec![ConfiguredMcpServer::Http {
+            name: "hosted-context".to_string(),
+            url: "https://mcp.example.test/mcp".to_string(),
+            url_env_file: None,
+            url_env_name: None,
+            headers: vec![McpHttpHeaderConfig {
+                name: "Authorization".to_string(),
+                value: "Bearer secret".to_string(),
+                value_file: None,
+                env_file: None,
+                env_name: None,
+                value_prefix: String::new(),
+            }],
+        }]);
+
+        let encoded = document.to_json().unwrap();
+        assert_eq!(
+            parse_mcp_config_document(&encoded).unwrap(),
+            document.servers
+        );
+        assert!(!format!("{document:?}").contains("Bearer secret"));
     }
 
     #[test]

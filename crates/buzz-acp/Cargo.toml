@@ -34,6 +34,7 @@ tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 futures-util = { workspace = true }
+aho-corasick = "1.1"
 
 # HTTP (channel discovery REST API)
 reqwest = { workspace = true }
@@ -61,6 +62,7 @@ tracing-subscriber = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+zeroize = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

@@ -111,7 +111,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
-| `BUZZ_ACP_MCP_CONFIG` | no | `""` (empty) | Path to a version 1 JSON file defining additional stdio MCP servers. |
+| `BUZZ_ACP_MCP_CONFIG` | no | `""` (empty) | Path to a version 1 JSON file defining additional stdio and Streamable HTTP MCP servers. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
@@ -122,8 +122,8 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 ### Multiple MCP servers
 
-Use `--mcp-config <absolute-path>` or `BUZZ_ACP_MCP_CONFIG` to add named stdio
-MCP servers:
+Use `--mcp-config <absolute-path>` or `BUZZ_ACP_MCP_CONFIG` to add named local
+and remote MCP servers:
 
 ```json
 {
@@ -137,6 +137,19 @@ MCP servers:
       "env": {
         "ANALYTICS_TOKEN": "replace-me"
       }
+    },
+    {
+      "name": "hosted-context",
+      "transport": "http",
+      "url": "https://mcp.example.test/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "env_file": "/run/secrets/hosted-context.env",
+          "env_name": "MCP_TOKEN",
+          "value_prefix": "Bearer "
+        }
+      ]
     }
   ]
 }
@@ -148,9 +161,13 @@ loaded by `buzz-acp` automatically; a launcher must resolve and approve them
 before writing this document.
 
 The JSON is strict. The only top-level fields are `version` and `servers`.
-Each server has `name`, `transport`, `command`, `args`, and `env`. Version 1
-supports the `stdio` transport. Server names must be unique, contain 1 to 128
-ASCII bytes using only letters, digits, `_`, or `-`, and cannot contain `__`.
+Each server has a `name` and tagged `transport`. A `stdio` entry contains
+`command`, `args`, and `env`; an `http` entry contains a URL and optional
+headers. URLs and header values can be literal, loaded from protected files,
+or selected by name from protected environment files. Public endpoints require
+HTTPS; plain HTTP is limited to literal private IP addresses. Server names must
+be unique, contain 1 to 128 ASCII bytes using only letters, digits, `_`, or `-`,
+and cannot contain `__`.
 Names are checked across both structured entries and the legacy server.
 
 The config file is limited to 64 KiB. A harness can have at most 16 MCP

@@ -170,6 +170,34 @@ pub struct OwnedAgent {
     pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
+    /// Whether the adapter advertises Streamable HTTP MCP support.
+    pub http_mcp_supported: bool,
+}
+
+pub(crate) fn supports_http_mcp(initialize_result: &serde_json::Value) -> bool {
+    initialize_result
+        .get("agentCapabilities")
+        .and_then(|capabilities| capabilities.get("mcpCapabilities"))
+        .and_then(|capabilities| capabilities.get("http"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn validate_mcp_transport_capabilities(
+    http_mcp_supported: bool,
+    runtime_name: &str,
+    servers: &[McpServer],
+) -> Result<(), AcpError> {
+    if http_mcp_supported {
+        return Ok(());
+    }
+    if let Some(server) = servers.iter().find(|server| server.is_http()) {
+        return Err(AcpError::Protocol(format!(
+            "MCP server '{}' requires HTTP MCP support, but runtime '{}' did not advertise agentCapabilities.mcpCapabilities.http",
+            server.name(), runtime_name
+        )));
+    }
+    Ok(())
 }
 
 /// Package name reported by `claude-agent-acp` in its `initialize` response.
@@ -894,6 +922,11 @@ async fn create_session_and_apply_model(
     channel_id: Option<Uuid>,
     channel_type: Option<&str>,
 ) -> Result<String, AcpError> {
+    validate_mcp_transport_capabilities(
+        agent.http_mcp_supported,
+        &agent.agent_name,
+        &ctx.mcp_servers,
+    )?;
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
@@ -1053,7 +1086,9 @@ pub(crate) fn mcp_servers_with_git_origin(
         (None, _) => None,
     };
     if let Some(origin) = origin {
-        if let Some(server) = git_origin_mcp_server_index.and_then(|index| servers.get_mut(index)) {
+        if let Some(McpServer::Stdio(server)) =
+            git_origin_mcp_server_index.and_then(|index| servers.get_mut(index))
+        {
             server.env.push(origin);
         }
     }
@@ -4036,12 +4071,12 @@ mod tests {
     use serde_json::json;
 
     fn test_mcp_server() -> McpServer {
-        McpServer {
+        McpServer::Stdio(crate::acp::McpServerStdio {
             name: "dev".into(),
             command: "buzz-dev-mcp".into(),
             args: vec![],
             env: vec![],
-        }
+        })
     }
 
     #[test]
@@ -4054,10 +4089,13 @@ mod tests {
             Some("stream"),
             None,
         );
-        assert!(servers[0].env.iter().any(|entry| {
+        let McpServer::Stdio(server) = &servers[0] else {
+            panic!("expected stdio")
+        };
+        assert!(server.env.iter().any(|entry| {
             entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID" && entry.value == channel_id.to_string()
         }));
-        assert!(!servers[0]
+        assert!(!server
             .env
             .iter()
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_AGENT_NAME"));
@@ -4072,13 +4110,51 @@ mod tests {
             Some("dm"),
             Some("Builder"),
         );
-        assert!(servers[0].env.iter().any(|entry| {
+        let McpServer::Stdio(server) = &servers[0] else {
+            panic!("expected stdio")
+        };
+        assert!(server.env.iter().any(|entry| {
             entry.name == "BUZZ_GIT_ORIGIN_AGENT_NAME" && entry.value == "Builder"
         }));
-        assert!(!servers[0]
+        assert!(!server
             .env
             .iter()
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID"));
+    }
+
+    #[test]
+    fn initialize_capability_allows_http_mcp() {
+        let init = json!({
+            "agentCapabilities": {"mcpCapabilities": {"http": true}}
+        });
+        let servers = vec![McpServer::Http(crate::acp::McpServerHttp {
+            transport: crate::acp::HttpTransport::Http,
+            name: "context".into(),
+            url: "https://mcp.example.test/mcp".into(),
+            headers: vec![],
+        })];
+
+        assert!(
+            validate_mcp_transport_capabilities(supports_http_mcp(&init), "codex", &servers)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn initialize_without_http_capability_rejects_remote_server() {
+        let init = json!({"agentCapabilities": {"mcpCapabilities": {}}});
+        let servers = vec![McpServer::Http(crate::acp::McpServerHttp {
+            transport: crate::acp::HttpTransport::Http,
+            name: "context".into(),
+            url: "https://mcp.example.test/mcp".into(),
+            headers: vec![],
+        })];
+
+        let error =
+            validate_mcp_transport_capabilities(supports_http_mcp(&init), "buzz-agent", &servers)
+                .expect_err("HTTP-incapable runtimes must fail before session/new");
+        assert!(error.to_string().contains("context"));
+        assert!(error.to_string().contains("HTTP MCP"));
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
@@ -6025,6 +6101,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            http_mcp_supported: false,
         };
 
         // Simulate dispatch: install a steer receiver (normally done by
@@ -6083,6 +6160,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            http_mcp_supported: false,
         };
 
         // Simulate a completed turn: `steer_rx` was consumed by the read loop
