@@ -135,6 +135,14 @@ EOF
 [[ ! -e "$fixture/port-occupied" ]] || printf 'LISTEN 0 128 127.0.0.1:3000 0.0.0.0:*\n'
 EOF
   chmod +x "$fixture/fake-bin/ss"
+  for launcher in env nohup; do
+    cat > "$fixture/fake-bin/$launcher" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$launcher' >> "$fixture/external-launch.calls"
+exit 97
+EOF
+    chmod +x "$fixture/fake-bin/$launcher"
+  done
   chmod +x "$fixture/scripts"/*.sh
 }
 
@@ -376,6 +384,9 @@ fi
 [[ ! -e "$fixture/state/relay.pid" && ! -e "$fixture/state/acp.pid" ]] \
   && pass "stop removes pilot-owned PID markers" \
   || fail "stop must remove pilot-owned PID markers"
+[[ ! -e "$fixture/external-launch.calls" ]] \
+  && pass "secret-bearing paths never invoke external env or nohup" \
+  || fail "external env/nohup must never receive pilot launch arguments"
 
 if [[ $failures -ne 0 ]]; then
   exit 1

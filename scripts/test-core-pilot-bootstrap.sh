@@ -80,6 +80,13 @@ cat > "$fixture/fake-bin/ss" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+for launcher in env nohup; do
+  cat > "$fixture/fake-bin/$launcher" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' '$launcher' >> "$fixture/external-launch.calls"
+exit 97
+EOF
+done
 chmod +x "$fixture/fake-bin"/* "$fixture/scripts"/*.sh
 
 run_bootstrap() {
@@ -128,6 +135,8 @@ while IFS= read -r call; do
      || "$call" == "inspect --format={{.State.Health.Status}} buzz-minio" ]] \
     || { printf 'FAIL: bootstrap used an unapproved Docker operation\n' >&2; exit 1; }
 done < "$fixture/docker.calls"
+[[ ! -e "$fixture/external-launch.calls" ]] \
+  || { printf 'FAIL: bootstrap invoked external env/nohup on a secret-bearing path\n' >&2; exit 1; }
 
 set +e
 PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/core-pilot-preflight.sh" \

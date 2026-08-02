@@ -87,15 +87,18 @@ for container in buzz-postgres buzz-redis buzz-minio; do
   [[ "$healthy" == true ]] || { pilot_die 'local infrastructure did not become healthy'; exit 1; }
 done
 
-admin_env=(
-  env -i
-  "PATH=$PILOT_BIN_DIR:/usr/bin:/bin"
-  DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:5432/buzz
-  REDIS_URL=redis://127.0.0.1:6379
-  RELAY_URL=ws://127.0.0.1:3000
-  "BUZZ_RELAY_PRIVATE_KEY=${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}"
-)
-"${admin_env[@]}" "$PILOT_BIN_DIR/buzz-admin" migrate >> "$PILOT_STATE_DIR/bootstrap.log" 2>&1
+run_admin() {
+  (
+    pilot_clear_environment
+    export PATH="$PILOT_BIN_DIR:/usr/bin:/bin"
+    export DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:5432/buzz
+    export REDIS_URL=redis://127.0.0.1:6379
+    export RELAY_URL=ws://127.0.0.1:3000
+    export BUZZ_RELAY_PRIVATE_KEY="${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}"
+    exec "$PILOT_BIN_DIR/buzz-admin" "$@"
+  )
+}
+run_admin migrate >> "$PILOT_STATE_DIR/bootstrap.log" 2>&1
 
 relay_marker="$PILOT_STATE_DIR/relay.pid"
 relay_bin="$PILOT_BIN_DIR/buzz-relay"
@@ -109,19 +112,22 @@ if ! relay_ready; then
     listeners="$(ss -H -ltn 'sport = :3000' 2>/dev/null)" || { pilot_die 'unable to inspect relay port'; exit 1; }
     [[ -z "$listeners" ]] || { pilot_die 'relay port is occupied by a non-pilot process'; exit 1; }
   fi
-  nohup env -i \
-    "PATH=$PILOT_BIN_DIR:/usr/bin:/bin" \
-    RUST_LOG=buzz_relay=info \
-    DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:5432/buzz \
-    REDIS_URL=redis://127.0.0.1:6379 \
-    RELAY_URL=ws://127.0.0.1:3000 \
-    BUZZ_BIND_ADDR=127.0.0.1:3000 \
-    BUZZ_REQUIRE_AUTH_TOKEN=false \
-    BUZZ_REQUIRE_RELAY_MEMBERSHIP=true \
-    "RELAY_OWNER_PUBKEY=${PILOT_ENV[CORE_BANKER_PUBLIC_KEY]}" \
-    "BUZZ_RELAY_PRIVATE_KEY=${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}" \
-    BUZZ_GIT_ENABLED=false \
-    "$relay_bin" > "$PILOT_STATE_DIR/relay.log" 2>&1 &
+  (
+    trap '' HUP
+    pilot_clear_environment
+    export PATH="$PILOT_BIN_DIR:/usr/bin:/bin"
+    export RUST_LOG=buzz_relay=info
+    export DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:5432/buzz
+    export REDIS_URL=redis://127.0.0.1:6379
+    export RELAY_URL=ws://127.0.0.1:3000
+    export BUZZ_BIND_ADDR=127.0.0.1:3000
+    export BUZZ_REQUIRE_AUTH_TOKEN=false
+    export BUZZ_REQUIRE_RELAY_MEMBERSHIP=true
+    export RELAY_OWNER_PUBKEY="${PILOT_ENV[CORE_BANKER_PUBLIC_KEY]}"
+    export BUZZ_RELAY_PRIVATE_KEY="${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}"
+    export BUZZ_GIT_ENABLED=false
+    exec "$relay_bin"
+  ) </dev/null > "$PILOT_STATE_DIR/relay.log" 2>&1 &
   relay_pid=$!
   marker_written=false
   for _ in $(seq 1 10); do
@@ -133,15 +139,20 @@ if ! relay_ready; then
   relay_ready || { pilot_stop_marker "$relay_marker" "$relay_bin"; pilot_die 'bootstrap relay did not become ready'; exit 1; }
 fi
 
-"${admin_env[@]}" "$PILOT_BIN_DIR/buzz-admin" add-member \
+run_admin add-member \
   --pubkey "${PILOT_ENV[CORE_AGENT_PUBLIC_KEY]}" --role member >> "$PILOT_STATE_DIR/bootstrap.log" 2>&1
-"${admin_env[@]}" "$PILOT_BIN_DIR/buzz-admin" add-member \
+run_admin add-member \
   --pubkey "${PILOT_ENV[CORE_NON_OWNER_PUBLIC_KEY]}" --role member >> "$PILOT_STATE_DIR/bootstrap.log" 2>&1
 
 buzz_as() {
   local private_key="$1"; shift
-  env -i "PATH=$PILOT_BIN_DIR:/usr/bin:/bin" BUZZ_RELAY_URL=http://127.0.0.1:3000 \
-    "BUZZ_PRIVATE_KEY=$private_key" "$PILOT_BIN_DIR/buzz" "$@"
+  (
+    pilot_clear_environment
+    export PATH="$PILOT_BIN_DIR:/usr/bin:/bin"
+    export BUZZ_RELAY_URL=http://127.0.0.1:3000
+    export BUZZ_PRIVATE_KEY="$private_key"
+    exec "$PILOT_BIN_DIR/buzz" "$@"
+  )
 }
 buzz_as "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" users set-profile --name 'Core Banker' >/dev/null
 buzz_as "${PILOT_ENV[CORE_AGENT_PRIVATE_KEY]}" users set-profile --name 'Core Research Partner' >/dev/null

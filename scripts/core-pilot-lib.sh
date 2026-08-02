@@ -247,6 +247,16 @@ pilot_prepare_state_dir() {
   chmod 700 "$PILOT_STATE_DIR" || { pilot_die 'unable to secure pilot state directory'; return 1; }
 }
 
+# Clear inherited exported variables using Bash builtins only. Call this inside
+# a subshell immediately before exporting the exact target environment and
+# directly execing the real binary. Secrets therefore never appear in argv.
+pilot_clear_environment() {
+  local variable
+  while IFS= read -r variable; do
+    unset "$variable" 2>/dev/null || true
+  done < <(compgen -e)
+}
+
 pilot_require_release_binaries() {
   PILOT_BIN_DIR="$PILOT_REPO_ROOT/target/release"
   local binary
@@ -258,11 +268,13 @@ pilot_require_release_binaries() {
 pilot_validate_nostr_key() {
   local private_key="$1" status
   set +e
-  env -i \
-    "PATH=$PILOT_BIN_DIR:/usr/bin:/bin" \
-    "BUZZ_PRIVATE_KEY=$private_key" \
-    BUZZ_RELAY_URL=ws://127.0.0.1:1 \
-    "$PILOT_BIN_DIR/buzz" --format compact users get >/dev/null 2>&1
+  (
+    pilot_clear_environment
+    export PATH="$PILOT_BIN_DIR:/usr/bin:/bin"
+    export BUZZ_PRIVATE_KEY="$private_key"
+    export BUZZ_RELAY_URL=ws://127.0.0.1:1
+    exec "$PILOT_BIN_DIR/buzz" --format compact users get
+  ) >/dev/null 2>&1
   status=$?
   set -e
   [[ $status -eq 2 ]] || { pilot_die 'agent Nostr private key is invalid'; return 1; }

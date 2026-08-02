@@ -79,30 +79,15 @@ tail -n 100 ~/.local/state/core-buzz/relay.log
 tail -n 100 ~/.local/state/core-buzz/acp.log
 ```
 
-Verify the relay from Windows PowerShell, then launch the already-installed,
-signed Buzz Desktop with the stable banker identity. Close Buzz first because
-an existing single-instance process will not inherit the Core environment:
+Verify and launch the already-installed signed Buzz Desktop from Windows
+PowerShell using the checked-in helper. It targets the installed
+`buzz-desktop.exe`, verifies both Desktop and CLI installation files, refuses
+an existing single-instance process, and confirms the new process remains
+running before it clears the banker environment and opens the Core Lab link:
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:3000/_readiness' | Out-Null
-if (Get-Process -Name Buzz -ErrorAction SilentlyContinue) {
-  throw 'Close the existing Buzz process, then run this block again.'
-}
-$banker = (& wsl.exe -d Ubuntu -- bash -lc `
-  'awk -F= ''$1=="CORE_BANKER_PRIVATE_KEY" {printf "%s",$2}'' "$HOME/.config/core-buzz/agent.env"').Trim()
-if ([string]::IsNullOrWhiteSpace($banker)) { throw 'Core banker identity is unavailable.' }
-try {
-  $env:BUZZ_PRIVATE_KEY = $banker
-  $env:BUZZ_SHARE_IDENTITY = '1'
-  $env:BUZZ_RELAY_URL = 'ws://127.0.0.1:3000'
-  Start-Process -FilePath "$env:LOCALAPPDATA\Buzz\Buzz.exe"
-} finally {
-  Remove-Item Env:\BUZZ_PRIVATE_KEY -ErrorAction SilentlyContinue
-  Remove-Item Env:\BUZZ_SHARE_IDENTITY -ErrorAction SilentlyContinue
-  Remove-Item Env:\BUZZ_RELAY_URL -ErrorAction SilentlyContinue
-  $banker = $null
-}
-Start-Process 'buzz://add-community?relay=ws%3A%2F%2F127.0.0.1%3A3000&name=Core%20Lab'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "\\wsl.localhost\Ubuntu\home\blake\src\buzz-core-core-pilot\scripts\core-pilot-desktop.ps1"
 ```
 
 In the Desktop add-community screen, confirm the prefilled relay and the name
