@@ -5,9 +5,11 @@
 //! distinguishes them from digests for exactly this reason — so a tag-only
 //! reference is rejected, not just `:latest`.
 //!
-//! v1 ships no baked default (there is no published `ghcr.io/block/buzz-sprig`
-//! image yet, so a compile-time digest would be a placeholder). `image` is
-//! therefore required, and its absence fails closed with a named field.
+//! There is no parse-time fallback: `image` is required, and its absence
+//! fails closed with a named field. The published `ghcr.io/block/buzz-sprig`
+//! digest is offered only as a schema `default` (a UI prefill the desktop
+//! submits explicitly — see `config::DEFAULT_IMAGE`), so the create-intent
+//! fingerprint never depends on compiled-in provider state.
 
 /// A validated, digest-qualified image reference.
 ///
@@ -35,9 +37,9 @@ impl std::fmt::Display for ImageRef {
 pub fn parse(raw: &str) -> Result<ImageRef, String> {
     let reference = raw.trim();
     if reference.is_empty() {
-        return Err("provider_config.image is required: v1 ships no default \
-                    image, so the digest-pinned image to run must be given \
-                    explicitly"
+        return Err("provider_config.image is required: no image is assumed \
+                    at parse time, so the digest-pinned image to run must be \
+                    given explicitly"
             .to_string());
     }
 
@@ -169,7 +171,8 @@ mod tests {
         }
     }
 
-    /// v1 has no baked default, so an absent image is an error that names the
+    /// Parsing has no fallback (the schema default is a UI prefill, not a
+    /// parse-time substitute), so an absent image is an error that names the
     /// field rather than a silent fallback.
     #[test]
     fn empty_reference_names_the_field() {

@@ -114,6 +114,14 @@ fn info_response_carries_the_contract_fields() {
         default.starts_with("buzz-agents-"),
         "unexpected namespace default: {default}"
     );
+    let image_default = schema["properties"]["image"]["default"]
+        .as_str()
+        .expect("no image default");
+    assert!(
+        image_default.starts_with("ghcr.io/block/buzz-sprig:")
+            && image_default.contains("@sha256:"),
+        "unexpected image default: {image_default}"
+    );
 }
 
 /// The desktop's richest payload must parse. No response fixture: this one
