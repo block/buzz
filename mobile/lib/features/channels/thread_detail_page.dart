@@ -117,20 +117,20 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
     int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
+    int? indexForMessageId(String messageId) {
+      if (messageId == threadHead.id) return headIndex;
+      final chronologicalIndex = replies.indexWhere(
+        (reply) => reply.id == messageId,
+      );
+      return chronologicalIndex < 0 ? null : indexForReply(chronologicalIndex);
+    }
 
     useEffect(() {
       final messageId = initialMessageId;
       // Wait for the authoritative thread query before consuming the one-shot
       // jump; the fallback main-timeline list can contain only the linked reply.
       if (messageId == null || fetchedReplies == null) return null;
-      final chronologicalIndex = replies.indexWhere(
-        (reply) => reply.id == messageId,
-      );
-      final targetIndex = messageId == threadHead.id
-          ? headIndex
-          : chronologicalIndex < 0
-          ? null
-          : indexForReply(chronologicalIndex);
+      final targetIndex = indexForMessageId(messageId);
       if (targetIndex == null || didJumpToInitialMessage.value) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
@@ -139,6 +139,45 @@ class ThreadDetailPage extends HookConsumerWidget {
       });
       return null;
     }, [initialMessageId, fetchedReplies, replies.length]);
+
+    // Desktop parity: the thread panel opens pinned to the newest reply
+    // (useAnchoredScroll's pinToBottomOnMount). A resolvable deep-link target
+    // wins; an unresolvable one falls back to the pin, matching desktop's
+    // missed-target behavior. One-shot and independent of the hydration
+    // baseline below, which a cache-hydrated reopen pre-satisfies on first
+    // build. When head and newest reply already fit the viewport, the pin is
+    // a no-op so short threads keep the head at the top.
+    final hasHydratedReplies = fetchedReplies != null;
+    final didPinInitialReplies = useRef(false);
+    useEffect(() {
+      if (!hasHydratedReplies || didPinInitialReplies.value) return null;
+      didPinInitialReplies.value = true;
+      final messageId = initialMessageId;
+      final hasResolvableTarget =
+          messageId != null && indexForMessageId(messageId) != null;
+      if (hasResolvableTarget || replies.isEmpty) return null;
+      final lastIndex = indexForReply(replies.length - 1);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        final positions = itemPositionsListener.itemPositions.value;
+        final fitsViewport =
+            positions.any(
+              (position) =>
+                  position.index == headIndex && position.itemLeadingEdge >= 0,
+            ) &&
+            positions.any(
+              (position) =>
+                  position.index == lastIndex && position.itemTrailingEdge <= 1,
+            );
+        if (fitsViewport) return;
+        itemScrollController.scrollTo(
+          index: lastIndex,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+      });
+      return null;
+    }, [hasHydratedReplies, replies.length, initialMessageId]);
 
     // A top-anchored list doesn't stick to the newest item the way the old
     // reversed one did, so follow the tail explicitly: when a reply arrives
@@ -250,9 +289,11 @@ class ThreadDetailPage extends HookConsumerWidget {
                 itemScrollController: itemScrollController,
                 itemPositionsListener: itemPositionsListener,
                 // Top-anchored, head first, replies flowing down — matching
-                // desktop's thread panel. The old reversed list bottom-anchored
-                // the content, which jammed the head against the composer
-                // whenever a thread had only a handful of replies.
+                // desktop's thread panel, which pairs this layout with a
+                // bottom-pin on open (see the initial-pin effect above). The
+                // old reversed list bottom-anchored the content, which jammed
+                // the head against the composer whenever a thread had only a
+                // handful of replies.
                 padding: EdgeInsets.only(
                   left: Grid.gutter,
                   right: Grid.gutter,
