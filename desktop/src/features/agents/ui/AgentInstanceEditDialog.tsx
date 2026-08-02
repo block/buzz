@@ -974,7 +974,7 @@ export function AgentInstanceEditDialog({
               </div>
             </div>
 
-            {/* Who can talk to this agent */}
+            {/* Who can send instructions */}
             <CreateAgentRespondToField
               allowlist={respondToAllowlist}
               disabled={updateMutation.isPending}

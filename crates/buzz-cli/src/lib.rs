@@ -82,11 +82,11 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
-    #[arg(long, env = "BUZZ_AUTH_TAG")]
+    #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
@@ -369,6 +369,9 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
+        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -808,6 +811,9 @@ pub enum UsersCmd {
         /// Search by display name (case-insensitive substring match)
         #[arg(long = "name")]
         name: Option<String>,
+        /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)
+        #[arg(long = "owner", requires = "name")]
+        owner: Option<String>,
     },
     /// Update the current identity's profile
     #[command(name = "set-profile")]
@@ -1126,6 +1132,11 @@ pub enum ReposCmd {
         /// Preferred Nostr relay(s) for repo discovery — can be specified multiple times
         #[arg(long = "nostr-relay")]
         relays: Vec<String>,
+        /// Channel UUID to bind the repo to. The `buzz-channel` tag is the
+        /// git ACL: without it the relay 404s every clone/fetch/push until
+        /// the author runs `buzz repos bind` (issue #3527).
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1144,6 +1155,20 @@ pub enum ReposCmd {
         /// Maximum number of results
         #[arg(long)]
         limit: Option<u32>,
+    },
+    /// Bind (or rebind) one of your repositories to a channel.
+    ///
+    /// The `buzz-channel` tag on the announcement is the git ACL: the relay
+    /// authorizes clone/fetch/push by membership in the bound channel. A
+    /// repo announced without it (e.g. by a vanilla NIP-34 client) returns
+    /// 404 for everyone until its author binds it here.
+    Bind {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Channel UUID to bind. Replaces any existing binding.
+        #[arg(long)]
+        channel: String,
     },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
@@ -1743,6 +1768,41 @@ pub enum ModerationCmd {
     },
 }
 
+/// Normalize hand-authored `BUZZ_AUTH_TAG` input to strict JSON.
+///
+/// `.env` files and shell exports sometimes carry the tag in the unquoted
+/// shorthand `[auth,<hex>,<conditions>,<hex>]` (quotes dropped by hand).
+/// When the input is not valid JSON but is bracket-delimited, rewrite it as
+/// a JSON array of the comma-separated fields (an empty field `,,` becomes
+/// `""`, matching the canonical form `["auth","hex","","hex"]`).
+///
+/// This is presentation-layer leniency at the configuration edge only: the
+/// output is always fed through the SDK's strict `parse_auth_tag` /
+/// `verify_auth_tag`, which enforce structure, hex, the conditions grammar,
+/// and the BIP-340 signature. Inputs that are already valid JSON — or not
+/// recognizable as the shorthand — are returned unchanged so the strict
+/// parser reports the error on the original bytes.
+fn normalize_auth_tag_input(input: &str) -> String {
+    let trimmed = input.trim();
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_owned();
+    }
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let fields: Vec<&str> = trimmed[1..trimmed.len() - 1]
+            .split(',')
+            .map(str::trim)
+            .collect();
+        // Only a plausible 4-field auth tag is rewritten; anything else is
+        // passed through untouched for the strict parser to reject with an
+        // error that references the caller's original input.
+        if fields.len() == 4 && !fields.iter().any(|f| f.contains('"')) {
+            // serde_json cannot fail serializing a Vec<&str>.
+            return serde_json::to_string(&fields).expect("string array serializes");
+        }
+    }
+    trimmed.to_owned()
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -1763,17 +1823,28 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
 
     // NIP-OA: parse and verify the auth tag if provided.
+    //
+    // `BUZZ_AUTH_TAG` is hand-authored configuration, so the unquoted raw
+    // shorthand `[auth,hex,,hex]` is normalized to JSON here — at this input
+    // edge only. The SDK grammar and the `x-auth-tag` wire format stay strict
+    // JSON; all validation and signature verification happen on the strict
+    // path below, unchanged.
     let (auth_tag, auth_tag_json) = match cli.auth_tag {
-        Some(ref json) if !json.is_empty() => {
-            let tag = buzz_sdk::nip_oa::parse_auth_tag(json)
+        Some(ref input) if !input.is_empty() => {
+            let json = normalize_auth_tag_input(input);
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
                 .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-            buzz_sdk::nip_oa::verify_auth_tag(json, &keys.public_key()).map_err(|e| {
+            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
                 CliError::Auth(format!(
                     "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
                     keys.public_key().to_hex()
                 ))
             })?;
-            (Some(tag), Some(json.clone()))
+            // Canonical wire form derives from the parsed-and-verified tag
+            // (same shape as buzz-acp's RestClient), never from raw input.
+            let canonical = serde_json::to_string(tag.as_slice())
+                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {e}")))?;
+            (Some(tag), Some(canonical))
         }
         _ => (None, None),
     };
@@ -1809,6 +1880,51 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// Raw shorthand `[auth,hex,,hex]` normalizes to strict JSON; the empty
+    /// conditions field becomes `""`.
+    #[test]
+    fn normalize_auth_tag_raw_shorthand() {
+        let owner = "a".repeat(64);
+        let sig = "b".repeat(128);
+
+        let raw = format!("[auth,{owner},,{sig}]");
+        let json = normalize_auth_tag_input(&raw);
+        let parsed: Vec<String> = serde_json::from_str(&json).expect("output must be JSON");
+        assert_eq!(parsed, vec!["auth", &owner, "", &sig]);
+
+        // With conditions and surrounding whitespace (shell/.env artifacts).
+        let raw = format!("  [auth, {owner} , kind=9, {sig}]  \n");
+        let json = normalize_auth_tag_input(&raw);
+        let parsed: Vec<String> = serde_json::from_str(&json).expect("output must be JSON");
+        assert_eq!(parsed, vec!["auth", &owner, "kind=9", &sig]);
+    }
+
+    /// Valid JSON input passes through byte-identical (modulo outer trim) —
+    /// the normalizer must never rewrite well-formed input.
+    #[test]
+    fn normalize_auth_tag_json_passthrough() {
+        let owner = "a".repeat(64);
+        let sig = "b".repeat(128);
+        let json_in = serde_json::json!(["auth", owner, "kind=9", sig]).to_string();
+        assert_eq!(normalize_auth_tag_input(&json_in), json_in);
+    }
+
+    /// Inputs that are neither JSON nor a plausible 4-field shorthand pass
+    /// through unchanged, so the strict parser rejects the original bytes.
+    #[test]
+    fn normalize_auth_tag_leaves_garbage_untouched() {
+        for garbage in [
+            "not a tag",
+            "[auth,too,few]",
+            "[a,b,c,d,e]",
+            r#"[auth,"quoted",x,y]"#, // quote chars => not the shorthand
+            "[]",
+            "{\"auth\":1}",
+        ] {
+            assert_eq!(normalize_auth_tag_input(garbage), garbage.trim());
+        }
+    }
 
     /// Smoke test: CLI definition is valid and parseable.
     #[test]
@@ -1988,7 +2104,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["create", "get", "list", "protect"]
+            vec!["bind", "create", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2051,7 +2167,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 4),
+            ("repos", 5),
             ("social", 7),
             ("upload", 1),
             ("users", 5),
@@ -2074,5 +2190,47 @@ mod tests {
                 group_name, expected_count, actual_count
             );
         }
+    }
+
+    /// Collect all args (recursing into subcommands) whose env var name looks
+    /// like a credential but does NOT have `hide_env_values` set.
+    fn collect_unhidden_secret_args(cmd: &clap::Command) -> Vec<(String, String)> {
+        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+
+        let mut violations: Vec<(String, String)> = Vec::new();
+
+        for arg in cmd.get_arguments() {
+            if let Some(env_key) = arg.get_env() {
+                let env_name = env_key.to_string_lossy().to_uppercase();
+                let is_secret = SECRET_PATTERNS.iter().any(|pat| env_name.contains(pat));
+                if is_secret && !arg.is_hide_env_values_set() {
+                    violations.push((cmd.get_name().to_string(), env_name));
+                }
+            }
+        }
+
+        for sub in cmd.get_subcommands() {
+            violations.extend(collect_unhidden_secret_args(sub));
+        }
+
+        violations
+    }
+
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// must set `hide_env_values = true` to prevent credential leakage in --help.
+    #[test]
+    fn secret_env_args_hide_their_values_in_help() {
+        let cmd = Cli::command();
+        let violations = collect_unhidden_secret_args(&cmd);
+        assert!(
+            violations.is_empty(),
+            "Found secret-bearing env args without hide_env_values=true. \
+             Add `hide_env_values = true` to each:\n{}",
+            violations
+                .iter()
+                .map(|(cmd, env)| format!("  command={cmd:?} env={env:?}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

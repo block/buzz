@@ -481,6 +481,13 @@
   color: var(--buzz-muted-foreground);
 }
 
+/* Match the hover treatment used by inactive channel rows. */
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="sidebar-profile-card"]:hover {
+  background-color: var(--buzz-hover-surface);
+}
+
 /*
  * App and settings sidebar section headings plus secondary footer text use the
  * same tint. Navigation rows keep their normal foreground in both sidebars.

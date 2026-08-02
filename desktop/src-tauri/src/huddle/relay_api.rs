@@ -164,7 +164,8 @@ pub(crate) async fn connect_audio_relay(
     let cancel_clone = cancel.clone();
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(50);
     let output_device_name = state
-        .audio_output_device
+        .huddle_audio
+        .output_device
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();

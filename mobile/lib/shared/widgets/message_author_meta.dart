@@ -83,7 +83,7 @@ class MessageAuthorMeta extends StatelessWidget {
         return Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Expanded(child: authorName),
+            Flexible(child: authorName),
             if (showUsername) ...[
               const SizedBox(width: Grid.half),
               ConstrainedBox(

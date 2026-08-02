@@ -3,6 +3,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -93,10 +95,12 @@ class SearchPage extends HookConsumerWidget {
     }
 
     return FrostedScaffold(
+      backgroundColor: Colors.transparent,
       // Keep the empty state centered in the page rather than the portion left
       // above the keyboard.
       resizeToAvoidBottomInset: false,
       appBar: FrostedAppBar(
+        automaticallyImplyLeading: false,
         gradient: context.appColors.topSectionGradient,
         title: const Text('Search'),
         titleStyle: headerTitleStyle,
@@ -344,7 +348,10 @@ class _SearchBody extends ConsumerWidget {
     return ListView(
       key: const Key('search-results-list'),
       padding: EdgeInsets.only(
-        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+        bottom:
+            Grid.xl +
+            MediaQuery.paddingOf(context).bottom +
+            MediaQuery.viewInsetsOf(context).bottom,
       ),
       children: [
         if (showChannels && state.channelResults.isNotEmpty)
@@ -394,7 +401,10 @@ class _RecentSearches extends StatelessWidget {
     return ListView(
       key: const Key('recent-searches-list'),
       padding: EdgeInsets.only(
-        bottom: Grid.xl + MediaQuery.viewInsetsOf(context).bottom,
+        bottom:
+            Grid.xl +
+            MediaQuery.paddingOf(context).bottom +
+            MediaQuery.viewInsetsOf(context).bottom,
       ),
       children: [
         Padding(
@@ -589,7 +599,7 @@ class _PeopleSection extends ConsumerWidget {
   }
 }
 
-class _MessagesSection extends ConsumerWidget {
+class _MessagesSection extends HookConsumerWidget {
   final List<SearchHit> hits;
   final String? currentPubkey;
   final VoidCallback onResultSelected;
@@ -606,8 +616,15 @@ class _MessagesSection extends ConsumerWidget {
     final channels = ref.watch(channelsProvider).value ?? [];
 
     // Preload author profiles.
-    final pubkeys = hits.map((h) => h.pubkey.toLowerCase()).toSet().toList();
-    ref.read(userCacheProvider.notifier).preload(pubkeys);
+    final preloadPubkeys = {
+      for (final hit in hits) hit.pubkey.toLowerCase(),
+      for (final hit in hits) ...mentionedPubkeysFromTags(hit.tags),
+    }.toList()..sort();
+    final preloadPubkeysKey = preloadPubkeys.join('\u0000');
+    useEffect(() {
+      ref.read(userCacheProvider.notifier).preload(preloadPubkeys);
+      return null;
+    }, [preloadPubkeysKey]);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -627,7 +644,7 @@ class _MessagesSection extends ConsumerWidget {
   }
 }
 
-class _MessageTile extends StatelessWidget {
+class _MessageTile extends ConsumerWidget {
   final SearchHit hit;
   final UserProfile? authorProfile;
   final Map<String, UserProfile> userCache;
@@ -645,12 +662,34 @@ class _MessageTile extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final authorName = authorProfile?.label ?? shortPubkey(hit.pubkey);
     final timeAgo = relativeTime(hit.createdAt);
     final channelName = hit.channelName?.trim().replaceFirst(RegExp(r'^#'), '');
     final hasChannelName = channelName != null && channelName.isNotEmpty;
     final isDm = channel?.isDm ?? false;
+    final profileMentionNames = {
+      for (final pubkey in mentionedPubkeysFromTags(hit.tags))
+        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
+          pubkey: userCache[pubkey]!.displayName!.trim(),
+    };
+    final mentionPubkeys = mentionedPubkeysFromTags(hit.tags);
+    final knownAgentPubkeys = channel == null
+        ? ref.watch(knownAgentPubkeysProvider)
+        : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: knownAgentPubkeys,
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: mentionPubkeys,
+      profileMentionNames: profileMentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     return ListTile(
       key: ValueKey('search-message-row-${hit.eventId}'),
@@ -722,6 +761,8 @@ class _MessageTile extends StatelessWidget {
           MessageContent(
             key: ValueKey('search-message-body-${hit.eventId}'),
             content: hit.content,
+            mentionNames: mentionNames,
+            agentMentionPubkeys: agentMentionPubkeys,
             tags: hit.tags,
             maxLines: 2,
             baseStyle: activityPreviewTextStyle.copyWith(

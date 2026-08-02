@@ -17,6 +17,7 @@ const RUNTIME_LOGOS: Record<string, string> = {
 // Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
 // Keys match the preset `id` values emitted by the backend PRESET_HARNESSES.
 export const PRESET_LOGOS: Record<string, string> = {
+  devin: "/harness-logos/devin.svg",
   omp: "/harness-logos/omp.svg",
   grok: "/harness-logos/grok.svg",
   opencode: "/harness-logos/opencode.svg",
