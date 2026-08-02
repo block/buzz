@@ -17,8 +17,8 @@ use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
-/// The current wire version for execution-node commands and receipts.
-pub const EXECUTION_PROTOCOL_VERSION: u16 = 2;
+/// The current wire version for execution-node commands, announcements, and receipts.
+pub const EXECUTION_PROTOCOL_VERSION: u16 = 3;
 
 /// The maximum lifetime of a command envelope.
 pub const MAX_COMMAND_TTL: Duration = Duration::minutes(15);

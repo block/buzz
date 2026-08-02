@@ -145,9 +145,18 @@ export async function buildInstanceInputForDefinition(
   }
 
   if (backendIntent?.type === "execution-node") {
-    throw new Error(
-      "Execution-node deployments must be published through the execution command flow.",
-    );
+    return {
+      ...base,
+      systemPrompt: persona.systemPrompt,
+      model: persona.model ?? undefined,
+      provider: persona.provider ?? undefined,
+      spawnAfterCreate: false,
+      startOnAppLaunch: false,
+      backend: {
+        type: "execution_node",
+        nodeId: backendIntent.nodeId,
+      },
+    };
   }
 
   return {

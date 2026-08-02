@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration as StdDuration;
 
 use buzz_core_pkg::execution::{
-    CredentialRef, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
+    AgentWorkloadContext, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
     ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt,
     ProviderAuthResponse, ProviderAuthSession, WorkloadSpec, WorkloadStatus,
 };
@@ -14,13 +14,15 @@ use buzz_core_pkg::kind::{
 use chrono::{Duration, Utc};
 use nostr::{nips::nip44, EventBuilder, Kind, PublicKey, Tag};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
+    managed_agents::{load_managed_agents, save_managed_agents, BackendKind},
     relay::{query_relay, relay_ws_url_with_override, SubmitEventResponse},
 };
+use buzz_core_pkg::tenant::relay_url_authority;
 
 const RECEIPT_POLL_INTERVAL: StdDuration = StdDuration::from_millis(250);
 const RECEIPT_POLL_TIMEOUT: StdDuration = StdDuration::from_secs(10);
@@ -57,23 +59,18 @@ pub struct ExecutionNodeTarget {
     pub workloads: Vec<WorkloadStatus>,
 }
 
-/// Safe workload input for the first remote execution deployment flow.
+/// Input for deploying an existing managed-agent identity to an execution node.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeployExecutionWorkloadInput {
-    /// Target node public key.
+pub struct DeployManagedAgentToExecutionNodeInput {
+    /// Managed-agent public identity whose configuration is the source of truth.
+    pub pubkey: String,
+    /// Target paired execution node.
     pub node_id: String,
-    /// User-visible workload name.
-    pub display_name: String,
-    /// Runtime-neutral runtime identifier.
+    /// Runtime identifier selected for this deployment.
     pub runtime: String,
-    /// Optional model identifier.
-    pub model: Option<String>,
-    /// Optional provider identifier.
-    pub provider: Option<String>,
-    /// Node-local credential references only.
-    #[serde(default)]
-    pub credential_refs: Vec<CredentialRef>,
+    /// Channel selected by the create flow, when one exists.
+    pub channel_id: Option<String>,
 }
 
 /// Result of publishing a deploy command and, when online, receiving its receipt.
@@ -155,6 +152,12 @@ enum WorkloadLifecycleOperation {
 pub async fn list_execution_nodes(
     state: State<'_, AppState>,
 ) -> Result<Vec<ExecutionNodeTarget>, String> {
+    let owner_keys = state.signing_keys()?;
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let relay_authority = relay_url_authority(&relay_ws_url_with_override(&state));
+    if relay_authority.is_empty() {
+        return Err("the configured relay URL has no valid authority".into());
+    }
     let events = query_relay(
         &state,
         &[serde_json::json!({
@@ -176,6 +179,9 @@ pub async fn list_execution_nodes(
         let Ok(status) = serde_json::from_str::<ExecutionNodeStatus>(&event.content) else {
             continue;
         };
+        if status.validate().is_err() {
+            continue;
+        }
         let Ok(author_node_id) =
             buzz_core_pkg::execution::ExecutionNodeId::new(event.pubkey.to_hex())
         else {
@@ -184,6 +190,13 @@ pub async fn list_execution_nodes(
         if status.node_id != author_node_id
             || !announcement_d_tag_matches(&event, status.node_id.as_str())
         {
+            continue;
+        }
+        if !status.owner_attestations.iter().any(|attestation| {
+            attestation
+                .verify(&status.node_id, &relay_authority, Some(&owner_pubkey))
+                .is_ok()
+        }) {
             continue;
         }
         let availability = if status.lifecycle != ExecutionNodeLifecycle::Ready {
@@ -217,27 +230,87 @@ pub async fn list_execution_nodes(
     Ok(nodes)
 }
 
-/// Encrypt and publish one owner-authorized deploy command to a paired node.
+/// Deploy an already-created managed-agent identity to a paired execution node.
 ///
-/// The command contains only the safe shared workload projection. The node's
-/// credentials and runtime implementation remain outside the event payload.
+/// The workload projection is reconstructed from the durable managed-agent
+/// record, so remote execution uses the same identity, prompt, relay/auth
+/// configuration, audience policy, and channel context as the Desktop agent.
 #[tauri::command]
-pub async fn deploy_execution_workload(
-    input: DeployExecutionWorkloadInput,
+pub async fn deploy_managed_agent_to_execution_node(
+    input: DeployManagedAgentToExecutionNodeInput,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DeployExecutionWorkloadResponse, String> {
     let node_id = ExecutionNodeId::new(input.node_id.trim().to_string())
         .map_err(|error| format!("invalid execution node id: {error}"))?;
-    let workload = WorkloadSpec::agent(
-        buzz_core_pkg::execution::WorkloadId::random(),
-        input.display_name,
-        input.runtime,
-        input.model,
-        input.provider,
-        input.credential_refs,
+    let workload = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == input.pubkey)
+            .ok_or_else(|| format!("managed agent {} not found", input.pubkey))?;
+        match &record.backend {
+            BackendKind::ExecutionNode {
+                node_id: bound_node_id,
+            } if bound_node_id == node_id.as_str() => {}
+            BackendKind::ExecutionNode { .. } => {
+                return Err("managed agent is bound to a different execution node".into())
+            }
+            _ => return Err("managed agent is not configured for an execution node".into()),
+        }
+        let relay_url = crate::relay::effective_agent_relay_url(
+            &record.relay_url,
+            &relay_ws_url_with_override(&state),
+        );
+        let mut workload = WorkloadSpec::agent(
+            buzz_core_pkg::execution::WorkloadId::random(),
+            record.name.clone(),
+            input.runtime,
+            record.model.clone(),
+            record.provider.clone(),
+            Vec::new(),
+        )
+        .map_err(|error| format!("invalid managed-agent workload: {error}"))?;
+        workload.agent = Some(
+            AgentWorkloadContext::new(
+                record.pubkey.clone(),
+                record.system_prompt.clone(),
+                Some(relay_url),
+                record.auth_tag.clone(),
+                Some(record.respond_to.as_str().to_string()),
+                record.respond_to_allowlist.clone(),
+                input.channel_id.clone(),
+            )
+            .map_err(|error| format!("invalid managed-agent context: {error}"))?,
+        );
+        workload
+            .validate()
+            .map_err(|error| format!("invalid managed-agent workload: {error}"))?;
+        workload
+    };
+    let response = send_execution_command(
+        &state,
+        node_id.clone(),
+        ExecutionCommand::Deploy { workload },
     )
-    .map_err(|error| format!("invalid execution workload: {error}"))?;
-    send_execution_command(&state, node_id, ExecutionCommand::Deploy { workload }).await
+    .await?;
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(&app)?;
+    let record = records
+        .iter_mut()
+        .find(|record| record.pubkey == input.pubkey)
+        .ok_or_else(|| format!("managed agent {} disappeared", input.pubkey))?;
+    record.backend_agent_id = Some(response.workload_id.as_str().to_string());
+    save_managed_agents(&app, &records)?;
+    Ok(response)
 }
 
 /// Start a durable workload through the encrypted execution command path.
@@ -274,6 +347,79 @@ pub async fn remove_execution_workload(
     state: State<'_, AppState>,
 ) -> Result<DeployExecutionWorkloadResponse, String> {
     send_lifecycle_command(&state, input, WorkloadLifecycleOperation::Remove).await
+}
+
+/// Remove a managed-agent workload and require a confirmed node-side result.
+pub(crate) async fn remove_execution_workload_for_managed_agent(
+    state: &State<'_, AppState>,
+    node_id: &str,
+    workload_id: &str,
+) -> Result<(), String> {
+    let response = send_lifecycle_command(
+        state,
+        ExecutionWorkloadCommandInput {
+            node_id: node_id.to_string(),
+            workload_id: buzz_core_pkg::execution::WorkloadId::new(workload_id.to_string())
+                .map_err(|error| format!("invalid managed-agent workload id: {error}"))?,
+        },
+        WorkloadLifecycleOperation::Remove,
+    )
+    .await?;
+    match response.receipt {
+        Some(receipt)
+            if matches!(
+                receipt.outcome,
+                buzz_core_pkg::execution::ReceiptOutcome::Succeeded
+            ) =>
+        {
+            Ok(())
+        }
+        Some(receipt) => Err(format!(
+            "execution node did not remove workload: {:?}",
+            receipt.outcome
+        )),
+        None => Err("execution node did not confirm workload removal".into()),
+    }
+}
+
+pub(crate) async fn start_execution_workload_for_managed_agent(
+    state: &State<'_, AppState>,
+    node_id: &str,
+    workload_id: &str,
+) -> Result<(), String> {
+    let response = send_lifecycle_command(
+        state,
+        ExecutionWorkloadCommandInput {
+            node_id: node_id.to_string(),
+            workload_id: buzz_core_pkg::execution::WorkloadId::new(workload_id.to_string())
+                .map_err(|error| format!("invalid managed-agent workload id: {error}"))?,
+        },
+        WorkloadLifecycleOperation::Start,
+    )
+    .await?;
+    ensure_lifecycle_command_accepted(response)
+}
+
+fn ensure_lifecycle_command_accepted(
+    response: DeployExecutionWorkloadResponse,
+) -> Result<(), String> {
+    match response.receipt {
+        Some(receipt)
+            if matches!(
+                receipt.outcome,
+                buzz_core_pkg::execution::ReceiptOutcome::Accepted
+                    | buzz_core_pkg::execution::ReceiptOutcome::Progress
+                    | buzz_core_pkg::execution::ReceiptOutcome::Succeeded
+            ) =>
+        {
+            Ok(())
+        }
+        Some(receipt) => Err(format!(
+            "execution node rejected workload lifecycle command: {:?}",
+            receipt.outcome
+        )),
+        None => Err("execution node did not confirm workload lifecycle command".into()),
+    }
 }
 
 /// Start a provider-authentication session on a paired execution node.
@@ -365,6 +511,7 @@ async fn send_execution_command(
     node_id: ExecutionNodeId,
     command: ExecutionCommand,
 ) -> Result<DeployExecutionWorkloadResponse, String> {
+    ensure_trusted_execution_node(state, &node_id).await?;
     let issued_at = Utc::now();
     let envelope = ExecutionCommandEnvelope::new(
         node_id.clone(),
@@ -437,6 +584,54 @@ async fn send_execution_command(
         publication,
         receipt,
     })
+}
+
+async fn ensure_trusted_execution_node(
+    state: &State<'_, AppState>,
+    expected_node_id: &ExecutionNodeId,
+) -> Result<(), String> {
+    let owner_keys = state.signing_keys()?;
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let relay_authority = relay_url_authority(&relay_ws_url_with_override(state));
+    if relay_authority.is_empty() {
+        return Err("the configured relay URL has no valid authority".into());
+    }
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [KIND_EXECUTION_NODE_ANNOUNCEMENT],
+            "limit": 200,
+        })],
+    )
+    .await?;
+    let trusted = events.into_iter().any(|event| {
+        if event.kind.as_u16() as u32 != KIND_EXECUTION_NODE_ANNOUNCEMENT
+            || !event.verify_id()
+            || !event.verify_signature()
+        {
+            return false;
+        }
+        let Ok(status) = serde_json::from_str::<ExecutionNodeStatus>(&event.content) else {
+            return false;
+        };
+        let Ok(author_node_id) = ExecutionNodeId::new(event.pubkey.to_hex()) else {
+            return false;
+        };
+        status.validate().is_ok()
+            && status.node_id == *expected_node_id
+            && status.node_id == author_node_id
+            && announcement_d_tag_matches(&event, status.node_id.as_str())
+            && status.owner_attestations.iter().any(|attestation| {
+                attestation
+                    .verify(&status.node_id, &relay_authority, Some(&owner_pubkey))
+                    .is_ok()
+            })
+    });
+    if trusted {
+        Ok(())
+    } else {
+        Err("execution node is not paired with this workspace owner and relay".into())
+    }
 }
 
 async fn wait_for_execution_receipt(
@@ -548,7 +743,7 @@ mod tests {
     fn target_projection_uses_shared_status_types() {
         let _status = ExecutionNodeStatus::new(
             ExecutionNodeId::new("a".repeat(64)).expect("node id"),
-            "Onkie server",
+            "Example execution node",
             ExecutionNodeLifecycle::Ready,
             [ExecutionCapability::Deploy],
         )

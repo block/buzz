@@ -789,7 +789,7 @@ pub fn run() {
             resolve_oa_owner,
             list_relay_agents,
             list_execution_nodes,
-            deploy_execution_workload,
+            deploy_managed_agent_to_execution_node,
             start_execution_workload,
             stop_execution_workload,
             restart_execution_workload,

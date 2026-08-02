@@ -1,5 +1,6 @@
 use tauri::AppHandle;
 
+use crate::commands::execution_nodes::remove_execution_workload_for_managed_agent;
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -72,8 +73,8 @@ fn collect_cascade_pubkeys(agents: &[ManagedAgentRecord], persona_id: &str) -> V
         .collect()
 }
 
-/// Names of cascade agents that are provider-deployed: non-local backend with
-/// a live `backend_agent_id`.
+/// Names of cascade agents that are provider-deployed and cannot be removed
+/// by this command's execution-node cleanup phase.
 ///
 /// Pure helper used by `delete_persona`'s pre-flight: the cascade is refused
 /// while any exist, because deleting the local record would orphan the remote
@@ -86,7 +87,10 @@ fn collect_remote_deployed(
         .iter()
         .filter(|a| {
             cascade.contains(&a.pubkey)
-                && a.backend != crate::managed_agents::BackendKind::Local
+                && matches!(
+                    &a.backend,
+                    crate::managed_agents::BackendKind::Provider { .. }
+                )
                 && a.backend_agent_id.is_some()
         })
         .map(|a| a.name.clone())
@@ -112,6 +116,27 @@ fn commit_cascade_agents(
 #[tauri::command]
 pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
+    let state = app.state::<crate::app_state::AppState>();
+    let execution_targets = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        load_managed_agents(&app)?
+            .iter()
+            .filter(|agent| agent.persona_id.as_deref() == Some(id.as_str()))
+            .filter_map(|agent| match (&agent.backend, &agent.backend_agent_id) {
+                (
+                    crate::managed_agents::BackendKind::ExecutionNode { node_id },
+                    Some(workload_id),
+                ) => Some((node_id.clone(), workload_id.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    for (node_id, workload_id) in execution_targets {
+        remove_execution_workload_for_managed_agent(&state, &node_id, &workload_id).await?;
+    }
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 

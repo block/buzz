@@ -23,14 +23,12 @@ export async function listExecutionNodes(): Promise<ExecutionNodeTarget[]> {
   return invokeTauri<ExecutionNodeTarget[]>("list_execution_nodes");
 }
 
-/** Safe workload fields accepted by the remote deploy command. */
-export type DeployExecutionWorkloadInput = {
+/** Input for deploying a persisted managed-agent identity remotely. */
+export type DeployManagedAgentToExecutionNodeInput = {
+  pubkey: string;
   nodeId: string;
-  displayName: string;
   runtime: string;
-  model?: string;
-  provider?: string;
-  credentialRefs?: Array<{ provider: string; name: string }>;
+  channelId?: string;
 };
 
 /** Terminal receipt projection returned after a remote deploy. */
@@ -81,20 +79,18 @@ export function executionReceiptFailure(
   return receipt && "error" in receipt.outcome ? receipt.outcome.error : null;
 }
 
-/** Publish one encrypted deploy command to a paired execution node. */
-export async function deployExecutionWorkload(
-  input: DeployExecutionWorkloadInput,
+/** Deploy a managed agent while preserving its Desktop identity and config. */
+export function deployManagedAgentToExecutionNode(
+  input: DeployManagedAgentToExecutionNodeInput,
 ): Promise<DeployExecutionWorkloadResponse> {
   return invokeTauri<DeployExecutionWorkloadResponse>(
-    "deploy_execution_workload",
+    "deploy_managed_agent_to_execution_node",
     {
       input: {
+        pubkey: input.pubkey,
         nodeId: input.nodeId,
-        displayName: input.displayName,
         runtime: input.runtime,
-        model: input.model,
-        provider: input.provider,
-        credentialRefs: input.credentialRefs ?? [],
+        channelId: input.channelId,
       },
     },
   );

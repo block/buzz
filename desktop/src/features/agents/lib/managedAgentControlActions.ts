@@ -1,4 +1,8 @@
 import { sendChannelMessage } from "@/shared/api/tauri";
+import {
+  startExecutionWorkload,
+  stopExecutionWorkload,
+} from "@/shared/api/tauriExecution";
 import type {
   Channel,
   ManagedAgent,
@@ -36,7 +40,10 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
 }
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
-  if (agent.backend.type === "provider") {
+  if (
+    agent.backend.type === "provider" ||
+    agent.backend.type === "execution_node"
+  ) {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
   }
 
@@ -85,6 +92,17 @@ export async function startManagedAgentWithRules({
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
+  if (agent.backend.type === "execution_node") {
+    if (!agent.backendAgentId) {
+      throw new Error("Agent has not been deployed to its execution node");
+    }
+    await startExecutionWorkload({
+      nodeId: agent.backend.nodeId,
+      workloadId: agent.backendAgentId,
+    });
+    return;
+  }
+
   await startManagedAgent(agent.pubkey);
 }
 
@@ -135,6 +153,17 @@ export async function stopManagedAgentWithRules({
     return {
       noticeMessage: "Shutdown command sent. Agent will stop shortly.",
     };
+  }
+
+  if (agent.backend.type === "execution_node") {
+    if (!agent.backendAgentId) {
+      throw new Error("Agent has not been deployed to its execution node");
+    }
+    await stopExecutionWorkload({
+      nodeId: agent.backend.nodeId,
+      workloadId: agent.backendAgentId,
+    });
+    return {};
   }
 
   await stopManagedAgent(agent.pubkey);

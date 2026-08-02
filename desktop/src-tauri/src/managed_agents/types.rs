@@ -10,6 +10,9 @@ pub enum BackendKind {
         id: String,
         config: serde_json::Value,
     },
+    /// Workload managed by a paired Buzz execution node. The associated
+    /// workload identity is stored in `ManagedAgentRecord::backend_agent_id`.
+    ExecutionNode { node_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

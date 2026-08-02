@@ -1,6 +1,9 @@
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
 
+use super::execution_nodes::{
+    remove_execution_workload_for_managed_agent, start_execution_workload_for_managed_agent,
+};
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -1073,6 +1076,10 @@ pub async fn start_managed_agent(
     let owner_hex = workspace_owner_hex(&state)?;
     enum StartTarget {
         Local,
+        ExecutionNode {
+            node_id: String,
+            workload_id: String,
+        },
         Provider {
             backend: BackendKind,
             cached_binary_path: Option<String>,
@@ -1122,14 +1129,22 @@ pub async fn start_managed_agent(
             persona_id: record.persona_id.clone(),
         };
 
-        let target = if record.backend == BackendKind::Local {
-            StartTarget::Local
-        } else {
-            StartTarget::Provider {
-                backend: record.backend.clone(),
+        let target = match &record.backend {
+            BackendKind::Local => StartTarget::Local,
+            BackendKind::ExecutionNode { node_id } => {
+                let workload_id = record.backend_agent_id.clone().ok_or_else(|| {
+                    format!("agent {pubkey} has not been deployed to its execution node")
+                })?;
+                StartTarget::ExecutionNode {
+                    node_id: node_id.clone(),
+                    workload_id,
+                }
+            }
+            backend => StartTarget::Provider {
+                backend: backend.clone(),
                 cached_binary_path: record.provider_binary_path.clone(),
                 agent_json: build_deploy_payload(&app, &state, record)?,
-            }
+            },
         };
 
         (target, reconcile)
@@ -1138,6 +1153,33 @@ pub async fn start_managed_agent(
     let result = match target {
         StartTarget::Local => {
             start_local_agent_with_preflight(&app, &state, &pubkey, &owner_hex, false).await
+        }
+        StartTarget::ExecutionNode {
+            node_id,
+            workload_id,
+        } => {
+            start_execution_workload_for_managed_agent(&state, &node_id, &workload_id).await?;
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let records = load_managed_agents(&app)?;
+            let runtimes = state
+                .managed_agent_processes
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let record = records
+                .iter()
+                .find(|r| r.pubkey == pubkey)
+                .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            let personas = load_personas(&app).unwrap_or_default();
+            build_managed_agent_summary(
+                &app,
+                record,
+                &runtimes,
+                &personas,
+                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
+            )
         }
         StartTarget::Provider {
             backend: BackendKind::Provider { id, config },
@@ -1279,6 +1321,26 @@ pub async fn delete_managed_agent(
     app: AppHandle,
 ) -> Result<(), String> {
     use tauri::Manager;
+    let state = app.state::<AppState>();
+    let execution_target = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let records = load_managed_agents(&app)?;
+        records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .and_then(|record| match (&record.backend, &record.backend_agent_id) {
+                (BackendKind::ExecutionNode { node_id }, Some(workload_id)) => {
+                    Some((node_id.clone(), workload_id.clone()))
+                }
+                _ => None,
+            })
+    };
+    if let Some((node_id, workload_id)) = execution_target {
+        remove_execution_workload_for_managed_agent(&state, &node_id, &workload_id).await?;
+    }
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         {
@@ -1310,7 +1372,10 @@ pub async fn delete_managed_agent(
             // remote deployment. The frontend sends force_remote_delete: true only after
             // the user confirms the orphan warning.
             if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+                let execution_node_cleanup =
+                    matches!(&record.backend, BackendKind::ExecutionNode { .. });
                 if record.backend != BackendKind::Local
+                    && !execution_node_cleanup
                     && record.backend_agent_id.is_some()
                     && !force_remote_delete.unwrap_or(false)
                 {

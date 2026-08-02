@@ -38,7 +38,7 @@ import { useCreatedAgentChannelAttachment } from "@/features/agents/useCreatedAg
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
-  deployExecutionWorkload,
+  deployManagedAgentToExecutionNode,
   executionReceiptFailure,
 } from "@/shared/api/tauriExecution";
 import type {
@@ -242,21 +242,40 @@ export function usePersonaActions() {
           return true;
         }
         if (startIntent?.type === "execution-node") {
-          const deployment = await deployExecutionWorkload({
+          const agentInput = await buildInstanceInputForDefinition(
+            persona,
+            runtime,
+            undefined,
+            startIntent,
+          );
+          const created = await createAgentMutation.mutateAsync(agentInput);
+          if (created.spawnError) throw new Error(created.spawnError);
+          const deployment = await deployManagedAgentToExecutionNode({
+            pubkey: created.agent.pubkey,
             nodeId: startIntent.nodeId,
-            displayName: persona.displayName,
             runtime: runtime.id,
-            model: persona.model ?? undefined,
-            provider: persona.provider ?? undefined,
+            channelId: targetChannel?.id,
           });
-          const outcome = deployment.receipt?.outcome.outcome;
           const failure = executionReceiptFailure(deployment.receipt);
+          if (failure) {
+            throw new Error(
+              `The execution node rejected the workload command: ${failure}.`,
+            );
+          }
+          const deployed = {
+            ...created,
+            agent: {
+              ...created.agent,
+              backendAgentId: deployment.workloadId,
+              status: "deployed" as const,
+            },
+          };
+          await createdAgentAttachment.presentCreatedAgent(
+            deployed,
+            targetChannel,
+          );
           setPersonaNoticeMessage(
-            outcome === "succeeded"
-              ? `Deployed ${persona.displayName} to the execution node (receipt: succeeded).`
-              : failure
-                ? `The execution node reported ${outcome}: ${failure}.`
-                : `Published ${persona.displayName} to the execution node; awaiting its receipt.`,
+            `Deployed ${persona.displayName} to the execution node.`,
           );
           setPersonaDialogState(null);
           return true;

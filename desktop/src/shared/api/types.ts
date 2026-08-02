@@ -302,7 +302,8 @@ export type ManagedAgentRuntimeStatus = {
 
 export type ManagedAgentBackend =
   | { type: "local" }
-  | { type: "provider"; id: string; config: Record<string, unknown> };
+  | { type: "provider"; id: string; config: Record<string, unknown> }
+  | { type: "execution_node"; nodeId: string };
 
 export type ManagedAgent = {
   pubkey: string;

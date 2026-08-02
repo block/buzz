@@ -1,9 +1,9 @@
 use buzz_core::execution::{
-    CredentialRef, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
-    ExecutionNodeAttestation, ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus,
-    ExecutionReceipt, ExecutionValidationError, ProviderAuthResponse, ProviderAuthSession,
-    ReceiptDetail, ReceiptOutcome, SafeErrorCode, WorkloadId, WorkloadLifecycle, WorkloadSpec,
-    WorkloadStatus,
+    AgentWorkloadContext, CredentialRef, ExecutionCapability, ExecutionCommand,
+    ExecutionCommandEnvelope, ExecutionNodeAttestation, ExecutionNodeId, ExecutionNodeLifecycle,
+    ExecutionNodeStatus, ExecutionReceipt, ExecutionValidationError, ProviderAuthResponse,
+    ProviderAuthSession, ReceiptDetail, ReceiptOutcome, SafeErrorCode, WorkloadId,
+    WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
 };
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
@@ -30,6 +30,36 @@ fn execution_node_attestation_binds_owner_node_and_relay() {
             Some(&nostr::Keys::generate().public_key().to_hex())
         )
         .is_err());
+}
+
+#[test]
+fn managed_workload_round_trips_agent_identity_and_context() {
+    let owner = nostr::Keys::generate();
+    let mut workload = workload();
+    workload.agent = Some(
+        AgentWorkloadContext::new(
+            owner.public_key().to_hex(),
+            Some("You are a careful coding agent.".into()),
+            Some("wss://relay.example/community".into()),
+            Some("[\"oa\",\"owner\"]".into()),
+            Some("allowlist".into()),
+            vec![owner.public_key().to_hex()],
+            Some("channel-123".into()),
+        )
+        .expect("valid agent context"),
+    );
+
+    let encoded = serde_json::to_value(&workload).expect("serialize workload");
+    assert_eq!(encoded["agent"]["pubkey"], owner.public_key().to_hex());
+    assert_eq!(
+        encoded["agent"]["systemPrompt"],
+        "You are a careful coding agent."
+    );
+    assert_eq!(encoded["agent"]["channelId"], "channel-123");
+    assert!(encoded["agent"].get("privateKey").is_none());
+
+    let decoded: WorkloadSpec = serde_json::from_value(encoded).expect("decode workload");
+    assert_eq!(decoded, workload);
 }
 
 fn workload_id() -> WorkloadId {
