@@ -38,6 +38,11 @@ import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import {
+  extractNostrProfilePubkeys,
+  materializeInboundProfiles,
+} from "@/features/messages/lib/hasMention";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
@@ -185,10 +190,80 @@ export const MessageRow = React.memo(
       },
       [channelId, openReminder],
     );
-    const { mentionNames, mentionPubkeysByName } = React.useMemo(
-      () => resolveMentionProps(message.tags, profiles),
-      [profiles, message.tags],
+    // Extract nostr:npub1.../nostr:nprofile1... pubkeys from the message body
+    // so we can trigger profile hydration even when no `p` tag supplies them.
+    const inboundProfilePubkeys = React.useMemo(
+      () => extractNostrProfilePubkeys(message.body),
+      [message.body],
     );
+
+    // Batch-fetch profiles for body-embedded profile references that are not
+    // covered by the existing tag-based profile lookup passed via `profiles`.
+    const inboundProfilesQuery = useUsersBatchQuery(inboundProfilePubkeys, {
+      enabled: inboundProfilePubkeys.length > 0,
+    });
+
+    // Merge the tag-based profile lookup with any freshly fetched profiles for
+    // body-embedded references. This remains stable when neither source changes.
+    const effectiveProfiles = React.useMemo(() => {
+      const extra = inboundProfilesQuery.data?.profiles;
+      if (!extra) return profiles;
+      return { ...profiles, ...extra };
+    }, [profiles, inboundProfilesQuery.data?.profiles]);
+
+    // Resolve tag-based mention names, then overlay decoded nostr:npub.../
+    // nostr:nprofile... references from the body using current profile identity.
+    const { mentionNames, mentionPubkeysByName, displayBody } =
+      React.useMemo(() => {
+        const tagProps = resolveMentionProps(message.tags, effectiveProfiles);
+
+        const { body: materialized, nameToHexPubkey } =
+          materializeInboundProfiles(message.body, (pubkey) => {
+            const profile = effectiveProfiles?.[pubkey];
+            if (!profile) return null;
+            return (
+              profile.displayName?.trim() ||
+              profile.name?.trim() ||
+              profile.nip05Handle?.split("@")[0]?.trim() ||
+              null
+            );
+          });
+
+        if (nameToHexPubkey.size === 0) {
+          return { ...tagProps, displayBody: message.body };
+        }
+
+        // Build a lowercase-keyed name→pubkey map for the chip renderer.
+        const extraByName = Object.fromEntries(
+          [...nameToHexPubkey.entries()].map(([name, pubkey]) => [
+            name.toLowerCase(),
+            pubkey,
+          ]),
+        );
+        // Merge: existing tag names take precedence; decoded profile names fill in
+        // references that had no corresponding p/mention tag.
+        const existingNamesLower = new Set(
+          (tagProps.mentionNames ?? []).map((n) => n.toLowerCase()),
+        );
+        const extraNames = [...nameToHexPubkey.keys()].filter(
+          (n) => !existingNamesLower.has(n.toLowerCase()),
+        );
+        const mergedNames =
+          (tagProps.mentionNames ?? []).length > 0 || extraNames.length > 0
+            ? [...(tagProps.mentionNames ?? []), ...extraNames]
+            : undefined;
+        const mergedPubkeysByName =
+          tagProps.mentionPubkeysByName !== undefined ||
+          Object.keys(extraByName).length > 0
+            ? { ...tagProps.mentionPubkeysByName, ...extraByName }
+            : undefined;
+
+        return {
+          mentionNames: mergedNames,
+          mentionPubkeysByName: mergedPubkeysByName,
+          displayBody: materialized,
+        };
+      }, [effectiveProfiles, message.tags, message.body]);
     // "Is this pubkey an agent" = the community-scoped baseline every surface
     // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
     // O(1) checks — no per-row rescan of `profiles` (that duplicated parent
@@ -371,7 +446,7 @@ export const MessageRow = React.memo(
                 message,
                 isKnownAgentPubkey,
               )}
-              content={message.body}
+              content={displayBody}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
               agentMentionPubkeysByName={agentMentionPubkeysByName}
