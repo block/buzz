@@ -3624,7 +3624,11 @@ pub(crate) fn build_turn_metric_counts(
             // from input+output.
             total_tokens: usage.turn_total_tokens,
             cost_usd: usage.turn_cost_usd,
-            cache_read_tokens: None,
+            // Field-local: present when the cumulative counter was monotonic
+            // across this turn. Zero means no cache hits this turn (not absent).
+            cache_read_tokens: usage.turn_cache_read_tokens,
+            // buzz-agent does not emit a cache-write count on the wire today;
+            // leave None rather than deriving it from other fields.
             cache_write_tokens: None,
         })
     } else {
@@ -3642,7 +3646,13 @@ pub(crate) fn build_turn_metric_counts(
         // one. Never derived from input+output (NIP-AM MUST NOT).
         total_tokens: usage.cumulative_total_tokens,
         cost_usd: usage.cumulative_cost_usd,
-        cache_read_tokens: None,
+        // Session-cumulative cache-read tokens; None when the harness never
+        // reported this field (e.g. goose or older buzz-agent sessions).
+        // Passes through directly — do not wrap in Some() as the field already
+        // carries provenance (None vs Some(0) are distinct meanings).
+        cache_read_tokens: usage.cumulative_cache_read_tokens,
+        // buzz-agent does not emit a cache-write count on the wire today;
+        // leave None rather than deriving it from other fields.
         cache_write_tokens: None,
     });
     (turn_counts, cumulative_counts)
@@ -6022,10 +6032,12 @@ mod tests {
             turn_output_tokens: Some(50),
             turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 100,
             cumulative_output_tokens: 50,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // owner_pubkey = None → early return, no panic.
@@ -6056,10 +6068,12 @@ mod tests {
             turn_output_tokens: Some(80),
             turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 80,
             cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
@@ -6091,10 +6105,12 @@ mod tests {
             turn_output_tokens: Some(20),
             turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 150,
             cumulative_output_tokens: 70,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
@@ -6126,10 +6142,12 @@ mod tests {
             turn_output_tokens: None,
             turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 400,
             cumulative_output_tokens: 100,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
@@ -6158,10 +6176,12 @@ mod tests {
             turn_output_tokens: Some(30),
             turn_total_tokens: Some(130), // genuine per-turn total
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 500,
             cumulative_output_tokens: 120,
             cumulative_total_tokens: Some(620), // genuine cumulative total
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
 
@@ -6205,10 +6225,12 @@ mod tests {
             turn_output_tokens: Some(60),
             turn_total_tokens: None, // provider did not supply a total
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 60,
             cumulative_total_tokens: None, // session has no total
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
 
@@ -6245,6 +6267,96 @@ mod tests {
         assert_ne!(
             turn_json["totalTokens"], derived_sum,
             "total_tokens must never equal input+output when provider omitted it"
+        );
+    }
+
+    /// A payload with nonzero `accumulatedCachedInputTokens` on the second turn
+    /// must produce a kind:44200 payload where `cumulative.cacheReadTokens` is
+    /// nonzero and `turn.cacheReadTokens` reflects the per-turn delta.
+    /// This is the acceptance-criterion test: it proves the threading is live,
+    /// not hardcoded to None.
+    #[test]
+    fn test_build_turn_metric_counts_cache_read_tokens_thread_through() {
+        // Wire-parse a buzz-agent payload with cache, run it through the tracker,
+        // and verify the published TokenCounts carry the cache field.
+        let raw1 = serde_json::json!({
+            "sessionId": "cache-sess",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 15_091,
+                "accumulatedOutputTokens": 156,
+                "accumulatedCachedInputTokens": 5_033,
+            }
+        });
+        let raw2 = serde_json::json!({
+            "sessionId": "cache-sess",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 28_500,
+                "accumulatedOutputTokens": 310,
+                "accumulatedCachedInputTokens": 11_000,
+            }
+        });
+
+        let mut tracker = crate::usage::UsageTracker::default();
+
+        // Turn 1 — establish baseline (delta unreliable, but cumulative still present).
+        tracker.begin_turn("cache-sess");
+        if let crate::usage::GooseSessionUpdateVariant::UsageUpdate(p) =
+            serde_json::from_value::<crate::usage::GooseSessionUpdateNotification>(raw1)
+                .unwrap()
+                .update
+        {
+            tracker.record("cache-sess", &p);
+        }
+        let t1 = tracker.take().expect("turn 1");
+
+        // Turn 1: cumulative must carry the cache count; turn delta is None (no baseline).
+        let (turn1, cum1) = crate::pool::build_turn_metric_counts(&t1);
+        // delta_reliable = false on first turn → no turn counts.
+        assert!(turn1.is_none(), "first turn: no reliable turn counts");
+        let cum1 = cum1.expect("cumulative always present");
+        assert_eq!(
+            cum1.cache_read_tokens,
+            Some(5_033),
+            "cumulative.cacheReadTokens must be 5033 after turn 1"
+        );
+
+        // Turn 2 — delta reliable.
+        tracker.begin_turn("cache-sess");
+        if let crate::usage::GooseSessionUpdateVariant::UsageUpdate(p) =
+            serde_json::from_value::<crate::usage::GooseSessionUpdateNotification>(raw2)
+                .unwrap()
+                .update
+        {
+            tracker.record("cache-sess", &p);
+        }
+        let t2 = tracker.take().expect("turn 2");
+
+        let (turn2, cum2) = crate::pool::build_turn_metric_counts(&t2);
+
+        let turn2 = turn2.expect("reliable turn counts on turn 2");
+        // Per-turn cache delta: 11_000 - 5_033 = 5_967.
+        assert_eq!(
+            turn2.cache_read_tokens,
+            Some(5_967),
+            "turn.cacheReadTokens must be the per-turn delta"
+        );
+        // cache_write_tokens is always None — buzz-agent doesn't emit it.
+        assert!(
+            turn2.cache_write_tokens.is_none(),
+            "cache_write_tokens must be None — not emitted by buzz-agent"
+        );
+
+        let cum2 = cum2.expect("cumulative always present");
+        assert_eq!(
+            cum2.cache_read_tokens,
+            Some(11_000),
+            "cumulative.cacheReadTokens must be 11_000 after turn 2"
+        );
+        assert!(
+            cum2.cache_write_tokens.is_none(),
+            "cache_write_tokens must be None on cumulative too"
         );
     }
 

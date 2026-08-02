@@ -5,7 +5,7 @@ Mobile uses immutable release-candidate tags cut directly from remote `main`:
 
 | Lane | Entry point | Artifact |
 |------|-------------|----------|
-| Desktop | `Prepare Desktop Release` | Packaged desktop app (signed/notarized macOS, unsigned Windows, and Linux) |
+| Desktop | `just release-desktop <version>` | Packaged desktop app (signed/notarized macOS, unsigned Windows, and Linux) |
 | Relay | `just release-relay` | `ghcr.io/block/buzz` container image |
 | Mobile | `scripts/mobile-release.sh candidate X.Y.Z` | Exact `mobile-vX.Y.Z-rc.N` source identity |
 
@@ -16,20 +16,15 @@ remains manual because OSS CI cannot trigger private CI.
 
 ## Quick Start
 
-Desktop releases are prepared from the current remote `main` by GitHub Actions:
+Prepare desktop releases locally from an up-to-date, clean `main` checkout:
 
 ```sh
-gh workflow run prepare-desktop-release.yml \
-  --repo block/buzz \
-  --ref main \
-  -f version=0.5.3
+just release-desktop 0.5.3
 ```
 
-The equivalent GitHub UI path is **Actions → Prepare Desktop Release → Run
-workflow**, select `main`, enter the version without a `v` prefix, and run it.
-The local `just release-desktop <version>` recipe uses the same candidate script,
-but the Actions workflow is the canonical operator path because it runs with the
-release App identity and does not depend on an operator checkout.
+The recipe generates the immutable candidate and opens or updates its pull
+request. Candidate branch creation uses the operator's GitHub permissions; the
+release App is intentionally limited to creating protected release tags.
 
 ```sh
 # Relay release
@@ -52,21 +47,23 @@ or mobile GitHub Release.
 
 ### Desktop
 
-1. Run **Prepare Desktop Release** with an explicit version. Automation fetches
-   the current `origin/main`, regenerates `version-bump/<version>` as one
+1. Run `just release-desktop <version>` from a clean, up-to-date `main` checkout.
+   The script fetches the current `origin/main`, regenerates
+   `version-bump/<version>` as one
    deterministic candidate commit, records the frozen base and proposed
    `desktop-v<version>` tag in `.release/desktop-candidate.json`, updates every
    desktop manifest and lockfile, writes a full-SHA changelog, and opens or
    updates the PR.
 2. Review the recorded base and candidate SHA, the complete changelog, and CI.
-   The candidate must receive an approval on its exact current head. Any
-   regeneration changes that head and therefore requires a fresh approval.
-3. Merge with **Create a merge commit**. Squash and rebase are invalid for
-   desktop release PRs. Repository settings and the `main` ruleset must allow
-   merge commits for this option to exist.
-4. `auto-tag-on-release-pr-merge` verifies the two-parent merge, exact candidate
-   approval, and every required check, then tags the reviewed candidate—not the
-   merge commit—as `desktop-v<version>`.
+   The required **Desktop Release Candidate** check validates the exact head.
+   Authorization is either an approval on that exact head or a permitted Default
+   ruleset bypass at merge time. Any regeneration changes the head and requires
+   the checks—and, for the review path, approval—to run again.
+3. **Squash merge** the PR. The protected branch must still be exactly the
+   recorded base; otherwise regenerate the candidate from current `main`.
+4. `auto-tag-on-release-pr-merge` verifies the frozen parent, full-tree identity,
+   required checks, and one of the two authorization paths, then tags the squash
+   commit as `desktop-v<version>`.
 5. The tag triggers `release.yml`. It builds and stages Apple Silicon and Intel
    macOS, Windows, and Linux artifacts; publishes the versioned release only
    after the complete set succeeds; then updates the rolling updater manifest
@@ -233,10 +230,10 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
 - **Write access** to the `block/buzz` GitHub repository
 - An `origin` remote whose configured URL is the canonical `block/buzz`
   repository
-- `gh` CLI version 2.87.0 or newer, authenticated with permission to dispatch
-  the candidate workflow
-- Repository settings and the `main` ruleset configured to allow **merge
-  commits**; desktop release PRs cannot be squash- or rebase-merged
+- `gh` CLI authenticated with permission to push the candidate branch and open
+  its pull request
+- The Default `main` ruleset configured for squash-only merging, strict required
+  checks, stale-review dismissal, and the **Desktop Release Candidate** check
 - Release tag ruleset [`14378754`](https://github.com/block/buzz/rules/14378754)
   active for `desktop-v*` and `mobile-v*`, with creation, update, deletion, and
   non-fast-forward protections and `buzz-release-bot` as its sole always-bypass
@@ -247,7 +244,7 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
 
   | Name | Kind | Purpose |
   |------|------|---------|
-  | `BUZZ_RELEASE_TAGGER_CLIENT_ID` | Variable | GitHub App client ID used to prepare candidates and create tags |
+  | `BUZZ_RELEASE_TAGGER_CLIENT_ID` | Variable | GitHub App client ID used to create protected release tags |
   | `BUZZ_RELEASE_TAGGER_PRIVATE_KEY` | Secret | GitHub App private key |
   | `OSX_CODESIGN_ROLE` | Secret | macOS signing role used by `block/apple-codesign-action` |
   | `CODESIGN_S3_BUCKET` | Secret | macOS signing exchange bucket |
@@ -268,21 +265,13 @@ actor list.
 
 ## Troubleshooting
 
-### The release PR does not offer **Create a merge commit**
+### The desktop candidate is stale or cannot be squash merged
 
-The immutable desktop flow cannot release until both the repository merge
-settings and the `main` ruleset allow merge commits. Do not squash the PR: the
-auto-tagger deliberately rejects a one-parent squash commit. Enable merge
-commits, then merge the already-approved exact candidate head with **Create a
-merge commit**.
-
-### `Prepare Desktop Release` fails before opening a PR
-
-Check the workflow run first. Confirm `BUZZ_RELEASE_TAGGER_CLIENT_ID` and
-`BUZZ_RELEASE_TAGGER_PRIVATE_KEY` are configured and that the release App can
-write contents and pull requests. Rerunning the preparer regenerates the
-candidate from the then-current `origin/main`; if its head changes, obtain a new
-approval before merging.
+Do not update the branch manually and do not weaken the ruleset. Run
+`just release-desktop <version>` again from current `main`; this regenerates the
+candidate, reruns CI, and requires a fresh approval when using the review path.
+The post-merge verifier refuses to tag a squash whose parent differs from the
+recorded candidate base or whose tree differs from the validated PR head.
 
 ### Local `just release-desktop` fails with "must be on main branch"
 Switch to `main` and pull latest before running the release recipe.

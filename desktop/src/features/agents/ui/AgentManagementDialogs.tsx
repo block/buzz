@@ -1,4 +1,5 @@
 import { useAgentManagement } from "@/features/agents/useAgentManagement";
+import { AgentCardDialogs } from "./AgentCardViewerDialog";
 import { AgentDialog } from "./AgentDialog";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 
@@ -55,6 +56,7 @@ export function AgentManagementDialogs() {
           title="Edit agent"
         />
       ) : null}
+      <AgentCardDialogs />
     </>
   );
 }

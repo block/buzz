@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1106,6 +1106,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tauri-utils",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.29.0",
