@@ -21,8 +21,10 @@ name: Docker image
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
 #                              + matching :debug-* tags
 #                              (+ :latest/:debug-latest for stable releases)
-#   - pull_request           → build only (no push), cache stays warm
 #   - workflow_dispatch      → manual relay-tag rescue at the tag itself
+# Pull requests are built by docker-pr.yml under read-only permissions. Keeping
+# validation separate prevents unmerged code from receiving package-write or
+# attestation authority, even for same-repository pull requests.
 #
 # Why workflow_dispatch carries a version input:
 #   Normal releases arrive through the push:tags trigger above. The input is
@@ -43,32 +45,16 @@ on:
   push:
     branches: [main]
     tags: ["relay-v[0-9]*"]
-  pull_request:
-    paths:
-      - "Dockerfile"
-      - "Dockerfile.push-gateway"
-      - ".dockerignore"
-      - ".github/workflows/docker.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "crates/**"
-      - "web/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "patches/**"
   workflow_dispatch:
     inputs:
       version:
         description: "Semver version e.g. 0.3.0 (no relay-v prefix) — for relay-tag rescue dispatch"
         required: true
 
-# One image build per ref; cancel superseded PR builds, but never cancel
-# tag/main builds (publishing must not be aborted mid-flight).
+# One publication per ref. Publishing must not be aborted mid-flight.
 concurrency:
   group: docker-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type == 'branch' && github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -81,6 +67,7 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.platform }})
+    if: github.repository == 'block/buzz' || vars.GHCR_IMAGE != ''
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -125,8 +112,6 @@ jobs:
               max-parallelism = 2
 
       - name: Log in to GHCR
-        # Skip on pull_request from forks — no GHCR creds, build-only.
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           registry: ghcr.io
@@ -175,11 +160,11 @@ jobs:
           # Push by digest, not by tag — the merge job assembles the tags
           # into one multi-arch manifest. This is what makes the native-arm
           # matrix possible.
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: |
             type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
           cache-to: |
-            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.IMAGE_NAME, matrix.arch) || '' }}
+            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }},mode=max,compression=zstd
 
       - name: Build and push debug image by digest
         id: build-debug
@@ -190,12 +175,11 @@ jobs:
           target: runtime-debug
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: |
             type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
 
       - name: Export release and debug digests
-        if: github.event_name != 'pull_request'
         env:
           RELEASE_DIGEST: ${{ steps.build-release.outputs.digest }}
           DEBUG_DIGEST: ${{ steps.build-debug.outputs.digest }}
@@ -205,7 +189,6 @@ jobs:
           touch "/tmp/digests-debug/${DEBUG_DIGEST#sha256:}"
 
       - name: Upload release digest
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: digests-release-${{ matrix.arch }}
@@ -214,7 +197,6 @@ jobs:
           retention-days: 1
 
       - name: Upload debug digest
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: digests-debug-${{ matrix.arch }}
@@ -224,7 +206,7 @@ jobs:
 
   merge:
     name: Merge ${{ matrix.variant }} multi-arch manifest
-    if: github.event_name != 'pull_request'
+    if: github.repository == 'block/buzz' || vars.GHCR_IMAGE != ''
     runs-on: ubuntu-24.04
     needs: build
     timeout-minutes: 15
@@ -342,6 +324,7 @@ jobs:
 
   push-gateway-build:
     name: Build public push gateway (${{ matrix.platform }})
+    if: github.repository == 'block/buzz'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -377,7 +360,6 @@ jobs:
             [worker.oci]
               max-parallelism = 2
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           registry: ghcr.io
@@ -400,16 +382,14 @@ jobs:
           file: ./Dockerfile.push-gateway
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:${{ matrix.arch }}
-          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:{0},mode=max,compression=zstd', matrix.arch) || '' }}
+          cache-to: type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:${{ matrix.arch }},mode=max,compression=zstd
       - name: Export digest
-        if: github.event_name != 'pull_request'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: mkdir -p /tmp/gateway-digests && touch "/tmp/gateway-digests/${DIGEST#sha256:}"
       - name: Upload digest
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: gateway-digests-${{ matrix.arch }}
@@ -419,7 +399,7 @@ jobs:
 
   push-gateway-merge:
     name: Publish public push gateway image
-    if: github.event_name != 'pull_request'
+    if: github.repository == 'block/buzz'
     runs-on: ubuntu-24.04
     needs: push-gateway-build
     timeout-minutes: 15

@@ -1,0 +1,89 @@
+name: Docker image validation
+
+# Pull requests compile every public image on both native architectures without
+# receiving registry-write or attestation authority. Publication lives only in
+# docker.yml, whose jobs are restricted to trusted non-PR events.
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "Dockerfile.push-gateway"
+      - ".dockerignore"
+      - ".github/workflows/docker.yml"
+      - ".github/workflows/docker-pr.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "web/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "patches/**"
+
+concurrency:
+  group: docker-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    name: Validate (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+
+      - name: Validate relay release image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=registry,ref=ghcr.io/block/buzz-buildcache:${{ matrix.arch }}
+
+      - name: Validate relay debug image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime-debug
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=registry,ref=ghcr.io/block/buzz-buildcache:${{ matrix.arch }}
+
+      - name: Validate public push gateway image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile.push-gateway
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:${{ matrix.arch }}

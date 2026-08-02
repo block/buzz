@@ -43,16 +43,52 @@ git -C "$tmp" tag -m "relay release" relay-v2.0.0
   GITHUB_REF=refs/tags/relay-v2.0.0 "$verify" relay-v 2.0.0
 )
 
+docker_publish="$repo_root/.github/workflows/docker.yml"
+docker_validation="$repo_root/.github/workflows/docker-pr.yml"
+
 if grep -q 'inputs\.ref' \
   "$repo_root/.github/workflows/release.yml" \
-  "$repo_root/.github/workflows/docker.yml"; then
+  "$docker_publish"; then
   echo "publisher workflow still accepts a caller-selected source ref" >&2
   exit 1
 fi
 
 grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/release.yml"
-grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/docker.yml"
+grep -q 'verify-release-ref\.sh' "$docker_publish"
 grep -q 'test-release-ref-contract\.sh' "$repo_root/.github/workflows/ci.yml"
+
+if grep -Fq 'pull_request:' "$docker_publish"; then
+  echo "Docker publisher still runs on pull requests" >&2
+  exit 1
+fi
+grep -Fq 'pull_request:' "$docker_validation"
+grep -Fq 'permissions: {}' "$docker_validation"
+grep -Fq 'contents: read' "$docker_validation"
+[[ "$(grep -Fc 'docker/build-push-action@' "$docker_validation")" -eq 3 ]] || {
+  echo "Docker PR validation must build relay release, relay debug, and gateway images" >&2
+  exit 1
+}
+if rg -q 'packages: write|id-token: write|attestations: write|docker/login-action@|cache-to:|push: true' "$docker_validation"; then
+  echo "Docker PR validation gained registry-write or attestation authority" >&2
+  exit 1
+fi
+
+[[ "$(grep -Fxc "    if: github.repository == 'block/buzz' || vars.GHCR_IMAGE != ''" "$docker_publish")" -eq 2 ]] || {
+  echo "relay build and manifest publication must require canonical repo or explicit fork image" >&2
+  exit 1
+}
+[[ "$(grep -Fxc "    if: github.repository == 'block/buzz'" "$docker_publish")" -eq 2 ]] || {
+  echo "push-gateway build and manifest publication must remain canonical-only" >&2
+  exit 1
+}
+if rg -q "github\.event_name != 'pull_request'|github\.event\.pull_request" "$docker_publish"; then
+  echo "Docker publisher still mixes pull-request authority into publication jobs" >&2
+  exit 1
+fi
+[[ "$(grep -Fc 'push=true' "$docker_publish")" -eq 3 ]] || {
+  echo "trusted Docker publication must push exactly three image variants" >&2
+  exit 1
+}
 "$repo_root/scripts/test-signed-canary-contract.sh"
 auto_tag="$repo_root/.github/workflows/auto-tag-on-release-pr-merge.yml"
 grep -q 'actions/create-github-app-token@' "$auto_tag"
