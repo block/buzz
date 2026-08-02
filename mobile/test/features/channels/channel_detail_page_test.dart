@@ -29,6 +29,7 @@ import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1186,6 +1187,11 @@ void main() {
       expect(find.byTooltip('Jump to oldest unread message'), findsOneWidget);
       expect(find.byIcon(LucideIcons.chevronUp), findsOneWidget);
       expect(tester.getSize(unreadButton), const Size.square(48));
+      final unreadRect = tester.getRect(unreadButton);
+      expect(
+        unreadRect.top,
+        frostedAppBarHeight(tester.element(unreadButton)) + Grid.xs,
+      );
       expect(find.text('Latest'), findsNothing);
 
       await tester.tap(unreadButton);
