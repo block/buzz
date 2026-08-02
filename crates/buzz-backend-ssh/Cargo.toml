@@ -29,3 +29,11 @@ zeroize = { workspace = true }
 # arrived damaged. Both are already workspace dependencies.
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# Step 0 of the deploy reconciliation loop (docs/remote-agents.md) requires the
+# provider to derive the agent's identity from `private_key_nsec` rather than
+# trust a caller-supplied pubkey. bech32 decodes the NIP-19 nsec; secp256k1
+# turns those bytes into the x-only public key every host-side name is keyed on.
+# Versions match the ones already resolved in the workspace lockfile
+# (buzz-pair-relay pins the same secp256k1 major).
+bech32 = "0.11"
+secp256k1 = "0.31"
