@@ -330,6 +330,7 @@ export function AppShell() {
     unreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
+    threadOnlyUnreadChannelIds,
     unreadChannelNotificationCount,
     getEffectiveTimestamp: getChannelReadAt,
     getOwnTimestamp: getOwnReadAt,
@@ -355,7 +356,6 @@ export function AppShell() {
     onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
     followedRootIds,
   });
-
   const getThreadReadAt = React.useCallback(
     (rootId: string, channelId?: string | null) => {
       const threadReadAt = getOwnReadAt(`thread:${rootId}`);
@@ -910,6 +910,7 @@ export function AppShell() {
                             selectedView={selectedView}
                             unreadChannelIds={unreadChannelIds}
                             unreadChannelCounts={unreadChannelCounts}
+                            threadOnlyUnreadChannelIds={threadOnlyUnreadChannelIds}
                             mutedChannelIds={mutedChannelIds}
                             onMuteChannel={muteChannel}
                             onUnmuteChannel={unmuteChannel}

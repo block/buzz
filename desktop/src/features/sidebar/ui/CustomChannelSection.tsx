@@ -360,6 +360,7 @@ export function ChannelGroupSection({
   title,
   unreadChannelCounts,
   unreadChannelIds,
+  threadOnlyUnreadChannelIds,
   sections,
   assignments,
   onAssignChannel,
@@ -408,6 +409,7 @@ export function ChannelGroupSection({
   title: string;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
+  threadOnlyUnreadChannelIds?: ReadonlySet<string>;
   hasUnread?: boolean;
   onMarkAllRead?: () => void;
   sections?: ChannelSection[];
@@ -440,6 +442,9 @@ export function ChannelGroupSection({
                       channel={channel}
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       hasUnread={unreadChannelIds.has(channel.id)}
+                      hasThreadOnlyUnread={threadOnlyUnreadChannelIds?.has(
+                        channel.id,
+                      )}
                       unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
@@ -453,6 +458,9 @@ export function ChannelGroupSection({
                     channel={channel}
                     activeWorking={activeWorkingByChannelId?.get(channel.id)}
                     hasUnread={unreadChannelIds.has(channel.id)}
+                    hasThreadOnlyUnread={threadOnlyUnreadChannelIds?.has(
+                      channel.id,
+                    )}
                     unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                     isMuted={mutedChannelIds?.has(channel.id)}
                     isActive={
@@ -550,6 +558,7 @@ export function CustomChannelSection({
   selectedChannelId,
   unreadChannelCounts,
   unreadChannelIds,
+  threadOnlyUnreadChannelIds,
   sections,
   assignments,
   isFirst,
@@ -587,6 +596,7 @@ export function CustomChannelSection({
   selectedChannelId: string | null;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
+  threadOnlyUnreadChannelIds?: ReadonlySet<string>;
   sections: ChannelSection[];
   assignments: Record<string, string>;
   isFirst: boolean;
@@ -743,6 +753,9 @@ export function CustomChannelSection({
                                   channel.id,
                                 )}
                                 hasUnread={unreadChannelIds.has(channel.id)}
+                                hasThreadOnlyUnread={threadOnlyUnreadChannelIds?.has(
+                                  channel.id,
+                                )}
                                 unreadCount={
                                   unreadChannelCounts.get(channel.id) ?? 0
                                 }

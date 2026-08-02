@@ -747,11 +747,13 @@ test.describe("thread unread indicator", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-    // The crux: leave general. The unopened thread reply should still keep a
-    // numeric channel sidebar badge until the thread itself is read.
+    // The crux: leave general. The unopened thread reply should still keep
+    // the thread-unread dot until the thread itself is read.
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
-    await expect(page.getByTestId("channel-unread-general")).toBeVisible();
+    await expect(
+      page.getByTestId("channel-thread-unread-general"),
+    ).toBeVisible();
   });
 
   // Regression guard for the all-replies window: when the loaded window holds

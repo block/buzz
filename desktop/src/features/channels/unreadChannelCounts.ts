@@ -5,6 +5,8 @@ export type ObservedUnreadEvent = {
   createdAt: number;
   rootId: string | null;
   highPriority: boolean;
+  isDm: boolean;
+  isThreadedReply: boolean;
   countsTowardBadge: boolean;
   countsTowardAppBadge: boolean;
 };
@@ -23,6 +25,8 @@ export function makeObservedUnreadEvent(input: {
     createdAt: input.createdAt,
     rootId: input.rootId,
     highPriority: input.highPriority,
+    isDm,
+    isThreadedReply: input.isThreadedReply,
     countsTowardBadge: isDm || input.isThreadedReply || input.highPriority,
     countsTowardAppBadge:
       isDm || (!input.isThreadedReply && input.highPriority),
@@ -118,6 +122,39 @@ export function countUnreadHighPriorityObservedEvents(
     if (readAt === null || event.createdAt > readAt) count += 1;
   }
   return count;
+}
+
+/**
+ * A badge event whose only reason for counting is a threaded reply: not a DM
+ * and not a mention/broadcast. A mention inside a thread is high-priority and
+ * is intentionally excluded — it keeps the solid numeric badge.
+ */
+export function isThreadOnlyBadgeObservedEvent(
+  event: ObservedUnreadEvent,
+): boolean {
+  return event.isThreadedReply === true && !event.isDm && !event.highPriority;
+}
+
+/**
+ * True when at least one badge-counting event is unread and ALL unread
+ * badge-counting events are thread-only — i.e. the channel's numeric badge is
+ * entirely explained by replies invisible in the channel scroll, so the
+ * sidebar can demote it to the thread-glyph badge.
+ */
+export function unreadBadgeObservedEventsAreThreadOnly(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): boolean {
+  if (!eventsById) return false;
+  let sawThreadOnly = false;
+  for (const event of eventsById.values()) {
+    if (!event.countsTowardBadge) continue;
+    const readAt = getReadAt(event);
+    if (readAt !== null && event.createdAt <= readAt) continue;
+    if (!isThreadOnlyBadgeObservedEvent(event)) return false;
+    sawThreadOnly = true;
+  }
+  return sawThreadOnly;
 }
 
 export function observedUnreadEventReadAt(

@@ -108,6 +108,7 @@ type AppSidebarProps = {
     | "projects";
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
+  threadOnlyUnreadChannelIds: ReadonlySet<string>;
   communities: Community[];
   onAddCommunity: (community: Community) => void;
   onAddCommunityOpenChange?: (open: boolean) => void;
@@ -195,6 +196,7 @@ export function AppSidebar({
   selectedView,
   unreadChannelCounts,
   unreadChannelIds,
+  threadOnlyUnreadChannelIds,
   communities,
   onAddCommunity,
   onAddCommunityOpenChange,
@@ -650,6 +652,7 @@ export function AppSidebar({
                       title="Starred"
                       unreadChannelCounts={unreadChannelCounts}
                       unreadChannelIds={unreadChannelIds}
+                      threadOnlyUnreadChannelIds={threadOnlyUnreadChannelIds}
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
                       onUnmuteChannel={onUnmuteChannel}
@@ -684,6 +687,7 @@ export function AppSidebar({
                         selectedChannelId={selectedChannelId}
                         unreadChannelCounts={unreadChannelCounts}
                         unreadChannelIds={unreadChannelIds}
+                        threadOnlyUnreadChannelIds={threadOnlyUnreadChannelIds}
                         sections={channelSections}
                         assignments={channelAssignments}
                         isFirst={idx === 0}
@@ -755,6 +759,7 @@ export function AppSidebar({
                       title="Channels"
                       unreadChannelCounts={unreadChannelCounts}
                       unreadChannelIds={unreadChannelIds}
+                      threadOnlyUnreadChannelIds={threadOnlyUnreadChannelIds}
                       sections={channelSections}
                       assignments={channelAssignments}
                       onAssignChannel={assignChannel}
@@ -794,6 +799,7 @@ export function AppSidebar({
                       title="Forums"
                       unreadChannelCounts={unreadChannelCounts}
                       unreadChannelIds={unreadChannelIds}
+                      threadOnlyUnreadChannelIds={threadOnlyUnreadChannelIds}
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
                       onUnmuteChannel={onUnmuteChannel}

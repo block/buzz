@@ -1,6 +1,7 @@
 import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
+import { cn } from "@/shared/lib/cn";
 import { FeatureGate } from "@/shared/features";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import {
@@ -98,6 +99,11 @@ export function AppSidebarPrimaryMenu({
       <SidebarMenu className="pb-2">
         <SidebarMenuItem>
           <SidebarMenuButton
+            className={cn(
+              selectedView !== "home" &&
+                homeBadgeCount > 0 &&
+                "font-semibold text-sidebar-foreground hover:text-sidebar-foreground",
+            )}
             isActive={selectedView === "home"}
             onClick={onSelectHome}
             tooltip="Inbox"
@@ -108,7 +114,7 @@ export function AppSidebarPrimaryMenu({
           </SidebarMenuButton>
           {homeBadgeCount > 0 ? (
             <SidebarMenuBadge
-              className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+              className="right-2 rounded-full bg-primary px-1.5 text-2xs font-semibold tabular-nums text-primary-foreground peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
               data-testid="sidebar-home-count"
             >
               {Math.min(homeBadgeCount, 99)}
