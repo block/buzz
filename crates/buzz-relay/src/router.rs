@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::json;
 use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -247,7 +248,7 @@ fn invite_relay_url(configured_relay_url: &str, headers: &HeaderMap) -> Option<S
     Some(format!("{scheme}://{authority}"))
 }
 
-fn minimal_invite_landing_html(relay_url: &str, code: &str) -> String {
+fn minimal_invite_landing_html(relay_url: &str, code: &str, script_nonce: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("relay", relay_url)
         .append_pair("code", code)
@@ -284,6 +285,18 @@ fn minimal_invite_landing_html(relay_url: &str, code: &str) -> String {
       h1 { font-size: 28px; margin: 0 0 12px; }
       p { color: rgb(0 0 0 / 62%); line-height: 1.5; margin: 0 0 28px; }
       a { display: block; }
+      .policy {
+        background: rgb(0 0 0 / 3%);
+        border: 1px solid rgb(0 0 0 / 10%);
+        border-radius: 12px;
+        margin-bottom: 20px;
+        padding: 16px;
+        text-align: left;
+      }
+      .policy label { color: rgb(0 0 0 / 68%); display: flex; font-size: 13px; gap: 10px; line-height: 1.5; }
+      .policy label + label { margin-top: 12px; }
+      .policy input { flex: 0 0 auto; margin-top: 3px; }
+      .policy a { color: black; display: inline; text-underline-offset: 3px; }
       .primary {
         background: black;
         border-radius: 10px;
@@ -292,6 +305,7 @@ fn minimal_invite_landing_html(relay_url: &str, code: &str) -> String {
         padding: 12px 18px;
         text-decoration: none;
       }
+      .primary[aria-disabled="true"] { cursor: not-allowed; opacity: 0.45; }
       .download {
         color: black;
         font-size: 14px;
@@ -304,14 +318,119 @@ fn minimal_invite_landing_html(relay_url: &str, code: &str) -> String {
     <main>
       <h1>You're invited to Buzz</h1>
       <p>Open Buzz to accept this invitation and join the community.</p>
-      <a class="primary" href="__APP_LINK__">Accept invite in Buzz</a>
+      <section class="policy" id="join-policy" hidden>
+        <label id="age-confirmation" hidden>
+          <input id="age-confirmed" type="checkbox">
+          <span>I am 18 years of age or older.</span>
+        </label>
+        <label id="agreement-confirmation" hidden>
+          <input id="agreement-confirmed" type="checkbox">
+          <span>
+            I have reviewed and agree to the community
+            <a href="/api/join-policy/terms" id="terms-link" rel="noopener noreferrer" target="_blank" hidden>Terms of Service</a><span id="policy-separator" hidden> and </span><a href="/api/join-policy/privacy" id="privacy-link" rel="noopener noreferrer" target="_blank" hidden>Privacy Policy</a>.
+          </span>
+        </label>
+      </section>
+      <a aria-disabled="true" class="primary" href="__APP_LINK__" id="accept-invite">Accept invite in Buzz</a>
+      <p aria-live="polite" id="invite-status" role="status" hidden></p>
       <a class="download" href="https://github.com/block/buzz/releases/latest" rel="noreferrer">Download Buzz</a>
     </main>
+    <script nonce="__SCRIPT_NONCE__">
+      (() => {
+        "use strict";
+
+        const acceptLink = document.getElementById("accept-invite");
+        const policyPanel = document.getElementById("join-policy");
+        const ageRow = document.getElementById("age-confirmation");
+        const ageCheckbox = document.getElementById("age-confirmed");
+        const agreementRow = document.getElementById("agreement-confirmation");
+        const agreementCheckbox = document.getElementById("agreement-confirmed");
+        const termsLink = document.getElementById("terms-link");
+        const privacyLink = document.getElementById("privacy-link");
+        const separator = document.getElementById("policy-separator");
+        const status = document.getElementById("invite-status");
+        let policy;
+        let opening = false;
+
+        const updateDisabledState = () => {
+          const needsAge = Boolean(policy?.age_attestation_required);
+          const needsAgreement = Boolean(policy?.terms_markdown || policy?.privacy_markdown);
+          const disabled =
+            policy === undefined ||
+            opening ||
+            (needsAge && !ageCheckbox.checked) ||
+            (needsAgreement && !agreementCheckbox.checked);
+          acceptLink.setAttribute("aria-disabled", String(disabled));
+        };
+
+        ageCheckbox.addEventListener("change", updateDisabledState);
+        agreementCheckbox.addEventListener("change", updateDisabledState);
+
+        acceptLink.addEventListener("click", async (event) => {
+          if (policy === null) return;
+          event.preventDefault();
+          if (policy === undefined || acceptLink.getAttribute("aria-disabled") === "true") return;
+
+          opening = true;
+          status.hidden = false;
+          status.textContent = "Preparing your invitation…";
+          updateDisabledState();
+          try {
+            const response = await fetch("/api/invites/accept-policy", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                code: new URL(acceptLink.href).searchParams.get("code"),
+                policy_version: policy.version,
+                age_confirmed: ageCheckbox.checked,
+              }),
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const payload = await response.json();
+            if (typeof payload.receipt !== "string" || payload.receipt.length === 0) {
+              throw new Error("Missing policy receipt");
+            }
+            const appUrl = new URL(acceptLink.href);
+            appUrl.searchParams.set("policy_receipt", payload.receipt);
+            window.location.assign(appUrl.toString());
+          } catch (_error) {
+            opening = false;
+            status.textContent = "Could not accept the community policy. Please try again.";
+            updateDisabledState();
+          }
+        });
+
+        fetch("/api/join-policy")
+          .then(async (response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const payload = await response.json();
+            policy = payload.policy ?? null;
+            if (policy) {
+              const hasTerms = Boolean(policy.terms_markdown);
+              const hasPrivacy = Boolean(policy.privacy_markdown);
+              policyPanel.hidden = false;
+              ageRow.hidden = !policy.age_attestation_required;
+              agreementRow.hidden = !(hasTerms || hasPrivacy);
+              termsLink.hidden = !hasTerms;
+              privacyLink.hidden = !hasPrivacy;
+              separator.hidden = !(hasTerms && hasPrivacy);
+            }
+            updateDisabledState();
+          })
+          .catch(() => {
+            status.hidden = false;
+            status.textContent = "Could not load the community policy. Please try again.";
+            updateDisabledState();
+          });
+      })();
+    </script>
   </body>
 </html>
 "#;
 
-    TEMPLATE.replace("__APP_LINK__", &app_link)
+    TEMPLATE
+        .replace("__APP_LINK__", &app_link)
+        .replace("__SCRIPT_NONCE__", script_nonce)
 }
 
 async fn invite_landing_handler(
@@ -330,18 +449,27 @@ async fn invite_landing_handler(
     let Some(relay_url) = invite_relay_url(&state.config.relay_url, &headers) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let mut response = Html(minimal_invite_landing_html(&relay_url, &code)).into_response();
+    let nonce_bytes: [u8; 16] = rand::random();
+    let script_nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+    let csp = format!(
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{script_nonce}'; \
+         connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    let Ok(csp) = csp.parse::<header::HeaderValue>() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut response = Html(minimal_invite_landing_html(
+        &relay_url,
+        &code,
+        &script_nonce,
+    ))
+    .into_response();
     let response_headers = response.headers_mut();
     response_headers.insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
-    response_headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        header::HeaderValue::from_static(
-            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-        ),
-    );
+    response_headers.insert(header::CONTENT_SECURITY_POLICY, csp);
     response_headers.insert(
         header::REFERRER_POLICY,
         header::HeaderValue::from_static("no-referrer"),
@@ -615,12 +743,17 @@ mod tests {
         let html = minimal_invite_landing_html(
             "wss://relay.example.com",
             "v2.payload\"><script>alert(1)</script>",
+            "test-nonce",
         );
 
         assert!(html.contains(
             "buzz://join?relay=wss%3A%2F%2Frelay.example.com&amp;code=v2.payload%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E"
         ));
         assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("<script nonce=\"test-nonce\">"));
+        assert!(html.contains("fetch(\"/api/join-policy\")"));
+        assert!(html.contains("fetch(\"/api/invites/accept-policy\""));
+        assert!(html.contains("appUrl.searchParams.set(\"policy_receipt\", payload.receipt)"));
     }
 
     #[test]
