@@ -62,11 +62,8 @@ function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
 }
 
-const MEMBERSHIP_GROUP_WINDOW_SECONDS = 5 * 60;
-
 type MembershipChangePayload = {
-  actor: string | null;
-  mode: "added" | "joined";
+  mode: "arrival" | "departure";
   target: string;
 };
 
@@ -81,21 +78,19 @@ function parseMembershipChangePayload(
       actor?: unknown;
       target?: unknown;
     };
+    if (payload.type === "member_left" && typeof payload.actor === "string") {
+      const target = payload.actor.trim().toLowerCase();
+      return target ? { mode: "departure", target } : null;
+    }
     if (
       payload.type !== "member_joined" ||
-      typeof payload.actor !== "string" ||
       typeof payload.target !== "string"
     ) {
       return null;
     }
 
-    const actor = payload.actor.trim().toLowerCase();
     const target = payload.target.trim().toLowerCase();
-    if (!actor || !target) return null;
-
-    return actor === target
-      ? { actor: null, mode: "joined", target }
-      : { actor, mode: "added", target };
+    return target ? { mode: "arrival", target } : null;
   } catch {
     return null;
   }
@@ -106,8 +101,10 @@ function membershipChangesCanGroup(
   second: MembershipChangePayload,
 ): boolean {
   return (
-    first.mode === second.mode &&
-    (first.mode === "joined" || first.actor === second.actor)
+    (first.mode === "arrival" && second.mode === "arrival") ||
+    (first.mode === "arrival" &&
+      second.mode === "departure" &&
+      first.target === second.target)
   );
 }
 
@@ -116,6 +113,11 @@ function membershipChangesCanGroup(
  * history cannot repartition the rows that are already loaded. Their key is
  * likewise the newest entry's key: extending the oldest visible group changes
  * its contents, but not its identity or the virtual list's existing key suffix.
+ *
+ * Compatible membership activities stay together while they are contiguous.
+ * Arrivals (self-joins and additions) share one summary; an arrival immediately
+ * followed by that member leaving becomes a single lifecycle summary. That
+ * deliberately lets a contiguous activity run extend beyond its original hour.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
@@ -139,9 +141,7 @@ function buildMembershipGroups(
         barrierIndexes.has(start) ||
         !candidatePayload ||
         !membershipChangesCanGroup(candidatePayload, newestPayload) ||
-        newestEntry.message.createdAt < candidate.message.createdAt ||
-        newestEntry.message.createdAt - candidate.message.createdAt >
-          MEMBERSHIP_GROUP_WINDOW_SECONDS
+        newestEntry.message.createdAt < candidate.message.createdAt
       ) {
         break;
       }

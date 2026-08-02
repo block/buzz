@@ -30,6 +30,20 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "membershipActivityAvatarStacks",
+      "name": "Membership activity avatars",
+      "description": "Show avatars above grouped channel join and leave activity. Turn this off to compare the text-only layout.",
+      "defaultEnabled": true,
+      "platforms": ["desktop"]
+    },
+    {
+      "id": "membershipActivityAvatarInlineLayout",
+      "name": "Inline membership activity avatars",
+      "description": "Place membership activity avatar stacks to the left of their text instead of above it.",
+      "defaultEnabled": false,
+      "platforms": ["desktop"]
     }
   ]
 }
