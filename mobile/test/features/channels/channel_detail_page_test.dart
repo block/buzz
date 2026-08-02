@@ -1207,6 +1207,102 @@ void main() {
       expect(find.byIcon(LucideIcons.chevronDown), findsOneWidget);
     });
 
+    testWidgets('loads history through the oldest unread boundary', (
+      tester,
+    ) async {
+      final newestPage = [
+        for (var i = 50; i < 100; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final olderPage = [
+        for (var i = 0; i < 50; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        newestPage,
+        olderPages: [olderPage],
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 21'), findsOneWidget);
+      expect(findRichText('Message 50'), findsNothing);
+    });
+
+    testWidgets('stops loading the unread boundary after a failed page', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 50; i < 100; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        messages,
+        failOlderFetch: true,
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
+      expect(find.bySemanticsLabel('Loading older messages'), findsNothing);
+    });
+
     testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
     ) async {
@@ -3199,12 +3295,17 @@ Channel _channel({required String id, required String name}) => Channel(
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
+  final List<List<NostrEvent>> _olderPages;
+  final bool failOlderFetch;
 
   _FakeMessagesNotifier(
     this._messages, {
     String channelId = _channelId,
     bool hasLoadedMessages = true,
+    List<List<NostrEvent>> olderPages = const [],
+    this.failOlderFetch = false,
   }) : _hasLoadedMessages = hasLoadedMessages,
+       _olderPages = [...olderPages],
        super(channelId);
 
   @override
@@ -3214,10 +3315,16 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   bool get hasLoadedMessages => _hasLoadedMessages;
 
   @override
-  bool get reachedOldest => true;
+  bool get reachedOldest => _olderPages.isEmpty && !failOlderFetch;
 
   @override
-  Future<bool> fetchOlder() async => false;
+  Future<bool> fetchOlder() async {
+    if (failOlderFetch || _olderPages.isEmpty) return false;
+    _messages = [..._olderPages.removeAt(0), ..._messages]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    state = AsyncData(_messages);
+    return true;
+  }
 
   void setMessages(List<NostrEvent> messages) {
     _messages = messages;

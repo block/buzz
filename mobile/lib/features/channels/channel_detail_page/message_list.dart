@@ -48,23 +48,62 @@ class _MessageList extends HookConsumerWidget {
     final didJumpToInitialMessage = useRef(false);
     final isUnreadNavigationDismissed = useState(false);
     final detachedWhileUnreadShown = useRef(false);
-    final oldestUnreadMessageIdRef = useRef<String?>(null);
-    if (hasInitialUnread && oldestUnreadMessageIdRef.value == null) {
-      final readAt = initialChannelReadAt;
-      final unread = entries
-          .where((entry) => readAt == null || entry.message.createdAt > readAt)
-          .map((entry) => entry.message)
-          .firstOrNull;
-      oldestUnreadMessageIdRef.value =
-          unread?.id ?? (entries.isEmpty ? null : entries.last.message.id);
-    }
-    final oldestUnreadMessageId =
-        initialMessageId == null && initialThreadRootId == null
-        ? oldestUnreadMessageIdRef.value
-        : null;
+    final oldestUnreadMessageId = useState<String?>(null);
+    final unreadBoundaryLoadFailed = useState(false);
+    final hasUnreadDeepLink =
+        initialMessageId != null || initialThreadRootId != null;
+    final notifier = ref.read(channelMessagesProvider(channelId).notifier);
+
+    useEffect(
+      () {
+        if (!hasInitialUnread ||
+            hasUnreadDeepLink ||
+            oldestUnreadMessageId.value != null ||
+            unreadBoundaryLoadFailed.value ||
+            entries.isEmpty) {
+          return null;
+        }
+
+        final readAt = initialChannelReadAt;
+        final oldestLoadedAt = entries.first.message.createdAt;
+        final hasCrossedReadBoundary =
+            readAt != null && oldestLoadedAt <= readAt;
+        if (!hasCrossedReadBoundary && !notifier.reachedOldest) {
+          var cancelled = false;
+          unawaited(
+            Future<void>(() async {
+              final loaded = await notifier.fetchOlder();
+              if (!cancelled && !loaded && !notifier.reachedOldest) {
+                unreadBoundaryLoadFailed.value = true;
+              }
+            }),
+          );
+          return () => cancelled = true;
+        }
+
+        final unread = entries
+            .where(
+              (entry) => readAt == null || entry.message.createdAt > readAt,
+            )
+            .map((entry) => entry.message)
+            .firstOrNull;
+        oldestUnreadMessageId.value =
+            unread?.id ?? (readAt == null ? entries.first.message.id : null);
+        return null;
+      },
+      [
+        hasInitialUnread,
+        hasUnreadDeepLink,
+        initialChannelReadAt,
+        entries.length,
+        notifier.reachedOldest,
+        unreadBoundaryLoadFailed.value,
+      ],
+    );
 
     final showUnreadNavigation =
-        !isUnreadNavigationDismissed.value && oldestUnreadMessageId != null;
+        !isUnreadNavigationDismissed.value &&
+        oldestUnreadMessageId.value != null;
 
     int? reversedIndexOf(String? messageId) {
       if (messageId == null) return null;
@@ -96,7 +135,7 @@ class _MessageList extends HookConsumerWidget {
     }
 
     Future<void> scrollToOldestUnread() async {
-      final targetIndex = reversedIndexOf(oldestUnreadMessageId);
+      final targetIndex = reversedIndexOf(oldestUnreadMessageId.value);
       if (targetIndex == null ||
           !itemScrollController.isAttached ||
           isAutoScrolling.value) {
