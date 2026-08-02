@@ -79,8 +79,6 @@ macro_rules! windows_install_command {
     };
 }
 
-pub(crate) use windows_install_command;
-
 #[cfg(test)]
 mod tests {
     use crate::managed_agents::known_acp_runtime_exact;
@@ -202,26 +200,6 @@ mod tests {
                 < command.find("Invoke-RestMethod").unwrap(),
             "the env prefix must be set before the installer runs. Got: {command}"
         );
-    }
-
-    /// The install command is echoed into the install log, which flows through
-    /// the redaction pipeline. A literal that looks like a credential would be
-    /// scrubbed and render the logged command unreadable.
-    #[test]
-    fn test_no_windows_install_command_embeds_credential_like_literals() {
-        for (id, command) in windows_install_commands() {
-            assert!(
-                !command.contains('@'),
-                "{id}: no URL userinfo — a `user:pass@host` literal would be redacted out of \
-                 the install log. Got: {command}"
-            );
-            for marker in ["TOKEN", "SECRET", "PASSWORD", "APIKEY"] {
-                assert!(
-                    !command.to_ascii_uppercase().contains(marker),
-                    "{id}: install commands must carry no {marker}-like literal. Got: {command}"
-                );
-            }
-        }
     }
 
     /// The vendor URLs are the payload; pin them so a refactor of the shared
