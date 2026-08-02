@@ -135,7 +135,8 @@ pub enum ManifestError {
 ///
 /// Refuses traversal (`..`), null/newline/control chars, non-`refs/` prefixes,
 /// and leading/trailing/double slashes. Allowed alphabet:
-/// `[a-zA-Z0-9_./+-@]`.
+/// `[a-zA-Z0-9_./+@-]` — note `+` immediately before `@` to avoid reading as
+/// a character-class range (`+-@` would include `: ; < = > ?`).
 ///
 /// `+` and `@` are legal git ref characters (`git check-ref-format`) with no
 /// meaning to the object-store key scheme or path traversal — they were
@@ -351,6 +352,10 @@ mod tests {
         assert!(is_safe_refname("refs/tags/release@v1"));
         assert!(!is_safe_refname("refs/heads/../escape"));
         assert!(!is_safe_refname("HEAD"));
+        // The empty-string reject is load-bearing: `ManifestError::EmptyHead`'s
+        // doc relies on the read side never accepting `""` as a head, so a
+        // missing `head` field is distinguishable from `""` (which is invalid).
+        assert!(!is_safe_refname(""));
         assert!(!is_safe_refname("refs/heads/"));
         assert!(!is_safe_refname("/refs/heads/main"));
         assert!(!is_safe_refname("refs/heads/main\nrefs/heads/evil"));
