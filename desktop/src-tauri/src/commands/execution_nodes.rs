@@ -238,6 +238,7 @@ pub async fn deploy_managed_agent_to_execution_node(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DeployExecutionWorkloadResponse, String> {
+    let _execution_guard = state.managed_agent_execution_transition.lock().await;
     let node_id = ExecutionNodeId::new(input.node_id.trim().to_string())
         .map_err(|error| format!("invalid execution node id: {error}"))?;
     let workload = {
@@ -250,8 +251,8 @@ pub async fn deploy_managed_agent_to_execution_node(
             .iter()
             .find(|record| record.pubkey == input.pubkey)
             .ok_or_else(|| format!("managed agent {} not found", input.pubkey))?;
-        let personas = load_personas(&app).unwrap_or_default();
-        let global_config = load_global_agent_config(&app).unwrap_or_default();
+        let personas = load_personas(&app)?;
+        let global_config = load_global_agent_config(&app)?;
         let effective_config = crate::managed_agents::effective_config::resolve_effective_config(
             record,
             &personas,
@@ -408,7 +409,7 @@ pub(crate) async fn remove_execution_workload_for_managed_agent(
     node_id: &str,
     workload_id: &str,
 ) -> Result<(), String> {
-    let response = send_lifecycle_command(
+    let response = send_lifecycle_command_unlocked(
         state,
         ExecutionWorkloadCommandInput {
             node_id: node_id.to_string(),
@@ -539,6 +540,15 @@ pub async fn cancel_execution_authentication(
 }
 
 async fn send_lifecycle_command(
+    state: &State<'_, AppState>,
+    input: ExecutionWorkloadCommandInput,
+    operation: WorkloadLifecycleOperation,
+) -> Result<DeployExecutionWorkloadResponse, String> {
+    let _execution_guard = state.managed_agent_execution_transition.lock().await;
+    send_lifecycle_command_unlocked(state, input, operation).await
+}
+
+async fn send_lifecycle_command_unlocked(
     state: &State<'_, AppState>,
     input: ExecutionWorkloadCommandInput,
     operation: WorkloadLifecycleOperation,

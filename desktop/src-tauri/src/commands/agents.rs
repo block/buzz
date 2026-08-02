@@ -1322,7 +1322,9 @@ pub async fn delete_managed_agent(
     app: AppHandle,
 ) -> Result<(), String> {
     use tauri::Manager;
-    let state = app.state::<AppState>();
+    let state_app = app.clone();
+    let state = state_app.state::<AppState>();
+    let _execution_guard = state.managed_agent_execution_transition.lock().await;
     let execution_target = {
         let _store_guard = state
             .managed_agents_store_lock

@@ -131,7 +131,9 @@ fn commit_cascade_agents(
 #[tauri::command]
 pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
-    let state = app.state::<crate::app_state::AppState>();
+    let state_app = app.clone();
+    let state = state_app.state::<crate::app_state::AppState>();
+    let _execution_guard = state.managed_agent_execution_transition.lock().await;
     let preflight_id = id.clone();
     let preflight_app = app.clone();
     let execution_targets = tokio::task::spawn_blocking(move || {

@@ -9,7 +9,6 @@ use std::{
 
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, Manager};
-#[cfg(feature = "mesh-llm")]
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
@@ -49,6 +48,10 @@ pub struct AppState {
     /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
     /// Never perform network I/O while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
+    /// Serializes remote execution lifecycle operations, including the
+    /// remote side effect and the local record projection. This prevents a
+    /// deploy from racing a delete between those two phases.
+    pub managed_agent_execution_transition: AsyncMutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
@@ -211,6 +214,7 @@ pub fn build_app_state() -> AppState {
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
+        managed_agent_execution_transition: AsyncMutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
