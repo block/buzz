@@ -313,6 +313,7 @@ mod tests {
             entry.runtime,
             RouteField::available("goose".into(), RouteSource::LinkedPersonaRuntime)
         );
+        inherited.runtime = Some("codex".into());
         inherited.agent_command_override = Some("/custom/unknown-agent".into());
         let entry = build_managed_agent_route_inventory(&[inherited], &personas, &global)
             .unwrap()
