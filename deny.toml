@@ -1,4 +1,8 @@
 [advisories]
+# Vulnerabilities remain fatal. Limit no-fix unmaintained notices to direct
+# workspace dependencies so target-specific transitive notices stay visible
+# without masking actionable vulnerability results.
+unmaintained = "workspace"
 ignore = [
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
     # Will be resolved when nostr crate updates its dependencies.
