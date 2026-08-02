@@ -75,7 +75,7 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   // Attach the original image via the mocked paperclip flow.
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
   const composer = page.getByTestId("message-composer");
   await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
 
@@ -153,7 +153,7 @@ test("spoiler marking survives drawing on the attachment", async ({ page }) => {
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
   const composer = page.getByTestId("message-composer");
   await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
 
