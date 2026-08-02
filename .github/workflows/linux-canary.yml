@@ -18,10 +18,19 @@ permissions:
 
 jobs:
   build:
-    name: Build Linux canary
+    name: Build Linux canary (${{ matrix.target }})
     if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
-    container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+    strategy:
+      matrix:
+        include:
+          - target: AppImage
+            container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+            bundles: appimage
+          - target: Debian
+            container: ubuntu:22.04
+            bundles: deb
+    container: ${{ matrix.container }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -170,11 +179,12 @@ jobs:
           ./scripts/bundle-sidecars.sh
 
       - name: Build Linux Tauri app
-        run: cd desktop && pnpm tauri build --ci --bundles deb,appimage --config src-tauri/tauri.canary.conf.json
+        run: cd desktop && pnpm tauri build --ci --bundles ${{ matrix.bundles }} --config src-tauri/tauri.canary.conf.json
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
       - name: Fix AppImage (remove infra libs, symlink system GStreamer)
+        if: matrix.target == 'AppImage'
         # fix-appimage.sh checks for TAURI_SIGNING_PRIVATE_KEY and skips
         # re-signing when absent, so no signing env vars are needed here.
         # Repacking still runs, removing the Mesa/GLib/GStreamer conflict libs.
@@ -202,26 +212,26 @@ jobs:
           set -euo pipefail
           BUNDLE_DIR="desktop/src-tauri/target/release/bundle"
 
-          DEB=$(find "$BUNDLE_DIR/deb" -name '*.deb' -type f | head -1)
-          if [[ -z "$DEB" ]]; then
-            echo "::error::No DEB found in $BUNDLE_DIR/deb"
-            exit 1
+          if [ "${{ matrix.target }}" = "Debian" ]; then
+            DEB=$(find "$BUNDLE_DIR/deb" -name '*.deb' -type f | head -1)
+            if [[ -z "$DEB" ]]; then
+              echo "::error::No DEB found in $BUNDLE_DIR/deb"
+              exit 1
+            fi
+            echo "path=$DEB" >> "$GITHUB_OUTPUT"
+          else
+            APPIMAGE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' -type f | head -1)
+            if [[ -z "$APPIMAGE" ]]; then
+              echo "::error::No AppImage found in $BUNDLE_DIR/appimage"
+              exit 1
+            fi
+            echo "path=$APPIMAGE" >> "$GITHUB_OUTPUT"
           fi
-          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
-
-          APPIMAGE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' -type f | head -1)
-          if [[ -z "$APPIMAGE" ]]; then
-            echo "::error::No AppImage found in $BUNDLE_DIR/appimage"
-            exit 1
-          fi
-          echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Upload Linux canary packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: buzz-linux-canary-${{ github.sha }}
-          path: |
-            ${{ steps.artifacts.outputs.deb }}
-            ${{ steps.artifacts.outputs.appimage }}
+          name: buzz-linux-canary-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ steps.artifacts.outputs.path }}
           if-no-files-found: error
           retention-days: 7
