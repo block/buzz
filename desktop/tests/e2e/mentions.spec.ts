@@ -511,6 +511,31 @@ test("relay-only shared agents stay hidden from DM mentions", async ({
   await expect(autocomplete(page).getByText("alice")).toHaveCount(0);
 });
 
+test("relay-only shared agents stay hidden while channel type is unresolved", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  await page.evaluate(async (channelId) => {
+    const bridge = window as Window & {
+      __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
+        channelId: string;
+        channelType: null;
+      }) => void;
+    };
+    bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({ channelId, channelType: null });
+    await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  }, "f48efb06-0c93-5025-aac9-2e646bb6bfa8");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@alice");
+
+  await expect(autocomplete(page).getByText("alice")).toHaveCount(0);
+});
+
 test("autocomplete filters managed-agent suggestions as user types", async ({
   page,
 }) => {

@@ -238,9 +238,9 @@ export function useMentions(
     [members],
   );
   const allowedAgentPubkeys =
-    options?.channelType === "dm"
-      ? managedAgentPubkeys
-      : mentionableAgentPubkeys;
+    options?.channelType === "stream" || options?.channelType === "forum"
+      ? mentionableAgentPubkeys
+      : managedAgentPubkeys;
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
