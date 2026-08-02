@@ -5,10 +5,15 @@ import {
   useAttachManagedAgentToChannelMutation,
 } from "@/features/agents/hooks";
 import {
+  type AttachConnectedAgentToChannelResult,
+  useAttachConnectedAgentToChannelMutation,
+} from "./useConnectedAgents";
+import {
   useChannelMembersQuery,
   useChannelsQuery,
 } from "@/features/channels/hooks";
 import type { Channel, ChannelRole, ManagedAgent } from "@/shared/api/types";
+import type { ConnectedAgent } from "@/shared/api/remoteAgentTypes";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -20,26 +25,43 @@ import {
 } from "@/shared/ui/dialog";
 import { CopyButton } from "./CopyButton";
 
-export function AddAgentToChannelDialog({
-  agent,
-  open,
-  onAdded,
-  onOpenChange,
-}: {
-  agent: ManagedAgent | null;
+type AddAgentToChannelDialogSharedProps = {
   open: boolean;
-  onAdded: (
-    channel: Channel,
-    result: AttachManagedAgentToChannelResult,
-  ) => void;
   onOpenChange: (open: boolean) => void;
-}) {
+};
+
+type AddAgentToChannelDialogProps =
+  | (AddAgentToChannelDialogSharedProps & {
+      agent: ManagedAgent | null;
+      kind?: "managed";
+      onAdded: (
+        channel: Channel,
+        result: AttachManagedAgentToChannelResult,
+      ) => void;
+    })
+  | (AddAgentToChannelDialogSharedProps & {
+      agent: ConnectedAgent | null;
+      kind: "connected";
+      onAdded: (
+        channel: Channel,
+        result: AttachConnectedAgentToChannelResult,
+      ) => void;
+    });
+
+export function AddAgentToChannelDialog(props: AddAgentToChannelDialogProps) {
+  const { agent, open, onOpenChange } = props;
   const channelsQuery = useChannelsQuery();
   const [channelId, setChannelId] = React.useState("");
   const [role, setRole] = React.useState<Exclude<ChannelRole, "owner">>("bot");
-  const attachAgentMutation = useAttachManagedAgentToChannelMutation(
+  const attachManagedAgentMutation = useAttachManagedAgentToChannelMutation(
     channelId || null,
   );
+  const attachConnectedAgentMutation =
+    useAttachConnectedAgentToChannelMutation();
+  const activeMutation =
+    props.kind === "connected"
+      ? attachConnectedAgentMutation
+      : attachManagedAgentMutation;
   const channels = React.useMemo(
     () =>
       (channelsQuery.data ?? []).filter(
@@ -51,7 +73,8 @@ export function AddAgentToChannelDialog({
   function reset() {
     setChannelId("");
     setRole("bot");
-    attachAgentMutation.reset();
+    attachManagedAgentMutation.reset();
+    attachConnectedAgentMutation.reset();
   }
 
   function handleOpenChange(next: boolean) {
@@ -91,17 +114,25 @@ export function AddAgentToChannelDialog({
     channels.find((channel) => channel.id === channelId) ?? null;
 
   async function handleSubmit() {
-    if (!agent || !selectedChannel) {
+    if (!props.agent || !selectedChannel) {
       return;
     }
 
     try {
-      const result = await attachAgentMutation.mutateAsync({
-        agent,
-        role,
-      });
-
-      onAdded(selectedChannel, result);
+      if (props.kind === "connected") {
+        const result = await attachConnectedAgentMutation.mutateAsync({
+          agent: props.agent,
+          channelId: selectedChannel.id,
+          role,
+        });
+        props.onAdded(selectedChannel, result);
+      } else {
+        const result = await attachManagedAgentMutation.mutateAsync({
+          agent: props.agent,
+          role,
+        });
+        props.onAdded(selectedChannel, result);
+      }
       handleOpenChange(false);
     } catch {
       // React Query stores the error; keep the dialog open and render it inline.
@@ -116,8 +147,10 @@ export function AddAgentToChannelDialog({
             <DialogTitle>Add agent to channel</DialogTitle>
             <DialogDescription>
               Add {agent?.name ?? "this agent"} to a channel so desktop chat can
-              `@mention` it. Running agents pick up new channels automatically
-              via membership notifications.
+              `@mention` it.{" "}
+              {props.kind === "connected"
+                ? "Buzz writes membership only — the remote agent keeps supervising itself."
+                : "Running agents pick up new channels automatically via membership notifications."}
             </DialogDescription>
           </DialogHeader>
 
@@ -128,9 +161,7 @@ export function AddAgentToChannelDialog({
               </label>
               <select
                 className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={
-                  channels.length === 0 || attachAgentMutation.isPending
-                }
+                disabled={channels.length === 0 || activeMutation.isPending}
                 id="agent-channel-id"
                 onChange={(event) => setChannelId(event.target.value)}
                 value={channelId}
@@ -166,7 +197,7 @@ export function AddAgentToChannelDialog({
               </label>
               <select
                 className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={attachAgentMutation.isPending}
+                disabled={activeMutation.isPending}
                 id="agent-channel-role"
                 onChange={(event) =>
                   setRole(event.target.value as Exclude<ChannelRole, "owner">)
@@ -200,9 +231,9 @@ export function AddAgentToChannelDialog({
               </p>
             ) : null}
 
-            {attachAgentMutation.error instanceof Error ? (
+            {activeMutation.error instanceof Error ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                {attachAgentMutation.error.message}
+                {activeMutation.error.message}
               </p>
             ) : null}
           </div>
@@ -221,13 +252,13 @@ export function AddAgentToChannelDialog({
                 !agent ||
                 !selectedChannel ||
                 channelsQuery.isLoading ||
-                attachAgentMutation.isPending
+                activeMutation.isPending
               }
               onClick={() => void handleSubmit()}
               size="sm"
               type="button"
             >
-              {attachAgentMutation.isPending
+              {activeMutation.isPending
                 ? "Adding..."
                 : isAlreadyMember
                   ? "Re-add to channel"
