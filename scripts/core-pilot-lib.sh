@@ -114,7 +114,7 @@ pilot_require_value() {
 }
 
 pilot_validate_config() {
-  local required key prompt channels owner normalized_url
+  local required key prompt prompt_canonical reviewed_prompt prompt_hash channels owner normalized_url
   required=(
     BUZZ_RELAY_URL BUZZ_BIND_ADDR DATABASE_URL REDIS_URL BUZZ_REQUIRE_AUTH_TOKEN BUZZ_GIT_ENABLED
     BUZZ_AGENT_PROVIDER OPENAI_COMPAT_API OPENAI_COMPAT_BASE_URL OPENAI_COMPAT_MODEL
@@ -162,8 +162,14 @@ pilot_validate_config() {
   [[ "$channels" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]] || {
     pilot_die 'pilot requires exactly one UUID channel'; return 1;
   }
+  [[ "$channels" != '11111111-1111-4111-8111-111111111111' ]] || {
+    pilot_die 'replace the template channel before launch'; return 1;
+  }
   owner="${PILOT_ENV[BUZZ_ACP_AGENT_OWNER]}"
   [[ "$owner" =~ ^[0-9a-fA-F]{64}$ ]] || { pilot_die 'pilot owner must be a public key'; return 1; }
+  [[ "${owner,,}" != '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' ]] || {
+    pilot_die 'replace the template owner before launch'; return 1;
+  }
   [[ -n "${PILOT_ENV[OPENAI_COMPAT_API_KEY]}" && -n "${PILOT_ENV[BUZZ_PRIVATE_KEY]}" ]] || {
     pilot_die 'pilot credentials are empty'; return 1;
   }
@@ -172,14 +178,43 @@ pilot_validate_config() {
   if [[ "$prompt" != /* ]]; then
     prompt="$PILOT_REPO_ROOT/$prompt"
   fi
-  [[ -f "$prompt" && -r "$prompt" ]] || { pilot_die 'system prompt is missing'; return 1; }
-  PILOT_ENV[BUZZ_ACP_SYSTEM_PROMPT_FILE]="$prompt"
+  reviewed_prompt="$PILOT_REPO_ROOT/config/core-pilot/core-research-partner.md"
+  prompt_canonical="$(realpath -e -- "$prompt" 2>/dev/null)" || { pilot_die 'system prompt is missing'; return 1; }
+  reviewed_prompt="$(realpath -e -- "$reviewed_prompt" 2>/dev/null)" || { pilot_die 'reviewed system prompt is missing'; return 1; }
+  [[ "$prompt_canonical" == "$reviewed_prompt" && -f "$prompt_canonical" && -r "$prompt_canonical" ]] || {
+    pilot_die 'system prompt is not the reviewed Core prompt'; return 1;
+  }
+  prompt_hash="$(sha256sum -- "$prompt_canonical" 2>/dev/null)" || { pilot_die 'unable to verify system prompt'; return 1; }
+  [[ "${prompt_hash%% *}" == '2da83d41001a2084463e1c6a147905ddd40c37ec08788819aae4e302090b41ad' ]] || {
+    pilot_die 'reviewed system prompt failed integrity verification'; return 1;
+  }
+  PILOT_ENV[BUZZ_ACP_SYSTEM_PROMPT_FILE]="$prompt_canonical"
 }
 
 pilot_check_secret_permissions() {
-  local mode owner
-  owner="$(stat -c '%u' "$PILOT_SECRETS_FILE" 2>/dev/null)" || return 0
-  mode="$(stat -c '%a' "$PILOT_SECRETS_FILE" 2>/dev/null)" || return 0
+  local mode owner kind canonical repo_canonical
+  [[ -f "$PILOT_SECRETS_FILE" && ! -L "$PILOT_SECRETS_FILE" ]] || {
+    pilot_die 'secret file must be a regular non-symlink file'; return 1;
+  }
+  canonical="$(realpath -e -- "$PILOT_SECRETS_FILE" 2>/dev/null)" || {
+    pilot_die 'unable to resolve secret file'; return 1;
+  }
+  [[ "$canonical" == "$PILOT_SECRETS_FILE" ]] || {
+    pilot_die 'secret file path must be canonical'; return 1;
+  }
+  repo_canonical="$(realpath -e -- "$PILOT_REPO_ROOT" 2>/dev/null)" || {
+    pilot_die 'unable to resolve repository root'; return 1;
+  }
+  case "$canonical" in
+    "$repo_canonical"|"$repo_canonical"/*)
+      pilot_die 'secret file must live outside the repository'
+      return 1
+      ;;
+  esac
+  kind="$(stat -c '%F' -- "$canonical" 2>/dev/null)" || { pilot_die 'unable to inspect secret file'; return 1; }
+  owner="$(stat -c '%u' -- "$canonical" 2>/dev/null)" || { pilot_die 'unable to inspect secret file'; return 1; }
+  mode="$(stat -c '%a' -- "$canonical" 2>/dev/null)" || { pilot_die 'unable to inspect secret file'; return 1; }
+  [[ "$kind" == 'regular file' ]] || { pilot_die 'secret file must be regular'; return 1; }
   [[ "$owner" == "$UID" ]] || { pilot_die 'secret file must be owned by the current user'; return 1; }
   (( (8#$mode & 077) == 0 )) || { pilot_die 'secret file must not be group/world readable'; return 1; }
 }
@@ -193,9 +228,22 @@ pilot_prepare_state_dir() {
 pilot_require_release_binaries() {
   PILOT_BIN_DIR="$PILOT_REPO_ROOT/target/release"
   local binary
-  for binary in buzz-relay buzz-acp buzz-agent; do
+  for binary in buzz-relay buzz-acp buzz-agent buzz; do
     [[ -x "$PILOT_BIN_DIR/$binary" ]] || { pilot_die 'required release binary is missing'; return 1; }
   done
+}
+
+pilot_validate_nostr_key() {
+  local status
+  set +e
+  env -i \
+    "PATH=$PILOT_BIN_DIR:$PATH" \
+    "BUZZ_PRIVATE_KEY=${PILOT_ENV[BUZZ_PRIVATE_KEY]}" \
+    BUZZ_RELAY_URL=ws://127.0.0.1:1 \
+    "$PILOT_BIN_DIR/buzz" --format compact users get >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || { pilot_die 'agent Nostr private key is invalid'; return 1; }
 }
 
 pilot_load_and_validate() {
@@ -206,24 +254,75 @@ pilot_load_and_validate() {
   pilot_validate_config || return 1
   pilot_prepare_state_dir || return 1
   pilot_require_release_binaries || return 1
+  pilot_validate_nostr_key || return 1
+}
+
+pilot_process_start_time() {
+  local pid="$1" stat_line remainder
+  stat_line="$(<"/proc/$pid/stat")" 2>/dev/null || return 1
+  remainder="${stat_line##*) }"
+  awk '{print $20}' <<< "$remainder"
+}
+
+pilot_file_identity() {
+  stat -Lc '%d:%i' -- "$1" 2>/dev/null
+}
+
+pilot_cmdline_has_exact_arg() {
+  local pid="$1" expected="$2" arg
+  while IFS= read -r -d '' arg; do
+    [[ "$arg" == "$expected" ]] && return 0
+  done < "/proc/$pid/cmdline" 2>/dev/null
+  return 1
+}
+
+pilot_write_marker() {
+  local marker="$1" pid="$2" expected="$3" expected_path start_time binary_id exe_id proc_exe
+  expected_path="$(realpath -e -- "$expected" 2>/dev/null)" || return 1
+  start_time="$(pilot_process_start_time "$pid")" || return 1
+  binary_id="$(pilot_file_identity "$expected_path")" || return 1
+  proc_exe="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null)" || return 1
+  exe_id="$(pilot_file_identity "$proc_exe")" || return 1
+  [[ "$proc_exe" == "$expected_path" ]] || pilot_cmdline_has_exact_arg "$pid" "$expected_path" || return 1
+  printf 'v1|%s|%s|%s|%s|%s\n' "$pid" "$start_time" "$expected_path" "$binary_id" "$exe_id" > "$marker"
 }
 
 pilot_marker_matches() {
-  local marker="$1" expected="$2" pid binary cmdline
-  [[ -f "$marker" ]] || return 1
-  IFS='|' read -r pid binary < "$marker" || return 1
-  [[ "$binary" == "$expected" && "$pid" =~ ^[0-9]+$ ]] || return 1
+  local marker="$1" expected="$2" version pid start_time binary binary_id exe_id extra
+  local expected_path current_start current_binary_id proc_exe current_exe_id
+  [[ -f "$marker" && ! -L "$marker" ]] || return 1
+  IFS='|' read -r version pid start_time binary binary_id exe_id extra < "$marker" || return 1
+  [[ "$version" == v1 && -z "${extra:-}" && "$pid" =~ ^[0-9]+$ && "$start_time" =~ ^[0-9]+$ ]] || return 1
+  expected_path="$(realpath -e -- "$expected" 2>/dev/null)" || return 1
+  [[ "$binary" == "$expected_path" ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-  [[ "$cmdline" == *"$expected"* ]]
+  current_start="$(pilot_process_start_time "$pid")" || return 1
+  [[ "$current_start" == "$start_time" ]] || return 1
+  current_binary_id="$(pilot_file_identity "$expected_path")" || return 1
+  [[ "$current_binary_id" == "$binary_id" ]] || return 1
+  proc_exe="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null)" || return 1
+  current_exe_id="$(pilot_file_identity "$proc_exe")" || return 1
+  [[ "$current_exe_id" == "$exe_id" ]] || return 1
+  [[ "$proc_exe" == "$expected_path" ]] || pilot_cmdline_has_exact_arg "$pid" "$expected_path"
 }
 
 pilot_stop_marker() {
-  local marker="$1" expected="$2" pid binary
-  if [[ -f "$marker" ]]; then
-    IFS='|' read -r pid binary < "$marker" || true
+  local marker="$1" expected="$2" version pid rest
+  if [[ -f "$marker" && ! -L "$marker" ]]; then
+    IFS='|' read -r version pid rest < "$marker" || true
     if pilot_marker_matches "$marker" "$expected"; then
-      kill "$pid" 2>/dev/null || true
+      pilot_marker_matches "$marker" "$expected" && kill -TERM "$pid" 2>/dev/null || true
+      for _ in $(seq 1 50); do
+        pilot_marker_matches "$marker" "$expected" || break
+        sleep 0.1
+      done
+      if pilot_marker_matches "$marker" "$expected"; then
+        pilot_marker_matches "$marker" "$expected" && kill -KILL "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+          pilot_marker_matches "$marker" "$expected" || break
+          sleep 0.1
+        done
+      fi
     fi
     rm -f "$marker"
   fi

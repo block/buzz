@@ -16,13 +16,32 @@ acp_marker="$PILOT_STATE_DIR/acp.pid"
 relay_bin="$PILOT_BIN_DIR/buzz-relay"
 acp_bin="$PILOT_BIN_DIR/buzz-acp"
 
-if pilot_marker_matches "$relay_marker" "$relay_bin" && pilot_marker_matches "$acp_marker" "$acp_bin"; then
+pilot_relay_ready() {
+  pilot_marker_matches "$relay_marker" "$relay_bin" \
+    && [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/_readiness || true)" == '200' ]]
+}
+
+pilot_acp_ready() {
+  pilot_marker_matches "$acp_marker" "$acp_bin" \
+    && grep -Fq "connected to relay at ${PILOT_ENV[BUZZ_RELAY_URL]}" "$PILOT_STATE_DIR/acp.log" 2>/dev/null \
+    && grep -Fq "subscribed to channel ${PILOT_ENV[BUZZ_ACP_CHANNELS]}" "$PILOT_STATE_DIR/acp.log" 2>/dev/null
+}
+
+if pilot_relay_ready && pilot_acp_ready; then
   printf 'Core pilot is already running.\n'
   exit 0
 fi
 
 pilot_stop_marker "$relay_marker" "$relay_bin"
 pilot_stop_marker "$acp_marker" "$acp_bin"
+
+if command -v ss >/dev/null 2>&1; then
+  listeners="$(ss -H -ltn 'sport = :3000' 2>/dev/null)" || { pilot_die 'unable to inspect relay port'; exit 1; }
+  [[ -z "$listeners" ]] || { pilot_die 'relay port is occupied by a non-pilot process'; exit 1; }
+elif (exec 3<>/dev/tcp/127.0.0.1/3000) 2>/dev/null; then
+  pilot_die 'relay port is occupied by a non-pilot process'
+  exit 1
+fi
 
 cd "$PILOT_REPO_ROOT"
 docker compose up -d postgres redis minio minio-init
@@ -40,15 +59,32 @@ nohup env -i \
   "BUZZ_REQUIRE_AUTH_TOKEN=${PILOT_ENV[BUZZ_REQUIRE_AUTH_TOKEN]}" \
   "BUZZ_GIT_ENABLED=${PILOT_ENV[BUZZ_GIT_ENABLED]}" \
   "$relay_bin" > "$relay_log" 2>&1 &
-printf '%s|%s\n' "$!" "$relay_bin" > "$relay_marker"
+relay_pid=$!
+marker_written=false
+for _ in $(seq 1 10); do
+  if pilot_write_marker "$relay_marker" "$relay_pid" "$relay_bin"; then
+    marker_written=true
+    break
+  fi
+  sleep 0.05
+done
+if [[ "$marker_written" != true ]]; then
+  pilot_die 'relay exited before its ownership marker could be established'
+  exit 1
+fi
 
 for _ in $(seq 1 30); do
-  if [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/_readiness || true)" == '200' ]]; then
+  if ! pilot_marker_matches "$relay_marker" "$relay_bin"; then
+    rm -f "$relay_marker"
+    pilot_die 'relay exited during readiness'
+    exit 1
+  fi
+  if pilot_relay_ready; then
     break
   fi
   sleep 1
 done
-if [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/_readiness || true)" != '200' ]]; then
+if ! pilot_relay_ready; then
   pilot_stop_marker "$relay_marker" "$relay_bin"
   pilot_die 'relay did not become ready; see the pilot relay log'
   exit 1
@@ -84,6 +120,38 @@ nohup env -i \
   "BUZZ_ACP_DEDUP=${PILOT_ENV[BUZZ_ACP_DEDUP]}" \
   "BUZZ_ACP_MULTIPLE_EVENT_HANDLING=${PILOT_ENV[BUZZ_ACP_MULTIPLE_EVENT_HANDLING]}" \
   "$acp_bin" > "$acp_log" 2>&1 &
-printf '%s|%s\n' "$!" "$acp_bin" > "$acp_marker"
+acp_pid=$!
+marker_written=false
+for _ in $(seq 1 10); do
+  if pilot_write_marker "$acp_marker" "$acp_pid" "$acp_bin"; then
+    marker_written=true
+    break
+  fi
+  sleep 0.05
+done
+if [[ "$marker_written" != true ]]; then
+  pilot_stop_marker "$relay_marker" "$relay_bin"
+  pilot_die 'ACP exited before its ownership marker could be established'
+  exit 1
+fi
+
+for _ in $(seq 1 30); do
+  if ! pilot_marker_matches "$acp_marker" "$acp_bin"; then
+    rm -f "$acp_marker"
+    pilot_stop_marker "$relay_marker" "$relay_bin"
+    pilot_die 'ACP exited before connection and channel subscription readiness'
+    exit 1
+  fi
+  if pilot_acp_ready; then
+    break
+  fi
+  sleep 1
+done
+if ! pilot_acp_ready || ! pilot_relay_ready; then
+  pilot_stop_marker "$acp_marker" "$acp_bin"
+  pilot_stop_marker "$relay_marker" "$relay_bin"
+  pilot_die 'pilot stack did not reach connected subscription readiness'
+  exit 1
+fi
 
 printf 'Core pilot is ready at ws://127.0.0.1:3000.\n'
