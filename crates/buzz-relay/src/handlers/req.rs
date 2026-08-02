@@ -2069,6 +2069,17 @@ mod tests {
     }
 
     #[test]
+    fn result_gated_execution_kinds_can_match() {
+        for kind in [
+            buzz_core::kind::KIND_EXECUTION_NODE_COMMAND,
+            buzz_core::kind::KIND_EXECUTION_NODE_RECEIPT,
+        ] {
+            let f = Filter::new().kind(nostr::Kind::Custom(kind as u16));
+            assert!(filter_can_match_result_gated_kinds(&f));
+        }
+    }
+
+    #[test]
     fn result_gated_kind_9_only_cannot_match() {
         let f = Filter::new().kind(nostr::Kind::TextNote);
         assert!(!filter_can_match_result_gated_kinds(&f));
