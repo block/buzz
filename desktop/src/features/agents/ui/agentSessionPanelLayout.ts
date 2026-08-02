@@ -85,6 +85,17 @@ export function deriveLatestSessionId(
   return null;
 }
 
+/** Derive the most recent turn id, including a turn that has just completed. */
+export function deriveLatestTurnId(
+  events: readonly ObserverEvent[],
+): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const turnId = events[i]?.turnId;
+    if (turnId) return turnId;
+  }
+  return null;
+}
+
 export function resolveDisplayEvents(
   scopedEvents: ObserverEvent[],
   rawEventsOverride: ObserverEvent[] | undefined,

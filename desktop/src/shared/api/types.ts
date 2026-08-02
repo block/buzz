@@ -458,7 +458,7 @@ export type ManagedAgentLog = {
 };
 
 export type CancelManagedAgentTurnResult = {
-  status: "sent" | "no_active_turn";
+  status: "sent" | "context_mismatch";
 };
 
 /**

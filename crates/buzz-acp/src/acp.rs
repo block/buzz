@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
+use crate::config::PermissionMode;
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
 
@@ -158,6 +159,8 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// Harness-side fallback for synchronous ACP permission requests.
+    permission_mode: PermissionMode,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -410,6 +413,24 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+/// Permission requests can contain tool arguments, paths, and user-provided
+/// labels. Observer evidence records that a request arrived, but never copies
+/// those sensitive parameters into replay buffers or encrypted frames.
+fn observer_safe_inbound_message(message: &serde_json::Value) -> serde_json::Value {
+    if message.get("method").and_then(serde_json::Value::as_str)
+        != Some("session/request_permission")
+    {
+        return message.clone();
+    }
+
+    serde_json::json!({
+        "jsonrpc": message.get("jsonrpc").cloned().unwrap_or_else(|| serde_json::json!("2.0")),
+        "id": message.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "method": "session/request_permission",
+        "params": { "redacted": true }
+    })
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -541,6 +562,7 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            permission_mode: PermissionMode::Default,
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -557,6 +579,11 @@ impl AcpClient {
     pub fn set_observer(&mut self, observer: Option<ObserverHandle>, agent_index: usize) {
         self.observer = observer;
         self.observer_agent_index = Some(agent_index);
+    }
+
+    /// Set the endpoint permission policy for subsequent tool requests.
+    pub(crate) fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
     }
 
     /// Update metadata that will be attached to subsequent raw wire events.
@@ -1197,7 +1224,7 @@ impl AcpClient {
                     continue;
                 }
             };
-            self.observe("acp_read", msg.clone());
+            self.observe("acp_read", observer_safe_inbound_message(&msg));
 
             // Check if this is a response to our expected request (has matching id
             // AND no `method` field — a `method` field means it's an agent-initiated
@@ -1520,7 +1547,7 @@ impl AcpClient {
                             continue;
                         }
                     };
-                    self.observe("acp_read", msg.clone());
+                    self.observe("acp_read", observer_safe_inbound_message(&msg));
 
                     let activity_now = Instant::now();
                     idle_deadline = activity_now + idle_timeout;
@@ -1853,10 +1880,11 @@ impl AcpClient {
         }
     }
 
-    /// Auto-approve a `session/request_permission` request from the agent.
+    /// Apply local policy to a synchronous `session/request_permission`.
     ///
-    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
-    /// If no `allow_once` option exists, falls back to `reject_once`.
+    /// Monitor modes select `allow_once`; lockdown modes select `reject_once`.
+    /// Monitor fails closed when no allow option exists, while lockdown treats
+    /// a missing reject option as a protocol error rather than degrading.
     ///
     /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
     ///
@@ -1874,9 +1902,14 @@ impl AcpClient {
         // Mark as not yet responded — guards against double-response race.
         self.permission_responded = false;
 
-        let options = msg["params"]["options"]
-            .as_array()
-            .ok_or_else(|| AcpError::Protocol("permission request missing options".into()))?;
+        let Some(options) = msg["params"]["options"].as_array() else {
+            return self
+                .cancel_permission_request_with_protocol_error(
+                    &id,
+                    "permission request missing options",
+                )
+                .await;
+        };
 
         tracing::debug!(
             target: "acp::permission",
@@ -1884,38 +1917,74 @@ impl AcpClient {
             options.len()
         );
 
-        // Find allow_once by kind — NEVER hardcode optionId.
-        let allow_once = options
+        let desired_kind = permission_option_kind(&self.permission_mode);
+        let rejecting = desired_kind == "reject_once";
+        // Never hardcode optionId; ACP agents choose their identifiers.
+        let selected = options
             .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some(desired_kind));
 
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
-                .as_str()
-                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
+        let (response, decision) = if let Some(opt) = selected {
+            let Some(option_id) = opt["optionId"].as_str() else {
+                return self
+                    .cancel_permission_request_with_protocol_error(
+                        &id,
+                        format!("{desired_kind} option missing optionId"),
+                    )
+                    .await;
+            };
             tracing::info!(
                 target: "acp::permission",
-                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
+                "applying permission mode {} to request id={id} with {desired_kind} optionId={option_id:?}",
+                self.permission_mode
             );
-            permission_response_selected(&id, option_id)
+            (
+                permission_response_selected(&id, option_id),
+                if rejecting {
+                    "rejected"
+                } else {
+                    "allowed_once"
+                },
+            )
         } else {
-            // No allow_once — fall back to reject_once.
             tracing::warn!(
                 target: "acp::permission",
-                "no allow_once option found in permission request id={id}, falling back to reject_once"
+                "no {desired_kind} option found in permission request id={id}"
             );
+            // Lockdown must never degrade to approval when an adapter sends an
+            // incomplete option set.
+            if rejecting {
+                return self
+                    .cancel_permission_request_with_protocol_error(
+                        &id,
+                        "lockdown permission request missing reject_once option",
+                    )
+                    .await;
+            }
             let reject = options
                 .iter()
                 .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
 
             if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
-                permission_response_selected(&id, option_id)
+                let Some(option_id) = opt["optionId"].as_str() else {
+                    return self
+                        .cancel_permission_request_with_protocol_error(
+                            &id,
+                            "reject_once option missing optionId",
+                        )
+                        .await;
+                };
+                (
+                    permission_response_selected(&id, option_id),
+                    "rejected_no_allow_option",
+                )
             } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
+                return self
+                    .cancel_permission_request_with_protocol_error(
+                        &id,
+                        "no suitable permission option found (neither allow_once nor reject_once)",
+                    )
+                    .await;
             }
         };
 
@@ -1936,7 +2005,39 @@ impl AcpClient {
         self.write_ndjson(&response).await?;
         self.permission_responded = true;
         self.pending_permission_id = None;
+        self.observe(
+            "permission_decision",
+            serde_json::json!({
+                "mode": self.permission_mode.as_wire_str(),
+                "decision": decision,
+            }),
+        );
         Ok(())
+    }
+
+    /// Cancel a malformed permission request before surfacing its protocol error.
+    ///
+    /// The successful cancellation write is the commit point: only then is the
+    /// pending state cleared and owner-local decision evidence emitted. If the
+    /// adapter write fails, the pending state remains available to the normal
+    /// cancellation cleanup path and no false success evidence is recorded.
+    async fn cancel_permission_request_with_protocol_error(
+        &mut self,
+        id: &serde_json::Value,
+        message: impl Into<String>,
+    ) -> Result<(), AcpError> {
+        let response = permission_response_cancelled(id);
+        self.write_ndjson(&response).await?;
+        self.permission_responded = true;
+        self.pending_permission_id = None;
+        self.observe(
+            "permission_decision",
+            serde_json::json!({
+                "mode": self.permission_mode.as_wire_str(),
+                "decision": "cancelled_protocol_error",
+            }),
+        );
+        Err(AcpError::Protocol(message.into()))
     }
 
     /// Parse `stopReason` from a `session/prompt` result value.
@@ -2018,6 +2119,14 @@ fn permission_response_selected(id: &serde_json::Value, option_id: &str) -> serd
         "id": id,
         "result": { "outcome": { "outcome": "selected", "optionId": option_id } }
     })
+}
+
+fn permission_option_kind(mode: &PermissionMode) -> &'static str {
+    if matches!(mode, PermissionMode::DontAsk | PermissionMode::Plan) {
+        "reject_once"
+    } else {
+        "allow_once"
+    }
 }
 
 /// Build a JSON-RPC permission response with `outcome: "cancelled"`.
@@ -2308,6 +2417,27 @@ mod tests {
     }
 
     #[test]
+    fn observer_redacts_permission_request_secrets() {
+        let secret = "seeded-secret-tool-argument";
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "permission-secret",
+            "method": "session/request_permission",
+            "params": {
+                "toolCall": { "path": "/private/example", "arguments": [secret] },
+                "options": [{ "optionId": secret, "name": secret, "kind": "allow_once" }]
+            }
+        });
+
+        let evidence = super::observer_safe_inbound_message(&request);
+        let encoded = serde_json::to_string(&evidence).unwrap();
+        assert!(!encoded.contains(secret));
+        assert!(!encoded.contains("/private/example"));
+        assert_eq!(evidence["params"]["redacted"], true);
+        assert_eq!(evidence["id"], "permission-secret");
+    }
+
+    #[test]
     fn find_reject_once_fallback_when_no_allow_once() {
         let options: Vec<serde_json::Value> = serde_json::from_str(
             r#"[{"optionId": "rej-x", "name": "Reject", "kind": "reject_once"}]"#,
@@ -2324,6 +2454,180 @@ mod tests {
             .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
         assert!(reject_once.is_some());
         assert_eq!(reject_once.unwrap()["optionId"].as_str(), Some("rej-x"));
+    }
+
+    #[test]
+    fn permission_policy_monitor_modes_allow_once() {
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+        ] {
+            assert_eq!(permission_option_kind(&mode), "allow_once");
+        }
+    }
+
+    #[test]
+    fn permission_policy_lockdown_modes_reject_once() {
+        for mode in [PermissionMode::DontAsk, PermissionMode::Plan] {
+            assert_eq!(permission_option_kind(&mode), "reject_once");
+        }
+    }
+
+    #[tokio::test]
+    async fn lockdown_handler_selects_reject_before_tool_execution() {
+        let mut client =
+            spawn_script("read -t 2 response; printf '%s\\n' \"$response\"; sleep 1").await;
+        client.set_permission_mode(PermissionMode::DontAsk);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "permission-7",
+            "method": "session/request_permission",
+            "params": {
+                "options": [
+                    {"optionId": "yes", "kind": "allow_once"},
+                    {"optionId": "no", "kind": "reject_once"}
+                ]
+            }
+        });
+
+        client.handle_permission_request(&request).await.unwrap();
+        let echoed = client.reader.next().await.unwrap().unwrap();
+        let response: serde_json::Value = serde_json::from_str(&echoed).unwrap();
+        assert_eq!(response["result"]["outcome"]["optionId"], "no");
+    }
+
+    #[tokio::test]
+    async fn monitor_handler_selects_allow_once() {
+        let mut client =
+            spawn_script("read -t 2 response; printf '%s\\n' \"$response\"; sleep 1").await;
+        client.set_permission_mode(PermissionMode::Default);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "session/request_permission",
+            "params": {
+                "options": [
+                    {"optionId": "yes", "kind": "allow_once"},
+                    {"optionId": "no", "kind": "reject_once"}
+                ]
+            }
+        });
+
+        client.handle_permission_request(&request).await.unwrap();
+        let echoed = client.reader.next().await.unwrap().unwrap();
+        let response: serde_json::Value = serde_json::from_str(&echoed).unwrap();
+        assert_eq!(response["result"]["outcome"]["optionId"], "yes");
+    }
+
+    #[tokio::test]
+    async fn lockdown_missing_reject_cancels_and_clears_pending_state() {
+        let mut client =
+            spawn_script("read -t 2 response; printf '%s\\n' \"$response\"; sleep 1").await;
+        client.set_permission_mode(PermissionMode::DontAsk);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "permission-malformed",
+            "method": "session/request_permission",
+            "params": {
+                "options": [{"optionId": "yes", "kind": "allow_once"}]
+            }
+        });
+
+        let error = client
+            .handle_permission_request(&request)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AcpError::Protocol(_)));
+        let echoed = client.reader.next().await.unwrap().unwrap();
+        let response: serde_json::Value = serde_json::from_str(&echoed).unwrap();
+        assert_eq!(response["result"]["outcome"]["outcome"], "cancelled");
+        assert!(client.pending_permission_id.is_none());
+        assert!(client.permission_responded);
+    }
+
+    #[tokio::test]
+    async fn monitor_without_allow_or_reject_cancels_and_clears_pending_state() {
+        let mut client =
+            spawn_script("read -t 2 response; printf '%s\\n' \"$response\"; sleep 1").await;
+        client.set_permission_mode(PermissionMode::Default);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 19,
+            "method": "session/request_permission",
+            "params": {
+                "options": [{"optionId": "always", "kind": "allow_always"}]
+            }
+        });
+
+        let error = client
+            .handle_permission_request(&request)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AcpError::Protocol(_)));
+        let echoed = client.reader.next().await.unwrap().unwrap();
+        let response: serde_json::Value = serde_json::from_str(&echoed).unwrap();
+        assert_eq!(response["result"]["outcome"]["outcome"], "cancelled");
+        assert!(client.pending_permission_id.is_none());
+        assert!(client.permission_responded);
+    }
+
+    #[tokio::test]
+    async fn permission_request_missing_options_cancels_and_clears_pending_state() {
+        let mut client =
+            spawn_script("read -t 2 response; printf '%s\\n' \"$response\"; sleep 1").await;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "missing-options",
+            "method": "session/request_permission",
+            "params": {}
+        });
+
+        let error = client
+            .handle_permission_request(&request)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AcpError::Protocol(_)));
+        let echoed = client.reader.next().await.unwrap().unwrap();
+        let response: serde_json::Value = serde_json::from_str(&echoed).unwrap();
+        assert_eq!(response["result"]["outcome"]["outcome"], "cancelled");
+        assert!(client.pending_permission_id.is_none());
+        assert!(client.permission_responded);
+    }
+
+    #[tokio::test]
+    async fn failed_permission_write_keeps_pending_state_and_emits_no_decision() {
+        let mut client = spawn_script("exit 0").await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client.child.wait().await.unwrap();
+        client.set_permission_mode(PermissionMode::DontAsk);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "permission-write-failure",
+            "method": "session/request_permission",
+            "params": {
+                "options": [{"optionId": "no", "kind": "reject_once"}]
+            }
+        });
+
+        let error = client
+            .handle_permission_request(&request)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AcpError::Io(_) | AcpError::WriteTimeout(_)));
+        assert_eq!(
+            client.pending_permission_id,
+            Some(serde_json::json!("permission-write-failure"))
+        );
+        assert!(!client.permission_responded);
+        assert!(
+            observer
+                .snapshot()
+                .iter()
+                .all(|event| event.kind != "permission_decision"),
+            "a failed adapter write must not emit successful decision evidence"
+        );
     }
 
     #[test]

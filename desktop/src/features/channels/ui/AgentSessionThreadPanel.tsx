@@ -14,6 +14,8 @@ import {
   mergeObserverEventWindows,
   observerEventScrollId,
   scopeByChannel,
+  deriveLatestSessionId,
+  deriveLatestTurnId,
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
@@ -61,6 +63,8 @@ import { useLoadArchivedObserverEvents } from "@/features/agents/ui/useObserverE
 import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScroll";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { NumbatSecurityFindings } from "@/features/agents/ui/NumbatSecurityFindings";
+import { useNumbatFindings } from "@/features/agents/ui/useNumbatFindings";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
@@ -127,6 +131,20 @@ export function AgentSessionThreadPanel({
   const combinedHeaderEvents = React.useMemo(
     () => mergeObserverEventWindows(scopedEvents, archivedChannelEvents),
     [scopedEvents, archivedChannelEvents],
+  );
+  const latestTurnId = React.useMemo(
+    () => deriveLatestTurnId(combinedHeaderEvents),
+    [combinedHeaderEvents],
+  );
+  const activeSessionId = React.useMemo(
+    () => deriveLatestSessionId(combinedHeaderEvents),
+    [combinedHeaderEvents],
+  );
+  const numbatFindings = useNumbatFindings(
+    agent.pubkey,
+    sessionChannelId,
+    activeSessionId,
+    latestTurnId,
   );
   const latestActivityAt = React.useMemo(
     () => getLatestActivityTimestamp(combinedHeaderEvents),
@@ -251,12 +269,17 @@ export function AgentSessionThreadPanel({
   const animateActivity = useTranscriptAnimationEnabled();
   const showTimestamps = useTranscriptTimestampsEnabled();
   async function handleInterruptTurn() {
-    if (!channel) {
+    if (!channel || !activeSessionId || !latestTurnId) {
       return;
     }
 
     try {
-      await cancelManagedAgentTurn(agent.pubkey, channel.id);
+      await cancelManagedAgentTurn(
+        agent.pubkey,
+        channel.id,
+        activeSessionId,
+        latestTurnId,
+      );
       toast.success(
         `Stop signal sent to ${agent.name}. It may take a moment to respond.`,
       );
@@ -492,6 +515,18 @@ export function AgentSessionThreadPanel({
       >
         <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef}>
+          <NumbatSecurityFindings
+            error={numbatFindings.error}
+            findings={numbatFindings.findings}
+            health={numbatFindings.health}
+            onCancelTurn={
+              canStopCurrentTurn && activeSessionId && latestTurnId
+                ? () => {
+                    void handleInterruptTurn();
+                  }
+                : undefined
+            }
+          />
           <ManagedAgentSessionPanel
             agent={agent}
             channelId={sessionChannelId}

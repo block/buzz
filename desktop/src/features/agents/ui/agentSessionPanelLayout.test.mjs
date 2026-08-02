@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deriveLatestSessionId,
+  deriveLatestTurnId,
   observerEventScrollId,
   resolveDisplayEvents,
   resolveRawRailLayout,
@@ -63,6 +64,14 @@ test("deriveLatestSessionId skips trailing events without a sessionId", () => {
 test("deriveLatestSessionId returns null when no event carries a sessionId", () => {
   const events = [{ seq: 1, sessionId: null }, { seq: 2 }];
   assert.equal(deriveLatestSessionId(events), null);
+});
+
+test("deriveLatestTurnId retains the last completed turn", () => {
+  const events = [
+    { seq: 1, turnId: "turn-1" },
+    { seq: 2, turnId: null },
+  ];
+  assert.equal(deriveLatestTurnId(events), "turn-1");
 });
 
 // ---- resolveDisplayEvents ----

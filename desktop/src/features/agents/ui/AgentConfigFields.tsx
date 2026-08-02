@@ -54,27 +54,26 @@ import {
 } from "@/features/agents/ui/buzzAgentModelTuningFields";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
+import { GuardianPolicyField } from "./GuardianPolicyField";
+import { GUARDIAN_POLICY_ENV } from "./guardianPolicy";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
-
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
   provider: null,
   model: null,
   preferred_runtime: null,
 };
-
 /** Baked env keys that route to structured controls, not the generic env editor. */
 const BAKED_STRUCTURED_KEYS = new Set([
   "BUZZ_AGENT_PROVIDER",
   "BUZZ_AGENT_MODEL",
   BUZZ_AGENT_THINKING_EFFORT,
+  GUARDIAN_POLICY_ENV,
 ]);
-
 const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-
 type AgentConfigDisclosure =
   | "full"
   | "onboarding-essential"
@@ -866,7 +865,11 @@ export function AgentConfigFields({
           />
         </div>
       ) : null}
-
+      {showAdvancedFields ? (
+        <GuardianPolicyField
+          {...{ blockClassName, config, fieldLabelClassName, onConfigChange }}
+        />
+      ) : null}
       {showAdvancedFields ? (
         <div className={cn(blockClassName, "space-y-3")}>
           <button
