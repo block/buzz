@@ -17,6 +17,23 @@ async function enableProjectsFeature(page: import("@playwright/test").Page) {
   });
 }
 
+test("empty projects view exposes the first-project creation flow", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page, { emptyProjects: true });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  await expect(page.getByText("No projects yet")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Projects" }),
+  ).toBeVisible();
+  await page.getByTestId("projects-create-menu").click();
+  await page.getByRole("menuitem", { name: "Repository" }).click();
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+});
+
 test("top-level project lists align dates and overflow actions", async ({
   page,
 }) => {

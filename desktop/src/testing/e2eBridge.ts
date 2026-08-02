@@ -170,6 +170,8 @@ type E2eConfig = {
     pocketVoiceImportResult?: "success" | "cancel" | "invalid";
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
+    /** Return no seeded repository events so the first-project flow can be tested. */
+    emptyProjects?: boolean;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -5125,6 +5127,10 @@ function writeMockProjectBranch(
 }
 
 function buildMockProjectEvents(): RelayEvent[] {
+  if (getConfig()?.mock?.emptyProjects) {
+    return [];
+  }
+
   const events: RelayEvent[] = [];
   const daySeconds = 86_400;
   const now = Math.floor(Date.now() / 1000);
