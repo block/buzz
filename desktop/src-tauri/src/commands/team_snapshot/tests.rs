@@ -761,3 +761,17 @@ mod egress_guard_boundary {
         assert!(err.contains("key-backup material"), "{err}");
     }
 }
+
+#[test]
+fn explicit_import_backend_is_applied() {
+    let backend = BackendKind::Provider {
+        id: "test".to_string(),
+        config: serde_json::json!({"name": "imported"}),
+    };
+    assert_eq!(import_backend_or_local(Some(backend.clone())), backend);
+}
+
+#[test]
+fn absent_import_backend_defaults_local() {
+    assert_eq!(import_backend_or_local(None), BackendKind::Local);
+}

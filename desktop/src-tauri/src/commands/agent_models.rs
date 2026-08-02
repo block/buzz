@@ -1,9 +1,3 @@
-use std::collections::{BTreeMap, HashSet};
-
-use nostr::Keys;
-use serde::Deserialize;
-use tauri::{AppHandle, State};
-
 use super::agent_model_process::run_agent_models_command;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
@@ -13,7 +7,6 @@ use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
-
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -27,7 +20,10 @@ use crate::{
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
-
+use nostr::Keys;
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
+use tauri::{AppHandle, State};
 /// Query available models from an agent via `buzz-acp models --json`.
 ///
 /// Spawns a short-lived subprocess (no relay connection needed). The subprocess
@@ -56,35 +52,28 @@ pub async fn get_agent_models(
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
-
         let record = records
             .iter()
             .find(|r| r.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-
         let resolved = resolve_command(&record.acp_command)
             .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-
         // Resolve the effective harness from the linked persona (mirrors spawn),
         // so model discovery runs against the persona's current harness, not the
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
         let global = load_global_agent_config(&app).unwrap_or_default();
-
         // Single pure helper — descriptor + authoritative model/provider
         // resolver, packaged so the linked-agent regression test binds the
         // exact values this command consumes. Returns Err on dangling harness
         // id, propagating it to the caller.
         let discovery = agent_model_discovery_config(record, &personas, &global)
             .map_err(|e| model_discovery_error(&pubkey, &e))?;
-
         let resolved_agent = resolve_command(&discovery.command)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| discovery.command.clone());
-
         (resolved, resolved_agent, discovery)
     }; // store lock released — subprocess runs without holding the lock
-
     let AgentModelDiscoveryConfig {
         args: agent_args,
         model: persisted_model,
@@ -93,7 +82,6 @@ pub async fn get_agent_models(
         env: merged_env,
         command: _,
     } = discovery;
-
     let merged_env = discovery_env_with_baked_floor(merged_env);
     // Resolve against the baked/process env when the record saved no provider,
     // so a build-provided provider still gets live discovery.
@@ -109,7 +97,6 @@ pub async fn get_agent_models(
     {
         return Ok(models);
     }
-
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
         &effective_provider,
@@ -120,7 +107,6 @@ pub async fn get_agent_models(
     {
         return Ok(models);
     }
-
     if let Some(models) = discover_anthropic_models(
         &state.http_client,
         &effective_provider,
@@ -131,7 +117,6 @@ pub async fn get_agent_models(
     {
         return Ok(models);
     }
-
     if let Some(models) = discover_databricks_models(
         &state.http_client,
         &effective_provider,
@@ -142,7 +127,6 @@ pub async fn get_agent_models(
     {
         return Ok(models);
     }
-
     run_agent_models_command(
         resolved_acp,
         agent_command,
@@ -813,8 +797,9 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    let pubkey = input.pubkey.clone();
     // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params, rollback) = {
+    let (summary, sync_params, rollback, provider_deploy) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -830,9 +815,8 @@ pub async fn update_managed_agent(
             state.clear_agent_session_caches(pubkey);
         }
 
-        let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
+        let record = find_managed_agent_mut(&mut records, &pubkey)?;
         let previous_record = record.clone();
-
         let mut name_changed = false;
         if let Some(name_update) = input.name {
             let trimmed = name_update.trim().to_string();
@@ -929,14 +913,21 @@ pub async fn update_managed_agent(
             record.respond_to_allowlist = prospective_allowlist;
         }
 
+        let backend_deploy = super::agent_backend_update::apply_backend_update(
+            &app,
+            record,
+            &mut runtimes,
+            input.backend,
+        )?;
+
         record.updated_at = now_iso();
 
         save_managed_agents(&app, &records)?;
 
         let record = records
             .iter()
-            .find(|r| r.pubkey == input.pubkey)
-            .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
+            .find(|r| r.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {} not found", pubkey))?;
 
         // Publish the edit to the relay. After-save, inside the lock, before
         // any .await. The retention upsert hashes the opt-IN projection, so an
@@ -979,10 +970,19 @@ pub async fn update_managed_agent(
             )?
         };
         let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
-        (summary, sync_params, rollback)
+        (summary, sync_params, rollback, backend_deploy)
     }; // lock dropped here
 
     try_regenerate_nest(&app);
+
+    let summary = super::agent_backend_update::deploy_updated_backend(
+        &app,
+        &state,
+        &pubkey,
+        provider_deploy,
+        summary,
+    )
+    .await?;
 
     // Phase 2: relay profile sync (async, outside lock). A rename is committed
     // only when this succeeds; otherwise restore the complete pre-edit record

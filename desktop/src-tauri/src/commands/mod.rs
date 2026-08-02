@@ -1,4 +1,5 @@
 mod agent_auth;
+mod agent_backend_update;
 mod agent_config;
 mod agent_discovery;
 mod agent_logs;

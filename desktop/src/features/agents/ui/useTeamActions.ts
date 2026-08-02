@@ -25,6 +25,7 @@ import type {
   AgentTeam,
   Channel,
   CreateTeamInput,
+  ManagedAgentBackend,
   UpdateTeamInput,
 } from "@/shared/api/types";
 import { deriveImportToast } from "./teamSnapshotImport.lib";
@@ -98,8 +99,7 @@ export function useTeamActions(
     }) => previewTeamSnapshotImport(fileBytes, fileName),
   });
   const confirmTeamSnapshotImportMutation = useMutation({
-    mutationFn: (input: { fileBytes: number[]; keepAllowlist: boolean }) =>
-      confirmTeamSnapshotImport(input),
+    mutationFn: confirmTeamSnapshotImport,
   });
 
   const teams = teamsQuery.data ?? [];
@@ -281,7 +281,10 @@ export function useTeamActions(
     }
   }
 
-  async function handleConfirmTeamSnapshotImport(keepAllowlist: boolean) {
+  async function handleConfirmTeamSnapshotImport(
+    keepAllowlist: boolean,
+    backend: ManagedAgentBackend,
+  ) {
     if (!teamSnapshotImportState) {
       return;
     }
@@ -290,6 +293,7 @@ export function useTeamActions(
       const result = await confirmTeamSnapshotImportMutation.mutateAsync({
         fileBytes: teamSnapshotImportState.fileBytes,
         keepAllowlist,
+        backend,
       });
       setTeamSnapshotImportResult(result);
       void queryClient.invalidateQueries({ queryKey: personasQueryKey });

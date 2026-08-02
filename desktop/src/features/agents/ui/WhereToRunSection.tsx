@@ -50,7 +50,8 @@ export function WhereToRunSection({
         onDraftChange({
           ...draft,
           probedProvider: result,
-          providerConfig: defaults,
+          providerConfig: { ...defaults, ...draft.providerConfig },
+          allowUnprobedProvider: false,
         });
       })
       .catch((error: unknown) => {

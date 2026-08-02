@@ -1,4 +1,5 @@
 use super::*;
+use crate::{commands::agent_backend_update, managed_agents::BackendKind};
 
 #[test]
 fn openai_model_normalization_keeps_agent_text_models() {
@@ -880,4 +881,48 @@ fn draft_agent_model_discovery_env_layers_all_three_tiers_in_order() {
             "env key `{key}` must resolve to {want:?} after three-tier layering"
         );
     }
+}
+
+#[test]
+fn absent_backend_update_preserves_current_backend() {
+    let current = BackendKind::Provider {
+        id: "test".to_string(),
+        config: serde_json::json!({"name": "existing"}),
+    };
+    assert_eq!(
+        agent_backend_update::requested_backend_update(&current, None, None).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn provider_backend_update_requests_deploy() {
+    let requested = BackendKind::Provider {
+        id: "test".to_string(),
+        config: serde_json::json!({"name": "changed"}),
+    };
+    assert_eq!(
+        agent_backend_update::requested_backend_update(
+            &BackendKind::Local,
+            None,
+            Some(requested.clone())
+        )
+        .unwrap(),
+        Some(requested)
+    );
+}
+
+#[test]
+fn deployed_provider_cannot_move_local_without_undeploy_protocol() {
+    let current = BackendKind::Provider {
+        id: "test".to_string(),
+        config: serde_json::json!({}),
+    };
+    let error = agent_backend_update::requested_backend_update(
+        &current,
+        Some("remote-1"),
+        Some(BackendKind::Local),
+    )
+    .unwrap_err();
+    assert!(error.contains("does not support undeploy"));
 }

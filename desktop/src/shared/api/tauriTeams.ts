@@ -2,6 +2,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import type {
   AgentTeam,
   CreateTeamInput,
+  ManagedAgentBackend,
   UpdateTeamInput,
 } from "@/shared/api/types";
 
@@ -101,6 +102,7 @@ export type TeamSnapshotImportPreview = {
 export type TeamSnapshotImportConfirm = {
   fileBytes: number[];
   keepAllowlist: boolean;
+  backend?: ManagedAgentBackend;
 };
 
 export type TeamSnapshotImportMemberResult = {
