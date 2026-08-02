@@ -284,6 +284,32 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
 
+test("relay-only shared agents emit an outbound mention tag when selected", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @alice");
+
+  const dropdown = autocomplete(page);
+  const aliceRow = dropdown.locator("button", { hasText: "alice" });
+  await expect(aliceRow).toBeVisible();
+  await expect(aliceRow.getByTestId("mention-agent-icon")).toBeVisible();
+  await aliceRow.click();
+  await page.keyboard.type("please reply");
+
+  const content = "Ask @alice please reply";
+  await expect(input).toHaveText(content);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toContain(TEST_IDENTITIES.alice.pubkey);
+});
+
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
 }) => {
