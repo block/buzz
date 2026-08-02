@@ -1,5 +1,9 @@
 import type { Page } from "@playwright/test";
-import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
+import type {
+  ChannelTemplate,
+  RelayEvent,
+  WorkflowRunStatus,
+} from "../../src/shared/api/types";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -274,6 +278,8 @@ type MockBridgeOptions = {
   joinChannelErrors?: string[];
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
+  /** Statuses returned by successive mocked workflow triggers. */
+  workflowRunStatuses?: WorkflowRunStatus[];
   feedReadError?: string;
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */

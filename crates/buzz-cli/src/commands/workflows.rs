@@ -57,40 +57,20 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
     Ok(())
 }
 
-/// Get workflow run history — query kinds [46001, 46002, 46003].
-///
-/// NOTE: The relay does not currently emit workflow execution events (46001-46003).
-/// Run history is stored in the workflow_runs DB table, not as Nostr events.
-/// This command will return an empty array until the relay adds event emission
-/// or a dedicated REST endpoint for run history.
+/// Get workflow run history from the relay's durable workflow_runs read path.
 pub async fn cmd_get_workflow_runs(
     client: &BuzzClient,
     workflow_id: &str,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
     validate_uuid(workflow_id)?;
-    let limit = limit.unwrap_or(20).min(100);
-    let filter = serde_json::json!({
-        "kinds": [46001, 46002, 46003],
-        "#d": [workflow_id],
-        "limit": limit
-    });
-    let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    let normalized: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
-                "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-                "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
-        })
-        .collect();
-    let output = serde_json::to_string(&normalized).unwrap_or_default();
-    println!("{output}");
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let resp = client
+        .get_authed(&format!("/api/workflows/{workflow_id}/runs?limit={limit}"))
+        .await?;
+    let runs: Vec<serde_json::Value> = serde_json::from_str(&resp)
+        .map_err(|e| CliError::Other(format!("failed to parse workflow run response: {e}")))?;
+    println!("{}", serde_json::to_string(&runs).unwrap_or_default());
     Ok(())
 }
 

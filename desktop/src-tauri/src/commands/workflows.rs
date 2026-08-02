@@ -5,7 +5,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    relay::{parse_command_response, query_relay, submit_event},
+    relay::{get_relay_json, parse_command_response, query_relay, submit_event},
 };
 
 // ── Wire shapes (snake_case, consumed by tauriWorkflows.ts) ──────────────────
@@ -121,26 +121,16 @@ pub async fn get_workflow(
 pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
-    // The authoritative run record the frontend's `WorkflowRun` shape needs
-    // (status / current_step / execution_trace / error_message) lives in the
-    // relay DB and is not exposed to the desktop client as a single queryable
-    // record. If the relay starts emitting lifecycle events (46001–46007, …),
-    // folding that stream into `WorkflowRun` would be another viable design.
-    // The important bit for this command is that raw lifecycle events are not
-    // the `RawWorkflowRun` contract.
-    //
-    // Until then we return a bare empty array — NOT a raw-event wrapper. The
-    // frontend wrapper (`getWorkflowRuns`) does `raw.map(fromRawWorkflowRun)`,
-    // so it must receive an array; the wrapped `{ runs: [...] }` shape would
-    // make `.map()` throw and crash the detail panel (the same TypeError class
-    // as the original page bug). Raw lifecycle events also don't carry the
-    // `id`/`workflow_id`/`status`/… fields `RawWorkflowRun` expects, so an
-    // empty list is the honest, safe placeholder.
-    let _ = (workflow_id, limit);
-    Ok(Vec::new())
+    let workflow_id =
+        uuid::Uuid::parse_str(&workflow_id).map_err(|_| "invalid workflow UUID".to_string())?;
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    get_relay_json(
+        &state,
+        &format!("/api/workflows/{workflow_id}/runs?limit={limit}"),
+    )
+    .await
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────

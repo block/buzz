@@ -1321,6 +1321,102 @@ async fn query_events_authed(
     Ok(Json(Value::Array(events)))
 }
 
+/// Query parameters for the authenticated workflow run-history endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct WorkflowRunsQuery {
+    /// Maximum number of runs to return. The relay applies a hard cap.
+    pub limit: Option<u32>,
+}
+
+/// Convert the durable DB run record to the wire shape consumed by Desktop and
+/// the agent CLI. Timestamps are Unix seconds to match the existing workflow
+/// event and frontend contracts.
+fn workflow_run_to_json(run: &buzz_db::workflow::WorkflowRunRecord) -> Value {
+    serde_json::json!({
+        "id": run.id.to_string(),
+        "workflow_id": run.workflow_id.to_string(),
+        "trigger_event_id": run.trigger_event_id.as_ref().map(hex::encode),
+        "status": run.status.to_string(),
+        "current_step": run.current_step,
+        "execution_trace": run.execution_trace,
+        "started_at": run.started_at.map(|value| value.timestamp()),
+        "completed_at": run.completed_at.map(|value| value.timestamp()),
+        "error_message": run.error_message,
+        "created_at": run.created_at.timestamp(),
+    })
+}
+
+/// Read workflow run history from the relay's durable workflow_runs table.
+///
+/// This is an authenticated, tenant-bound read. A caller may only see runs for
+/// workflows whose channel is in the caller's existing channel-access scope;
+/// inaccessible and unknown workflows deliberately share the same 404 response.
+pub async fn workflow_runs(
+    State(state): State<Arc<AppState>>,
+    Path(id_str): Path<String>,
+    Query(query): Query<WorkflowRunsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let workflow_id =
+        uuid::Uuid::parse_str(&id_str).map_err(|_| not_found("workflow not found"))?;
+    let path = match query.limit {
+        Some(limit) => format!("/api/workflows/{workflow_id}/runs?limit={limit}"),
+        None => format!("/api/workflows/{workflow_id}/runs"),
+    };
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| not_found("workflow not found"))?;
+    let url = nip98_expected_url(&state.config.relay_url, &tenant, &path);
+    let (pubkey, event_id_bytes) =
+        verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
+
+    enforce_http_admission(&state, &tenant, &pubkey).await?;
+    check_nip98_replay(&state, &tenant, event_id_bytes).await?;
+
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+    let auth_tag = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok());
+    super::relay_members::enforce_relay_membership(
+        &state,
+        tenant.community(),
+        &pubkey_bytes,
+        auth_tag,
+    )
+    .await?;
+
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), workflow_id)
+        .await
+        .map_err(|_| not_found("workflow not found"))?;
+    let Some(channel_id) = workflow.channel_id else {
+        return Err(not_found("workflow not found"));
+    };
+    let accessible_channels = state
+        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+        .await
+        .map_err(|error| internal_error(&format!("channel access lookup: {error}")))?;
+    if !accessible_channels.contains(&channel_id) {
+        return Err(not_found("workflow not found"));
+    }
+
+    let runs = state
+        .db
+        .list_workflow_runs(tenant.community(), workflow_id, i64::from(limit))
+        .await
+        .map_err(|error| internal_error(&format!("workflow run lookup: {error}")))?;
+    Ok(Json(Value::Array(
+        runs.iter().map(workflow_run_to_json).collect(),
+    )))
+}
+
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
 ///
 /// Enforces channel access: only counts events in channels the user can access.
@@ -2295,6 +2391,40 @@ mod tests {
         ];
 
         assert!(!has_mixed_search_filters(&filters));
+    }
+
+    #[test]
+    fn workflow_run_wire_preserves_failure_diagnostics() {
+        let created_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let started_at = chrono::DateTime::from_timestamp(1_700_000_001, 0).unwrap();
+        let completed_at = chrono::DateTime::from_timestamp(1_700_000_003, 0).unwrap();
+        let run = buzz_db::workflow::WorkflowRunRecord {
+            id: uuid::Uuid::from_u128(1),
+            community_id: buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(2)),
+            workflow_id: uuid::Uuid::from_u128(3),
+            status: buzz_db::workflow::RunStatus::Failed,
+            trigger_event_id: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+            current_step: 0,
+            execution_trace: serde_json::json!([
+                { "step_id": "notify", "status": "failed", "error": "destination missing" }
+            ]),
+            trigger_context: None,
+            started_at: Some(started_at),
+            completed_at: Some(completed_at),
+            error_message: Some("destination missing".to_string()),
+            created_at,
+        };
+
+        let wire = workflow_run_to_json(&run);
+        assert_eq!(wire["id"], "00000000-0000-0000-0000-000000000001");
+        assert_eq!(wire["workflow_id"], "00000000-0000-0000-0000-000000000003");
+        assert_eq!(wire["trigger_event_id"], "deadbeef");
+        assert_eq!(wire["status"], "failed");
+        assert_eq!(wire["created_at"], 1_700_000_000);
+        assert_eq!(wire["started_at"], 1_700_000_001);
+        assert_eq!(wire["completed_at"], 1_700_000_003);
+        assert_eq!(wire["error_message"], "destination missing");
+        assert_eq!(wire["execution_trace"][0]["step_id"], "notify");
     }
 
     #[test]

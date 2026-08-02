@@ -13,7 +13,11 @@ import {
 import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
+import type {
+  ChannelTemplate,
+  RelayEvent,
+  WorkflowRunStatus,
+} from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -289,6 +293,8 @@ type E2eConfig = {
     channelsReadDelayMs?: number;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
+    /** Statuses returned by successive mocked workflow triggers. */
+    workflowRunStatuses?: WorkflowRunStatus[];
     feedReadError?: string;
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
@@ -3105,6 +3111,7 @@ type RawWorkflowTraceEntry = {
 type RawWorkflowRun = {
   id: string;
   workflow_id: string;
+  trigger_event_id?: string | null;
   status:
     | "pending"
     | "running"
@@ -3123,11 +3130,13 @@ type RawWorkflowRun = {
 const mockWorkflows: MockWorkflow[] = [];
 let mockWorkflowRuns: RawWorkflowRun[] = [];
 let mockWorkflowIdCounter = 0;
+let mockWorkflowRunCounter = 0;
 
 function resetMockWorkflows() {
   mockWorkflows.length = 0;
   mockWorkflowRuns = [];
   mockWorkflowIdCounter = 0;
+  mockWorkflowRunCounter = 0;
 }
 
 function parseWorkflowDefinition(
@@ -3222,6 +3231,7 @@ function handleDeleteWorkflow(args: { workflowId: string }) {
 
 function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
   const createdAt = Math.floor(Date.now() / 1000);
+  const status = getConfig()?.mock?.workflowRunStatuses?.shift() ?? "completed";
   const rawSteps = Array.isArray(workflow.definition.steps)
     ? workflow.definition.steps
     : [];
@@ -3249,7 +3259,7 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
         typeof step.id === "string" && step.id.trim().length > 0
           ? step.id
           : `step_${index + 1}`,
-      status: "completed",
+      status: status === "failed" ? "failed" : "completed",
       output,
       started_at: startedAt,
       completed_at: completedAt,
@@ -3268,14 +3278,15 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
       : createdAt;
 
   return {
-    id: `mock-run-${Date.now()}`,
+    id: `mock-run-${++mockWorkflowRunCounter}`,
     workflow_id: workflow.id,
-    status: "completed",
+    trigger_event_id: null,
+    status,
     current_step: null,
     execution_trace: executionTrace,
     started_at: startedAt,
     completed_at: completedAt,
-    error_message: null,
+    error_message: status === "failed" ? "Mock workflow run failed." : null,
     created_at: createdAt,
   };
 }

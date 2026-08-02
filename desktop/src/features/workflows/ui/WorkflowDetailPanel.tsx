@@ -184,7 +184,10 @@ export function WorkflowDetailPanel({
                                 <span className="truncate font-mono text-xs font-medium">
                                   {run.id.slice(0, 8)}
                                 </span>
-                                <RunStatusBadge status={run.status} />
+                                <RunStatusBadge
+                                  data-testid={`workflow-run-status-${run.status}`}
+                                  status={run.status}
+                                />
                               </div>
                               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-2xs text-muted-foreground">
                                 <span>
@@ -280,7 +283,10 @@ function formatStatusLabel(status: string) {
   return status.replace(/_/g, " ");
 }
 
-function RunStatusBadge({ status }: { status: string }) {
+function RunStatusBadge({
+  status,
+  ...props
+}: { status: string } & React.ComponentProps<typeof Badge>) {
   const variants: Record<string, BadgeProps["variant"]> = {
     active: "success",
     disabled: "secondary",
@@ -289,12 +295,12 @@ function RunStatusBadge({ status }: { status: string }) {
     failed: "destructive",
     running: "info",
     pending: "secondary",
-    cancelled: "secondary",
+    cancelled: "warning",
     waiting_approval: "warning",
   };
 
   return (
-    <Badge variant={variants[status] ?? "secondary"}>
+    <Badge {...props} variant={variants[status] ?? "secondary"}>
       {formatStatusLabel(status)}
     </Badge>
   );
