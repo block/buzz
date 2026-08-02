@@ -493,9 +493,10 @@ async fn main() -> anyhow::Result<()> {
     // linearizable conditional-write axiom (A3) before serving git traffic.
     // Failure is fatal: a backend that cannot satisfy pointer CAS invalidates
     // the manifest-pointer protocol. This is a deployment gate, not a proof.
-    if std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
-        .map(|v| v != "false")
-        .unwrap_or(true)
+    if config.git_enabled
+        && std::env::var("BUZZ_GIT_CONFORMANCE_PROBE")
+            .map(|v| v != "false")
+            .unwrap_or(true)
     {
         let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
             .ok()
@@ -514,8 +515,11 @@ async fn main() -> anyhow::Result<()> {
             race_rounds,
             "running git object-store conformance probe (A3 gate)"
         );
-        let report = state
-            .git_store
+        let Some(git) = state.git_runtime() else {
+            return Err(anyhow::anyhow!("git runtime missing while Git is enabled"));
+        };
+        let report = git
+            .store
             .run_conformance_probe(cfg)
             .await
             .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;

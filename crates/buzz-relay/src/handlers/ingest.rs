@@ -162,6 +162,26 @@ pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
     .increment(1);
 }
 
+/// Returns whether an event belongs to the Git repository collaboration surface.
+///
+/// A relay with Git disabled rejects these events before persistence so it
+/// cannot retain repository metadata that no available runtime can serve.
+fn is_git_repository_event(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_GIT_REPO_ANNOUNCEMENT
+            | KIND_GIT_REPO_STATE
+            | KIND_GIT_PATCH
+            | KIND_GIT_PULL_REQUEST
+            | KIND_GIT_PR_UPDATE
+            | KIND_GIT_ISSUE
+            | KIND_GIT_STATUS_OPEN
+            | KIND_GIT_STATUS_MERGED
+            | KIND_GIT_STATUS_CLOSED
+            | KIND_GIT_STATUS_DRAFT
+    )
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -1813,6 +1833,12 @@ async fn ingest_event_inner(
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
     debug!(event_id = %event_id_hex, kind = kind_u32, "ingest_event");
+
+    if !state.config.git_enabled && is_git_repository_event(kind_u32) {
+        return Err(IngestError::Rejected(
+            "invalid: Git support is disabled on this relay".into(),
+        ));
+    }
 
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(
@@ -4785,5 +4811,73 @@ mod tests {
             counts.get(&("ws".to_owned(), "invalid".to_owned())),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn git_repository_events_are_identified_for_disabled_relay_rejection() {
+        assert!(is_git_repository_event(KIND_GIT_REPO_ANNOUNCEMENT));
+        assert!(is_git_repository_event(KIND_GIT_REPO_STATE));
+        assert!(is_git_repository_event(KIND_GIT_PULL_REQUEST));
+        assert!(!is_git_repository_event(KIND_TEXT_NOTE));
+    }
+
+    #[tokio::test]
+    async fn disabled_git_rejects_repo_announcement_before_persistence() {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.git_enabled = false;
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = std::sync::Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth_service = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = std::sync::Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth_service,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        let state = std::sync::Arc::new(state);
+        let keys = nostr::Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16), "")
+            .tag(nostr::Tag::parse(["d", "demo"]).expect("repo tag"))
+            .sign_with_keys(&keys)
+            .expect("sign repo announcement");
+        let tenant = TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+            "git.test",
+        );
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::ReposWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+
+        let result = ingest_event(&state, &tenant, event, auth).await;
+
+        assert!(matches!(
+            result,
+            Err(IngestError::Rejected(message)) if message == "invalid: Git support is disabled on this relay"
+        ));
     }
 }

@@ -2745,7 +2745,9 @@ async fn seed_manifest_pointer(
         .canonical_bytes()
         .map_err(|e| anyhow::anyhow!("empty manifest serialize: {e}"))?;
     let manifest_key = state
-        .git_store
+        .git_runtime()
+        .ok_or_else(|| anyhow::anyhow!("Git support is disabled on this relay"))?
+        .store
         .put_manifest(&bytes)
         .await
         .map_err(|e| anyhow::anyhow!("put_manifest: {e}"))?;
@@ -2755,7 +2757,9 @@ async fn seed_manifest_pointer(
 
     let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
     let outcome = state
-        .git_store
+        .git_runtime()
+        .ok_or_else(|| anyhow::anyhow!("Git support is disabled on this relay"))?
+        .store
         .put_pointer(&pkey, digest.as_bytes(), Precond::IfNoneMatchStar)
         .await
         .map_err(|e| anyhow::anyhow!("put_pointer: {e}"))?;
@@ -2767,7 +2771,9 @@ async fn seed_manifest_pointer(
             // either a stale pointer from a prior repo lifecycle for the same
             // (owner, repo) or a real misconfiguration — surface, don't swallow.
             let (_etag, body) = state
-                .git_store
+                .git_runtime()
+                .ok_or_else(|| anyhow::anyhow!("Git support is disabled on this relay"))?
+                .store
                 .get_pointer(&pkey)
                 .await
                 .map_err(|e| anyhow::anyhow!("re-read pointer after LostRace: {e}"))?
@@ -2817,7 +2823,9 @@ async fn ensure_manifest_pointer(
 
     let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
     let existing = state
-        .git_store
+        .git_runtime()
+        .ok_or_else(|| anyhow::anyhow!("Git support is disabled on this relay"))?
+        .store
         .get_pointer(&pkey)
         .await
         .map_err(|e| anyhow::anyhow!("get_pointer: {e}"))?;
