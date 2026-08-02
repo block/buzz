@@ -6,9 +6,10 @@ use std::time::Duration;
 use buzz_core::kind::{KIND_EXECUTION_NODE_COMMAND, KIND_PAIRING};
 use buzz_core::pairing::session::PairingSession;
 use buzz_core::pairing::{qr::decode_qr, types::PayloadType, PairingError};
+use buzz_core::tenant::relay_url_authority;
 use buzz_node::{
-    build_announcement_with_workloads, parse_desktop_pairing_payload, DesktopPairingPayload,
-    ExecutionController, NodeConfig, NodeError, NodeIdentity, OwnerStore,
+    build_announcement_with_workloads_and_attestations, parse_desktop_pairing_payload,
+    DesktopPairingPayload, ExecutionController, NodeConfig, NodeError, NodeIdentity, OwnerStore,
 };
 use clap::{Parser, Subcommand};
 use futures_util::stream::FuturesUnordered;
@@ -156,8 +157,12 @@ async fn run_connection(
         .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;
 
     let workloads = controller.workload_statuses().await;
-    let announcement =
-        build_announcement_with_workloads(identity, &config.display_name, &workloads)?;
+    let announcement = build_announcement_with_workloads_and_attestations(
+        identity,
+        &config.display_name,
+        &workloads,
+        owners.attestations(),
+    )?;
     let response = connection
         .send_event(announcement)
         .await
@@ -191,7 +196,7 @@ async fn run_connection(
             changed = shutdown.changed() => {
                 changed.map_err(|_| NodeError::InvalidConfiguration("shutdown signal closed".into()))?;
                 while let Some(result) = work.next().await {
-                    publish_work_result(&mut connection, controller, identity, config, result).await?;
+                    publish_work_result(&mut connection, controller, identity, owners, config, result).await?;
                 }
                 connection
                     .disconnect()
@@ -203,7 +208,7 @@ async fn run_connection(
                 Ok(buzz_ws_client::RelayMessage::Event { event, .. }) => {
                     if work.len() >= config.max_concurrent_commands {
                         if let Some(result) = work.next().await {
-                            publish_work_result(&mut connection, controller, identity, config, result)
+                            publish_work_result(&mut connection, controller, identity, owners, config, result)
                                 .await?;
                         }
                     }
@@ -230,7 +235,7 @@ async fn run_connection(
                 }
             },
             Some(result) = work.next(), if !work.is_empty() => {
-                publish_work_result(&mut connection, controller, identity, config, result).await?;
+                publish_work_result(&mut connection, controller, identity, owners, config, result).await?;
             }
         }
     }
@@ -240,6 +245,7 @@ async fn publish_work_result(
     connection: &mut buzz_ws_client::NostrWsConnection,
     controller: &ExecutionController,
     identity: &NodeIdentity,
+    owners: &OwnerStore,
     config: &NodeConfig,
     result: Result<Result<(EventId, Vec<Event>), NodeError>, tokio::task::JoinError>,
 ) -> Result<(), NodeError> {
@@ -264,8 +270,12 @@ async fn publish_work_result(
         }
     }
     let workloads = controller.workload_statuses().await;
-    let announcement =
-        build_announcement_with_workloads(identity, &config.display_name, &workloads)?;
+    let announcement = build_announcement_with_workloads_and_attestations(
+        identity,
+        &config.display_name,
+        &workloads,
+        owners.attestations(),
+    )?;
     let response = connection
         .send_event(announcement)
         .await
@@ -398,9 +408,48 @@ async fn pair_node(qr_arg: Option<String>) -> Result<(), NodeError> {
             Err(_) => {}
         }
     };
-    let DesktopPairingPayload { owner_pubkey, .. } = parse_desktop_pairing_payload(&payload)?;
+    let DesktopPairingPayload {
+        owner_pubkey,
+        relay_url,
+        mut nsec,
+    } = parse_desktop_pairing_payload(&payload)?;
+    let expected_relay_authority = relay_url_authority(&config.relay_url);
+    if expected_relay_authority.is_empty()
+        || relay_url_authority(&relay_url) != expected_relay_authority
+    {
+        return Err(NodeError::PairingPayload(
+            "pairing payload relay does not match the configured relay".into(),
+        ));
+    }
+    let nsec = nsec
+        .take()
+        .ok_or_else(|| NodeError::PairingPayload("pairing payload is missing nsec".into()))?;
+    let owner_keys = match nostr::Keys::parse(&nsec) {
+        Ok(keys) => keys,
+        Err(error) => {
+            zeroize::Zeroize::zeroize(&mut nsec);
+            return Err(NodeError::PairingPayload(error.to_string()));
+        }
+    };
+    zeroize::Zeroize::zeroize(&mut nsec);
+    if owner_keys.public_key().to_hex() != owner_pubkey {
+        return Err(NodeError::PairingPayload(
+            "pairing payload owner identity does not match nsec".into(),
+        ));
+    }
+    let node_id = identity.node_id()?;
+    let node_attestation = buzz_core::execution::ExecutionNodeAttestation::sign(
+        &owner_keys,
+        &node_id,
+        expected_relay_authority.clone(),
+    )?;
     let mut owners = OwnerStore::load(&config.data_dir)?;
-    owners.add(&owner_pubkey, &config.data_dir)?;
+    owners.add_attestation(
+        node_attestation,
+        &node_id,
+        &expected_relay_authority,
+        &config.data_dir,
+    )?;
     publish_event(
         &mut write,
         &session
@@ -446,7 +495,11 @@ where
     .await
     {
         Ok(result) => result?,
-        Err(_) => return Ok(()),
+        Err(_) => {
+            return Err(NodeError::InvalidConfiguration(
+                "relay authentication timed out".into(),
+            ))
+        }
     };
     let relay = RelayUrl::parse(relay_url)
         .map_err(|error| NodeError::InvalidConfiguration(error.to_string()))?;

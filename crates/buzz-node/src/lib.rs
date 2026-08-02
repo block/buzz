@@ -10,10 +10,10 @@ use std::sync::Arc;
 const MAX_CONCURRENT_COMMANDS: usize = 1024;
 
 use buzz_core::execution::{
-    ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope, ExecutionNodeId,
-    ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, ProviderAuthResponse,
-    ReceiptDetail, ReceiptOutcome, SafeErrorCode, WorkloadId, WorkloadLifecycle, WorkloadSpec,
-    WorkloadStatus, EXECUTION_PROTOCOL_VERSION,
+    ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope, ExecutionNodeAttestation,
+    ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt,
+    ProviderAuthResponse, ReceiptDetail, ReceiptOutcome, SafeErrorCode, WorkloadId,
+    WorkloadLifecycle, WorkloadSpec, WorkloadStatus, EXECUTION_PROTOCOL_VERSION,
 };
 use buzz_core::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
@@ -169,6 +169,8 @@ impl NodeIdentity {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OwnerStore {
     owners: Vec<String>,
+    #[serde(default)]
+    attestations: Vec<ExecutionNodeAttestation>,
 }
 
 impl OwnerStore {
@@ -197,6 +199,40 @@ impl OwnerStore {
         Ok(())
     }
 
+    /// Add an owner proof and persist the pairing binding for this relay.
+    pub fn add_attestation(
+        &mut self,
+        attestation: ExecutionNodeAttestation,
+        node_id: &ExecutionNodeId,
+        relay_authority: &str,
+        data_dir: &Path,
+    ) -> Result<(), NodeError> {
+        attestation
+            .verify(node_id, relay_authority, None)
+            .map_err(|error| NodeError::PairingPayload(error.to_string()))?;
+        let owner = nostr::PublicKey::from_hex(&attestation.owner_pubkey)
+            .map_err(|error| NodeError::PairingPayload(error.to_string()))?
+            .to_hex();
+        if !self.owners.iter().any(|existing| existing == &owner) {
+            self.owners.push(owner);
+            self.owners.sort_unstable();
+        }
+        if !self.attestations.contains(&attestation) {
+            self.attestations.push(attestation);
+            self.attestations.sort_by(|left, right| {
+                left.owner_pubkey
+                    .cmp(&right.owner_pubkey)
+                    .then(left.relay_authority.cmp(&right.relay_authority))
+                    .then(left.signature.cmp(&right.signature))
+            });
+        }
+        fs::create_dir_all(data_dir)?;
+        let path = data_dir.join("owners.json");
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        set_private_file_permissions(&path)?;
+        Ok(())
+    }
+
     /// Check whether an owner public key is paired.
     pub fn contains(&self, owner: &str) -> bool {
         self.owners.iter().any(|candidate| candidate == owner)
@@ -205,6 +241,11 @@ impl OwnerStore {
     /// Return paired owner identities without exposing any private material.
     pub fn owners(&self) -> &[String] {
         &self.owners
+    }
+
+    /// Return owner proofs included in node announcements.
+    pub fn attestations(&self) -> &[ExecutionNodeAttestation] {
+        &self.attestations
     }
 }
 
@@ -218,6 +259,16 @@ pub fn build_announcement_with_workloads(
     identity: &NodeIdentity,
     display_name: &str,
     workloads: &[buzz_core::execution::WorkloadStatus],
+) -> Result<Event, NodeError> {
+    build_announcement_with_workloads_and_attestations(identity, display_name, workloads, &[])
+}
+
+/// Build an announcement including durable workload state and pairing proofs.
+pub fn build_announcement_with_workloads_and_attestations(
+    identity: &NodeIdentity,
+    display_name: &str,
+    workloads: &[buzz_core::execution::WorkloadStatus],
+    attestations: &[ExecutionNodeAttestation],
 ) -> Result<Event, NodeError> {
     let node_id = identity.node_id()?;
     let status = ExecutionNodeStatus::new(
@@ -233,6 +284,7 @@ pub fn build_announcement_with_workloads(
             ExecutionCapability::ProviderAuthentication,
         ],
     )?;
+    let status = status.with_owner_attestations(attestations.iter().cloned())?;
     let status = status
         .with_workloads(workloads.iter().cloned())
         .map_err(|error| NodeError::InvalidCommand(error.to_string()))?;
@@ -257,6 +309,10 @@ pub struct DesktopPairingPayload {
     pub owner_pubkey: String,
     /// Relay to use after pairing.
     pub relay_url: String,
+    /// Owner key transferred by the existing SAS-protected pairing flow. It
+    /// is used only to sign the node binding and is never persisted.
+    #[serde(default, skip_serializing)]
+    pub nsec: Option<String>,
 }
 
 /// Parse a Desktop pairing payload without retaining the private key it may contain.
@@ -485,6 +541,7 @@ pub struct ExecutionController {
     state: Arc<Mutex<ControllerState>>,
     workload_locks: Arc<Mutex<HashMap<WorkloadKey, Arc<Mutex<()>>>>>,
     concurrency: Arc<Semaphore>,
+    persist_lock: Arc<Mutex<()>>,
 }
 
 impl Default for ExecutionController {
@@ -541,6 +598,7 @@ impl ExecutionController {
             state: Arc::new(Mutex::new(ControllerState::default())),
             workload_locks: Arc::new(Mutex::new(HashMap::new())),
             concurrency: Arc::new(Semaphore::new(limit.max(1))),
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -700,10 +758,8 @@ impl ExecutionController {
                     events: events.clone(),
                 },
             );
-            let snapshot = persisted_state(&state);
-            let data_dir = state.data_dir.clone();
             drop(state);
-            persist_snapshot(&snapshot, data_dir.as_deref())?;
+            self.persist_current_state().await?;
             return Ok(events);
         }
 
@@ -767,10 +823,8 @@ impl ExecutionController {
                     events: events.clone(),
                 },
             );
-            let snapshot = persisted_state(&state);
-            let data_dir = state.data_dir.clone();
             drop(state);
-            persist_snapshot(&snapshot, data_dir.as_deref())?;
+            self.persist_current_state().await?;
             return Ok(events);
         }
 
@@ -811,11 +865,18 @@ impl ExecutionController {
                 events: events.clone(),
             },
         );
+        drop(state);
+        self.persist_current_state().await?;
+        Ok(events)
+    }
+
+    async fn persist_current_state(&self) -> Result<(), NodeError> {
+        let _persist_guard = self.persist_lock.lock().await;
+        let state = self.state.lock().await;
         let snapshot = persisted_state(&state);
         let data_dir = state.data_dir.clone();
         drop(state);
-        persist_snapshot(&snapshot, data_dir.as_deref())?;
-        Ok(events)
+        persist_snapshot(&snapshot, data_dir.as_deref())
     }
 
     /// Inspect the fake runtime for diagnostics and tests.
@@ -1128,9 +1189,9 @@ mod tests {
             second.node_id().expect("node id")
         );
 
-        let event = build_announcement(&first, "Onkie server").expect("announcement");
+        let event = build_announcement(&first, "Example execution node").expect("announcement");
         let content: serde_json::Value = serde_json::from_str(&event.content).expect("json");
-        assert_eq!(content["displayName"], "Onkie server");
+        assert_eq!(content["displayName"], "Example execution node");
         assert!(event.content.find("docker").is_none());
         assert!(event.content.find("privateKey").is_none());
         let _ = fs::remove_dir_all(dir);
@@ -1780,7 +1841,11 @@ mod tests {
         let second = make_command("second");
         let first_event = deploy_command_event(&owner, &node, &first);
         let second_event = deploy_command_event(&owner, &node, &second);
-        let controller = ExecutionController::with_concurrency(2);
+        // Use durable state here so concurrent commands exercise the same
+        // persistence path used by a real node, including the serialized
+        // snapshot writer.
+        let controller =
+            ExecutionController::load_with_concurrency(&dir, 2).expect("load durable controller");
 
         let (first_result, second_result) = tokio::join!(
             controller.handle_command_event(&node, &owners, &first_event, now),
@@ -1790,6 +1855,8 @@ mod tests {
         assert!(first_result.is_ok());
         assert!(second_result.is_ok());
         assert_eq!(controller.runtime().await.workload_count(), 2);
+        let restarted = ExecutionController::load(&dir).expect("restart controller");
+        assert_eq!(restarted.runtime().await.workload_count(), 2);
         let _ = fs::remove_dir_all(dir);
     }
 

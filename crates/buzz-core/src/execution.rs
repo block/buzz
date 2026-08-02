@@ -6,8 +6,14 @@
 //! reconciliation remain owned by their respective components.
 
 use chrono::{DateTime, Duration, Utc};
+use nostr::hashes::sha256::Hash as Sha256Hash;
+use nostr::hashes::Hash;
+use nostr::secp256k1::schnorr::Signature;
+use nostr::secp256k1::Message;
+use nostr::{Keys, PublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -22,6 +28,9 @@ const MAX_PROVIDER_BYTES: usize = 128;
 const MAX_RUNTIME_BYTES: usize = 128;
 const MAX_SESSION_ID_BYTES: usize = 128;
 const MAX_AUTH_RESPONSE_BYTES: usize = 16 * 1024;
+const MAX_AUTH_TAG_BYTES: usize = 1024;
+const MAX_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_RELAY_URL_BYTES: usize = 2048;
 
 /// Validation failures for execution protocol values.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -96,6 +105,12 @@ pub enum ExecutionValidationError {
     /// An authentication response was empty.
     #[error("authentication response must not be empty")]
     EmptyAuthenticationResponse,
+    /// An owner public key in an execution-node attestation was malformed.
+    #[error("execution-node attestation owner identity is invalid")]
+    InvalidAttestationOwner,
+    /// An execution-node attestation did not verify for the expected node and relay.
+    #[error("execution-node attestation is invalid")]
+    InvalidAttestation,
 }
 
 /// Errors returned when decoding and validating a JSON command envelope.
@@ -164,6 +179,77 @@ impl TryFrom<String> for ExecutionNodeId {
 impl From<ExecutionNodeId> for String {
     fn from(value: ExecutionNodeId) -> Self {
         value.0
+    }
+}
+
+fn execution_node_attestation_message(node_id: &ExecutionNodeId, relay_authority: &str) -> Message {
+    let preimage = format!(
+        "nostr:buzz-execution-node:{}/{}",
+        node_id.as_str(),
+        relay_authority
+    );
+    Message::from_digest(Sha256Hash::hash(preimage.as_bytes()).to_byte_array())
+}
+
+/// Owner proof binding an execution node to one relay authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionNodeAttestation {
+    /// Owner public key that authorized this node.
+    pub owner_pubkey: String,
+    /// Relay authority this node was paired for.
+    pub relay_authority: String,
+    /// BIP-340 Schnorr signature over the node and relay authority.
+    pub signature: String,
+}
+
+impl ExecutionNodeAttestation {
+    /// Sign an owner proof for a node and relay authority.
+    pub fn sign(
+        owner_keys: &Keys,
+        node_id: &ExecutionNodeId,
+        relay_authority: impl Into<String>,
+    ) -> Result<Self, ExecutionValidationError> {
+        let relay_authority = relay_authority.into();
+        validate_text("relay authority", &relay_authority, 256, false)?;
+        let signature = owner_keys.sign_schnorr(&execution_node_attestation_message(
+            node_id,
+            &relay_authority,
+        ));
+        Ok(Self {
+            owner_pubkey: owner_keys.public_key().to_hex(),
+            relay_authority,
+            signature: signature.to_string(),
+        })
+    }
+
+    /// Verify this proof against the expected node, relay, and optional owner.
+    pub fn verify(
+        &self,
+        node_id: &ExecutionNodeId,
+        expected_relay_authority: &str,
+        expected_owner_pubkey: Option<&str>,
+    ) -> Result<(), ExecutionValidationError> {
+        if self.relay_authority != expected_relay_authority {
+            return Err(ExecutionValidationError::InvalidAttestation);
+        }
+        if expected_owner_pubkey.is_some_and(|owner| owner != self.owner_pubkey) {
+            return Err(ExecutionValidationError::InvalidAttestation);
+        }
+        let owner = PublicKey::from_hex(&self.owner_pubkey)
+            .map_err(|_| ExecutionValidationError::InvalidAttestationOwner)?;
+        let signature = Signature::from_str(&self.signature)
+            .map_err(|_| ExecutionValidationError::InvalidAttestation)?;
+        let xonly = owner
+            .xonly()
+            .map_err(|_| ExecutionValidationError::InvalidAttestation)?;
+        SECP256K1
+            .verify_schnorr(
+                &signature,
+                &execution_node_attestation_message(node_id, &self.relay_authority),
+                &xonly,
+            )
+            .map_err(|_| ExecutionValidationError::InvalidAttestation)
     }
 }
 
@@ -282,6 +368,101 @@ impl CredentialRef {
     }
 }
 
+/// Identity and behavior context for a managed agent workload.
+///
+/// This is deliberately separate from runtime infrastructure and credential
+/// references: the node receives the same agent contract as Desktop, while
+/// secrets and process-launch details remain node-local.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentWorkloadContext {
+    /// Public identity of the managed agent.
+    pub pubkey: String,
+    /// System prompt belonging to the managed agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Relay configuration the managed agent should use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    /// NIP-OA profile authorization for the managed agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_tag: Option<String>,
+    /// Response audience mode for the managed agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<String>,
+    /// Response audience allowlist for the managed agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_allowlist: Vec<String>,
+    /// Channel context selected for this deployment, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+}
+
+impl AgentWorkloadContext {
+    /// Build and validate the managed-agent context carried by a workload.
+    pub fn new(
+        pubkey: impl Into<String>,
+        system_prompt: Option<String>,
+        relay_url: Option<String>,
+        auth_tag: Option<String>,
+        response_mode: Option<String>,
+        response_allowlist: Vec<String>,
+        channel_id: Option<String>,
+    ) -> Result<Self, ExecutionValidationError> {
+        let context = Self {
+            pubkey: pubkey.into(),
+            system_prompt,
+            relay_url,
+            auth_tag,
+            response_mode,
+            response_allowlist,
+            channel_id,
+        };
+        context.validate()?;
+        Ok(context)
+    }
+
+    fn validate(&self) -> Result<(), ExecutionValidationError> {
+        PublicKey::from_hex(&self.pubkey)
+            .map_err(|_| ExecutionValidationError::InvalidAttestationOwner)?;
+        if let Some(system_prompt) = &self.system_prompt {
+            validate_text(
+                "workload system prompt",
+                system_prompt,
+                MAX_SYSTEM_PROMPT_BYTES,
+                true,
+            )?;
+        }
+        if let Some(relay_url) = &self.relay_url {
+            validate_text("workload relay URL", relay_url, MAX_RELAY_URL_BYTES, false)?;
+        }
+        if let Some(auth_tag) = &self.auth_tag {
+            validate_text("workload auth tag", auth_tag, MAX_AUTH_TAG_BYTES, false)?;
+        }
+        if let Some(response_mode) = &self.response_mode {
+            validate_text(
+                "workload response mode",
+                response_mode,
+                MAX_SESSION_ID_BYTES,
+                false,
+            )?;
+        }
+        for value in &self.response_allowlist {
+            PublicKey::from_hex(value)
+                .map_err(|_| ExecutionValidationError::InvalidAttestationOwner)?;
+        }
+        if let Some(channel_id) = &self.channel_id {
+            validate_text(
+                "workload channel ID",
+                channel_id,
+                MAX_SESSION_ID_BYTES,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Safe workload projection sent in a deploy command.
 ///
 /// Runtime-specific infrastructure such as Docker images, sockets, container
@@ -301,6 +482,9 @@ pub struct WorkloadSpec {
     pub provider: Option<String>,
     /// References to credentials already stored by the node.
     pub credential_refs: Vec<CredentialRef>,
+    /// The managed-agent contract, when this workload represents an agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentWorkloadContext>,
 }
 
 impl WorkloadSpec {
@@ -320,6 +504,7 @@ impl WorkloadSpec {
             model,
             provider,
             credential_refs,
+            agent: None,
         };
         workload.validate()?;
         Ok(workload)
@@ -339,6 +524,9 @@ impl WorkloadSpec {
         }
         if let Some(provider) = &self.provider {
             validate_text("workload provider", provider, MAX_PROVIDER_BYTES, false)?;
+        }
+        if let Some(agent) = &self.agent {
+            agent.validate()?;
         }
         let mut unique_credentials = BTreeSet::new();
         for credential in &self.credential_refs {
@@ -738,6 +926,9 @@ pub struct ExecutionNodeStatus {
     pub lifecycle: ExecutionNodeLifecycle,
     /// Explicit capabilities supported by this node.
     pub capabilities: BTreeSet<ExecutionCapability>,
+    /// Owner proofs binding this node to a relay authority.
+    #[serde(default)]
+    pub owner_attestations: Vec<ExecutionNodeAttestation>,
     /// Safe status projections for workloads on this node.
     pub workloads: Vec<WorkloadStatus>,
     /// Time at which this projection was observed.
@@ -761,6 +952,7 @@ impl ExecutionNodeStatus {
             display_name: display_name.into(),
             lifecycle,
             capabilities: capabilities.into_iter().collect(),
+            owner_attestations: Vec::new(),
             workloads: Vec::new(),
             observed_at: Utc::now(),
         };
@@ -774,6 +966,19 @@ impl ExecutionNodeStatus {
         I: IntoIterator<Item = WorkloadStatus>,
     {
         self.workloads = workloads.into_iter().collect();
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Add owner proofs to this public status projection.
+    pub fn with_owner_attestations<I>(
+        mut self,
+        attestations: I,
+    ) -> Result<Self, ExecutionValidationError>
+    where
+        I: IntoIterator<Item = ExecutionNodeAttestation>,
+    {
+        self.owner_attestations = attestations.into_iter().collect();
         self.validate()?;
         Ok(self)
     }

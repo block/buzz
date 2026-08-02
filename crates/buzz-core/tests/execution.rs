@@ -1,14 +1,35 @@
 use buzz_core::execution::{
     CredentialRef, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
-    ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt,
-    ExecutionValidationError, ProviderAuthResponse, ProviderAuthSession, ReceiptDetail,
-    ReceiptOutcome, SafeErrorCode, WorkloadId, WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
+    ExecutionNodeAttestation, ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus,
+    ExecutionReceipt, ExecutionValidationError, ProviderAuthResponse, ProviderAuthSession,
+    ReceiptDetail, ReceiptOutcome, SafeErrorCode, WorkloadId, WorkloadLifecycle, WorkloadSpec,
+    WorkloadStatus,
 };
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::json;
 
 fn node_id() -> ExecutionNodeId {
     ExecutionNodeId::new("A".repeat(64)).expect("valid node id")
+}
+
+#[test]
+fn execution_node_attestation_binds_owner_node_and_relay() {
+    let owner = nostr::Keys::generate();
+    let node = node_id();
+    let attestation =
+        ExecutionNodeAttestation::sign(&owner, &node, "relay.example").expect("attestation");
+
+    attestation
+        .verify(&node, "relay.example", Some(&owner.public_key().to_hex()))
+        .expect("valid attestation");
+    assert!(attestation.verify(&node, "other.example", None).is_err());
+    assert!(attestation
+        .verify(
+            &node,
+            "relay.example",
+            Some(&nostr::Keys::generate().public_key().to_hex())
+        )
+        .is_err());
 }
 
 fn workload_id() -> WorkloadId {
