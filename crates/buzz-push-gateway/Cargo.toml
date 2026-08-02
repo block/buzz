@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+dev-app-attest-bypass = []
+
 [lib]
 name = "buzz_push_gateway"
 path = "src/lib.rs"
@@ -29,9 +33,8 @@ getrandom = "0.4"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 nostr = { workspace = true }
-p256 = { version = "0.14", features = ["ecdsa", "pem", "pkcs8"] }
 rand = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

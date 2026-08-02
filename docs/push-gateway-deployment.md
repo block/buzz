@@ -19,18 +19,23 @@
 | `BUZZ_PUSH_ENABLED_PROFILES` | Comma-separated `buzz-ios-production` and/or `buzz-ios-sandbox`. |
 | `BUZZ_PUSH_APP_ATTEST_APP_ID` | Exact Apple App Attest application identifier (`TEAMID.bundle-id`). |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
-| `BUZZ_PUSH_APNS_KEY_PATH` | Read-only mounted Apple APNs `.p8` provider key. |
-| `BUZZ_PUSH_APNS_KEY_ID` | APNs provider key id. |
-| `BUZZ_PUSH_APNS_TEAM_ID` | Apple developer team id. |
+| `BUZZ_PUSH_APNS_CERT_PATH` | Read-only mounted PEM containing the Apple Push Services certificate and unencrypted PKCS#8 private key. |
 | `BUZZ_PUSH_APNS_TOPIC` | Buzz iOS bundle id. |
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
+
+Each gateway deployment represents exactly one Apple team and bundle-id pair:
+`BUZZ_PUSH_APP_ATTEST_APP_ID` and `BUZZ_PUSH_APNS_TOPIC` are scalar startup
+settings, and the mounted APNs certificate must match that topic. Dogfood
+(`JMTDPW9CG3` / `xyz.block.buzz.dogfood.mobile`) and production
+(`EYF346PHUG` / `xyz.block.buzz.mobile`) therefore require separate gateway
+deployments with their own matching settings and credentials.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
 ## Secret and key rotation rules
 
-Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs key and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
+Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
 
 The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
 
@@ -44,13 +49,12 @@ The service reaps expired challenges and replay rows, idle quota rows, expired/r
 
 ## Metrics and alerting
 
-The gateway serves Prometheus metrics at `GET /metrics` on the **private health listener** (`BUZZ_PUSH_HEALTH_ADDR`, default `0.0.0.0:8081`) — the same port as the probes, never on the public `8080`. All series are sanitized and bounded-cardinality: label values are drawn only from closed sets (the six APNs outcome classes, the fixed admission results, the static error codes already returned to callers, and the readiness causes). No endpoint, device token, relay pubkey, request id, or any request-scoped identifier is ever used as a label.
+The gateway serves Prometheus metrics at `GET /metrics` on the **private health listener** (`BUZZ_PUSH_HEALTH_ADDR`, default `0.0.0.0:8081`) — the same port as the probes, never on the public `8080`. All series are sanitized and bounded-cardinality: label values are drawn only from closed sets (the five APNs outcome classes, the fixed admission results, the static error codes already returned to callers, and the readiness causes). No endpoint, device token, relay pubkey, request id, or any request-scoped identifier is ever used as a label.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `refresh_credential` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
+| `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
-| `push_gateway_apns_credential_refreshes_total` | counter | — | Provider JWT refreshed after APNs reported expiry. |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
@@ -64,7 +68,7 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 | Alert | Fires when | Severity | Action |
 |---|---|---|---|
-| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | APNs provider token/topic is unhealthy. Check the `.p8` key, `BUZZ_PUSH_APNS_KEY_ID`, `..._TEAM_ID`, and `..._TOPIC`. No endpoints are being invalidated, but nothing is delivering. |
+| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | APNs certificate/topic is unhealthy. Check `BUZZ_PUSH_APNS_CERT_PATH` and `BUZZ_PUSH_APNS_TOPIC`. No endpoints are being invalidated, but nothing is delivering. |
 | `PushGatewayAdmissionUnavailable` | any admission `unavailable` for 5m | critical | PostgreSQL authority store is unreachable. Check DB connectivity and the pod's `postgresEgressCidrs` NetworkPolicy. |
 | `PushGatewayReadinessAuthorityFailing` | readiness `authority` failures for 5m | warning | Replicas are being pulled from the Service on DB check failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
 | `PushGatewayReaperFailing` | reaper failed ≥2 times within 30m (runs every 5m) | warning | Expired reservations aren't being swept, growing the bounded-until-expiry window. Check DB write availability. |
@@ -103,7 +107,7 @@ Only after that command succeeds, set the exact digest as `image.digest`; the ch
 
 Network policy keeps APNs HTTPS and PostgreSQL egress in separate CIDR lists. APNs currently requires broad TCP/443 reachability; `networkPolicy.postgresEgressCidrs` must be narrowed to the production database network, and the DNS namespace/pod selectors must match the cluster DNS deployment. The sample private CIDR is not a claim about the production topology.
 
-Kubernetes does not restart pods when referenced Secret bytes change. AEAD or APNs credential rotation therefore requires an explicit rolling restart after the secret manager update (for example, `kubectl rollout restart deployment/<release>-buzz-push-gateway`) and readiness verification before removing predecessor keys. Service-account token automount is disabled.
+Kubernetes does not restart pods when referenced Secret bytes change. AEAD or APNs certificate rotation therefore requires an explicit rolling restart after the secret manager update (for example, `kubectl rollout restart deployment/<release>-buzz-push-gateway`) and readiness verification before removing predecessor keys. Service-account token automount is disabled.
 
 ## Gateway chart release
 

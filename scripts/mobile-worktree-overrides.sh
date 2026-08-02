@@ -70,7 +70,7 @@ case "$android_slug" in
     [0-9]*) android_slug="w_$android_slug" ;;
 esac
 
-ios_bundle_id="com.buzz.buzzMobile.${ios_slug}"
+ios_bundle_id="xyz.block.buzz.dogfood.mobile.${ios_slug}"
 android_suffix=".${android_slug}"
 
 cat > "$ios_overrides" <<XCCONFIG

@@ -1,6 +1,7 @@
 use buzz_push_gateway::{
     apns::ApnsTransport,
     app_attest::AppAttestVerifier,
+    app_attest_policy::AppAttestPolicy,
     authority::AuthorityStore,
     config::Config,
     grant::{GrantKey, GrantKeyring},
@@ -34,11 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let c = Config::from_env()?;
+    #[cfg(feature = "dev-app-attest-bypass")]
+    let dev_app_attest_bypass = c.dev_app_attest_bypass();
     let metrics_handle = buzz_push_gateway::metrics::install()?;
-    let transport = Arc::new(ApnsTransport::token(
-        &fs::read(&c.apns_key_path)?,
-        &c.apns_key_id,
-        &c.apns_team_id,
+    let transport = Arc::new(ApnsTransport::certificate(
+        &fs::read(&c.apns_cert_path)?,
         c.apns_topic,
     )?);
     let grant_keyring = GrantKeyring::new(
@@ -77,10 +78,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    let app_attest = Arc::new(AppAttestVerifier::new(
-        c.app_attest_app_id,
+    let apple_app_attest = AppAttestVerifier::new(
+        c.app_attest_app_id.clone(),
         fs::read(&c.app_attest_root_cert_path)?,
-    )?);
+    )?;
+    #[cfg(feature = "dev-app-attest-bypass")]
+    let app_attest = Arc::new(AppAttestPolicy::from_config(
+        dev_app_attest_bypass,
+        apple_app_attest,
+    ));
+    #[cfg(not(feature = "dev-app-attest-bypass"))]
+    let app_attest = Arc::new(AppAttestPolicy::apple(apple_app_attest));
     let accepting = Arc::new(AtomicBool::new(true));
     let (public, health) = router_with_metrics(
         AppState {

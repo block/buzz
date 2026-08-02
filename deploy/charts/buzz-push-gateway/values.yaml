@@ -27,9 +27,9 @@ appAttestAppId: TEAMID.xyz.buzz
 appAttestRoot:
   secretName: buzz-push-gateway
   secretKey: app-attest-root.pem
-apnsKey:
+apnsCert:
   secretName: buzz-push-gateway
-  secretKey: apns-provider.p8
+  secretKey: apns-identity.pem
 service:
   port: 8080
 httpRoute:

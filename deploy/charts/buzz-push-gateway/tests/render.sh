@@ -42,8 +42,10 @@ assert j['metadata']['annotations']=={
     'helm.sh/hook-delete-policy':'before-hook-creation,hook-succeeded',
 }
 env={e['name'] for e in d['spec']['template']['spec']['containers'][0]['env']}
-required={'DATABASE_URL','BUZZ_PUSH_APNS_KEY_ID','BUZZ_PUSH_APNS_TEAM_ID','BUZZ_PUSH_APNS_TOPIC','BUZZ_PUSH_GRANT_KEYS','BUZZ_PUSH_TOKEN_KEYS','BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS'}
+required={'DATABASE_URL','BUZZ_PUSH_APNS_CERT_PATH','BUZZ_PUSH_APNS_TOPIC','BUZZ_PUSH_GRANT_KEYS','BUZZ_PUSH_TOKEN_KEYS','BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS'}
 assert required <= env
+apns_volume=next(v for v in d['spec']['template']['spec']['volumes'] if v['name']=='apns-cert')
+assert apns_volume['secret']['defaultMode']==0o400, apns_volume
 assert d['spec']['replicas'] >= 2
 assert not any(x and x.get('kind')=='HTTPRoute' for x in xs)
 # Observability is opt-in: default render exposes no scrape CRDs and 8081 stays
@@ -72,6 +74,15 @@ route=next(x for x in production if x and x.get('kind')=='HTTPRoute')
 assert route['spec']['parentRefs']
 assert 'push.buzz.xyz' in route['spec']['hostnames']
 PY
+
+# Legacy token-auth values must fail rather than silently selecting the default
+# certificate Secret.
+if helm template push deploy/charts/buzz-push-gateway \
+  --set apnsKey.secretName=legacy-apns-secret \
+  --set apnsKey.secretKey=legacy-provider.p8 >/dev/null 2>&1; then
+  echo 'expected legacy apnsKey values to fail schema validation' >&2
+  exit 1
+fi
 
 # Enabling a route without a Gateway attachment must fail schema validation.
 if helm template push deploy/charts/buzz-push-gateway --set httpRoute.enabled=true >/dev/null 2>&1; then

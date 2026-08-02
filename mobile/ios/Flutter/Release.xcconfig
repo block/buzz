@@ -4,8 +4,12 @@
 // Defaults for the iOS Release build. Internal/custom builds (e.g. an
 // enterprise-signed distribution) override these without patching tracked
 // files by writing `mobile/ios/Flutter/AppOverrides.xcconfig` (gitignored).
-BUNDLE_IDENTIFIER = com.buzz.buzzMobile
+BUNDLE_IDENTIFIER = xyz.block.buzz.mobile
 APP_DISPLAY_NAME = Buzz
 CODE_SIGN_STYLE = Automatic
 CODE_SIGN_IDENTITY = iPhone Developer
+BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
+BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_IOS_PUSH_ENVIRONMENT = production
+BUZZ_APP_ATTEST_ENVIRONMENT = production
 #include? "AppOverrides.xcconfig"

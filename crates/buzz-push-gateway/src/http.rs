@@ -1,7 +1,7 @@
 //! Stateful installation, delegation, delivery, and health APIs.
 use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
-    app_attest::AppAttestVerifier,
+    app_attest_policy::AppAttestPolicy,
     authority::{
         AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, NewInstallation,
     },
@@ -36,7 +36,7 @@ use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 #[derive(Clone)]
 pub struct AppState {
     pub grant_keyring: Arc<GrantKeyring>,
-    pub app_attest: Arc<AppAttestVerifier>,
+    pub app_attest: Arc<AppAttestPolicy>,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
     pub transport: Arc<dyn PushTransport>,
@@ -656,17 +656,12 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
     // fence. The detached task completes disposition bookkeeping.
     let delivery = tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let mut outcome = transport.send(attempt, profile, &endpoint).await;
-        if outcome == DeliveryOutcome::RefreshCredential {
-            crate::metrics::record_credential_refresh();
-            transport.refresh_credential();
-            outcome = transport.send(attempt, profile, &endpoint).await;
-        }
+        let outcome = transport.send(attempt, profile, &endpoint).await;
         crate::metrics::record_apns_delivery(outcome, started.elapsed().as_secs_f64());
         let disposition = match outcome {
-            DeliveryOutcome::Retry { .. }
-            | DeliveryOutcome::ConfigurationFault
-            | DeliveryOutcome::RefreshCredential => DeliveryDisposition::Retryable,
+            DeliveryOutcome::Retry { .. } | DeliveryOutcome::ConfigurationFault => {
+                DeliveryDisposition::Retryable
+            }
             DeliveryOutcome::Accepted
             | DeliveryOutcome::InvalidEndpoint { .. }
             | DeliveryOutcome::PermanentRequestFault => DeliveryDisposition::Terminal,
@@ -704,7 +699,7 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             }),
         )
             .into_response(),
-        DeliveryOutcome::ConfigurationFault | DeliveryOutcome::RefreshCredential => {
+        DeliveryOutcome::ConfigurationFault => {
             error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault")
         }
         DeliveryOutcome::PermanentRequestFault => error(StatusCode::BAD_REQUEST, "invalid_request"),
@@ -773,4 +768,147 @@ pub fn router_with_metrics(
         );
     }
     (public, health)
+}
+
+/// Known-answer vectors for the exact App Attest transcript bytes defined by
+/// NIP-PL ("Exact App Attest transcript construction"). The fixture file is
+/// shared ground truth with client-side canonical encoders (the Swift NIP-PL
+/// iOS client): a client encoder that fails to reproduce these bytes exactly
+/// fails every enroll/delegate/rotate/revoke call with `invalid_attestation`.
+#[cfg(test)]
+mod transcript_vector_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    const VECTORS_JSON: &str = include_str!("../tests/vectors/app_attest_transcripts.json");
+
+    // Deterministic fixture inputs mirrored in the vector file's `inputs`.
+    const CHALLENGE_ID: uuid::Uuid =
+        uuid::Uuid::from_u128(0x1111_1111_1111_4111_8111_1111_1111_1111);
+    const INSTALLATION: uuid::Uuid =
+        uuid::Uuid::from_u128(0x2222_2222_2222_4222_8222_2222_2222_2222);
+    // base64url-no-pad of bytes 0x00..=0x1f.
+    const CHALLENGE: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    // Standard base64 (padded) of 32 bytes of 0xAA.
+    const KEY_ID: &str = "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=";
+    // 32-byte APNs token, lowercase hex.
+    const ENDPOINT: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    const RELAY_PUBKEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn assert_vector(name: &str, actual: &str) {
+        let file: serde_json::Value = serde_json::from_str(VECTORS_JSON).unwrap();
+        let vector = file["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == name)
+            .unwrap_or_else(|| panic!("vector {name} missing from fixture"));
+        assert_eq!(
+            actual,
+            vector["transcript"].as_str().unwrap(),
+            "{name} bytes"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(actual.as_bytes())),
+            vector["sha256"].as_str().unwrap(),
+            "{name} sha256"
+        );
+    }
+
+    #[test]
+    fn fixture_encodings_match_their_raw_bytes() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let challenge_bytes: Vec<u8> = (0u8..32).collect();
+        assert_eq!(URL_SAFE_NO_PAD.encode(&challenge_bytes), CHALLENGE);
+        assert_eq!(STANDARD.encode([0xAAu8; 32]), KEY_ID);
+        assert_eq!(hex::decode(ENDPOINT).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn enroll_transcript_vector() {
+        let t = EnrollTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            key_id: KEY_ID,
+            app_profile: AppProfile::BuzzIosProduction,
+            endpoint: ENDPOINT,
+            endpoint_epoch: 1,
+            expires_at: 1_752_624_000,
+        };
+        assert_vector("enroll", &transcript("buzz.push.enroll.v1", &t).unwrap());
+    }
+
+    #[test]
+    fn delegate_transcript_vector() {
+        let t = DelegateTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/delegations",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            endpoint_epoch: 1,
+            generation: 1,
+            relay_pubkey: RELAY_PUBKEY,
+            not_before: 1_752_620_000,
+            expires_at: 1_752_624_000,
+        };
+        assert_vector(
+            "delegate",
+            &transcript("buzz.push.delegate.v1", &t).unwrap(),
+        );
+    }
+
+    #[test]
+    fn rotate_endpoint_transcript_vector() {
+        let t = RotateTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations/endpoint",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            endpoint_epoch: 1,
+            new_endpoint_epoch: 2,
+            endpoint: ENDPOINT,
+        };
+        assert_vector(
+            "rotate_endpoint",
+            &transcript("buzz.push.rotate-endpoint.v1", &t).unwrap(),
+        );
+    }
+
+    #[test]
+    fn revoke_delegation_transcript_vector() {
+        let t = RevokeDelegationTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/delegations/revoke",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            relay_pubkey: RELAY_PUBKEY,
+            generation: 2,
+        };
+        assert_vector(
+            "revoke_delegation",
+            &transcript("buzz.push.revoke-delegation.v1", &t).unwrap(),
+        );
+    }
+
+    #[test]
+    fn revoke_installation_transcript_vector() {
+        let t = RevokeInstallationTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations/revoke",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            endpoint_epoch: 1,
+            new_endpoint_epoch: 2,
+        };
+        assert_vector(
+            "revoke_installation",
+            &transcript("buzz.push.revoke-installation.v1", &t).unwrap(),
+        );
+    }
 }

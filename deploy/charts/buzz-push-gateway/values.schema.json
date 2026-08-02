@@ -23,6 +23,25 @@
       "type": "string",
       "minLength": 1
     },
+    "apnsCert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secretName",
+        "secretKey"
+      ],
+      "properties": {
+        "secretName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "apnsKey": false,
     "httpRoute": {
       "type": "object",
       "required": [
@@ -238,6 +257,7 @@
     "publicDeliveryUrl",
     "maxGrantLifetimeSeconds",
     "appAttestAppId",
+    "apnsCert",
     "httpRoute",
     "image",
     "migration"
