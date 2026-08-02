@@ -82,8 +82,7 @@ fn load_auth_tag() -> Result<Option<Tag>, String> {
         .or_else(|| git_config("nostr.authtag"));
 
     raw.map(|value| {
-        let parts: Vec<String> =
-            serde_json::from_str(&value).map_err(|e| format!("invalid NIP-OA auth tag: {e}"))?;
+        let parts: Vec<String> = parse_auth_tag_parts(&value)?;
         if parts.len() != 4 || parts.first().map(String::as_str) != Some("auth") {
             return Err(
                 "invalid NIP-OA auth tag: expected [auth, owner, conditions, signature]"
@@ -93,6 +92,32 @@ fn load_auth_tag() -> Result<Option<Tag>, String> {
         Tag::parse(parts).map_err(|e| format!("invalid NIP-OA auth tag: {e}"))
     })
     .transpose()
+}
+
+/// Parse a NIP-OA `auth` tag into its component strings.
+///
+/// Accepts both the JSON array form (`["auth","hex","","hex"]`) and the raw
+/// Nostr tag form (`[auth,hex,,hex]`) — the unquoted, comma-delimited
+/// serialization used inside Nostr events and commonly stored in `.env` files.
+/// Matches the SDK's `parse_json_array` behavior so Git auth consumers accept
+/// the same `BUZZ_AUTH_TAG` values as the CLI.
+fn parse_auth_tag_parts(input: &str) -> Result<Vec<String>, String> {
+    let trimmed = input.trim();
+    // Fast path: well-formed JSON array.
+    if let Ok(parts) = serde_json::from_str::<Vec<String>>(trimmed) {
+        return Ok(parts);
+    }
+    // Fallback: raw Nostr tag form [auth,hex,,hex].
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let parts: Vec<String> = inner.split(',').map(|p| p.trim().to_owned()).collect();
+        if !parts.is_empty() {
+            return Ok(parts);
+        }
+    }
+    Err(format!(
+        "invalid NIP-OA auth tag: expected JSON array or raw tag form, got {trimmed:?}"
+    ))
 }
 
 #[derive(Default)]

@@ -487,12 +487,12 @@ fn load_auth_tag() -> Result<Option<(String, String, String)>, Error> {
         )));
     }
 
-    // Parse: ["auth", "<owner>", "<conditions>", "<sig>"]
-    let arr: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| Error::Fatal(format!("BUZZ_AUTH_TAG is not valid JSON: {e}")))?;
-    let arr = arr
-        .as_array()
-        .ok_or_else(|| Error::Fatal("BUZZ_AUTH_TAG must be a JSON array".to_string()))?;
+    // Parse: [\"auth\", \"<owner>\", \"<conditions>\", \"<sig>\"]
+    // Accept both the JSON array form and the raw Nostr tag form
+    // ([auth,hex,,hex]) so this consumer matches the SDK's parse_json_array
+    // behavior and the CLI.
+    let arr = parse_auth_tag_array(&json_str)
+        .map_err(|e| Error::Fatal(format!("BUZZ_AUTH_TAG is not a valid auth tag: {e}")))?;
     if arr.len() != 4 {
         return Err(Error::Fatal(
             "BUZZ_AUTH_TAG must have exactly 4 elements".to_string(),
@@ -546,6 +546,35 @@ fn load_auth_tag() -> Result<Option<(String, String, String)>, Error> {
     }
 
     Ok(Some((owner, conditions, sig)))
+}
+
+/// Parse a NIP-OA `auth` tag into a JSON array of values.
+///
+/// Accepts both the JSON array form (`["auth","hex","","hex"]`) and the raw
+/// Nostr tag form (`[auth,hex,,hex]`) — the unquoted, comma-delimited
+/// serialization used inside Nostr events and commonly stored in `.env` files.
+/// Matches the SDK's `parse_json_array` behavior so Git signing accepts the
+/// same `BUZZ_AUTH_TAG` values as the CLI.
+fn parse_auth_tag_array(input: &str) -> Result<Vec<serde_json::Value>, String> {
+    let trimmed = input.trim();
+    // Fast path: well-formed JSON array.
+    if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Ok(arr);
+    }
+    // Fallback: raw Nostr tag form [auth,hex,,hex].
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let arr: Vec<serde_json::Value> = inner
+            .split(',')
+            .map(|p| serde_json::Value::String(p.trim().to_owned()))
+            .collect();
+        if !arr.is_empty() {
+            return Ok(arr);
+        }
+    }
+    Err(format!(
+        "expected JSON array or raw tag form, got {trimmed:?}"
+    ))
 }
 
 /// Validate NIP-OA conditions string with structural parsing.
@@ -2007,6 +2036,43 @@ Initial commit"
             matches!(result, Ok(None)),
             "absent auth tag should be Ok(None)"
         );
+    }
+
+    /// load_auth_tag accepts the raw Nostr tag form `[auth,hex,,hex]`,
+    /// matching the SDK's parse_json_array fallback and the CLI.
+    #[test]
+    fn test_load_auth_tag_accepts_raw_nostr_form() {
+        let owner = "a".repeat(64);
+        let sig = "b".repeat(128);
+
+        // Raw form with empty conditions (`,,`).
+        std::env::set_var("BUZZ_AUTH_TAG", format!("[auth,{owner},,{sig}]"));
+        let result = load_auth_tag();
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "raw Nostr tag form with empty conditions should be accepted"
+        );
+
+        // Raw form with conditions.
+        std::env::set_var("BUZZ_AUTH_TAG", format!("[auth,{owner},kind=9,{sig}]"));
+        let result = load_auth_tag();
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "raw Nostr tag form with conditions should be accepted"
+        );
+
+        // Raw form with surrounding whitespace.
+        std::env::set_var(
+            "BUZZ_AUTH_TAG",
+            format!("  [auth, {owner} , kind=9, {sig}]  \n"),
+        );
+        let result = load_auth_tag();
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "raw Nostr tag form with whitespace should be accepted"
+        );
+
+        std::env::remove_var("BUZZ_AUTH_TAG");
     }
 
     /// Helper: sign a payload and return the armored signature

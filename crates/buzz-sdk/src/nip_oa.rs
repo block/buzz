@@ -341,8 +341,8 @@ pub fn canonicalize_auth_tag(input: &str) -> Result<String, SdkError> {
     }
     // Re-serialize as canonical JSON. parse_auth_tag / verify_auth_tag validate
     // the contents; here we only normalize the container shape.
-    Ok(serde_json::to_string(&arr)
-        .map_err(|e| SdkError::InvalidInput(format!("canonical serialization failed: {e}")))?)
+    serde_json::to_string(&arr)
+        .map_err(|e| SdkError::InvalidInput(format!("canonical serialization failed: {e}")))
 }
 
 #[cfg(test)]
