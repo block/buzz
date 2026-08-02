@@ -12,6 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use nostr::{Event, ToBech32};
 use serde_json::{json, Value};
 
+use crate::managed_agents::{agent_events::managed_agent_content_from_event, RelayAgentInfo};
 use crate::models::*;
 
 mod user_search;
@@ -493,6 +494,82 @@ pub fn agents_from_events(events: &[Event]) -> Value {
         })
         .collect();
     json!({ "agents": arr })
+}
+
+// ── kind:30177 (managed-agent) relay-agent directory ────────────────────────
+
+/// Build a `RelayAgentInfo` seed from a kind:30177 managed-agent event —
+/// everything except `channels`/`channel_ids`, which kind:30177 doesn't
+/// carry and must be resolved separately from a kind:39002 membership query
+/// (see `agent_channel_ids_from_member_events`).
+///
+/// The agent's pubkey comes from the event's `d` tag, not `event.pubkey`:
+/// kind:30177 is a parameterized-replaceable event published BY the agent's
+/// *owner*, so `event.pubkey` is the owner's identity, not the agent's.
+pub fn relay_agent_seed_from_managed_agent_event(
+    event: &Event,
+) -> Result<RelayAgentInfo, String> {
+    let pubkey = first_tag_value(event, "d")
+        .ok_or_else(|| "kind:30177 missing required `d` tag".to_string())?
+        .to_string();
+    let content = managed_agent_content_from_event(event)?;
+    Ok(RelayAgentInfo {
+        pubkey,
+        name: content.name,
+        agent_type: "agent".to_string(),
+        channels: Vec::new(),
+        channel_ids: Vec::new(),
+        capabilities: Vec::new(),
+        status: "offline".to_string(),
+        respond_to: Some(content.respond_to),
+        respond_to_allowlist: content.respond_to_allowlist,
+    })
+}
+
+/// Build a pubkey → channel-id-list map from kind:39002 (NIP-29 group
+/// members) events, restricted to `agent_pubkeys`. One event is one
+/// channel's full member list; the channel id is its `d` tag, and each
+/// `p`-tag naming one of `agent_pubkeys` means that agent is a member.
+///
+/// Mirrors the query pattern `buzz-acp`'s own `RelayClient::discover_channels`
+/// uses to find an agent's own channel memberships
+/// (`crates/buzz-acp/src/relay.rs`) and the pattern `get_channels` uses for
+/// the viewer's own memberships (`commands/channels.rs`) — batched across
+/// multiple agent pubkeys in one relay round trip instead of one pubkey.
+pub fn agent_channel_ids_from_member_events(
+    events: &[Event],
+    agent_pubkeys: &std::collections::HashSet<String>,
+) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for event in events {
+        let Some(channel_id) = first_tag_value(event, "d") else {
+            continue;
+        };
+        for slice in tags_named(event, "p") {
+            let Some(pubkey) = slice.get(1) else { continue };
+            if !agent_pubkeys.contains(pubkey) {
+                continue;
+            }
+            map.entry(pubkey.clone())
+                .or_default()
+                .push(channel_id.to_string());
+        }
+    }
+    map
+}
+
+/// Build a channel-id → name map from kind:39000 metadata events, for
+/// filling in `RelayAgentInfo::channels` (display-only — eligibility logic
+/// only needs `channel_ids`).
+pub fn channel_names_by_id(events: &[Event]) -> HashMap<String, String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let id = first_tag_value(event, "d")?.to_string();
+            let name = first_tag_value(event, "name").unwrap_or("").to_string();
+            Some((id, name))
+        })
+        .collect()
 }
 
 // ── kind:13534 (relay membership list) ──────────────────────────────────────
@@ -1007,5 +1084,83 @@ mod tests {
         assert_eq!(timestamp_to_iso(1_609_459_200), "2021-01-01T00:00:00Z");
         // Epoch
         assert_eq!(timestamp_to_iso(0), "1970-01-01T00:00:00Z");
+    }
+
+    // ── kind:30177 (managed-agent) relay-agent directory ────────────────
+
+    #[test]
+    fn relay_agent_seed_uses_d_tag_not_event_pubkey() {
+        let agent_pubkey = "1".repeat(64);
+        let content = serde_json::json!({
+            "name": "Scout",
+            "parallelism": 1,
+            "respond_to": "anyone",
+        })
+        .to_string();
+        let e = ev(30177, &content, vec![vec!["d", &agent_pubkey]]);
+
+        let seed = relay_agent_seed_from_managed_agent_event(&e).unwrap();
+
+        assert_eq!(seed.pubkey, agent_pubkey);
+        assert_ne!(
+            seed.pubkey,
+            e.pubkey.to_hex(),
+            "must not use the event author (the owner) as the agent's pubkey"
+        );
+        assert_eq!(seed.name, "Scout");
+        assert_eq!(
+            seed.respond_to,
+            Some(crate::managed_agents::RespondTo::Anyone)
+        );
+        assert!(seed.channel_ids.is_empty());
+        assert!(seed.channels.is_empty());
+    }
+
+    #[test]
+    fn relay_agent_seed_rejects_event_without_d_tag() {
+        let content = serde_json::json!({
+            "name": "Scout",
+            "parallelism": 1,
+            "respond_to": "anyone",
+        })
+        .to_string();
+        let e = ev(30177, &content, vec![]);
+
+        assert!(relay_agent_seed_from_managed_agent_event(&e).is_err());
+    }
+
+    #[test]
+    fn agent_channel_ids_groups_by_pubkey_and_ignores_non_candidates() {
+        let agent_a = "a".repeat(64);
+        let agent_b = "b".repeat(64);
+        let stranger = "c".repeat(64);
+        let candidates: std::collections::HashSet<String> =
+            [agent_a.clone(), agent_b.clone()].into_iter().collect();
+
+        let general = ev(
+            39002,
+            "",
+            vec![vec!["d", "general"], vec!["p", &agent_a], vec!["p", &stranger]],
+        );
+        let random = ev(39002, "", vec![vec!["d", "random"], vec!["p", &agent_b]]);
+
+        let map =
+            agent_channel_ids_from_member_events(&[general, random], &candidates);
+
+        assert_eq!(map.get(&agent_a), Some(&vec!["general".to_string()]));
+        assert_eq!(map.get(&agent_b), Some(&vec!["random".to_string()]));
+        assert!(
+            !map.contains_key(&stranger),
+            "non-candidate pubkeys must not appear in the result"
+        );
+    }
+
+    #[test]
+    fn channel_names_by_id_maps_d_tag_to_name_tag() {
+        let e = ev(39000, "", vec![vec!["d", "general"], vec!["name", "general"]]);
+
+        let map = channel_names_by_id(std::slice::from_ref(&e));
+
+        assert_eq!(map.get("general"), Some(&"general".to_string()));
     }
 }
