@@ -296,6 +296,12 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Delay (ms) before the mock relay echoes a sent kind-9 back over the
+     *  live subscription. The real relay's fanout is post-commit and
+     *  fire-and-forget, so the echo always trails the send ack; the mock's
+     *  default synchronous echo masks any UI that (incorrectly) waits for
+     *  it — the thread-pane echo-chamber bug. 0/undefined = synchronous. */
+    sendEchoDelayMs?: number;
     /** Close the first channel-window live REQ; its retry is accepted. */
     closeChannelLiveSubscriptionOnce?: boolean;
     /** Reject successive kind-9 sends with these messages, then resume. */
@@ -8669,6 +8675,21 @@ async function handleSendChannelMessage(
       window.setTimeout(resolve, sendMessageDelayMs),
     );
   }
+  // Mirror the real relay's post-commit fanout: the live-subscription echo
+  // trails the send ack. Synchronous echo (delay 0) is the legacy default,
+  // but note it hides own-send liveness bugs — the UI must not depend on the
+  // echo to paint a send it already knows about.
+  const sendEchoDelayMs = config?.mock?.sendEchoDelayMs ?? 0;
+  const echoLiveEvent = (channelId: string, event: RelayEvent) => {
+    if (sendEchoDelayMs > 0) {
+      window.setTimeout(
+        () => emitMockLiveEvent(channelId, event),
+        sendEchoDelayMs,
+      );
+      return;
+    }
+    emitMockLiveEvent(channelId, event);
+  };
 
   // NIP-92 imeta attachments. The real relay echoes these back on the stored
   // event; mirror that here so attachment renderers (FileCard, images, video)
@@ -8695,7 +8716,7 @@ async function handleSendChannelMessage(
         ...extraTags,
       ]);
       recordMockMessage(args.channelId, event);
-      emitMockLiveEvent(args.channelId, event);
+      echoLiveEvent(args.channelId, event);
 
       return {
         event_id: event.id,
@@ -8758,7 +8779,7 @@ async function handleSendChannelMessage(
     };
 
     recordMockMessage(args.channelId, event);
-    emitMockLiveEvent(args.channelId, event);
+    echoLiveEvent(args.channelId, event);
 
     return {
       event_id: event.id,

@@ -107,8 +107,12 @@ export function useThreadReplies(
           );
           const current =
             queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+          // Keep events that arrived over the live subscription while this
+          // fetch was in flight, and any still-pending optimistic sends: the
+          // server cannot return an unconfirmed send, so dropping it here
+          // would flash-remove the user's own reply until the relay echo.
           const receivedInFlight = current.filter(
-            (event) => !idsAtStart.has(event.id),
+            (event) => event.pending || !idsAtStart.has(event.id),
           );
           return sortMessages([...fetched, ...receivedInFlight]);
         }

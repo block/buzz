@@ -280,6 +280,9 @@ type MockBridgeOptions = {
   applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Delay (ms) before the mock relay echoes a sent kind-9 back over the
+   * live subscription; see e2eBridge mock config. */
+  sendEchoDelayMs?: number;
   /** Close the first channel-window live REQ; its retry is accepted. */
   closeChannelLiveSubscriptionOnce?: boolean;
   /** Reject successive kind-9 sends with these messages, then resume. */

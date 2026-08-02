@@ -1,5 +1,10 @@
 import { useEffect, useEffectEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -74,6 +79,9 @@ type MessageQueryContext = {
   previousWindow: ChannelWindowStore | undefined;
   channelId: string;
   queryKey: ReturnType<typeof channelMessagesKey>;
+  /** Set only for thread replies: the thread-replies cache the optimistic
+   *  message was inserted into, so onSuccess/onError can reconcile it. */
+  threadKey?: ReturnType<typeof threadRepliesKey>;
 };
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
@@ -168,6 +176,102 @@ export function resolveSendChannel(
   return (
     targetChannel ??
     resolveEffectiveChannel(capturedChannelId, channelsCache, fallbackChannel)
+  );
+}
+
+/**
+ * Every cached event a reply's parent could live in: the flattened channel
+ * timeline plus each cached thread subtree for the channel. Thread replies
+ * are not timeline rows, so resolving a nested reply's root against the
+ * channel cache alone never finds the parent and silently mis-roots the
+ * reply at its parent id.
+ *
+ * Exported for unit testing.
+ */
+export function collectReplyParentContext(
+  queryClient: QueryClient,
+  channelId: string,
+): RelayEvent[] {
+  const channelMessages =
+    queryClient.getQueryData<RelayEvent[]>(channelMessagesKey(channelId)) ?? [];
+  const threadCaches = queryClient.getQueriesData<RelayEvent[]>({
+    queryKey: ["thread-replies", channelId],
+  });
+  return [
+    ...channelMessages,
+    ...threadCaches.flatMap(([, events]) => events ?? []),
+  ];
+}
+
+/**
+ * The echo-chamber fix (thread-pane liveness): the thread pane renders
+ * `threadRepliesKey(channelId, rootId)`, whose only live writer used to be
+ * the relay's WebSocket echo (`useChannelSubscription.appendMessage`). Your
+ * own reply therefore waited a full round-trip plus the relay's post-commit
+ * fanout before painting, while the channel pane painted optimistically —
+ * the thread pane absorbed 100% of echo lag. These three helpers mirror the
+ * channel window's optimistic lifecycle into the thread cache:
+ *
+ *   onMutate  → insertPendingThreadReply
+ *   onSuccess → reconcileSentThreadReply
+ *   onError   → rollbackPendingThreadReply
+ *
+ * All transforms are id-stable: the pending entry's localKey survives
+ * reconciliation (here explicitly; in the echo path via
+ * `isMatchingPendingMessage`), so the rendered row never remounts mid-send.
+ *
+ * Exported for unit testing.
+ */
+export function insertPendingThreadReply(
+  queryClient: QueryClient,
+  channelId: string,
+  pendingMessage: RelayEvent,
+): ReturnType<typeof threadRepliesKey> | undefined {
+  const reference = getThreadReference(pendingMessage.tags);
+  if (reference.parentId == null || reference.rootId == null) {
+    return undefined;
+  }
+  const threadKey = threadRepliesKey(channelId, reference.rootId);
+  queryClient.setQueryData<RelayEvent[]>(threadKey, (current = []) =>
+    mergeMessages(current, pendingMessage),
+  );
+  return threadKey;
+}
+
+/** See {@link insertPendingThreadReply}. Exported for unit testing. */
+export function reconcileSentThreadReply(
+  queryClient: QueryClient,
+  threadKey: ReturnType<typeof threadRepliesKey>,
+  optimisticId: string,
+  message: RelayEvent,
+): void {
+  // Drop the pending entry (a no-op when the WS echo already replaced it)
+  // and merge the confirmed event under the same localKey so the row's
+  // render identity is stable across the swap. mergeMessages dedupes by id,
+  // so an echo that raced ahead of the REST response cannot duplicate.
+  queryClient.setQueryData<RelayEvent[]>(threadKey, (current = []) =>
+    mergeMessages(
+      current.filter((event) => event.id !== optimisticId),
+      { ...message, localKey: optimisticId },
+    ),
+  );
+}
+
+/**
+ * See {@link insertPendingThreadReply}. Unlike the channel caches, the
+ * rollback is a targeted filter rather than a snapshot restore: restoring a
+ * pre-send snapshot would silently drop live replies that arrived over the
+ * subscription while the failed send was in flight.
+ *
+ * Exported for unit testing.
+ */
+export function rollbackPendingThreadReply(
+  queryClient: QueryClient,
+  threadKey: ReturnType<typeof threadRepliesKey>,
+  optimisticId: string,
+): void {
+  queryClient.setQueryData<RelayEvent[]>(threadKey, (current = []) =>
+    current.filter((event) => event.id !== optimisticId),
   );
 }
 
@@ -469,10 +573,10 @@ export function useSendMessageMutation(
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
+        const cachedMessages = collectReplyParentContext(
+          queryClient,
+          effectiveChannel.id,
+        );
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
@@ -570,7 +674,10 @@ export function useSendMessageMutation(
         effectiveChannel.id,
         content.trim(),
         identity,
-        previousMessages,
+        // Include cached thread subtrees: a nested reply's parent lives in
+        // the thread cache, not the channel timeline, and mis-resolving the
+        // root here would strand the optimistic insert under the wrong key.
+        collectReplyParentContext(queryClient, effectiveChannel.id),
         mentionPubkeys ?? [],
         parentEventId ?? null,
         mediaTags ?? [],
@@ -583,12 +690,23 @@ export function useSendMessageMutation(
       queryClient.setQueryData(windowKey, nextWindow);
       projectChannelWindowMessages(queryClient, effectiveChannel.id);
 
+      // Thread replies also render from the thread-replies cache, whose only
+      // other writer is the relay's WS echo — without this insert the thread
+      // pane waits a full round-trip to paint your own send (the
+      // echo-chamber bug).
+      const threadKey = insertPendingThreadReply(
+        queryClient,
+        effectiveChannel.id,
+        optimisticMessage,
+      );
+
       return {
         optimisticId: optimisticMessage.id,
         previousMessages,
         previousWindow,
         channelId: effectiveChannel.id,
         queryKey,
+        threadKey,
       };
     },
     onError: (error, _variables, context) => {
@@ -605,6 +723,13 @@ export function useSendMessageMutation(
         channelWindowKey(context.channelId),
         context.previousWindow,
       );
+      if (context.threadKey) {
+        rollbackPendingThreadReply(
+          queryClient,
+          context.threadKey,
+          context.optimisticId,
+        );
+      }
     },
     onSuccess: (message, _variables, context) => {
       // An accepted send proves the write-block is lifted; clear any recorded
@@ -630,6 +755,14 @@ export function useSendMessageMutation(
       });
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, context.channelId);
+      if (context.threadKey) {
+        reconcileSentThreadReply(
+          queryClient,
+          context.threadKey,
+          context.optimisticId,
+          message,
+        );
+      }
     },
   });
 }
