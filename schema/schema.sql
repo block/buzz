@@ -642,6 +642,11 @@ CREATE TABLE audit_log (
     object_id       TEXT,
     detail          JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Hash-encoding version of `hash` (#4173): 1 = legacy unframed preimage
+    -- (verify-only), 2 = length-prefixed. DEFAULT 1 supports rolling deploys
+    -- (pre-upgrade writers INSERT without the column); the relay write path
+    -- stamps the current version explicitly.
+    hash_version    SMALLINT NOT NULL DEFAULT 1,
     PRIMARY KEY (community_id, seq)
 );
 

@@ -34,6 +34,19 @@ pub struct AuditEntry {
     pub detail: serde_json::Value,
     /// When the entry was recorded.
     pub created_at: DateTime<Utc>,
+    /// Hash-encoding version `hash` was computed with. Rows predating the
+    /// column are 1 (the legacy unframed encoding — verify-only); every new
+    /// entry is stamped [`crate::hash::CURRENT_HASH_VERSION`] by the service,
+    /// never by callers. Serde default is 1 so entry JSON serialized before
+    /// this field existed still deserializes.
+    #[serde(default = "default_hash_version")]
+    pub hash_version: i16,
+}
+
+/// Serde default for [`AuditEntry::hash_version`]: entries serialized before
+/// the field existed were all v1.
+fn default_hash_version() -> i16 {
+    1
 }
 
 /// Input for appending a new audit entry. `seq`, `prev_hash`, `hash`, and
