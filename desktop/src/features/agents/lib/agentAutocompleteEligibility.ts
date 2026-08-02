@@ -54,12 +54,13 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
-export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+export function isAgentAutocompleteEligible(
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
     candidate.isAgent !== true ||
+    candidate.isMember === true ||
     managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
 }
