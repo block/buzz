@@ -149,7 +149,7 @@ fmt-all: fmt desktop-tauri-fmt mobile-fmt
 fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
 
 # Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
-# Sidecar binary list must stay in sync with desktop-release-build below.
+# Sidecar binary list must stay in sync with scripts/bundle-sidecars.sh.
 _ensure-sidecar-stubs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -227,18 +227,19 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     echo "Both compiled states verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
-# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
+# Uses the same sidecar build/bundle sequence as the official release workflows.
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
 desktop-release-build target="aarch64-apple-darwin":
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET={{target}}
-    mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    cargo build --release --target "$TARGET" \
+        -p buzz-acp \
+        -p buzz-agent \
+        -p buzz-dev-mcp \
+        -p git-credential-nostr \
+        -p buzz-cli
+    ./scripts/bundle-sidecars.sh "$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
