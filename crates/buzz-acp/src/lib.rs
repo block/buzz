@@ -1827,11 +1827,14 @@ async fn tokio_main() -> Result<()> {
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
+                let forced_env = forced_agent_spawn_env(&config);
                 let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result =
+                        spawn_and_init(&cmd, &args, &env, &forced_env, has_codex, idx, observer)
+                            .await;
                     guard.send(result);
                 });
             }
@@ -3608,13 +3611,14 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let forced_env = forced_agent_spawn_env(config);
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, &forced_env, has_codex, i, observer).await;
         guard.send(result);
     });
 }
@@ -3802,6 +3806,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let forced_env = forced_agent_spawn_env(config);
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
@@ -3814,7 +3819,8 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result =
+            spawn_and_init(&cmd, &args, &env, &forced_env, has_codex, index, observer).await;
         guard.send(result);
     });
 
@@ -3857,9 +3863,19 @@ struct PoolStartup {
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
+    forced_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
+}
+
+fn forced_agent_spawn_env(config: &Config) -> Vec<(String, String)> {
+    acp::forced_buzz_env_for_hermes(
+        &config.agent_command,
+        &config.relay_url,
+        &config.keys.secret_key().to_secret_hex(),
+        |name| std::env::var(name).ok(),
+    )
 }
 
 impl PoolStartup {
@@ -3869,6 +3885,7 @@ impl PoolStartup {
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
+            forced_env: forced_agent_spawn_env(config),
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             observer,
@@ -3888,6 +3905,7 @@ async fn initialize_agent_pool(
             &startup.command,
             &startup.args,
             &startup.extra_env,
+            &startup.forced_env,
             startup.has_generated_codex_config,
         )
         .await;
@@ -3988,13 +4006,20 @@ async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],
+    forced_env: &[(String, String)],
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    let mut acp = AcpClient::spawn(
+        command,
+        args,
+        extra_env,
+        forced_env,
+        has_generated_codex_config,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -4023,7 +4048,7 @@ async fn spawn_and_init(
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
-    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], &[], false).await
 }
 
 fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -4153,7 +4178,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
     let mut client =
-        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], &[], false).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("error: failed to spawn agent: {e}");
@@ -5160,6 +5185,33 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
+    fn hermes_spawn_env_uses_resolved_config_after_persona_overrides() {
+        let mut config = test_config();
+        config.agent_command = "/opt/bin/hermes-acp".into();
+        config.relay_url = "wss://source-community.example".into();
+        config.persona_env_vars.push((
+            "_HERMES_FORCE_BUZZ_RELAY_URL".into(),
+            "wss://stale-global.example".into(),
+        ));
+        let expected_private_key = config.keys.secret_key().to_secret_hex();
+
+        let env = forced_agent_spawn_env(&config);
+
+        assert_eq!(
+            env.iter()
+                .find(|(name, _)| name == "_HERMES_FORCE_BUZZ_RELAY_URL")
+                .map(|(_, value)| value.as_str()),
+            Some("wss://source-community.example")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(name, _)| name == "_HERMES_FORCE_BUZZ_PRIVATE_KEY")
+                .map(|(_, value)| value.as_str()),
+            Some(expected_private_key.as_str())
+        );
+    }
+
+    #[test]
     fn session_new_mcp_server_forwards_buzz_auth_tag() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
@@ -5384,7 +5436,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn("cat", &[], &[], &[], false)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),
