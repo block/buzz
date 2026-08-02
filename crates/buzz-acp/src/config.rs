@@ -20,6 +20,8 @@ use uuid::Uuid;
 use crate::filter::SubscriptionRule;
 pub(crate) use buzz_core::mcp_config::ConfiguredMcpServer;
 #[cfg(test)]
+pub(crate) use buzz_core::mcp_config::McpHttpHeaderConfig;
+#[cfg(test)]
 use buzz_core::mcp_config::{
     MCP_CONFIG_VERSION, MCP_SERVER_MAX_ARGS, MCP_SERVER_MAX_ENV, MCP_SERVER_NAME_MAX_BYTES,
     PROTECTED_MCP_ENV_NAMES,
@@ -131,9 +133,10 @@ fn load_mcp_config(
     legacy_mcp_command: &str,
 ) -> Result<Vec<ConfiguredMcpServer>, ConfigError> {
     let content = read_mcp_config(path)?;
-    let servers = parse_mcp_config_document(&content).map_err(|error| {
+    let mut servers = parse_mcp_config_document(&content).map_err(|error| {
         ConfigError::ConfigFile(format!("invalid MCP config {}: {error}", path.display()))
     })?;
+    resolve_http_mcp_secrets(&mut servers)?;
     validate_legacy_mcp_composition(&servers, legacy_mcp_command)?;
     Ok(servers)
 }
@@ -169,6 +172,102 @@ fn validate_legacy_mcp_composition(
     }) {
         return Err(ConfigError::ConfigFile(format!(
             "MCP server name '{legacy_name}' collides with the legacy --mcp-command server"
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_http_mcp_secrets(servers: &mut [ConfiguredMcpServer]) -> Result<(), ConfigError> {
+    for server in servers {
+        let ConfiguredMcpServer::Http {
+            name,
+            url,
+            url_env_file,
+            url_env_name,
+            headers,
+        } = server
+        else {
+            continue;
+        };
+        if let (Some(path), Some(env_name)) = (url_env_file.take(), url_env_name.take()) {
+            *url = read_named_env_value(&path, &env_name, "remote MCP URL")?;
+        }
+        validate_remote_mcp_url(name, url)?;
+        for header in headers {
+            if let Some(path) = header.value_file.take() {
+                header.value = std::fs::read_to_string(&path)
+                    .map_err(|error| {
+                        ConfigError::ConfigFile(format!(
+                            "failed to read remote MCP header value file {}: {error}",
+                            path.display()
+                        ))
+                    })?
+                    .trim()
+                    .to_string();
+            }
+            if let (Some(path), Some(env_name)) = (header.env_file.take(), header.env_name.take()) {
+                header.value = read_named_env_value(
+                    &path,
+                    &env_name,
+                    "remote MCP header environment variable",
+                )?;
+            }
+            if header.value.is_empty() || header.value.contains(['\r', '\n', '\0']) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "remote MCP server '{name}' header credential resolved empty or contains a control delimiter"
+                )));
+            }
+            if !header.value_prefix.is_empty() {
+                header.value = format!("{}{}", header.value_prefix, header.value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_named_env_value(
+    path: &std::path::Path,
+    name: &str,
+    description: &str,
+) -> Result<String, ConfigError> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "failed to read {description} file {}: {error}",
+            path.display()
+        ))
+    })?;
+    let prefix = format!("{name}=");
+    contents
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(str::trim)
+        .map(|value| value.trim_matches(['\"', '\'']).to_string())
+        .ok_or_else(|| {
+            ConfigError::ConfigFile(format!(
+                "{description} '{name}' not found in {}",
+                path.display()
+            ))
+        })
+}
+
+fn validate_remote_mcp_url(name: &str, value: &str) -> Result<(), ConfigError> {
+    let parsed = Url::parse(value).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "remote MCP server '{name}' has invalid URL: {error}"
+        ))
+    })?;
+    let private_http = parsed.scheme() == "http"
+        && parsed
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| match address {
+                std::net::IpAddr::V4(address) => address.is_private(),
+                std::net::IpAddr::V6(address) => address.is_unique_local(),
+            });
+    if parsed.scheme() != "https" && !private_http {
+        return Err(ConfigError::ConfigFile(format!(
+            "remote MCP server '{name}' requires HTTPS, or HTTP on a literal private IP address"
         )));
     }
     Ok(())
@@ -3174,7 +3273,10 @@ channels = "ALL"
             command,
             args,
             env,
-        } = &config.configured_mcp_servers[0];
+        } = &config.configured_mcp_servers[0]
+        else {
+            panic!("analytics must be stdio");
+        };
         assert_eq!(name, "analytics-primary");
         assert_eq!(command, posix_command);
         assert_eq!(
@@ -3194,8 +3296,58 @@ channels = "ALL"
             vec!["A_FIRST", "Z_LAST"]
         );
         assert_eq!(env["Z_LAST"], "backslash\\quote\"雪");
-        let ConfiguredMcpServer::Stdio { command, .. } = &config.configured_mcp_servers[1];
+        let ConfiguredMcpServer::Stdio { command, .. } = &config.configured_mcp_servers[1] else {
+            panic!("windows server must be stdio");
+        };
         assert_eq!(command, windows_command);
+    }
+
+    #[test]
+    fn structured_mcp_config_loads_http_transport_and_protected_credentials() {
+        let secrets = TempMcpConfig::write(
+            b"REMOTE_URL=https://mcp.example.test/mcp\nREMOTE_TOKEN=opaque-token\n",
+        );
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "hosted-context",
+            "transport": "http",
+            "url_env_file": secrets.path,
+            "url_env_name": "REMOTE_URL",
+            "headers": [{
+                "name": "Authorization",
+                "env_file": secrets.path,
+                "env_name": "REMOTE_TOKEN",
+                "value_prefix": "Bearer "
+            }]
+        })]));
+
+        let config = config_from_mcp_file(&file, None).expect("HTTP MCP config should load");
+        let ConfiguredMcpServer::Http {
+            name, url, headers, ..
+        } = &config.configured_mcp_servers[0]
+        else {
+            panic!("configured server must be HTTP");
+        };
+        assert_eq!(name, "hosted-context");
+        assert_eq!(url, "https://mcp.example.test/mcp");
+        assert_eq!(headers[0].name, "Authorization");
+        assert_eq!(headers[0].value, "Bearer opaque-token");
+        let debug = format!("{:?}", config.configured_mcp_servers[0]);
+        assert!(!debug.contains("opaque-token"));
+    }
+
+    #[test]
+    fn structured_mcp_config_rejects_public_plain_http() {
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "unsafe-remote",
+            "transport": "http",
+            "url": "http://example.test/mcp",
+            "headers": []
+        })]));
+
+        let error = config_from_mcp_file(&file, None)
+            .expect_err("public plain HTTP must be rejected")
+            .to_string();
+        assert!(error.contains("requires HTTPS"));
     }
 
     #[test]
