@@ -128,8 +128,8 @@
 - [x] Run the installed/mock desktop journey from sidebar to Ship to agent details to activity, recording anything that still requires the user's real-agent acceptance.
 - [x] Review the full diff for unrelated files, generated artifacts, secrets, and missing reset wiring.
 - [x] Record the implementation decisions and verification result to Memory MCP with `agent: CODEX`.
-- [ ] Push the branch and open/update a draft PR with screenshots and a clear acceptance checklist; do not mark ready or merge.
-- [ ] Hand back the local route/build and exact UI acceptance steps for the user.
+- [x] Push the branch and open/update a draft PR with screenshots and a clear acceptance checklist; do not mark ready or merge.
+- [x] Hand back the local route/build and exact UI acceptance steps for the user.
 
 Verification note (2026-08-02): the mock journey and all feature-owned checks
 pass. Real installed-app testing with live agents remains the user's acceptance
@@ -137,6 +137,13 @@ gate. `just desktop-check` was run and reaches the repository file-size ratchet;
 it reports nine files already oversized in the required `641f5ac4` base. The
 Living Ship navigation change was reduced to 999 lines in `AppShell.tsx` and no
 longer appears in that failure list.
+
+User UI acceptance route: start the desktop app from this preserved worktree,
+open **Living Ship** in the sidebar (`/ship`), then exercise one online-idle
+agent, one working agent, one explicit collaboration involving two agents, one
+stopped agent, compartment selection, adviser selection, and **Open activity**.
+Confirm normal-window label scale and approximate compartment placement before
+marking PR #15 ready.
 
 ## Plan Self-Review
 
