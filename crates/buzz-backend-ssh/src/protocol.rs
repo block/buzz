@@ -203,6 +203,17 @@ impl SshConfig {
     }
 }
 
+/// The provider-protocol wire-contract version this binary speaks.
+///
+/// Distinct from `CARGO_PKG_VERSION`, which is the provider's *software*
+/// version and says nothing about compatibility. The spec
+/// (`docs/remote-agents.md` §Info) fixes this document at `1` and requires an
+/// **integer** — the desktop's pre-secret negotiation gate (§Discovery) invokes
+/// `info` on a staged copy of this binary and rejects an absent or unsupported
+/// `protocol_version` *before* a request carrying `private_key_nsec` is sent.
+/// Absence is an error, not a presumed `1`, so this field is not optional.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// The `info` response, including the Tailscale-decorated config schema.
 ///
 /// When Tailscale is absent, logged out, or has no usable peers, `ssh_host`
@@ -223,6 +234,7 @@ pub fn info_response() -> serde_json::Value {
         "ok": true,
         "name": "SSH",
         "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": PROTOCOL_VERSION,
         "description": "Run agents on a remote host over SSH, supervised by systemd --user.",
         "config_schema": {
             "type": "object",
@@ -298,6 +310,23 @@ mod tests {
         }
         // The name this field must never have.
         assert!(desktop_rejects_key("ssh_key_path"));
+    }
+
+    /// The desktop's pre-secret gate rejects an absent or non-integer
+    /// `protocol_version` before the nsec is sent (spec §Discovery), so a
+    /// regression here does not degrade — it makes the provider undeployable.
+    #[test]
+    fn info_declares_an_integer_protocol_version() {
+        let info = info_response();
+        let declared = &info["protocol_version"];
+        assert!(
+            declared.is_u64(),
+            "protocol_version must be an integer, got {declared}"
+        );
+        assert_eq!(declared.as_u64(), Some(u64::from(PROTOCOL_VERSION)));
+        assert_eq!(PROTOCOL_VERSION, 1, "this document specifies 1");
+        // The wire-contract version is not the software version.
+        assert_ne!(declared, &info["version"]);
     }
 
     #[test]
