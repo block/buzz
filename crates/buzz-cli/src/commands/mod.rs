@@ -1,4 +1,6 @@
 pub mod agents;
+pub mod boards;
+pub mod cards;
 pub mod channel_templates;
 pub mod channels;
 pub mod dms;
