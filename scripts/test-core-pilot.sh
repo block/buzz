@@ -7,10 +7,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'pkill -P $$ 2>/dev/null || true; rm -rf "$tmp"' EXIT
 valid_nostr_secret='0000000000000000000000000000000000000000000000000000000000000001'
+agent_nostr_secret='0000000000000000000000000000000000000000000000000000000000000003'
 template_channel='11111111-1111-4111-8111-111111111111'
 pilot_channel='33333333-3333-4333-8333-333333333333'
 template_owner='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
-pilot_owner='79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+pilot_owner='c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5'
 
 failures=0
 fail() { printf 'FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
@@ -58,12 +59,27 @@ make_fixture() {
   pilot_secrets="$tmp/agent.env"
   cat > "$pilot_secrets" <<EOF
 OPENAI_COMPAT_API_KEY=SENTINEL_OPENAI_SECRET
-BUZZ_PRIVATE_KEY=$valid_nostr_secret
+CORE_RELAY_PUBLIC_KEY=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+CORE_RELAY_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001
+CORE_BANKER_PUBLIC_KEY=$pilot_owner
+CORE_BANKER_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000002
+CORE_AGENT_PUBLIC_KEY=f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
+CORE_AGENT_PRIVATE_KEY=$agent_nostr_secret
+CORE_NON_OWNER_PUBLIC_KEY=e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13
+CORE_NON_OWNER_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000004
 EOF
   chmod 600 "$pilot_secrets"
+  cat > "$fixture/state/channels.env" <<EOF
+CORE_RESEARCH_CHANNEL_ID=$pilot_channel
+CORE_SECOND_CHANNEL_ID=44444444-4444-4444-8444-444444444444
+EOF
+  chmod 600 "$fixture/state/channels.env"
   cat > "$fixture/target/release/buzz-relay" <<EOF
 #!/usr/bin/env bash
 [[ ! -e "$fixture/relay-exit-immediately" ]] || exit 0
+printf 'membership=%s\nowner=%s\nrelay_key_set=%s\n' \
+  "\${BUZZ_REQUIRE_RELAY_MEMBERSHIP:-}" "\${RELAY_OWNER_PUBKEY:-}" \
+  "\$(if [[ -n "\${BUZZ_RELAY_PRIVATE_KEY:-}" ]]; then printf yes; else printf no; fi)" > "$fixture/relay.env"
 touch "$fixture/relay-running"
 trap 'if [[ -e "$fixture/delay-exit" ]]; then sleep 1; fi; rm -f "$fixture/relay-running"; exit 0' TERM INT
 while :; do sleep 1; done
@@ -71,8 +87,17 @@ EOF
   cat > "$fixture/target/release/buzz-acp" <<EOF
 #!/usr/bin/env bash
 [[ ! -e "$fixture/acp-exit-immediately" ]] || exit 0
+printf 'agent_model=%s\nacp_model=%s\nlazy=%s\nagent_key_set=%s\n' \
+  "\${BUZZ_AGENT_MODEL:-}" "\${BUZZ_ACP_MODEL:-}" "\${BUZZ_ACP_LAZY_POOL-unset}" \
+  "\$(if [[ -n "\${BUZZ_PRIVATE_KEY:-}" ]]; then printf yes; else printf no; fi)" > "$fixture/acp.env"
+printf 'agent_pool_ready agents=1\n'
 printf 'connected to relay at %s\n' "\${BUZZ_RELAY_URL:-}"
+printf 'discovered 2 channel(s)\n'
 printf 'subscribed to channel %s\n' "\${BUZZ_ACP_CHANNELS:-}"
+if [[ -e "$fixture/acp-subscribe-second" ]]; then
+  printf 'subscribed to channel 44444444-4444-4444-8444-444444444444\n'
+fi
+printf 'presence set to online\n'
 touch "$fixture/acp-running"
 trap 'if [[ -e "$fixture/delay-exit" ]]; then sleep 1; fi; rm -f "$fixture/acp-running"; exit 0' TERM INT
 while :; do sleep 1; done
@@ -83,8 +108,12 @@ exit 0
 EOF
   cat > "$fixture/target/release/buzz" <<'EOF'
 #!/usr/bin/env bash
-[[ "${BUZZ_PRIVATE_KEY:-}" == "0000000000000000000000000000000000000000000000000000000000000001" ]] && exit 2
+[[ "${BUZZ_PRIVATE_KEY:-}" =~ ^0{63}[1-4]$ ]] && exit 2
 exit 3
+EOF
+  cat > "$fixture/target/release/buzz-admin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
 EOF
   chmod +x "$fixture/target/release"/*
   cat > "$fixture/fake-bin/docker" <<EOF
@@ -219,6 +248,11 @@ assert_failure_without_secret "unsafe publish mode fails closed" SENTINEL_OPENAI
   pilot "$fixture/scripts/core-pilot-preflight.sh"
 sed -i 's/BUZZ_ACP_PUBLISH_AGENT_OUTPUT=off/BUZZ_ACP_PUBLISH_AGENT_OUTPUT=trigger-reply/' "$fixture/pilot.env"
 
+printf 'BUZZ_ACP_LAZY_POOL=true\n' >> "$fixture/pilot.env"
+assert_failure_without_secret "lazy ACP pool configuration fails closed" SENTINEL_OPENAI_SECRET \
+  pilot "$fixture/scripts/core-pilot-preflight.sh"
+sed -i '$d' "$fixture/pilot.env"
+
 mv "$fixture/config/core-pilot/core-research-partner.md" "$fixture/config/core-pilot/prompt.missing"
 assert_failure_without_secret "missing system prompt fails closed" SENTINEL_OPENAI_SECRET \
   pilot "$fixture/scripts/core-pilot-preflight.sh"
@@ -227,6 +261,11 @@ rm "$fixture/target/release/buzz-agent"
 assert_failure_without_secret "missing release binary fails closed" SENTINEL_OPENAI_SECRET \
   pilot "$fixture/scripts/core-pilot-preflight.sh"
 cp "$fixture/target/release/buzz-acp" "$fixture/target/release/buzz-agent"
+rm "$fixture/target/release/buzz-admin"
+assert_failure_without_secret "missing bootstrap release binary fails closed" SENTINEL_OPENAI_SECRET \
+  pilot "$fixture/scripts/core-pilot-preflight.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/target/release/buzz-admin"
+chmod +x "$fixture/target/release/buzz-admin"
 
 touch "$fixture/port-occupied"
 assert_failure_without_secret "occupied relay port is rejected before launch" SENTINEL_OPENAI_SECRET \
@@ -246,21 +285,35 @@ assert_failure_without_secret "ACP exit before subscription readiness fails clos
 pilot "$fixture/scripts/core-pilot-stop.sh" >/dev/null 2>&1 || true
 rm -f "$fixture/acp-exit-immediately" "$fixture/docker.calls"
 
+touch "$fixture/acp-subscribe-second"
+assert_failure_without_secret "ACP subscription to the control channel fails closed" SENTINEL_OPENAI_SECRET \
+  pilot "$fixture/scripts/core-pilot-start.sh"
+pilot "$fixture/scripts/core-pilot-stop.sh" >/dev/null 2>&1 || true
+rm -f "$fixture/acp-subscribe-second" "$fixture/docker.calls"
+
+cp "$pilot_secrets" "$tmp/saved-agent.env"
 rm "$pilot_secrets"
 assert_failure_without_secret "start stops at the credential gate before Docker" "$valid_nostr_secret" \
   pilot "$fixture/scripts/core-pilot-start.sh"
 [[ ! -e "$fixture/docker.calls" ]] && pass "credential gate leaves Docker untouched" \
   || fail "credential gate must run before Docker"
-cat > "$pilot_secrets" <<EOF
-OPENAI_COMPAT_API_KEY=SENTINEL_OPENAI_SECRET
-BUZZ_PRIVATE_KEY=$valid_nostr_secret
-EOF
+mv "$tmp/saved-agent.env" "$pilot_secrets"
 chmod 600 "$pilot_secrets"
 
 assert_success "start launches the constrained stack" \
   pilot "$fixture/scripts/core-pilot-start.sh"
-[[ "$ASSERT_OUTPUT" != *SENTINEL_OPENAI_SECRET* && "$ASSERT_OUTPUT" != *"$valid_nostr_secret"* ]] \
+[[ "$ASSERT_OUTPUT" != *SENTINEL_OPENAI_SECRET* && "$ASSERT_OUTPUT" != *"$valid_nostr_secret"* \
+   && "$ASSERT_OUTPUT" != *"$agent_nostr_secret"* ]] \
   || fail "start must not print secrets"
+grep -q '^membership=true$' "$fixture/relay.env" \
+  && grep -q "^owner=$pilot_owner$" "$fixture/relay.env" \
+  && grep -q '^relay_key_set=yes$' "$fixture/relay.env" \
+  || fail "relay must launch with stable closed-membership identity"
+grep -q '^agent_model=gpt-5.6-terra$' "$fixture/acp.env" \
+  && grep -q '^acp_model=gpt-5.6-terra$' "$fixture/acp.env" \
+  && grep -q '^lazy=unset$' "$fixture/acp.env" \
+  && grep -q '^agent_key_set=yes$' "$fixture/acp.env" \
+  || fail "ACP must launch eager with the exact model and stable agent identity"
 assert_success "repeat start is idempotent" pilot "$fixture/scripts/core-pilot-start.sh" > /dev/null
 
 if [[ "$(wc -l < "$fixture/docker.calls")" -eq 1 ]] \

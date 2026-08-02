@@ -45,15 +45,16 @@ pilot_parse_paths() {
         ;;
     esac
   done
+  PILOT_CHANNELS_FILE="$PILOT_STATE_DIR/channels.env"
 }
 
 pilot_config_key_allowed() {
   case "$1" in
-    BUZZ_RELAY_URL|BUZZ_BIND_ADDR|DATABASE_URL|REDIS_URL|BUZZ_REQUIRE_AUTH_TOKEN|BUZZ_GIT_ENABLED|\
-    BUZZ_AGENT_PROVIDER|OPENAI_COMPAT_API|OPENAI_COMPAT_BASE_URL|OPENAI_COMPAT_MODEL|\
+    BUZZ_RELAY_URL|BUZZ_BIND_ADDR|DATABASE_URL|REDIS_URL|BUZZ_REQUIRE_AUTH_TOKEN|BUZZ_REQUIRE_RELAY_MEMBERSHIP|BUZZ_GIT_ENABLED|\
+    BUZZ_AGENT_PROVIDER|BUZZ_AGENT_MODEL|OPENAI_COMPAT_API|OPENAI_COMPAT_BASE_URL|OPENAI_COMPAT_MODEL|\
     BUZZ_AGENT_THINKING_EFFORT|BUZZ_AGENT_WEB_SEARCH|BUZZ_AGENT_NO_HINTS|BUZZ_AGENT_REQUIRE_REPLY|\
     BUZZ_ACP_SYSTEM_PROMPT_FILE|BUZZ_ACP_NO_BASE_PROMPT|BUZZ_ACP_NO_MEMORY|BUZZ_ACP_AGENT_COMMAND|\
-    BUZZ_ACP_AGENT_ARGS|BUZZ_ACP_MCP_COMMAND|BUZZ_ACP_PUBLISH_AGENT_OUTPUT|BUZZ_ACP_AGENTS|\
+    BUZZ_ACP_AGENT_ARGS|BUZZ_ACP_MODEL|BUZZ_ACP_MCP_COMMAND|BUZZ_ACP_PUBLISH_AGENT_OUTPUT|BUZZ_ACP_AGENTS|\
     BUZZ_ACP_HEARTBEAT_INTERVAL|BUZZ_ACP_SUBSCRIBE|BUZZ_ACP_KINDS|BUZZ_ACP_CHANNELS|\
     BUZZ_ACP_RESPOND_TO|BUZZ_ACP_AGENT_OWNER|BUZZ_ACP_DEDUP|BUZZ_ACP_MULTIPLE_EVENT_HANDLING)
       return 0
@@ -63,7 +64,14 @@ pilot_config_key_allowed() {
 }
 
 pilot_secret_key_allowed() {
-  [[ "$1" == 'OPENAI_COMPAT_API_KEY' || "$1" == 'BUZZ_PRIVATE_KEY' ]]
+  case "$1" in
+    OPENAI_COMPAT_API_KEY|CORE_RELAY_PUBLIC_KEY|CORE_RELAY_PRIVATE_KEY|\
+    CORE_BANKER_PUBLIC_KEY|CORE_BANKER_PRIVATE_KEY|CORE_AGENT_PUBLIC_KEY|\
+    CORE_AGENT_PRIVATE_KEY|CORE_NON_OWNER_PUBLIC_KEY|CORE_NON_OWNER_PRIVATE_KEY)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 pilot_is_placeholder() {
@@ -91,7 +99,7 @@ pilot_read_file() {
       pilot_secret_key_allowed "$key" || { pilot_die "secret file contains an unsupported setting"; return 1; }
     fi
     [[ -z "${PILOT_ENV[$key]+set}" ]] || { pilot_die "$kind file contains a duplicate setting"; return 1; }
-    if [[ "$key" != 'BUZZ_ACP_MCP_COMMAND' && -z "$value" ]]; then
+    if [[ "$key" != 'BUZZ_ACP_MCP_COMMAND' && "$key" != 'OPENAI_COMPAT_API_KEY' && -z "$value" ]]; then
       pilot_die "$kind file contains an empty required value" || return 1
     fi
     [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *[[:space:]]* ]] || {
@@ -116,14 +124,16 @@ pilot_require_value() {
 pilot_validate_config() {
   local required key prompt prompt_canonical reviewed_prompt prompt_hash channels owner normalized_url
   required=(
-    BUZZ_RELAY_URL BUZZ_BIND_ADDR DATABASE_URL REDIS_URL BUZZ_REQUIRE_AUTH_TOKEN BUZZ_GIT_ENABLED
-    BUZZ_AGENT_PROVIDER OPENAI_COMPAT_API OPENAI_COMPAT_BASE_URL OPENAI_COMPAT_MODEL
+    BUZZ_RELAY_URL BUZZ_BIND_ADDR DATABASE_URL REDIS_URL BUZZ_REQUIRE_AUTH_TOKEN BUZZ_REQUIRE_RELAY_MEMBERSHIP BUZZ_GIT_ENABLED
+    BUZZ_AGENT_PROVIDER BUZZ_AGENT_MODEL OPENAI_COMPAT_API OPENAI_COMPAT_BASE_URL OPENAI_COMPAT_MODEL
     BUZZ_AGENT_THINKING_EFFORT BUZZ_AGENT_WEB_SEARCH BUZZ_AGENT_NO_HINTS BUZZ_AGENT_REQUIRE_REPLY
     BUZZ_ACP_SYSTEM_PROMPT_FILE BUZZ_ACP_NO_BASE_PROMPT BUZZ_ACP_NO_MEMORY BUZZ_ACP_AGENT_COMMAND
-    BUZZ_ACP_AGENT_ARGS BUZZ_ACP_MCP_COMMAND BUZZ_ACP_PUBLISH_AGENT_OUTPUT BUZZ_ACP_AGENTS
+    BUZZ_ACP_AGENT_ARGS BUZZ_ACP_MODEL BUZZ_ACP_MCP_COMMAND BUZZ_ACP_PUBLISH_AGENT_OUTPUT BUZZ_ACP_AGENTS
     BUZZ_ACP_HEARTBEAT_INTERVAL BUZZ_ACP_SUBSCRIBE BUZZ_ACP_KINDS BUZZ_ACP_CHANNELS
     BUZZ_ACP_RESPOND_TO BUZZ_ACP_AGENT_OWNER BUZZ_ACP_DEDUP BUZZ_ACP_MULTIPLE_EVENT_HANDLING
-    OPENAI_COMPAT_API_KEY BUZZ_PRIVATE_KEY
+    OPENAI_COMPAT_API_KEY CORE_RELAY_PUBLIC_KEY CORE_RELAY_PRIVATE_KEY
+    CORE_BANKER_PUBLIC_KEY CORE_BANKER_PRIVATE_KEY CORE_AGENT_PUBLIC_KEY CORE_AGENT_PRIVATE_KEY
+    CORE_NON_OWNER_PUBLIC_KEY CORE_NON_OWNER_PRIVATE_KEY
   )
   for key in "${required[@]}"; do
     pilot_require "$key" || return 1
@@ -134,8 +144,10 @@ pilot_validate_config() {
   pilot_require_value DATABASE_URL 'postgres://buzz:buzz_dev@127.0.0.1:5432/buzz' || return 1
   pilot_require_value REDIS_URL 'redis://127.0.0.1:6379' || return 1
   pilot_require_value BUZZ_REQUIRE_AUTH_TOKEN false || return 1
+  pilot_require_value BUZZ_REQUIRE_RELAY_MEMBERSHIP true || return 1
   pilot_require_value BUZZ_GIT_ENABLED false || return 1
   pilot_require_value BUZZ_AGENT_PROVIDER openai || return 1
+  pilot_require_value BUZZ_AGENT_MODEL gpt-5.6-terra || return 1
   pilot_require_value OPENAI_COMPAT_API responses || return 1
   normalized_url="${PILOT_ENV[OPENAI_COMPAT_BASE_URL]%/}"
   [[ "$normalized_url" == 'https://api.openai.com/v1' ]] || { pilot_die 'OpenAI URL is not canonical'; return 1; }
@@ -148,6 +160,7 @@ pilot_validate_config() {
   pilot_require_value BUZZ_ACP_NO_MEMORY 1 || return 1
   pilot_require_value BUZZ_ACP_AGENT_COMMAND buzz-agent || return 1
   pilot_require_value BUZZ_ACP_AGENT_ARGS acp || return 1
+  pilot_require_value BUZZ_ACP_MODEL gpt-5.6-terra || return 1
   pilot_require_value BUZZ_ACP_MCP_COMMAND '' || return 1
   pilot_require_value BUZZ_ACP_PUBLISH_AGENT_OUTPUT trigger-reply || return 1
   pilot_require_value BUZZ_ACP_AGENTS 1 || return 1
@@ -170,8 +183,17 @@ pilot_validate_config() {
   [[ "${owner,,}" != '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' ]] || {
     pilot_die 'replace the template owner before launch'; return 1;
   }
-  [[ -n "${PILOT_ENV[OPENAI_COMPAT_API_KEY]}" && -n "${PILOT_ENV[BUZZ_PRIVATE_KEY]}" ]] || {
-    pilot_die 'pilot credentials are empty'; return 1;
+  [[ -n "${PILOT_ENV[OPENAI_COMPAT_API_KEY]}" ]] || {
+    pilot_die 'OpenAI credential is unavailable; bootstrap is allowed but ACP start is gated'; return 1;
+  }
+  [[ "${owner,,}" == "${PILOT_ENV[CORE_BANKER_PUBLIC_KEY],,}" ]] || {
+    pilot_die 'configured owner does not match the stable banker identity'; return 1;
+  }
+  [[ "$channels" == "${PILOT_CHANNELS[CORE_RESEARCH_CHANNEL_ID]:-}" ]] || {
+    pilot_die 'configured channel does not match generated pilot state'; return 1;
+  }
+  [[ -n "${PILOT_CHANNELS[CORE_SECOND_CHANNEL_ID]:-}" && "$channels" != "${PILOT_CHANNELS[CORE_SECOND_CHANNEL_ID]}" ]] || {
+    pilot_die 'second-channel control state is missing or unsafe'; return 1;
   }
 
   prompt="${PILOT_ENV[BUZZ_ACP_SYSTEM_PROMPT_FILE]}"
@@ -228,17 +250,17 @@ pilot_prepare_state_dir() {
 pilot_require_release_binaries() {
   PILOT_BIN_DIR="$PILOT_REPO_ROOT/target/release"
   local binary
-  for binary in buzz-relay buzz-acp buzz-agent buzz; do
+  for binary in buzz-relay buzz-admin buzz-acp buzz-agent buzz; do
     [[ -x "$PILOT_BIN_DIR/$binary" ]] || { pilot_die 'required release binary is missing'; return 1; }
   done
 }
 
 pilot_validate_nostr_key() {
-  local status
+  local private_key="$1" status
   set +e
   env -i \
-    "PATH=$PILOT_BIN_DIR:$PATH" \
-    "BUZZ_PRIVATE_KEY=${PILOT_ENV[BUZZ_PRIVATE_KEY]}" \
+    "PATH=$PILOT_BIN_DIR:/usr/bin:/bin" \
+    "BUZZ_PRIVATE_KEY=$private_key" \
     BUZZ_RELAY_URL=ws://127.0.0.1:1 \
     "$PILOT_BIN_DIR/buzz" --format compact users get >/dev/null 2>&1
   status=$?
@@ -246,15 +268,39 @@ pilot_validate_nostr_key() {
   [[ $status -eq 2 ]] || { pilot_die 'agent Nostr private key is invalid'; return 1; }
 }
 
+pilot_load_channels() {
+  local line key value
+  declare -gA PILOT_CHANNELS=()
+  [[ -f "$PILOT_CHANNELS_FILE" && ! -L "$PILOT_CHANNELS_FILE" ]] || {
+    pilot_die 'generated channel state is missing'; return 1;
+  }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^(CORE_RESEARCH_CHANNEL_ID|CORE_SECOND_CHANNEL_ID)=([0-9a-fA-F-]+)$ ]] || {
+      pilot_die 'generated channel state is malformed'; return 1;
+    }
+    key="${BASH_REMATCH[1]}"; value="${BASH_REMATCH[2]}"
+    [[ -z "${PILOT_CHANNELS[$key]+set}" ]] || { pilot_die 'generated channel state has duplicate keys'; return 1; }
+    [[ "$value" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]] || {
+      pilot_die 'generated channel state contains an invalid UUID'; return 1;
+    }
+    PILOT_CHANNELS["$key"]="$value"
+  done < "$PILOT_CHANNELS_FILE"
+  [[ ${#PILOT_CHANNELS[@]} -eq 2 ]] || { pilot_die 'generated channel state is incomplete'; return 1; }
+}
+
 pilot_load_and_validate() {
   declare -gA PILOT_ENV=()
   pilot_read_file "$PILOT_CONFIG_FILE" configuration || return 1
   pilot_check_secret_permissions || return 1
   pilot_read_file "$PILOT_SECRETS_FILE" secret || return 1
+  pilot_load_channels || return 1
   pilot_validate_config || return 1
   pilot_prepare_state_dir || return 1
   pilot_require_release_binaries || return 1
-  pilot_validate_nostr_key || return 1
+  pilot_validate_nostr_key "${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}" || return 1
+  pilot_validate_nostr_key "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" || return 1
+  pilot_validate_nostr_key "${PILOT_ENV[CORE_AGENT_PRIVATE_KEY]}" || return 1
+  pilot_validate_nostr_key "${PILOT_ENV[CORE_NON_OWNER_PRIVATE_KEY]}" || return 1
 }
 
 pilot_process_start_time() {

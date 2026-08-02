@@ -22,9 +22,18 @@ pilot_relay_ready() {
 }
 
 pilot_acp_ready() {
-  pilot_marker_matches "$acp_marker" "$acp_bin" \
-    && grep -Fq "connected to relay at ${PILOT_ENV[BUZZ_RELAY_URL]}" "$PILOT_STATE_DIR/acp.log" 2>/dev/null \
-    && grep -Fq "subscribed to channel ${PILOT_ENV[BUZZ_ACP_CHANNELS]}" "$PILOT_STATE_DIR/acp.log" 2>/dev/null
+  local log="$PILOT_STATE_DIR/acp.log" pool_line connected_line discovered_line subscribed_line presence_line
+  pilot_marker_matches "$acp_marker" "$acp_bin" || return 1
+  grep -Fq "subscribed to channel ${PILOT_CHANNELS[CORE_SECOND_CHANNEL_ID]}" "$log" 2>/dev/null && return 1
+  grep -Fq 'failed to subscribe' "$log" 2>/dev/null && return 1
+  pool_line="$(grep -nF 'agent_pool_ready agents=1' "$log" 2>/dev/null | head -1 | cut -d: -f1)"
+  connected_line="$(grep -nF "connected to relay at ${PILOT_ENV[BUZZ_RELAY_URL]}" "$log" 2>/dev/null | head -1 | cut -d: -f1)"
+  discovered_line="$(grep -nE 'discovered ([2-9]|[1-9][0-9]+) channel\(s\)' "$log" 2>/dev/null | head -1 | cut -d: -f1)"
+  subscribed_line="$(grep -nF "subscribed to channel ${PILOT_ENV[BUZZ_ACP_CHANNELS]}" "$log" 2>/dev/null | head -1 | cut -d: -f1)"
+  presence_line="$(grep -nF 'presence set to online' "$log" 2>/dev/null | head -1 | cut -d: -f1)"
+  [[ -n "$pool_line" && -n "$connected_line" && -n "$discovered_line" && -n "$subscribed_line" && -n "$presence_line" ]] \
+    && (( pool_line < connected_line && connected_line < discovered_line \
+      && discovered_line < subscribed_line && subscribed_line < presence_line ))
 }
 
 if pilot_relay_ready && pilot_acp_ready; then
@@ -48,7 +57,7 @@ docker compose up -d postgres redis minio minio-init
 
 relay_log="$PILOT_STATE_DIR/relay.log"
 acp_log="$PILOT_STATE_DIR/acp.log"
-pilot_path="$PILOT_BIN_DIR:$PATH"
+pilot_path="$PILOT_BIN_DIR:/usr/bin:/bin"
 
 nohup env -i \
   "PATH=$pilot_path" \
@@ -57,6 +66,9 @@ nohup env -i \
   "RELAY_URL=${PILOT_ENV[BUZZ_RELAY_URL]}" \
   "BUZZ_BIND_ADDR=${PILOT_ENV[BUZZ_BIND_ADDR]}" \
   "BUZZ_REQUIRE_AUTH_TOKEN=${PILOT_ENV[BUZZ_REQUIRE_AUTH_TOKEN]}" \
+  "BUZZ_REQUIRE_RELAY_MEMBERSHIP=${PILOT_ENV[BUZZ_REQUIRE_RELAY_MEMBERSHIP]}" \
+  "RELAY_OWNER_PUBKEY=${PILOT_ENV[CORE_BANKER_PUBLIC_KEY]}" \
+  "BUZZ_RELAY_PRIVATE_KEY=${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}" \
   "BUZZ_GIT_ENABLED=${PILOT_ENV[BUZZ_GIT_ENABLED]}" \
   "$relay_bin" > "$relay_log" 2>&1 &
 relay_pid=$!
@@ -93,9 +105,11 @@ fi
 nohup env -i \
   "PATH=$pilot_path" \
   "BUZZ_RELAY_URL=${PILOT_ENV[BUZZ_RELAY_URL]}" \
-  "BUZZ_PRIVATE_KEY=${PILOT_ENV[BUZZ_PRIVATE_KEY]}" \
+  RUST_LOG=info \
+  "BUZZ_PRIVATE_KEY=${PILOT_ENV[CORE_AGENT_PRIVATE_KEY]}" \
   "OPENAI_COMPAT_API_KEY=${PILOT_ENV[OPENAI_COMPAT_API_KEY]}" \
   "BUZZ_AGENT_PROVIDER=${PILOT_ENV[BUZZ_AGENT_PROVIDER]}" \
+  "BUZZ_AGENT_MODEL=${PILOT_ENV[BUZZ_AGENT_MODEL]}" \
   "OPENAI_COMPAT_API=${PILOT_ENV[OPENAI_COMPAT_API]}" \
   "OPENAI_COMPAT_BASE_URL=${PILOT_ENV[OPENAI_COMPAT_BASE_URL]}" \
   "OPENAI_COMPAT_MODEL=${PILOT_ENV[OPENAI_COMPAT_MODEL]}" \
@@ -108,6 +122,7 @@ nohup env -i \
   "BUZZ_ACP_NO_MEMORY=${PILOT_ENV[BUZZ_ACP_NO_MEMORY]}" \
   "BUZZ_ACP_AGENT_COMMAND=${PILOT_ENV[BUZZ_ACP_AGENT_COMMAND]}" \
   "BUZZ_ACP_AGENT_ARGS=${PILOT_ENV[BUZZ_ACP_AGENT_ARGS]}" \
+  "BUZZ_ACP_MODEL=${PILOT_ENV[BUZZ_ACP_MODEL]}" \
   "BUZZ_ACP_MCP_COMMAND=${PILOT_ENV[BUZZ_ACP_MCP_COMMAND]}" \
   "BUZZ_ACP_PUBLISH_AGENT_OUTPUT=${PILOT_ENV[BUZZ_ACP_PUBLISH_AGENT_OUTPUT]}" \
   "BUZZ_ACP_AGENTS=${PILOT_ENV[BUZZ_ACP_AGENTS]}" \
@@ -140,6 +155,13 @@ for _ in $(seq 1 30); do
     rm -f "$acp_marker"
     pilot_stop_marker "$relay_marker" "$relay_bin"
     pilot_die 'ACP exited before connection and channel subscription readiness'
+    exit 1
+  fi
+  if grep -Fq "subscribed to channel ${PILOT_CHANNELS[CORE_SECOND_CHANNEL_ID]}" "$acp_log" 2>/dev/null \
+    || grep -Fq 'failed to subscribe' "$acp_log" 2>/dev/null; then
+    pilot_stop_marker "$acp_marker" "$acp_bin"
+    pilot_stop_marker "$relay_marker" "$relay_bin"
+    pilot_die 'ACP reported an unsafe or failed channel subscription'
     exit 1
   fi
   if pilot_acp_ready; then
