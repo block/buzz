@@ -551,6 +551,58 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Opt-in only; never enabled implicitly for interactive agents.
+    pub publish_final_reply: bool,
+}
+
+/// Build a response that can only target the current batch's channel and
+/// newest triggering event. No model-controlled destination or signing key is
+/// involved.
+fn build_final_reply(
+    batch: &FlushBatch,
+    content: &str,
+    keys: &nostr::Keys,
+) -> Option<nostr::Event> {
+    let content = content.trim();
+    let trigger = batch.events.last()?;
+    if content.is_empty() {
+        return None;
+    }
+    let tags = crate::queue::parse_thread_tags(&trigger.event);
+    let root = tags
+        .root_event_id
+        .unwrap_or_else(|| trigger.event.id.to_hex());
+    let root = nostr::EventId::from_hex(&root).ok()?;
+    let thread = buzz_sdk::ThreadRef {
+        root_event_id: root,
+        parent_event_id: trigger.event.id,
+    };
+    let builder =
+        buzz_sdk::build_message(batch.channel_id, content, Some(&thread), &[], false, &[]).ok()?;
+    builder.sign_with_keys(keys).ok()
+}
+
+async fn publish_final_reply(ctx: &PromptContext, batch: &FlushBatch, content: String) {
+    let Some(event) = build_final_reply(batch, &content, &ctx.agent_keys) else {
+        return;
+    };
+    let channel_id = batch.channel_id;
+    let reply_to = batch
+        .events
+        .last()
+        .map(|e| e.event.id.to_hex())
+        .unwrap_or_default();
+    match tokio::time::timeout(Duration::from_secs(5), ctx.rest_client.submit_event(&event)).await {
+        Ok(Ok(_)) => {
+            tracing::info!(channel_id = %channel_id, reply_to, "published constrained final agent reply")
+        }
+        Ok(Err(error)) => {
+            tracing::error!(channel_id = %channel_id, reply_to, "failed to publish constrained final agent reply: {error}")
+        }
+        Err(_) => {
+            tracing::error!(channel_id = %channel_id, reply_to, "timed out publishing constrained final agent reply")
+        }
+    }
 }
 
 impl AgentPool {
@@ -1797,6 +1849,8 @@ pub async fn run_prompt_task(
                     return;
                 }
             }
+            // Initial-message output is setup chatter, never a task result.
+            agent.acp.clear_agent_message();
         }
     }
 
@@ -2127,6 +2181,12 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            if ctx.publish_final_reply {
+                if let Some(batch) = batch.as_ref() {
+                    publish_final_reply(&ctx, batch, agent.acp.take_agent_message()).await;
+                }
+            }
 
             send_prompt_result(
                 &result_tx,
@@ -6365,6 +6425,38 @@ mod tests {
         make_prompt_context_impl(&agent_keys, None)
     }
 
+    #[test]
+    fn constrained_final_reply_is_bound_to_latest_trigger_and_channel() {
+        let channel_id = Uuid::new_v4();
+        let keys = nostr::Keys::generate();
+        let trigger = nostr::EventBuilder::new(nostr::Kind::TextNote, "work")
+            .tags([nostr::Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: trigger.clone(),
+                prompt_tag: "mention".to_owned(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let reply = build_final_reply(&batch, "done", &keys).expect("reply event");
+        assert_eq!(reply.content, "done");
+        let channel_tag = channel_id.to_string();
+        let trigger_id = trigger.id.to_hex();
+        assert!(reply
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["h", channel_tag.as_str()]));
+        assert!(reply
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["e", trigger_id.as_str(), "", "reply"]));
+    }
+
     fn make_prompt_context_with_owner(
         agent_keys: &nostr::Keys,
         owner_pubkey: nostr::PublicKey,
@@ -6413,6 +6505,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            publish_final_reply: false,
         }
     }
 
