@@ -102,6 +102,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goClickUp = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/clickup",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProject = React.useCallback(
     (
       projectId: string,
@@ -309,6 +320,7 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goClickUp,
     goForumPost,
     goHome,
     goNewMessage,

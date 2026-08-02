@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  CheckSquare2,
+  FolderGit2,
+  Inbox,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -17,6 +24,7 @@ type SidebarSelectedView =
   | "channel"
   | "messages"
   | "agents"
+  | "clickup"
   | "workflows"
   | "pulse"
   | "projects";
@@ -38,6 +46,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectClickUp: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -83,6 +92,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectClickUp,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -140,6 +150,20 @@ export function AppSidebarPrimaryMenu({
             >
               <FolderGit2 className="h-4 w-4" />
               <SidebarMenuLabel>Projects</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
+        <FeatureGate feature="clickup">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-clickup-view"
+              isActive={selectedView === "clickup"}
+              onClick={onSelectClickUp}
+              tooltip="ClickUp"
+              type="button"
+            >
+              <CheckSquare2 className="h-4 w-4" />
+              <SidebarMenuLabel>ClickUp</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>
