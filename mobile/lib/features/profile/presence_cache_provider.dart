@@ -14,16 +14,19 @@ import '../../shared/relay/relay.dart';
 class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   static const _batchDelay = Duration(milliseconds: 50);
   static const _refreshInterval = Duration(seconds: 60);
+  static const _presenceTtl = Duration(seconds: 180);
 
   final Set<String> _tracked = {};
   final Set<String> _pending = {};
   final Map<String, String> _statuses = {};
   final Map<String, int> _lastLiveSequence = {};
-  final Map<String, int> _lastLiveCreatedAt = {};
+  final Map<String, int> _lastStatusCreatedAt = {};
+  final Map<String, DateTime> _positiveObservedAt = {};
   Timer? _batchTimer;
   Timer? _refreshTimer;
   void Function()? _presenceUnsub;
   String? _relayIdentity;
+  bool _snapshotInFlight = false;
   int _subscriptionVersion = 0;
   int _changeSequence = 0;
 
@@ -60,7 +63,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     _pending.clear();
     _statuses.clear();
     _lastLiveSequence.clear();
-    _lastLiveCreatedAt.clear();
+    _lastStatusCreatedAt.clear();
+    _positiveObservedAt.clear();
     _changeSequence = 0;
   }
 
@@ -108,18 +112,21 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     final status = event.content;
     if (!_isPresenceStatus(status)) return;
 
-    final previousCreatedAt = _lastLiveCreatedAt[pubkey];
+    final previousCreatedAt = _lastStatusCreatedAt[pubkey];
     if (previousCreatedAt != null && event.createdAt < previousCreatedAt) {
       return;
     }
-    _lastLiveCreatedAt[pubkey] = event.createdAt;
+    _lastStatusCreatedAt[pubkey] = event.createdAt;
     _changeSequence++;
     _lastLiveSequence[pubkey] = _changeSequence;
     _setStatus(pubkey, status);
   }
 
   void _scheduleSnapshot() {
-    if (_pending.isEmpty || _presenceUnsub == null || _batchTimer != null) {
+    if (_pending.isEmpty ||
+        _presenceUnsub == null ||
+        _batchTimer != null ||
+        _snapshotInFlight) {
       return;
     }
     _batchTimer = Timer(_batchDelay, _flushPending);
@@ -138,7 +145,13 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
 
     final pubkeys = _pending.toList(growable: false);
     _pending.clear();
-    await _fetchPresenceSnapshot(pubkeys, _subscriptionVersion);
+    _snapshotInFlight = true;
+    try {
+      await _fetchPresenceSnapshot(pubkeys, _subscriptionVersion);
+    } finally {
+      _snapshotInFlight = false;
+      _scheduleSnapshot();
+    }
   }
 
   Future<void> _fetchPresenceSnapshot(
@@ -158,7 +171,7 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       if (subscriptionVersion != _subscriptionVersion) return;
 
       final requested = pubkeys.toSet();
-      final snapshot = <String, String>{};
+      final snapshot = <String, NostrEvent>{};
       for (final event in events) {
         if (event.kind != EventKind.presenceUpdate) continue;
         // `/query` returns relay-signed synthetic events whose trusted p-tag
@@ -167,12 +180,37 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         final subject = event.getTagValue('p')?.toLowerCase();
         if (subject == null || !requested.contains(subject)) continue;
         if (!_isPresenceStatus(event.content)) continue;
-        snapshot[subject] = event.content;
+        final existing = snapshot[subject];
+        if (existing == null || event.createdAt > existing.createdAt) {
+          snapshot[subject] = event;
+        }
       }
 
       for (final pubkey in pubkeys) {
         if ((_lastLiveSequence[pubkey] ?? 0) > querySequence) continue;
-        _setStatus(pubkey, snapshot[pubkey] ?? 'offline');
+        final event = snapshot[pubkey];
+        if (event != null) {
+          final previousCreatedAt = _lastStatusCreatedAt[pubkey];
+          if (previousCreatedAt != null &&
+              event.createdAt < previousCreatedAt) {
+            continue;
+          }
+          _lastStatusCreatedAt[pubkey] = event.createdAt;
+          _setStatus(pubkey, event.content);
+          continue;
+        }
+
+        // Redis is updated before the live heartbeat is fanned out. A missing
+        // key can therefore mean expiry, but the relay also deliberately
+        // degrades Redis read failures to an empty snapshot. Preserve a fresh
+        // positive observation for one relay TTL so a transient read failure
+        // cannot make an online DM flash offline.
+        final observedAt = _positiveObservedAt[pubkey];
+        if (observedAt != null &&
+            DateTime.now().difference(observedAt) < _presenceTtl) {
+          continue;
+        }
+        _setStatus(pubkey, 'offline');
       }
     } catch (error) {
       debugPrint('[PresenceCacheNotifier] presence snapshot failed: $error');
@@ -183,6 +221,11 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       status == 'online' || status == 'away' || status == 'offline';
 
   void _setStatus(String pubkey, String status) {
+    if (status == 'online' || status == 'away') {
+      _positiveObservedAt[pubkey] = DateTime.now();
+    } else {
+      _positiveObservedAt.remove(pubkey);
+    }
     if (_statuses[pubkey] == status) return;
     _statuses[pubkey] = status;
     state = Map.unmodifiable(_statuses);

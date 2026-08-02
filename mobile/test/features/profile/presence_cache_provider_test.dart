@@ -79,6 +79,22 @@ void main() {
     expect(container.read(presenceCacheProvider)['alice'], 'online');
   });
 
+  test('fresh live status survives a temporarily empty snapshot', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _waitFor(() => relaySession.filters.isNotEmpty);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    relaySession.emit(_presence('alice', 'online'));
+
+    await _waitFor(() => relaySession.queries.isNotEmpty);
+    await _pumpEventQueue();
+
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+  });
+
   test('live event never trusts a spoofed p-tag subject', () async {
     final relaySession = _RecordingRelaySessionNotifier();
     final container = _buildContainer(relaySession: relaySession);
@@ -138,6 +154,24 @@ void main() {
     },
   );
 
+  test('snapshot timestamp rejects an older replayed live heartbeat', () async {
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryResults = [_snapshot('alice', 'online')];
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _waitFor(() => relaySession.filters.isNotEmpty);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitFor(
+      () => container.read(presenceCacheProvider)['alice'] == 'online',
+    );
+
+    relaySession.emit(_presence('alice', 'away', createdAt: 1999));
+
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+  });
+
   test(
     'keeps cached presence during reconnect and then resynchronizes',
     () async {
@@ -181,6 +215,42 @@ void main() {
     expect(relaySession.filters.single.kinds, [EventKind.presenceUpdate]);
     expect(relaySession.filters.single.limit, 0);
   });
+
+  test(
+    'relay change clears cache and discards an in-flight snapshot',
+    () async {
+      final relayConfig = _FakeRelayConfigNotifier();
+      final relaySession = _RecordingRelaySessionNotifier()
+        ..queryResults = [_snapshot('alice', 'online')];
+      final container = _buildContainer(
+        relaySession: relaySession,
+        relayConfig: relayConfig,
+      );
+      addTearDown(container.dispose);
+
+      container.read(presenceCacheProvider);
+      await _waitFor(() => relaySession.filters.isNotEmpty);
+      container.read(presenceCacheProvider.notifier).track(['alice']);
+      await _waitFor(
+        () => container.read(presenceCacheProvider)['alice'] == 'online',
+      );
+
+      final staleQuery = Completer<List<NostrEvent>>();
+      relaySession.queryCompleter = staleQuery;
+      final queryCount = relaySession.queries.length;
+      container.read(presenceCacheProvider.notifier).track(['bob']);
+      await _waitFor(() => relaySession.queries.length > queryCount);
+
+      relayConfig.setRelay('https://other-relay.example');
+      container.read(presenceCacheProvider);
+      expect(container.read(presenceCacheProvider), isEmpty);
+
+      staleQuery.complete([_snapshot('bob', 'online')]);
+      await _pumpEventQueue();
+
+      expect(container.read(presenceCacheProvider), isEmpty);
+    },
+  );
 }
 
 NostrEvent _presence(
@@ -225,10 +295,14 @@ Future<void> _waitFor(bool Function() predicate) async {
 
 ProviderContainer _buildContainer({
   required _RecordingRelaySessionNotifier relaySession,
+  _FakeRelayConfigNotifier? relayConfig,
 }) {
   return ProviderContainer(
     overrides: [
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
+      relayConfigProvider.overrideWith(
+        () => relayConfig ?? _FakeRelayConfigNotifier(),
+      ),
       relaySessionProvider.overrideWith(() => relaySession),
     ],
   );
@@ -281,4 +355,13 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
+}
+
+class _FakeRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.example');
+
+  void setRelay(String baseUrl) {
+    state = RelayConfig(baseUrl: baseUrl);
+  }
 }
