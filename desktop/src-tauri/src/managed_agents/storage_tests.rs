@@ -699,6 +699,137 @@ fn try_delete_agent_key_returns_result() {
     let _: fn(&str) -> Result<(), String> = super::try_delete_agent_key;
 }
 
+// ── runtime receipt discovery ────────────────────────────────────────────────
+
+fn runtime_receipt_fixture(
+    pubkey_byte: &str,
+) -> (std::path::PathBuf, super::ManagedAgentRuntimeReceipt) {
+    let key = super::ManagedAgentRuntimeKey::new(pubkey_byte.repeat(64), "wss://relay.example")
+        .expect("runtime key");
+    let path = std::path::PathBuf::from(format!("receipt-store/{}.json", key.runtime_id()));
+    (
+        path,
+        super::ManagedAgentRuntimeReceipt {
+            key,
+            pid: 1,
+            desktop_instance_id: "instance".to_string(),
+            started_at: "2026-08-01T00:00:00Z".to_string(),
+            windows_job_contained: true,
+        },
+    )
+}
+
+#[test]
+fn runtime_receipt_discovery_distinguishes_absence_from_directory_failure() {
+    let dir = Path::new("receipt-store");
+    let absent = super::read_agent_runtime_receipts_with(
+        dir,
+        |_| Ok(Vec::new()),
+        |_| Ok(()),
+        |_| unreachable!("an absent store has no receipt files"),
+    );
+    assert!(absent.unwrap().is_empty());
+
+    let unavailable = super::read_agent_runtime_receipts_with(
+        dir,
+        |_| Err("receipt directory unavailable".to_string()),
+        |_| Ok(()),
+        |_| unreachable!("directory failure must stop before file reads"),
+    );
+    assert!(unavailable
+        .unwrap_err()
+        .contains("receipt directory unavailable"));
+}
+
+#[test]
+fn runtime_receipt_discovery_fails_closed_on_directory_entry_failure() {
+    let result = super::read_agent_runtime_receipts_with(
+        Path::new("receipt-store"),
+        |_| Err("failed to inspect receipt directory entry".to_string()),
+        |_| Ok(()),
+        |_| unreachable!("entry failure must stop before file reads"),
+    );
+    assert!(result
+        .unwrap_err()
+        .contains("failed to inspect receipt directory entry"));
+}
+
+#[test]
+fn runtime_receipt_discovery_fails_closed_on_receipt_file_read_failure() {
+    let path = std::path::PathBuf::from("receipt-store/runtime.json");
+    let result = super::read_agent_runtime_receipts_with(
+        Path::new("receipt-store"),
+        |_| Ok(vec![path.clone()]),
+        |_| Ok(()),
+        |_| Err("receipt file unreadable".to_string()),
+    );
+    assert!(result.unwrap_err().contains("receipt file unreadable"));
+}
+
+#[test]
+fn runtime_receipt_discovery_fails_closed_on_malformed_or_partial_json() {
+    let path = std::path::PathBuf::from("receipt-store/runtime.json");
+    for bytes in [b"{".to_vec(), b"not-json".to_vec()] {
+        let result = super::read_agent_runtime_receipts_with(
+            Path::new("receipt-store"),
+            |_| Ok(vec![path.clone()]),
+            |_| Ok(()),
+            |_| Ok(bytes.clone()),
+        );
+        assert!(result.unwrap_err().contains("parse runtime receipt"));
+    }
+}
+
+#[test]
+fn runtime_receipt_discovery_never_returns_a_partial_authoritative_list() {
+    let (first, receipt) = runtime_receipt_fixture("a");
+    let second = std::path::PathBuf::from("receipt-store/second.json");
+    let first_bytes = serde_json::to_vec(&receipt).expect("serialize receipt");
+    let result = super::read_agent_runtime_receipts_with(
+        Path::new("receipt-store"),
+        |_| Ok(vec![first.clone(), second.clone()]),
+        |_| Ok(()),
+        |path| {
+            if path == first {
+                Ok(first_bytes.clone())
+            } else {
+                Err("second receipt unreadable".to_string())
+            }
+        },
+    );
+    assert!(result.unwrap_err().contains("second receipt unreadable"));
+}
+
+#[test]
+fn runtime_receipt_discovery_rejects_path_key_provenance_mismatch() {
+    let (_, receipt) = runtime_receipt_fixture("b");
+    let wrong_path = std::path::PathBuf::from("receipt-store/wrong.json");
+    let bytes = serde_json::to_vec(&receipt).expect("serialize receipt");
+    let result = super::read_agent_runtime_receipts_with(
+        Path::new("receipt-store"),
+        |_| Ok(vec![wrong_path.clone()]),
+        |_| Ok(()),
+        |_| Ok(bytes.clone()),
+    );
+    assert!(result
+        .unwrap_err()
+        .contains("does not match embedded runtime key"));
+}
+
+#[test]
+fn runtime_receipt_discovery_blocks_when_pending_tombstone_cannot_converge() {
+    let tombstone = std::path::PathBuf::from("receipt-store/runtime.json.delete-pending");
+    let result = super::read_agent_runtime_receipts_with(
+        Path::new("receipt-store"),
+        |_| Ok(vec![tombstone.clone()]),
+        |_| Err("tombstone cleanup unavailable".to_string()),
+        |_| unreachable!("a tombstone is not parsed as a receipt"),
+    );
+    assert!(result
+        .unwrap_err()
+        .contains("tombstone cleanup unavailable"));
+}
+
 // ── install logs ─────────────────────────────────────────────────────────────
 
 /// Install output can carry registry tokens and proxy credentials a failing

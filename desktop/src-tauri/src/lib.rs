@@ -12,6 +12,8 @@ mod identity_storage;
 mod key_backup;
 mod linux_media;
 mod managed_agents;
+#[cfg(target_os = "windows")]
+pub mod managed_launcher;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
 mod mesh_llm;
@@ -113,12 +115,7 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
     let mut stable_polls = 0;
 
     for _ in 0..MAX_POLLS {
-        // Accept whatever geometry the window-state plugin restores — maximized
-        // or a normal saved size. macOS applies the restore asynchronously, so
-        // we only need consecutive identical outer bounds to know it settled.
-        // Gating on `is_maximized()` here would leave `bounds` permanently
-        // `None` for restored non-maximized windows and stall the reveal until
-        // the poll timeout.
+        // Consecutive identical outer bounds prove async macOS restore has settled.
         let bounds = match (window.outer_position(), window.outer_size()) {
             (Ok(position), Ok(size)) => Some((position.x, position.y, size.width, size.height)),
             _ => None,
@@ -971,14 +968,17 @@ pub fn run() {
                 }
             }
         }
-        RunEvent::ExitRequested { code, .. } => {
+        RunEvent::ExitRequested { code, api, .. } => {
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);
             }
-            shut_down_app(app_handle, &run_shutdown_done);
+            let shutdown = shut_down_app(app_handle, &run_shutdown_done);
+            if shutdown::exit_blocked(shutdown, &restart_requested) {
+                api.prevent_exit();
+            }
         }
         RunEvent::Exit => {
-            shut_down_app(app_handle, &run_shutdown_done);
+            shutdown::report_final_shutdown(shut_down_app(app_handle, &run_shutdown_done));
             app_handle.state::<ClipboardState>().release();
 
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]

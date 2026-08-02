@@ -16,11 +16,11 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-        load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        agent_readiness, find_managed_agent_mut, known_acp_runtime, load_global_agent_config,
+        load_managed_agents, load_personas, record_agent_command, resolve_effective_agent_env,
+        save_global_agent_config, save_managed_agents, stop_managed_agent_process,
+        sync_managed_agent_processes, validate_global_config, AgentReadiness, BackendKind,
+        GlobalAgentConfig,
     },
 };
 
@@ -188,7 +188,7 @@ fn collect_restart_candidates(
     let candidates = records
         .iter()
         .filter(|record| {
-            if record.backend != BackendKind::Local {
+            if record.backend != BackendKind::Local || !record.auto_restart_on_config_change {
                 return false;
             }
             let has_live_runtime = runtimes.iter_mut().any(|(key, runtime)| {
@@ -227,11 +227,9 @@ fn collect_restart_candidates(
 /// This is the per-agent restart step in Phase 2 of `set_global_agent_config`.
 /// It mirrors the semantics of a manual agent restart:
 ///
-/// 1. **Stop under lock** — acquires the store lock, calls
-///    `sync_managed_agent_processes`, re-verifies eligibility (local backend,
-///    live process, effective env changed or readiness transition), then stops
-///    the process and saves the record.  The lock is released before the start
-///    so `start_local_agent_with_preflight` can re-acquire it cleanly.
+/// 1. **Serialized restart** — acquires the transition and store locks, syncs
+///    process state, re-verifies eligibility, stops, and starts all prior pairs
+///    without releasing the transition lease.
 ///    `personas_snapshot` is reused here instead of loading from disk again.
 ///
 /// 2. **Start via the normal preflight path** — calls
@@ -251,7 +249,20 @@ async fn restart_local_agent_on_config_change(
     new_global: &GlobalAgentConfig,
     personas_snapshot: &[crate::managed_agents::AgentDefinition],
 ) -> RestartOutcome {
-    // ── Step 1: stop under lock, re-verifying eligibility ─────────────────
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let mesh_model_id = match super::agents::preflight_local_agent_pairs(app, &state, pubkey).await
+    {
+        Ok(model_id) => model_id,
+        Err(error) => {
+            eprintln!(
+                "buzz-desktop: set_global_agent_config: preflight failed for {pubkey}: {error}"
+            );
+            return RestartOutcome::Skipped;
+        }
+    };
+    // Stop and start retain one transition lease; asynchronous preflight is
+    // complete before the synchronous serialized section begins.
     let app_for_stop = app.clone();
     let pubkey_owned = pubkey.to_string();
     let old_global_clone = old_global.clone();
@@ -261,6 +272,10 @@ async fn restart_local_agent_on_config_change(
     let stop_result = tokio::task::spawn_blocking(move || {
         use tauri::Manager;
         let state = app_for_stop.state::<AppState>();
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| format!("failed to acquire runtime transition lock: {e}"))?;
 
         let _store_guard = state
             .managed_agents_store_lock
@@ -274,11 +289,8 @@ async fn restart_local_agent_on_config_change(
             .map_err(|e| format!("failed to acquire runtimes lock: {e}"))?;
 
         // Sync process state so PID liveness reflects current reality.
-        let (sync_changed, _) = sync_managed_agent_processes(
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app_for_stop),
-        );
+        let (sync_changed, _) =
+            sync_managed_agent_processes(&app_for_stop, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app_for_stop, &records)?;
         }
@@ -289,8 +301,10 @@ async fn restart_local_agent_on_config_change(
             .find(|r| r.pubkey == pubkey_owned)
             .ok_or_else(|| format!("agent {pubkey_owned} not found"))?;
 
-        if record.backend != BackendKind::Local {
-            return Err(format!("agent {pubkey_owned} is no longer a local agent"));
+        if record.backend != BackendKind::Local || !record.auto_restart_on_config_change {
+            return Err(format!(
+                "agent {pubkey_owned} is no longer eligible for automatic restart"
+            ));
         }
         let runtime_keys =
             crate::managed_agents::managed_agent_runtime_keys(&runtimes, &pubkey_owned);
@@ -324,49 +338,57 @@ async fn restart_local_agent_on_config_change(
 
         // Stop the process.
         let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
-        stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
+        if let Err(stop_error) =
+            stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)
+        {
+            return crate::managed_agents::persist_failed_stop(stop_error, || {
+                save_managed_agents(&app_for_stop, &records)
+            });
+        }
         save_managed_agents(&app_for_stop, &records)?;
-
-        Ok(runtime_keys)
+        let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
+        drop(runtimes);
+        drop(_store_guard);
+        super::agents::start_local_agent_pairs_under_transition(
+            &app_for_stop,
+            &state,
+            &pubkey_owned,
+            &relay_urls,
+            &mesh_model_id,
+            &_transition,
+        )
+        .map(|_| ())
+        .map_err(|error| format!("start failed after serialized stop: {error}"))
     })
     .await;
 
-    let runtime_keys = match stop_result {
-        Ok(Ok(runtime_keys)) => runtime_keys,
-        Ok(Err(e)) => {
-            eprintln!("buzz-desktop: set_global_agent_config: skipping restart of {pubkey}: {e}");
-            return RestartOutcome::Skipped;
-        }
-        Err(e) => {
-            eprintln!(
-                "buzz-desktop: set_global_agent_config: spawn_blocking failed for stop of {pubkey}: {e}"
-            );
-            return RestartOutcome::Skipped;
-        }
-    };
-
-    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
-    use tauri::Manager;
-    let state = app.state::<AppState>();
-    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
-        .await
-    {
-        Ok(_) => {
+    match stop_result {
+        Ok(Ok(())) => {
             eprintln!(
                 "buzz-desktop: set_global_agent_config: restarted agent {pubkey} with updated config"
             );
             RestartOutcome::Restarted
         }
-        Err(e) => {
-            eprintln!(
-                "buzz-desktop: set_global_agent_config: failed to start {pubkey} after restart: {e}"
-            );
-            if let Err(save_err) = persist_last_error(app, pubkey, &e) {
+        Ok(Err(error)) if error.starts_with("start failed after serialized stop:") => {
+            eprintln!("buzz-desktop: set_global_agent_config: {error}");
+            if let Err(save_error) = persist_last_error(app, pubkey, &error) {
                 eprintln!(
-                    "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_err}"
+                    "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_error}"
                 );
             }
             RestartOutcome::FailedAfterStop
+        }
+        Ok(Err(error)) => {
+            eprintln!(
+                "buzz-desktop: set_global_agent_config: skipping restart of {pubkey}: {error}"
+            );
+            RestartOutcome::Skipped
+        }
+        Err(error) => {
+            eprintln!(
+                "buzz-desktop: set_global_agent_config: spawn_blocking failed for restart of {pubkey}: {error}"
+            );
+            RestartOutcome::Skipped
         }
     }
 }

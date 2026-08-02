@@ -5,12 +5,13 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
+#[cfg(not(windows))]
+use super::{process_is_running, terminate_process};
 use crate::app_state::AppState;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
@@ -137,6 +138,44 @@ pub fn put_managed_agent_runtime_lifecycle(
     Ok(status)
 }
 
+fn commit_polled_terminal_recovery<T>(
+    record: &mut super::ManagedAgentRecord,
+    key: &ManagedAgentRuntimeKey,
+    recovery_pid: u32,
+    retained_runtimes: &std::collections::HashMap<ManagedAgentRuntimeKey, T>,
+    clear: impl FnOnce(&mut super::ManagedAgentRecord, &ManagedAgentRuntimeKey) -> Result<bool, String>,
+) -> Result<(), String> {
+    if !retained_runtimes.contains_key(key) {
+        return Err(
+            "finalized managed-agent runtime token is unavailable for durable retirement".into(),
+        );
+    }
+    if let Err(error) = clear(record, key) {
+        super::record_terminal_proof_pending_recovery_clear(record, key, recovery_pid, &error);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn record_polled_terminal_outcome(
+    record: &mut super::ManagedAgentRecord,
+    key: &ManagedAgentRuntimeKey,
+    status: std::process::ExitStatus,
+    log_error: Option<super::storage::AgentLogError>,
+) {
+    if status.success() {
+        if record.last_error.is_none() {
+            record.last_exit_code = status.code();
+        }
+    } else {
+        let error = log_error.unwrap_or_else(|| super::storage::AgentLogError {
+            message: format!("harness exited with status {status}"),
+            code: None,
+        });
+        super::record_pending_pair_failure(record, key, status.code(), &error);
+    }
+}
+
 #[tauri::command]
 pub fn list_managed_agent_runtimes(
     app: AppHandle,
@@ -160,25 +199,74 @@ pub fn list_managed_agent_runtimes(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
+    let mut inspection_errors = Vec::new();
     let exited_keys: Vec<_> = runtimes
         .iter_mut()
         .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
+            Ok(Some(status)) => {
+                #[cfg(windows)]
+                if let Err(error) =
+                    super::process_lifecycle::finalize_tracked_runtime(&app, key, runtime)
+                {
+                    inspection_errors.push((key.clone(), error));
+                    return None;
+                }
+                #[cfg(not(windows))]
+                if let Err(error) = super::remove_agent_runtime_receipt(&app, key) {
+                    inspection_errors.push((key.clone(), error));
+                    return None;
+                }
+                Some((key.clone(), status))
+            }
             Ok(None) => None,
+            Err(error) => {
+                inspection_errors.push((key.clone(), error.to_string()));
+                None
+            }
         })
         .collect();
-    let records_changed = !exited_keys.is_empty();
+    let records_changed = !exited_keys.is_empty() || !inspection_errors.is_empty();
+    let mut terminal_clear_failures = Vec::new();
+    let mut terminal_clear_successes = Vec::new();
     let mut statuses = Vec::new();
-    for key in exited_keys {
-        runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(&app, &key);
-        state.clear_agent_session_cache(&key);
+    for (key, exit_status) in exited_keys {
+        let Some(recovery_pid) = runtimes.get(&key).map(|runtime| runtime.child.id()) else {
+            continue;
+        };
+        let log_error = if exit_status.success() {
+            None
+        } else {
+            runtimes
+                .get(&key)
+                .and_then(|runtime| super::meaningful_agent_error_from_log(&runtime.log_path))
+        };
         if let Some(record) = records
             .iter_mut()
             .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
         {
             record.updated_at = crate::util::now_iso();
-            record.last_stopped_at = Some(record.updated_at.clone());
+            if !exit_status.success() || record.last_error.is_none() {
+                record.last_exit_code = exit_status.code();
+            }
+            if let Err(error) = commit_polled_terminal_recovery(
+                record,
+                &key,
+                recovery_pid,
+                &runtimes,
+                |record, key| super::clear_pair_recovery_with_terminal_proof(&app, record, key),
+            ) {
+                terminal_clear_failures.push((key, error));
+                continue;
+            }
+            record_polled_terminal_outcome(record, &key, exit_status, log_error);
+            terminal_clear_successes.push(key.clone());
+            let sibling_active = runtimes.keys().any(|runtime_key| {
+                runtime_key.pubkey == record.pubkey
+                    && !terminal_clear_successes.contains(runtime_key)
+            });
+            if !sibling_active && !super::has_recovery_uncertainty(&app, record)? {
+                record.last_stopped_at = Some(record.updated_at.clone());
+            }
             let status = status_for_with(
                 &app,
                 record,
@@ -190,33 +278,95 @@ pub fn list_managed_agent_runtimes(
                     global: &global,
                 },
             );
-            emit_status(&app, &status);
             statuses.push(status);
         }
     }
-    statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
-        let record = records
+    for (key, error) in inspection_errors {
+        if let Some(record) = records
+            .iter_mut()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
+        {
+            #[cfg(windows)]
+            if let Some(runtime) = runtimes.get(&key) {
+                super::runtime::receipt_failure::mark_unverified_runtime(
+                    Some(&app),
+                    record,
+                    &key,
+                    runtime.child.id(),
+                    crate::util::now_iso(),
+                    format!("failed to inspect or finalize process state: {error}"),
+                );
+            }
+            #[cfg(not(windows))]
+            {
+                record.updated_at = crate::util::now_iso();
+                record.last_error = Some(format!("failed to inspect process state: {error}"));
+                record.last_error_code = None;
+            }
+        }
+    }
+    statuses.extend(
+        runtimes
             .iter()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
-        Some(status_for_with(
-            &app,
-            record,
-            key,
-            Some(runtime),
-            None,
-            StatusInputs {
-                personas: &personas,
-                global: &global,
-            },
-        ))
-    }));
-    drop(runtimes);
-    // Records are only mutated above when a runtime exited — skip the store
-    // rewrite on the common nothing-changed poll.
+            .filter(|(key, _)| !terminal_clear_successes.contains(key))
+            .filter_map(|(key, runtime)| {
+                let record = records
+                    .iter()
+                    .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
+                Some(status_for_with(
+                    &app,
+                    record,
+                    key,
+                    Some(runtime),
+                    None,
+                    StatusInputs {
+                        personas: &personas,
+                        global: &global,
+                    },
+                ))
+            }),
+    );
+    // Skip the store rewrite on the common nothing-changed poll.
     if records_changed {
-        save_managed_agents(&app, &records)?;
+        if let Err(error) = save_managed_agents(&app, &records) {
+            drop(runtimes);
+            let clear_errors = terminal_clear_failures
+                .iter()
+                .map(|(key, error)| format!("{}: {error}", key.runtime_id()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(if clear_errors.is_empty() {
+                error
+            } else {
+                format!("{clear_errors}; failed to persist terminal-proof retry markers: {error}")
+            });
+        }
+    }
+    for key in &terminal_clear_successes {
+        runtimes.remove(key);
+        state.clear_agent_session_cache(key);
+    }
+    drop(runtimes);
+    if !terminal_clear_failures.is_empty() {
+        return Err(terminal_clear_failures
+            .into_iter()
+            .map(|(key, error)| format!("{}: {error}", key.runtime_id()))
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    for status in &statuses {
+        emit_status(&app, status);
     }
     Ok(statuses)
+}
+
+pub(crate) fn start_managed_agent_runtime_pair_lazy_under_transition(
+    pubkey: String,
+    relay_url: String,
+    transition: &std::sync::MutexGuard<'_, ()>,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    start_pair(pubkey, relay_url, true, None, Some(transition), app)
 }
 
 pub(crate) fn start_managed_agent_runtime_pair_lazy(
@@ -224,7 +374,7 @@ pub(crate) fn start_managed_agent_runtime_pair_lazy(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, None, app)
 }
 
 #[tauri::command]
@@ -241,13 +391,20 @@ fn start_pair(
     relay_url: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
+    transition_held: Option<&std::sync::MutexGuard<'_, ()>>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
-    let _transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|e| e.to_string())?;
+    let _transition = if transition_held.is_some() {
+        None
+    } else {
+        Some(
+            state
+                .managed_agent_runtime_transition
+                .lock()
+                .map_err(|e| e.to_string())?,
+        )
+    };
     if state.shutdown_started.load(Ordering::Acquire) {
         return Err("desktop shutdown has started".into());
     }
@@ -264,16 +421,28 @@ fn start_pair(
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    if let Some(error) = super::recovery_admission_error(&app, record, &key)? {
+        return Err(error);
+    }
     let mut runtimes = state
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    if runtimes
-        .get_mut(&key)
-        .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
-    {
-        let status = status_for(&app, record, &key, runtimes.get(&key), None);
-        return Ok(status);
+    if let Some(runtime) = runtimes.get_mut(&key) {
+        match runtime
+            .child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+        {
+            None => {
+                let status = status_for(&app, record, &key, Some(runtime), None);
+                return Ok(status);
+            }
+            Some(_) => {
+                #[cfg(windows)]
+                super::process_lifecycle::finalize_tracked_runtime(&app, &key, runtime)?;
+            }
+        }
     }
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
@@ -283,24 +452,41 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    let process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(&app),
         started_at: now.clone(),
+        windows_job_contained: super::process_has_windows_job(&process),
     };
     if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
-        let _ = terminate_process(process.child.id());
-        let _ = process.child.wait();
-        return Err(error);
+        let cleanup_error = match super::runtime::receipt_failure::cleanup(
+            &app,
+            process,
+            record,
+            &mut runtimes,
+            key,
+            now,
+            error,
+        ) {
+            Err(error) => error,
+            Ok(()) => return Err("receipt-write failure was not propagated".to_string()),
+        };
+        drop(runtimes);
+        let persistence = save_managed_agents(&app, &records)
+            .err()
+            .map(|save_error| format!("; failed to persist cleanup state: {save_error}"))
+            .unwrap_or_default();
+        return Err(format!("{cleanup_error}{persistence}"));
     }
-    record.runtime_pid = None;
     record.updated_at = now.clone();
     record.last_started_at = Some(now);
     record.last_stopped_at = None;
-    record.last_error = None;
+    if !super::has_unverified_job_reap(record) {
+        record.last_error = None;
+    }
     runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
     let status = status_for(&app, record, &key, runtimes.get(&key), None);
     drop(runtimes);
@@ -315,11 +501,26 @@ pub fn stop_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    stop_pair(pubkey, relay_url, None, app)
+}
+
+fn stop_pair(
+    pubkey: String,
+    relay_url: String,
+    transition_held: Option<&std::sync::MutexGuard<'_, ()>>,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
-    let _transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|e| e.to_string())?;
+    let _transition = if transition_held.is_some() {
+        None
+    } else {
+        Some(
+            state
+                .managed_agent_runtime_transition
+                .lock()
+                .map_err(|e| e.to_string())?,
+        )
+    };
     let _store = state
         .managed_agents_store_lock
         .lock()
@@ -332,6 +533,10 @@ pub fn stop_managed_agent_runtime(
         .lock()
         .map_err(|e| e.to_string())?;
     if let Some(mut runtime) = runtimes.remove(&key) {
+        #[cfg(windows)]
+        let stop_result =
+            super::process_lifecycle::finalize_tracked_runtime(&app, &key, &mut runtime);
+        #[cfg(not(windows))]
         let stop_result = if process_is_running(runtime.child.id()) {
             terminate_process(runtime.child.id())
         } else {
@@ -341,17 +546,56 @@ pub fn stop_managed_agent_runtime(
         match stop_result {
             Ok(status) => {
                 record.last_exit_code = status.code();
+                if let Err(error) =
+                    super::clear_pair_recovery_with_terminal_proof(&app, record, &key)
+                {
+                    super::record_terminal_proof_pending_recovery_clear(
+                        record,
+                        &key,
+                        runtime.child.id(),
+                        &error,
+                    );
+                    runtimes.insert(key.clone(), runtime);
+                    drop(runtimes);
+                    save_managed_agents(&app, &records)?;
+                    return Err(format!(
+                        "failed to retire exact-pair recovery authority after terminal proof: {error}"
+                    ));
+                }
                 let _ = append_log_marker(&runtime.log_path, "=== stopped pair runtime ===");
             }
             Err(error) => {
-                // Keep failed teardown visible/manageable instead of
-                // orphaning it: the child stays tracked and the receipt
-                // stays on disk until a stop actually succeeds.
-                runtimes.insert(key, runtime);
-                return Err(error);
+                // Keep the exact child/Job authority and receipt under this
+                // pair key until a stop actually succeeds, and persist the
+                // failure mutation before returning.
+                let recovery_pid = runtime.child.id();
+                runtimes.insert(key.clone(), runtime);
+                let error = super::runtime::receipt_failure::mark_unverified_runtime(
+                    Some(&app),
+                    record,
+                    &key,
+                    recovery_pid,
+                    crate::util::now_iso(),
+                    format!(
+                        "Stop cleanup is incomplete and exact pair authority remains tracked for retry: {error}"
+                    ),
+                );
+                drop(runtimes);
+                return match save_managed_agents(&app, &records) {
+                    Ok(()) => Err(error),
+                    Err(persist_error) => Err(format!(
+                        "{error}; additionally failed to persist managed-agent stop failure: {persist_error}"
+                    )),
+                };
             }
         }
     } else {
+        #[cfg(windows)]
+        if super::terminal_proof_pending_recovery_clears(record).contains(&key) {
+            super::clear_pair_recovery_with_terminal_proof(&app, record, &key)?;
+        } else if let Some(error) = super::recovery_admission_error(&app, record, &key)? {
+            return Err(error);
+        }
         // No runtime is tracked at this key, but a valid prior-session
         // receipt may still point at a live child (e.g. the crash-recovery
         // window for a non-auto-start agent). Terminate that orphan before
@@ -363,12 +607,21 @@ pub fn stop_managed_agent_runtime(
         // only removes it after the child exits), mirroring the tracked
         // path's keep-until-success invariant.
         terminate_untracked_pair_runtime(&app, &key)?;
+        super::clear_pair_recovery_with_terminal_proof(&app, record, &key)?;
     }
-    super::remove_agent_runtime_receipt(&app, &key);
+    #[cfg(not(windows))]
+    super::remove_agent_runtime_receipt(&app, &key)?;
     state.clear_agent_session_cache(&key);
-    record.runtime_pid = None;
     record.updated_at = crate::util::now_iso();
-    record.last_stopped_at = Some(record.updated_at.clone());
+    let sibling_active = runtimes
+        .keys()
+        .any(|runtime_key| runtime_key.pubkey == record.pubkey);
+    if !sibling_active && !super::has_unverified_job_reap(record) {
+        record.runtime_pid = None;
+        record.last_stopped_at = Some(record.updated_at.clone());
+        record.last_error = None;
+        record.last_error_code = None;
+    }
     let status = status_for(&app, record, &key, None, None);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
@@ -382,8 +635,25 @@ pub fn restart_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
-    start_pair(pubkey, relay_url, true, None, app)
+    let state = app.state::<AppState>();
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    stop_pair(
+        pubkey.clone(),
+        relay_url.clone(),
+        Some(&_transition),
+        app.clone(),
+    )?;
+    start_pair(
+        pubkey,
+        relay_url,
+        true,
+        None,
+        Some(&_transition),
+        app.clone(),
+    )
 }
 
 /// Probe whether this agent can operate on `requested_relay_url`.
@@ -507,6 +777,7 @@ pub async fn reconcile_managed_agent_runtimes(
                         key.relay_url.clone(),
                         true,
                         Some(&record.updated_at),
+                        None,
                         app.clone(),
                     ) {
                         Ok(mut status) => {
@@ -569,148 +840,5 @@ pub async fn reconcile_managed_agent_runtimes(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn payload(
-        relay_url: &str,
-        lifecycle: ManagedAgentRuntimeLifecycle,
-        error: Option<&str>,
-    ) -> super::super::ManagedAgentRuntimeLifecycleObserverPayload {
-        super::super::ManagedAgentRuntimeLifecycleObserverPayload {
-            pubkey: "aa".repeat(32),
-            relay_url: relay_url.into(),
-            start_nonce: "test-generation".into(),
-            lifecycle,
-            error: error.map(str::to_owned),
-        }
-    }
-
-    fn record_with_relay(relay_url: &str) -> super::super::ManagedAgentRecord {
-        serde_json::from_str(&format!(
-            r#"{{
-                "pubkey": "{}",
-                "name": "pin-test",
-                "relay_url": "{relay_url}",
-                "acp_command": "buzz-acp",
-                "agent_command": "goose",
-                "agent_args": [],
-                "mcp_command": "",
-                "turn_timeout_seconds": 320,
-                "system_prompt": "",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
-            }}"#,
-            "aa".repeat(32)
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn legacy_relay_pin_is_ignored_for_fan_out() {
-        // Zero-touch cutover (#2122): a record carrying a creation-era
-        // `relay_url` pin must fan out exactly like an unpinned one — the
-        // stored field is parsed but never consulted. See
-        // `effective_agent_relay_url`.
-        let unpinned = record_with_relay("");
-        let pinned = record_with_relay("wss://one.example");
-        for record in [&unpinned, &pinned] {
-            assert_eq!(
-                crate::relay::effective_agent_relay_url(&record.relay_url, "wss://two.example"),
-                "wss://two.example"
-            );
-        }
-    }
-
-    #[test]
-    fn unkeyable_relay_degrades_to_failed_row() {
-        // A requested URL that cannot form a pair key must still yield a
-        // Failed row keyed by the raw requested string, so one bad community
-        // never aborts the rest of the reconcile batch.
-        let record = record_with_relay("");
-        let status = unkeyable_failed_status(
-            &record,
-            "not a url".to_string(),
-            "relay access probe timed out".to_string(),
-            &[],
-            &super::super::GlobalAgentConfig::default(),
-        );
-        assert!(matches!(
-            status.lifecycle,
-            ManagedAgentRuntimeLifecycle::Failed
-        ));
-        assert_eq!(status.relay_url, "not a url");
-        assert_eq!(status.requested_relay_url.as_deref(), Some("not a url"));
-        assert_eq!(status.pubkey, record.pubkey);
-        assert_eq!(
-            status.error.as_deref(),
-            Some("relay access probe timed out")
-        );
-        assert!(status.pid.is_none());
-    }
-
-    #[test]
-    fn runtime_key_rejects_non_hex_pubkeys() {
-        assert!(ManagedAgentRuntimeKey::new("../not-a-key", "wss://relay.example").is_err());
-        assert!(ManagedAgentRuntimeKey::new("gg".repeat(32), "wss://relay.example").is_err());
-    }
-
-    #[test]
-    fn runtime_key_canonicalizes_hex_pubkeys() {
-        let key = ManagedAgentRuntimeKey::new("AA".repeat(32), "wss://relay.example").unwrap();
-        assert_eq!(key.pubkey, "aa".repeat(32));
-    }
-
-    #[test]
-    fn observer_lifecycle_key_preserves_exact_canonical_pair() {
-        let first = payload(
-            "WSS://Relay.Example:443/",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        let key = observer_lifecycle_key(&first.pubkey, &first).unwrap();
-        assert_eq!(key.pubkey, first.pubkey);
-        assert_eq!(key.relay_url, "wss://relay.example");
-
-        let other = payload(
-            "wss://other.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        assert_ne!(key, observer_lifecycle_key(&other.pubkey, &other).unwrap());
-    }
-
-    #[test]
-    fn observer_lifecycle_rejects_cross_agent_and_desktop_states() {
-        let ready = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        assert!(observer_lifecycle_key(&"bb".repeat(32), &ready).is_err());
-
-        let stopped = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Stopped,
-            None,
-        );
-        assert!(observer_lifecycle_key(&stopped.pubkey, &stopped).is_err());
-    }
-
-    #[test]
-    fn observer_lifecycle_enforces_failed_error_contract() {
-        let failed = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Failed,
-            None,
-        );
-        assert!(observer_lifecycle_key(&failed.pubkey, &failed).is_err());
-
-        let ready_with_error = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            Some("unexpected"),
-        );
-        assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
-    }
-}
+#[path = "runtime_commands/tests.rs"]
+mod tests;

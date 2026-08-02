@@ -1,7 +1,6 @@
-use std::collections::{BTreeMap, HashSet};
-
 use nostr::Keys;
 use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
@@ -17,11 +16,11 @@ use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRoll
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
-        find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
-        load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
-        resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
-        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        build_managed_agent_summary, discovery_env_with_baked_floor, find_managed_agent_mut,
+        known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
+        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
+        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
         DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
@@ -39,6 +38,7 @@ pub async fn get_agent_models(
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
     let (resolved_acp, agent_command, discovery) = {
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -49,12 +49,12 @@ pub async fn get_agent_models(
             .lock()
             .map_err(|e| e.to_string())?;
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         let record = records
@@ -815,6 +815,7 @@ pub async fn update_managed_agent(
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
     let (summary, sync_params, rollback) = {
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -824,10 +825,9 @@ pub async fn update_managed_agent(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        let (_, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        let (_, exited_pubkeys) = sync_managed_agent_processes(&app, &mut records, &mut runtimes);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;

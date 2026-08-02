@@ -501,3 +501,62 @@ fn tauri_platform_configs_bundle_kubernetes_only_on_supported_hosts() {
         );
     }
 }
+
+#[test]
+fn failed_local_start_persists_mutated_records_before_returning_error() {
+    let dir = tempfile::tempdir().expect("temporary recovery directory");
+    let path = dir.path().join("managed-agents.json");
+    let mut record: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "name":"test","private_key_nsec":"nsec1fake","relay_url":"",
+            "acp_command":"buzz-acp","agent_command":"buzz-agent","agent_args":[],
+            "mcp_command":"","turn_timeout_seconds":320,"system_prompt":null,
+            "model":null,"provider":null,"env_vars":{},
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",
+            "last_started_at":null,"last_stopped_at":null,"last_exit_code":null,
+            "last_error":null
+        }"#,
+    )
+    .expect("managed-agent recovery record");
+    record.runtime_pid = Some(4242);
+    record.last_error = Some("receipt write failed; cleanup remains tracked".to_string());
+    let records = vec![record];
+
+    let result: Result<(), String> = persist_failed_local_start(
+        &records,
+        "receipt write failed; cleanup remains tracked".to_string(),
+        |records| {
+            let bytes = serde_json::to_vec_pretty(records).map_err(|error| error.to_string())?;
+            std::fs::write(&path, bytes).map_err(|error| error.to_string())
+        },
+    );
+
+    assert_eq!(
+        result.unwrap_err(),
+        "receipt write failed; cleanup remains tracked"
+    );
+    let saved: Vec<ManagedAgentRecord> = serde_json::from_slice(
+        &std::fs::read(path).expect("durable managed-agent recovery readback"),
+    )
+    .expect("parse durable managed-agent recovery state");
+    assert_eq!(saved[0].runtime_pid, Some(4242));
+    assert_eq!(
+        saved[0].last_error.as_deref(),
+        Some("receipt write failed; cleanup remains tracked")
+    );
+}
+
+#[test]
+fn failed_local_start_reports_recovery_persistence_failure() {
+    let records = Vec::<ManagedAgentRecord>::new();
+    let result: Result<(), String> =
+        persist_failed_local_start(&records, "receipt write failed".to_string(), |_| {
+            Err("disk unavailable".to_string())
+        });
+
+    assert_eq!(
+        result.unwrap_err(),
+        "receipt write failed; failed to persist start recovery state: disk unavailable"
+    );
+}

@@ -26,9 +26,13 @@ pub(crate) use metadata::{
     SESSION_TITLE_ENV_VAR,
 };
 
+pub(crate) mod receipt_failure;
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
-pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
+pub use stop::{
+    persist_failed_stop, persist_stop, stop_managed_agent_process,
+    stop_managed_agent_workspace_pair,
+};
 
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
@@ -44,6 +48,11 @@ use process::{
 pub(crate) use process::{
     current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
     terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+};
+#[cfg(all(test, windows))]
+use process::{
+    persisted_windows_receipt_can_retire, persisted_windows_receipt_for_pair,
+    persisted_windows_receipt_matches,
 };
 
 mod orphan_sweep;
@@ -66,9 +75,9 @@ use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 // Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
-#[cfg(test)]
-use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
+#[cfg(test)]
+pub(crate) use lifecycle::{kill_stale_tracked_processes_with, sync_managed_agent_processes_with};
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
@@ -889,24 +898,6 @@ pub fn spawn_agent_child(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    // Windows: suppress the harness console window. Without this a bare
-    // terminal pops for buzz-acp.exe and lingers (the app itself sets
-    // windows_subsystem="windows", but the spawned child does not inherit it).
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let child = command.spawn().map_err(|error| {
-        format!(
-            "failed to spawn `{}` for agent {}: {error}",
-            resolved_acp_command.display(),
-            record.name
-        )
-    })?;
-
     // Stamp the effective spawn config so the summary builder can flag
     // needs_restart when disk state drifts from what this process runs.
     // `effective_relay_url` is already resolved, and resolution is idempotent,
@@ -934,19 +925,23 @@ pub fn spawn_agent_child(
     };
 
     // Receipt persistence belongs to the caller's atomic register transition.
-
-    // Windows: assign the harness to a Job Object so its whole tree dies with
-    // the handle. The Unix process-group equivalent is set above.
     #[cfg(windows)]
-    return Ok(super::process_lifecycle::finish_spawn(
-        child,
+    return super::process_lifecycle::spawn_managed_agent_process(
+        command,
         log_path,
         spawn_config_hash,
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
-        &record.name,
-    ));
+    );
+    #[cfg(not(windows))]
+    let child = command.spawn().map_err(|error| {
+        format!(
+            "failed to spawn `{}` for agent {}: {error}",
+            resolved_acp_command.display(),
+            record.name
+        )
+    })?;
     #[cfg(not(windows))]
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,
@@ -981,43 +976,43 @@ pub fn start_managed_agent_process(
         )
     };
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)?;
+    super::ensure_recovery_admission(app, record, &key)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
-        if runtime
+        match runtime
             .child
             .try_wait()
             .map_err(|error| format!("failed to inspect running process: {error}"))?
-            .is_none()
         {
-            return Ok(());
+            None => return Ok(()),
+            Some(_) => {
+                #[cfg(windows)]
+                super::process_lifecycle::finalize_tracked_runtime(app, &key, runtime)?;
+                #[cfg(not(windows))]
+                super::remove_agent_runtime_receipt(app, &key)?;
+            }
         }
-
         runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(app, &key);
     }
+    super::terminate_untracked_pair_runtime(app, &key)?;
 
-    // Scalar PIDs are migration-only and never establish pair liveness.
-    record.runtime_pid = None;
-
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    let process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(app),
         started_at: now.clone(),
+        windows_job_contained: super::process_has_windows_job(&process),
     };
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
-        let _ = terminate_process(process.child.id());
-        let _ = process.child.wait();
-        return Err(error);
+        return receipt_failure::cleanup(app, process, record, runtimes, key, now, error);
     }
 
     record.updated_at = now.clone();
     record.last_started_at = Some(now);
     record.last_stopped_at = None;
     record.last_exit_code = None;
-    record.last_error = None;
-    record.last_error_code = None;
+    receipt_failure::clear_error_after_verified_start(record);
 
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())

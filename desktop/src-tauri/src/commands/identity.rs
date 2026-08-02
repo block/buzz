@@ -541,10 +541,12 @@ pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
         );
     }
 
-    // Stop all managed agents before restart so they don't race the wipe.
-    if let Err(e) = crate::shutdown::shutdown_managed_agents(&app) {
-        eprintln!("buzz-desktop sign-out: agent shutdown: {e}");
-    }
+    // Stop all managed agents before restart so they don't race the wipe. A
+    // failed bounded cleanup must block sentinel creation/restart; otherwise a
+    // second boot can destroy the remaining recovery identity.
+    crate::shutdown::shutdown_managed_agents(&app).map_err(|error| {
+        format!("sign out blocked because managed agents did not stop: {error}")
+    })?;
 
     // Write the reset sentinel — destruction happens on next boot.
     let data_dir = app

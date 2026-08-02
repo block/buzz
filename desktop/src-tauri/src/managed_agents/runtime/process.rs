@@ -425,12 +425,12 @@ pub(super) fn terminate_runtime_receipt_with(
     receipt: &super::super::ManagedAgentRuntimeReceipt,
     terminate: impl FnOnce(u32) -> Result<(), String>,
     mut is_running: impl FnMut(u32) -> bool,
-    remove: impl FnOnce(&std::path::Path),
+    remove: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> Result<(), String> {
     terminate(receipt.pid)?;
     for _ in 0..20 {
         if !is_running(receipt.pid) {
-            remove(path);
+            remove(path)?;
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -445,20 +445,85 @@ pub(super) fn terminate_runtime_receipt_with(
 /// the same pair. The caller must hold the runtime transition lock so receipt
 /// inspection, termination, spawn, and registration cannot race shutdown or
 /// another start.
+#[cfg(windows)]
+pub(super) fn persisted_windows_receipt_matches(
+    path: &std::path::Path,
+    receipt: &super::super::ManagedAgentRuntimeReceipt,
+    key: &ManagedAgentRuntimeKey,
+) -> bool {
+    receipt.key == *key
+        && ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), &receipt.key.relay_url)
+            .is_ok_and(|canonical| canonical == receipt.key)
+        && path.file_name().and_then(|name| name.to_str())
+            == Some(&format!("{}.json", key.runtime_id()))
+}
+
+#[cfg(windows)]
+pub(super) fn persisted_windows_receipt_can_retire(
+    receipt: &super::super::ManagedAgentRuntimeReceipt,
+) -> Result<bool, String> {
+    if receipt.windows_job_contained {
+        return Ok(true);
+    }
+    processkit::process_is_alive(receipt.pid, None)
+        .map(|alive| !alive)
+        .map_err(|error| {
+            format!(
+                "cannot inspect legacy runtime PID {} for pair {} on {}: {error}",
+                receipt.pid, receipt.key.pubkey, receipt.key.relay_url
+            )
+        })
+}
+
+#[cfg(windows)]
+pub(super) fn persisted_windows_receipt_for_pair(
+    receipts: Result<Vec<(std::path::PathBuf, super::super::ManagedAgentRuntimeReceipt)>, String>,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<Option<(std::path::PathBuf, super::super::ManagedAgentRuntimeReceipt)>, String> {
+    Ok(receipts?
+        .into_iter()
+        .find(|(path, receipt)| persisted_windows_receipt_matches(path, receipt, key)))
+}
+
 pub(crate) fn terminate_untracked_pair_runtime(
     app: &AppHandle,
     key: &ManagedAgentRuntimeKey,
 ) -> Result<(), String> {
+    #[cfg(not(windows))]
     let instance_id = current_instance_id(app);
-    let Some((path, receipt)) = super::super::read_all_agent_runtime_receipts(app)
+    #[cfg(windows)]
+    let receipt = persisted_windows_receipt_for_pair(
+        super::super::read_all_agent_runtime_receipts(app),
+        key,
+    )?;
+    #[cfg(not(windows))]
+    let receipt = super::super::read_all_agent_runtime_receipts(app)?
         .into_iter()
         .find(|(path, receipt)| {
             receipt.key == *key && valid_agent_runtime_receipt(path, receipt, &instance_id)
-        })
-    else {
+        });
+    let Some((path, receipt)) = receipt else {
         return Ok(());
     };
 
+    #[cfg(windows)]
+    {
+        // Receipts from this generation prove mandatory kill-on-close Job
+        // containment, so loss of the owning process also proves closure of that
+        // Job handle. Legacy receipts carry no such proof: retire them only after
+        // read-only liveness inspection proves their recorded PID is absent. A
+        // live or uninspectable legacy PID blocks replacement; it is never kill
+        // authority.
+        if !persisted_windows_receipt_can_retire(&receipt)? {
+            return Err(format!(
+                "legacy runtime PID {} for pair {} on {} is still live; refusing numeric-PID termination",
+                receipt.pid, receipt.key.pubkey, receipt.key.relay_url
+            ));
+        }
+        super::super::remove_agent_runtime_receipt_path(&path)
+    }
+
+    #[cfg(not(windows))]
     terminate_runtime_receipt_with(
         &path,
         &receipt,

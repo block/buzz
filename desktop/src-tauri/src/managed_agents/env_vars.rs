@@ -91,6 +91,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Internal launcher envelope. Only the desktop may construct these.
+    "BUZZ_MANAGED_LAUNCH_PROGRAM_WIDE",
+    "BUZZ_MANAGED_LAUNCH_ARGS_WIDE",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

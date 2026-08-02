@@ -1,14 +1,14 @@
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
 
+use crate::managed_agents::mesh_preflight::verify_relay_mesh_preflight;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        build_managed_agent_summary, discover_provider_candidates, ensure_persona_is_active,
+        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
+        normalize_agent_args, provider_deploy, resolve_provider_binary, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
         ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
@@ -201,51 +201,6 @@ pub(super) fn archive_managed_agent_pending(app: &AppHandle, state: &AppState, a
     }
 }
 
-fn normalize_relay_mesh(
-    config: Option<&RelayMeshConfig>,
-    backend: &BackendKind,
-) -> Result<Option<RelayMeshConfig>, String> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let model_ref = config.model_ref.trim();
-    if model_ref.is_empty() {
-        return Err("Buzz shared compute model is required".to_string());
-    }
-    if backend != &BackendKind::Local {
-        return Err("Buzz shared compute agents must use the local backend".to_string());
-    }
-
-    Ok(Some(RelayMeshConfig {
-        model_ref: model_ref.to_string(),
-    }))
-}
-
-fn trim_to_optional_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn resolve_created_avatar_url(
-    requested_avatar_url: Option<&str>,
-    persona_avatar_url: Option<String>,
-    agent_command: &str,
-) -> Option<String> {
-    requested_avatar_url
-        .and_then(trim_to_optional_string)
-        .or_else(|| {
-            persona_avatar_url
-                .as_deref()
-                .and_then(trim_to_optional_string)
-        })
-        .or_else(|| managed_agent_avatar_url(agent_command))
-}
-
 #[cfg(feature = "mesh-llm")]
 async fn ensure_relay_mesh_for_record(
     app: &AppHandle,
@@ -264,13 +219,12 @@ async fn ensure_relay_mesh_for_record(
     Ok(())
 }
 
-pub(super) async fn start_local_agent_pairs_with_preflight(
+pub(super) async fn preflight_local_agent_pairs(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
-    relay_urls: &[String],
-) -> Result<ManagedAgentSummary, String> {
-    let record_snapshot = {
+) -> Result<Option<String>, String> {
+    let record = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -280,20 +234,27 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?
     };
-    if record_snapshot.backend != BackendKind::Local {
+    if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is not a local agent"));
     }
-    let personas_for_preflight = load_personas(app).unwrap_or_default();
-    let global_for_preflight =
-        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let personas = load_personas(app).unwrap_or_default();
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let mesh_model_id =
         crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
-            &record_snapshot,
-            &personas_for_preflight,
-            &global_for_preflight,
+            &record, &personas, &global,
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false).await?;
+    Ok(mesh_model_id)
+}
 
+pub(super) fn start_local_agent_pairs_under_transition(
+    app: &AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    relay_urls: &[String],
+    mesh_model_id: &Option<String>,
+    transition: &std::sync::MutexGuard<'_, ()>,
+) -> Result<ManagedAgentSummary, String> {
     {
         let _store_guard = state
             .managed_agents_store_lock
@@ -308,6 +269,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
                 record.updated_at = crate::util::now_iso();
             }
         }
+        verify_relay_mesh_preflight(app, record, &personas, mesh_model_id, "restart")?;
         save_managed_agents(app, &records)?;
         if let Some(saved_record) = records.iter().find(|record| record.pubkey == pubkey) {
             retain_managed_agent_pending(app, state, saved_record);
@@ -316,11 +278,14 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
 
     let mut errors = Vec::new();
     for relay_url in relay_urls {
-        if let Err(error) = crate::managed_agents::start_managed_agent_runtime_pair_lazy(
-            pubkey.to_string(),
-            relay_url.clone(),
-            app.clone(),
-        ) {
+        if let Err(error) =
+            crate::managed_agents::start_managed_agent_runtime_pair_lazy_under_transition(
+                pubkey.to_string(),
+                relay_url.clone(),
+                transition,
+                app.clone(),
+            )
+        {
             errors.push(format!("{relay_url}: {error}"));
         }
     }
@@ -353,7 +318,6 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
     )
 }
-
 pub(super) async fn start_local_agent_with_preflight(
     app: &AppHandle,
     state: &AppState,
@@ -395,6 +359,14 @@ pub(super) async fn start_local_agent_with_preflight(
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
 
+    let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(state)?;
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err("desktop shutdown has started".into());
+    }
+
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -429,7 +401,14 @@ pub(super) async fn start_local_agent_with_preflight(
             }
         }
     }
-    start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex))?;
+    verify_relay_mesh_preflight(app, record, &personas, &mesh_model_id, "start")?;
+    if let Err(start_error) =
+        start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex))
+    {
+        return persist_failed_local_start(&records, start_error, |records| {
+            save_managed_agents(app, records)
+        });
+    }
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
         retain_managed_agent_pending(app, state, saved_record);
@@ -525,6 +504,7 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -536,12 +516,12 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
             .map_err(|error| error.to_string())?;
 
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         let personas = load_personas(&app).unwrap_or_default();
@@ -607,6 +587,7 @@ pub async fn create_managed_agent(
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -618,12 +599,12 @@ pub async fn create_managed_agent(
             .map_err(|error| error.to_string())?;
 
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
         if let Some(persona_id) = requested_persona_id.as_deref() {
             let personas = load_personas(&app)?;
@@ -678,6 +659,7 @@ pub async fn create_managed_agent(
 
     // ── Phase 3: save record (sync lock) ───────────────────────────────────────
     let (agent, resolved_avatar_url) = {
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -689,12 +671,12 @@ pub async fn create_managed_agent(
             .map_err(|error| error.to_string())?;
 
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         // Guard against a duplicate pubkey appearing between phase 1 and phase 3
@@ -946,6 +928,8 @@ pub async fn create_managed_agent(
         match start_local_agent_with_preflight(&app, &state, &pubkey, &owner_hex, true).await {
             Ok(agent) => agent,
             Err(error) => {
+                let _transition =
+                    crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
                 let _store_guard = state
                     .managed_agents_store_lock
                     .lock()
@@ -1083,6 +1067,7 @@ pub async fn start_managed_agent(
     // Collect backend info under lock; async preflight/spawn happens below.
     // Also snapshot profile reconciliation data for the background task.
     let (target, reconcile_data) = {
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -1094,12 +1079,12 @@ pub async fn start_managed_agent(
             .map_err(|error| error.to_string())?;
 
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
@@ -1220,6 +1205,7 @@ pub async fn stop_managed_agent(
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -1231,12 +1217,12 @@ pub async fn stop_managed_agent(
             .map_err(|error| error.to_string())?;
 
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         {
@@ -1250,7 +1236,12 @@ pub async fn stop_managed_agent(
             }
             // Pair-scoped: stops only the active workspace's pair; delete and
             // the config-restart flows still drain every pair.
-            stop_managed_agent_workspace_pair(&app, record, &mut runtimes)?;
+            if let Err(stop_error) = stop_managed_agent_workspace_pair(&app, record, &mut runtimes)
+            {
+                return crate::managed_agents::persist_failed_stop(stop_error, || {
+                    save_managed_agents(&app, &records)
+                });
+            }
         }
         save_managed_agents(&app, &records)?;
         let record = records
@@ -1281,6 +1272,7 @@ pub async fn delete_managed_agent(
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         {
             let _store_guard = state
                 .managed_agents_store_lock
@@ -1292,16 +1284,13 @@ pub async fn delete_managed_agent(
                 .lock()
                 .map_err(|error| error.to_string())?;
 
-            let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-                &mut records,
-                &mut runtimes,
-                &current_instance_id(&app),
-            );
+            let (sync_changed, exited_pubkeys) =
+                sync_managed_agent_processes(&app, &mut records, &mut runtimes);
             if sync_changed {
                 save_managed_agents(&app, &records)?;
             }
-            for pubkey in &exited_pubkeys {
-                state.clear_agent_session_caches(pubkey);
+            for key in &exited_pubkeys {
+                state.clear_agent_session_caches(&key.pubkey);
             }
 
             // Guard: reject deletion of deployed remote agents unless explicitly forced.
@@ -1322,7 +1311,11 @@ pub async fn delete_managed_agent(
             }
 
             if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
-                stop_managed_agent_process(&app, record, &mut runtimes)?;
+                if let Err(stop_error) = stop_managed_agent_process(&app, record, &mut runtimes) {
+                    return crate::managed_agents::persist_failed_stop(stop_error, || {
+                        save_managed_agents(&app, &records)
+                    });
+                }
             }
             state.clear_agent_session_caches(&pubkey);
             let initial_len = records.len();
@@ -1355,6 +1348,13 @@ pub async fn delete_managed_agent(
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
 // 3. Desktop's existing presence polling sees "offline" — UI updates automatically
 // No backend Tauri command needed. Presence IS the status.
+
+#[path = "agents_helpers.rs"]
+mod helpers;
+use helpers::{
+    normalize_relay_mesh, persist_failed_local_start, resolve_created_avatar_url,
+    trim_to_optional_string,
+};
 
 #[path = "agents_deploy.rs"]
 mod deploy;

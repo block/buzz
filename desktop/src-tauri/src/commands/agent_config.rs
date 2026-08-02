@@ -1,6 +1,3 @@
-use serde::Serialize;
-use tauri::{AppHandle, State};
-
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -12,12 +9,14 @@ use crate::{
                 NormalizedField, RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
+        known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
         ManagedAgentRuntimeKey,
     },
 };
+use serde::Serialize;
+use tauri::{AppHandle, State};
 
 /// Subset of the goose file config exposed to the frontend for gate evaluation.
 ///
@@ -349,6 +348,7 @@ pub async fn get_agent_config_surface(
     state: State<'_, AppState>,
 ) -> Result<RuntimeConfigSurface, String> {
     let record = {
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -359,12 +359,12 @@ pub async fn get_agent_config_surface(
             .lock()
             .map_err(|e| e.to_string())?;
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
         records
             .into_iter()

@@ -4,9 +4,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, find_managed_agent_mut,
-        load_managed_agents, load_personas, save_managed_agents, sync_managed_agent_processes,
-        ManagedAgentSummary,
+        build_managed_agent_summary, find_managed_agent_mut, load_managed_agents, load_personas,
+        save_managed_agents, sync_managed_agent_processes, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -26,6 +25,7 @@ pub async fn set_managed_agent_start_on_app_launch(
 ) -> Result<ManagedAgentSummary, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -37,12 +37,12 @@ pub async fn set_managed_agent_start_on_app_launch(
             .map_err(|error| error.to_string())?;
 
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         {
@@ -77,6 +77,7 @@ pub async fn set_managed_agent_auto_restart(
 ) -> Result<ManagedAgentSummary, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _transition = crate::managed_agents::lock_managed_agent_runtime_transition(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -88,12 +89,12 @@ pub async fn set_managed_agent_auto_restart(
             .map_err(|error| error.to_string())?;
 
         let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
+        for key in &exited_pubkeys {
+            state.clear_agent_session_caches(&key.pubkey);
         }
 
         {
