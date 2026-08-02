@@ -144,3 +144,10 @@ tokio = { version = "1", features = ["test-util"] }
 # The relay's media validation, so the snapshot-sharing tests can prove the
 # full export → sanitize → relay-accept → import contract end to end.
 buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
+
+# The desktop crate is an excluded Cargo workspace, so it needs the same
+# immutable 0.44 security patch as the repository root.
+[patch.crates-io]
+nostr = { git = "https://github.com/nostrdevkit/nostr", rev = "94dac28e9a718d853170308aeb551b1ebf89a0d0" }
+nostr-database = { git = "https://github.com/nostrdevkit/nostr", rev = "94dac28e9a718d853170308aeb551b1ebf89a0d0" }
+nostr-relay-pool = { git = "https://github.com/nostrdevkit/nostr", rev = "94dac28e9a718d853170308aeb551b1ebf89a0d0" }
