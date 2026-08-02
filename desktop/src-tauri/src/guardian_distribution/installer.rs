@@ -15,9 +15,7 @@ pub(crate) async fn install_current(
 ) -> Result<(), String> {
     let manifest = builtin_manifest()?;
     let artifact = manifest.artifact_for(std::env::consts::OS, std::env::consts::ARCH)?;
-    fs::create_dir_all(component_root)
-        .map_err(|error| format!("create Guardian component store: {error}"))?;
-    restrict_directory(component_root)?;
+    create_restricted_directory(component_root, "component store")?;
 
     let token = uuid::Uuid::new_v4().simple().to_string();
     let archive_path = component_root.join(format!(".download-{token}"));
@@ -34,11 +32,14 @@ pub(crate) async fn install_current(
             activate_receipt(component_root, &receipt_path)?;
             return Ok(());
         }
-        if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create Guardian version store: {error}"))?;
-            restrict_directory(parent)?;
-        }
+        let versions_root = component_root.join("versions");
+        create_restricted_directory(&versions_root, "version store")?;
+        let version_root = versions_root.join(&manifest.version);
+        create_restricted_directory(&version_root, "version directory")?;
+        let parent = final_path
+            .parent()
+            .ok_or("Guardian target has no version directory")?;
+        ensure_existing_directory(parent, "version directory")?;
 
         let mut archive = create_private_file(&archive_path)?;
         fetch_verified_artifact_to(artifact, &mut archive).await?;
@@ -112,6 +113,31 @@ fn restrict_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn create_restricted_directory(path: &Path, label: &str) -> Result<(), String> {
+    if path.exists() {
+        ensure_existing_directory(path, label)?;
+    } else {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("Guardian {label} has no parent directory"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create Guardian {label} parent: {error}"))?;
+        ensure_existing_directory(parent, &format!("{label} parent"))?;
+        fs::create_dir(path).map_err(|error| format!("create Guardian {label}: {error}"))?;
+        ensure_existing_directory(path, label)?;
+    }
+    restrict_directory(path)
+}
+
+fn ensure_existing_directory(path: &Path, label: &str) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("inspect Guardian {label}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("Guardian {label} is not a real directory"));
+    }
+    Ok(())
+}
+
 fn make_binary_executable(path: &PathBuf) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -139,5 +165,29 @@ mod tests {
         assert_eq!(receipt.target, "integration-target");
         assert!(binary.is_file());
         assert!(!root.path().join(".stage-orphan").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_store_rejects_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let component_root = parent.path().join("components");
+        symlink(outside.path(), &component_root).unwrap();
+        assert!(
+            create_restricted_directory(&component_root, "component store")
+                .unwrap_err()
+                .contains("not a real directory")
+        );
+
+        fs::remove_file(&component_root).unwrap();
+        create_restricted_directory(&component_root, "component store").unwrap();
+        let versions = component_root.join("versions");
+        symlink(outside.path(), &versions).unwrap();
+        assert!(create_restricted_directory(&versions, "version store")
+            .unwrap_err()
+            .contains("not a real directory"));
     }
 }
