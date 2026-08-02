@@ -577,10 +577,45 @@ pub async fn dispatch_action(
             })))
         }
 
-        SendDm { to, text: _ } => {
-            warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-            // TODO (WF-07): emit DM event.
-            Err(WorkflowError::NotImplemented("SendDm".into()))
+        SendDm { to, text } => {
+            let wf_run = engine
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendDm: failed to load workflow run {run_id}: {e}"
+                    ))
+                })?;
+            let workflow = engine
+                .db
+                .get_workflow(community_id, wf_run.workflow_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendDm: failed to load workflow {}: {e}",
+                        wf_run.workflow_id
+                    ))
+                })?;
+            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+            info!(
+                run_id = %run_id,
+                step = step_id,
+                recipient = %to,
+                "SendDm: delivering workflow DM"
+            );
+
+            let event_id = engine
+                .action_sink()?
+                .send_dm(community_id, to, text, &owner_pubkey_hex)
+                .await
+                .map_err(WorkflowError::from)?;
+
+            Ok(StepResult::Completed(serde_json::json!({
+                "sent": true,
+                "event_id": event_id,
+            })))
         }
 
         SetChannelTopic { topic: _ } => {

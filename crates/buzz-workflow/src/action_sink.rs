@@ -66,4 +66,20 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Send a direct message to one relay member on behalf of a workflow owner.
+    ///
+    /// The relay creates or reuses its two-party automation DM with
+    /// `recipient_pubkey`, signs the message with the relay key, and carries the
+    /// workflow owner in an `actor` attribution tag. The recipient is always
+    /// explicitly `p`-tagged so mention-gated agent runtimes can wake reliably.
+    ///
+    /// Returns the event ID hex string on success.
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
