@@ -1973,10 +1973,25 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes for most kinds
+    // NIP-59 instructs gift-wrap (kind 1059) clients to randomize `created_at`
+    // into the past — canonically up to two days — to thwart time-analysis
+    // attacks. Applying the tight ±15 min freshness window to the outer wrap
+    // rejects every spec-following NIP-17 DM. The wrap's timestamp is
+    // deliberately meaningless for ordering or retention, and the inner
+    // seal/rumor timestamps are end-to-end encrypted, so a wider window is
+    // safe here. We still bound it (2 days + 15 min skew) to reject
+    // implausibly stale wraps rather than skipping the check altogether.
+    // See block/buzz#4192.
+    const MAX_GIFT_WRAP_TIMESTAMP_DRIFT_SECS: i64 = 2 * 24 * 60 * 60 + 900;
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    let max_drift_secs = if kind_u32 == KIND_GIFT_WRAP {
+        MAX_GIFT_WRAP_TIMESTAMP_DRIFT_SECS
+    } else {
+        MAX_TIMESTAMP_DRIFT_SECS
+    };
+    if (event_ts - now).abs() > max_drift_secs {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
