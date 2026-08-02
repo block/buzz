@@ -64,6 +64,7 @@ user-idle = { version = "0.6", default-features = false }
 [dependencies]
 atomic-write-file = "0.3"
 anyhow = "1"
+cap-std = "3"
 dirs = "6"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-deep-link = "2"

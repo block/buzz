@@ -26,6 +26,40 @@ export type NumbatFindingBatch = {
   findings: NumbatFinding[];
 };
 
+export type GuardianNumbatStatus = {
+  state: "not_active" | "active" | "tampered" | "error";
+  provenance: "none" | "external_unmanaged" | "buzz_managed";
+  version: string | null;
+  digestSuffix: string | null;
+  rollbackAvailable: boolean;
+  target: string;
+  detail: string;
+};
+
+export function getGuardianNumbatStatus(): Promise<GuardianNumbatStatus> {
+  return invokeTauri<GuardianNumbatStatus>("get_guardian_numbat_status");
+}
+
+export function activateGuardianNumbat(): Promise<GuardianNumbatStatus> {
+  return invokeTauri<GuardianNumbatStatus>("activate_guardian_numbat");
+}
+
+export function installGuardianNumbat(): Promise<GuardianNumbatStatus> {
+  return invokeTauri<GuardianNumbatStatus>("install_guardian_numbat");
+}
+
+export function deactivateGuardianNumbat(): Promise<GuardianNumbatStatus> {
+  return invokeTauri<GuardianNumbatStatus>("deactivate_guardian_numbat");
+}
+
+export function rollbackGuardianNumbat(): Promise<GuardianNumbatStatus> {
+  return invokeTauri<GuardianNumbatStatus>("rollback_guardian_numbat");
+}
+
+export function uninstallGuardianNumbat(): Promise<GuardianNumbatStatus> {
+  return invokeTauri<GuardianNumbatStatus>("uninstall_guardian_numbat");
+}
+
 export function readNumbatFindings(
   agentPubkey: string,
   offset: number,

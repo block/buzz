@@ -83,3 +83,44 @@ fn activation_requires_a_valid_record_after_configuration_baseline() {
     assert!(!is_post_configuration_finding(unseen_agent, 11, 900, true));
     assert!(is_post_configuration_finding(unseen_agent, 11, 901, true));
 }
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_hook_commands_carry_buzz_ownership_and_uninstall_before_deletion() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("commands.log");
+    let binary = dir.path().join("numbat");
+    std::fs::write(
+        &binary,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+    )
+    .expect("write fake numbat");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+        .expect("make fake numbat executable");
+    let findings = dir.path().join("findings.ndjson");
+
+    run_numbat_hook_admin(
+        &binary,
+        "install",
+        "codex",
+        Some(&findings),
+        Duration::from_secs(2),
+    )
+    .expect("install hook");
+    run_numbat_hook_admin(&binary, "uninstall", "codex", None, Duration::from_secs(2))
+        .expect("uninstall hook");
+
+    let commands = std::fs::read_to_string(log).expect("read command log");
+    let mut lines = commands.lines();
+    let install = lines.next().expect("install command");
+    assert!(install.starts_with("hook install --agent codex"));
+    assert!(install.contains("--installed-by buzz-guardian"));
+    assert!(install.contains(findings.to_str().expect("utf-8 findings path")));
+    assert_eq!(
+        lines.next(),
+        Some("hook uninstall --agent codex"),
+        "uninstall must use the still-present verified binary"
+    );
+}

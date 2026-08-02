@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz buzz-guardian-numbat)
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 TARGET=${1:-$HOST}
 if [[ "$TARGET" != *windows* ]]; then
@@ -36,6 +36,7 @@ done
 if [[ ${#missing[@]} -gt 0 ]]; then
     echo "Error: missing release binaries in $SRC_DIR: ${missing[*]}" >&2
     echo "Run '$BUILD_HINT' first." >&2
+    echo "Build Guardian with 'cargo build --release --manifest-path desktop/src-tauri/Cargo.toml --bin buzz-guardian-numbat'." >&2
     exit 1
 fi
 

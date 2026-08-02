@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "manifest_sequence": 1,
+  "component": "numbat",
+  "version": "0.1.2",
+  "cli_version": "0.1.2",
+  "record_schema_version": "0.2.0",
+  "source": {
+    "repository": "https://github.com/perplexityai/numbat",
+    "tag": "v0.1.2",
+    "commit": "0e41ad66f5557f412eae330576271f2ee809d3de",
+    "release_url": "https://github.com/perplexityai/numbat/releases/tag/v0.1.2",
+    "workflow_run_url": "https://github.com/perplexityai/numbat/actions/runs/30680582672",
+    "upstream_attestation": null
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "path": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "notice_path": "THIRD_PARTY_LICENSES.txt",
+    "notice_sha256": "6b5caea18bb8bd059d20ab81a8a4375fefc356e5b135f68be5176e66180f4e81"
+  },
+  "limits": {
+    "max_entries": 128,
+    "max_expanded_size": 33554432,
+    "max_single_file_size": 25165824,
+    "max_compression_ratio": 20
+  },
+  "artifacts": [
+    {
+      "os": "darwin",
+      "arch": "amd64",
+      "archive_kind": "tar_gz",
+      "asset_name": "numbat_0.1.2_darwin_amd64.tar.gz",
+      "url": "https://github.com/perplexityai/numbat/releases/download/v0.1.2/numbat_0.1.2_darwin_amd64.tar.gz",
+      "archive_sha256": "94de3d45733463097415d19de8af7ff34746fc26c5a34f21bccf37047e30d5d1",
+      "archive_size": 7590438,
+      "expanded_size": 20915042,
+      "binary_path": "numbat",
+      "binary_sha256": "d5f6f50ca649f3cf47f30c74438f92ed5c955390bbedc79df29b60b74d406c5a",
+      "binary_size": 20382400
+    },
+    {
+      "os": "darwin",
+      "arch": "arm64",
+      "archive_kind": "tar_gz",
+      "asset_name": "numbat_0.1.2_darwin_arm64.tar.gz",
+      "url": "https://github.com/perplexityai/numbat/releases/download/v0.1.2/numbat_0.1.2_darwin_arm64.tar.gz",
+      "archive_sha256": "02e50942008fa045b4c25a214789d584cf40e500e61fe0be2981e53acfa49a2a",
+      "archive_size": 7052756,
+      "expanded_size": 19678548,
+      "binary_path": "numbat",
+      "binary_sha256": "45d89f9cd324a16fadb1680edade192451d7067060205b1db373fef0efe101bf",
+      "binary_size": 19145906
+    },
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "archive_kind": "tar_gz",
+      "asset_name": "numbat_0.1.2_linux_amd64.tar.gz",
+      "url": "https://github.com/perplexityai/numbat/releases/download/v0.1.2/numbat_0.1.2_linux_amd64.tar.gz",
+      "archive_sha256": "973da3b75c25aa7a671505a20a7f0dd5e21dd14da625dc05d4807982047b143c",
+      "archive_size": 7455721,
+      "expanded_size": 20472132,
+      "binary_path": "numbat",
+      "binary_sha256": "34fb0aee9e2e173e7597229b8530821ead897db288927ec80f768c60119cca37",
+      "binary_size": 19939490
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "archive_kind": "tar_gz",
+      "asset_name": "numbat_0.1.2_linux_arm64.tar.gz",
+      "url": "https://github.com/perplexityai/numbat/releases/download/v0.1.2/numbat_0.1.2_linux_arm64.tar.gz",
+      "archive_sha256": "56c2211ab431028ffa3ab10ca49e511cc3005afc3e3a20d518a3b6a2dc7659d4",
+      "archive_size": 6769488,
+      "expanded_size": 19210564,
+      "binary_path": "numbat",
+      "binary_sha256": "9246a5df6bd6d6960a3c82e8a5f84875d69a0314f5df1d64f716f66f285dc097",
+      "binary_size": 18677922
+    },
+    {
+      "os": "windows",
+      "arch": "amd64",
+      "archive_kind": "zip",
+      "asset_name": "numbat_0.1.2_windows_amd64.zip",
+      "url": "https://github.com/perplexityai/numbat/releases/download/v0.1.2/numbat_0.1.2_windows_amd64.zip",
+      "archive_sha256": "175f5e69b7eb316c81a07380802e72e2ddb246e0628caa7bf24c5dfef9200668",
+      "archive_size": 7719900,
+      "expanded_size": 21098658,
+      "binary_path": "numbat.exe",
+      "binary_sha256": "d4589b70c1ce79c8702358543a847a054aee089f6e9ff6ebc4b0ecbb39e92cf9",
+      "binary_size": 20566016
+    },
+    {
+      "os": "windows",
+      "arch": "arm64",
+      "archive_kind": "zip",
+      "asset_name": "numbat_0.1.2_windows_arm64.zip",
+      "url": "https://github.com/perplexityai/numbat/releases/download/v0.1.2/numbat_0.1.2_windows_arm64.zip",
+      "archive_sha256": "6cf0f632e50f70911bf8175e785d9e6d75216015bf2fdefc0b3229ebf79a316e",
+      "archive_size": 6898761,
+      "expanded_size": 19458210,
+      "binary_path": "numbat.exe",
+      "binary_sha256": "ae048764e8cac62d3548a1e267bff80e2b207cb2bebc4ac7723973bd0e63cf20",
+      "binary_size": 18925568
+    }
+  ]
+}

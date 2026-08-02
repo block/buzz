@@ -13,6 +13,9 @@ use tauri::AppHandle;
 
 use crate::managed_agents::{atomic_write_json_restricted, managed_agents_base_dir};
 
+mod managed_binary;
+use managed_binary::select_numbat_binary_for_app;
+
 const NUMBAT_SCHEMA_VERSION: &str = "0.2.0";
 const MAX_BATCH_BYTES: u64 = 1024 * 1024;
 const MAX_BACKLOG_BYTES: u64 = 4 * 1024 * 1024;
@@ -538,6 +541,7 @@ fn run_numbat_install(
             "--output-file",
         ])
         .arg(findings)
+        .args(["--installed-by", "buzz-guardian"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -568,6 +572,88 @@ fn run_numbat_install(
     }
 }
 
+fn run_numbat_hook_admin(
+    binary: &Path,
+    action: &str,
+    runtime: &str,
+    findings: Option<&Path>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut command = Command::new(binary);
+    command.args(["hook", action, "--agent", runtime]);
+    if action == "install" {
+        let findings = findings.ok_or("Guardian hook install requires a findings path")?;
+        command
+            .args(["--emit", "findings", "--output", "file", "--output-file"])
+            .arg(findings)
+            .args(["--installed-by", "buzz-guardian"]);
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to {action} Numbat {runtime} hook: {error}"))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "Numbat hook {action} for {runtime} exited with {status}"
+                ));
+            }
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Numbat hook {action} for {runtime} timed out after {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "failed to wait for Numbat hook {action} for {runtime}: {error}"
+                ));
+            }
+        }
+    }
+}
+
+pub(crate) fn reconcile_managed_numbat_hooks(app: &AppHandle, binary: &Path) -> Result<(), String> {
+    let findings = numbat_findings_template(app)?;
+    let lock = NUMBAT_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Numbat installation lock is unavailable".to_string())?;
+    for runtime in ["codex", "claude", "goose"] {
+        run_numbat_hook_admin(
+            binary,
+            "install",
+            runtime,
+            Some(&findings),
+            NUMBAT_INSTALL_TIMEOUT,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn uninstall_managed_numbat_hooks(binary: &Path) -> Result<(), String> {
+    let lock = NUMBAT_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Numbat installation lock is unavailable".to_string())?;
+    for runtime in ["codex", "claude", "goose"] {
+        run_numbat_hook_admin(binary, "uninstall", runtime, None, NUMBAT_INSTALL_TIMEOUT)?;
+    }
+    Ok(())
+}
+
 /// Idempotently attach Numbat's monitor-only callbacks outside the managed
 /// runtime's spawn critical path. Numbat is callback-based (not a daemon), so
 /// lifecycle management means keeping the hook and its local sink healthy.
@@ -576,16 +662,35 @@ fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str)
         "codex" | "claude" | "goose" => runtime,
         _ => return,
     };
-    let Some(binary) = crate::managed_agents::resolve_command("numbat") else {
-        write_health(
-            app,
-            agent_pubkey,
-            &NumbatGuardianHealth {
-                state: "unsupported".into(),
-                detail: "Numbat is not installed on this device.".into(),
-            },
-        );
-        return;
+    let binary = match select_numbat_binary_for_app(app) {
+        Ok(Some(binary)) => binary,
+        Ok(None) => {
+            write_health(
+                app,
+                agent_pubkey,
+                &NumbatGuardianHealth {
+                    state: "unsupported".into(),
+                    detail: "Numbat is not installed on this device.".into(),
+                },
+            );
+            return;
+        }
+        Err(detail) => {
+            write_health(
+                app,
+                agent_pubkey,
+                &NumbatGuardianHealth {
+                    state: "tampered".into(),
+                    detail,
+                },
+            );
+            return;
+        }
+    };
+    let provenance = if binary.managed {
+        "Buzz-managed"
+    } else {
+        "external unmanaged"
     };
     let result = (|| -> Result<(), String> {
         let dir = numbat_dir(app)?;
@@ -611,13 +716,18 @@ fn prepare_numbat_monitoring(app: &AppHandle, runtime: &str, agent_pubkey: &str)
             .lock()
             .map_err(|_| "Numbat installation lock is unavailable".to_string())?;
         let findings_template = numbat_findings_template(app)?;
-        run_numbat_install(&binary, runtime, &findings_template, NUMBAT_INSTALL_TIMEOUT)
+        run_numbat_install(
+            &binary.path,
+            runtime,
+            &findings_template,
+            NUMBAT_INSTALL_TIMEOUT,
+        )
     })();
     let health = match result {
         Ok(()) => NumbatGuardianHealth {
             state: "configured".into(),
             detail: format!(
-                "{runtime} monitoring is configured in detection-only mode with findings isolated to this managed agent."
+                "{runtime} monitoring is configured in detection-only mode through {provenance} Numbat, with findings isolated to this managed agent."
             ),
         },
         Err(detail) => NumbatGuardianHealth {
