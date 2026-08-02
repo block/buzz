@@ -191,6 +191,99 @@ void main() {
     },
   );
 
+  test(
+    'buffers a publish while reconnecting until the socket returns',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+      session.debugHandleDisconnected(Exception('connection lost'));
+
+      final published = session.publish(_event());
+      expect(socket.sent, isEmpty);
+
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _event().toJson()],
+      ]);
+
+      session.debugHandleMessage(['OK', _event().id, true, '']);
+      await expectLater(published, completes);
+    },
+  );
+
+  test(
+    'does not replay a publish already acknowledged before reconnect',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+
+      final published = session.publish(_event());
+      session.debugHandleMessage(['OK', _event().id, true, '']);
+      await published;
+
+      session.debugHandleDisconnected(Exception('connection lost'));
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _event().toJson()],
+      ]);
+    },
+  );
+
+  test(
+    'auth rejection fails pending publishes without replaying them',
+    () async {
+      final session = RelaySessionNotifier();
+      final socket = _ControlledRelaySocket(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(socket);
+
+      final published = session.publish(_event());
+      session.debugHandleDisconnected(
+        const RelayAuthRejectedException('restricted: access revoked'),
+      );
+      await expectLater(published, throwsA(isA<RelayAuthRejectedException>()));
+
+      session.debugHandleConnected();
+      expect(socket.sent, [
+        ['EVENT', _event().toJson()],
+      ]);
+    },
+  );
+
   test('classifies relay internal auth errors as transient', () {
     expect(
       classifyRelayAuthFailure(

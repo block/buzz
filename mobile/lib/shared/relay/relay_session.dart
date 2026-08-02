@@ -52,12 +52,13 @@ class _LiveSubscription {
 class _PendingEvent {
   final NostrEvent event;
   final Completer<NostrEvent> completer;
-  final Timer timeout;
+  final Duration acknowledgementTimeout;
+  Timer? timeout;
 
   _PendingEvent({
     required this.event,
     required this.completer,
-    required this.timeout,
+    required this.acknowledgementTimeout,
   });
 }
 
@@ -92,6 +93,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
   static const _eventBatchMs = 16;
+  static const _reconnectPublishTimeout = Duration(seconds: 30);
   static const _reconnectReplaySkewSeconds = 5;
   static const _maxRecentDeliveryKeys = 5000;
 
@@ -253,30 +255,32 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Publish an event and wait for the relay's OK confirmation.
   Future<NostrEvent> publish(
     NostrEvent event, {
-    Duration timeout = const Duration(seconds: 30),
+    Duration timeout = const Duration(seconds: 8),
   }) {
+    if (_paused) {
+      return Future.error(
+        Exception('Cannot publish while app is in background'),
+      );
+    }
     final completer = Completer<NostrEvent>();
-
-    final timer = Timer(timeout, () {
-      final pending = _pendingEvents.remove(event.id);
-      if (pending != null && !pending.completer.isCompleted) {
-        pending.completer.completeError(
-          TimeoutException(
-            'Event ${event.id} not acknowledged within $timeout',
-          ),
-        );
-      }
-    });
-
-    _pendingEvents[event.id] = _PendingEvent(
+    final pending = _PendingEvent(
       event: event,
       completer: completer,
-      timeout: timer,
+      acknowledgementTimeout: timeout,
     );
+    _pendingEvents[event.id] = pending;
 
     if (state.status == SessionStatus.connected) {
-      _sendEvent(event);
-    } else if (!_paused && state.status == SessionStatus.disconnected) {
+      _sendPendingEvent(pending);
+    } else {
+      _armPendingTimeout(
+        event.id,
+        _reconnectPublishTimeout,
+        'Event ${event.id} could not reconnect within '
+        '$_reconnectPublishTimeout',
+      );
+    }
+    if (!_paused && state.status == SessionStatus.disconnected) {
       _reconnectTimer?.cancel();
       _reconnectDelayMs = _baseReconnectDelayMs;
       final config = ref.read(relayConfigProvider);
@@ -406,6 +410,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       state = const SessionState(status: SessionStatus.disconnected);
       return;
     }
+    for (final eventId in _pendingEvents.keys) {
+      _armPendingTimeout(
+        eventId,
+        _reconnectPublishTimeout,
+        'Event $eventId could not reconnect within '
+        '$_reconnectPublishTimeout',
+      );
+    }
     _scheduleReconnect();
   }
 
@@ -447,8 +459,30 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// lost with the connection.
   void _replayPendingEvents() {
     for (final pending in _pendingEvents.values) {
-      _sendEvent(pending.event);
+      _sendPendingEvent(pending);
     }
+  }
+
+  void _sendPendingEvent(_PendingEvent pending) {
+    _armPendingTimeout(
+      pending.event.id,
+      pending.acknowledgementTimeout,
+      'Event ${pending.event.id} not acknowledged within '
+      '${pending.acknowledgementTimeout}',
+    );
+    _sendEvent(pending.event);
+  }
+
+  void _armPendingTimeout(String eventId, Duration timeout, String message) {
+    final pending = _pendingEvents[eventId];
+    if (pending == null) return;
+    pending.timeout?.cancel();
+    pending.timeout = Timer(timeout, () {
+      final expired = _pendingEvents.remove(eventId);
+      if (expired != null && !expired.completer.isCompleted) {
+        expired.completer.completeError(TimeoutException(message));
+      }
+    });
   }
 
   void _handleMessage(List<dynamic> data) {
@@ -562,7 +596,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     final pending = _pendingEvents.remove(eventId);
     if (pending == null) return;
-    pending.timeout.cancel();
+    pending.timeout?.cancel();
 
     if (accepted) {
       // We don't have the full event here; create a minimal placeholder.
@@ -665,7 +699,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _rejectAllPending(Object? error) {
     for (final entry in _pendingEvents.values) {
-      entry.timeout.cancel();
+      entry.timeout?.cancel();
       if (!entry.completer.isCompleted) {
         entry.completer.completeError(error ?? Exception('Connection lost'));
       }
