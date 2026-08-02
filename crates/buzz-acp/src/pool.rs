@@ -33,7 +33,7 @@ use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
 };
-use crate::config::{compose_session_title, DedupMode, PermissionMode};
+use crate::config::{compose_session_title, DedupMode, PermissionMode, PublishAgentOutput};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
@@ -44,6 +44,99 @@ use crate::relay::{ChannelInfo, RestClient};
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
+
+/// The only reply target trusted for ACP output publishing.
+///
+/// It is derived from the last real channel event in a flushed batch, never
+/// from agent text or prompt framing. Threaded triggers intentionally map both
+/// reply references to the human root so assistant replies stay flat.
+#[derive(Debug, Clone)]
+struct TrustedPublishTarget {
+    channel_id: Uuid,
+    root_event_id: nostr::EventId,
+    parent_event_id: nostr::EventId,
+}
+
+fn trusted_publish_target(batch: &FlushBatch) -> Result<TrustedPublishTarget, &'static str> {
+    let trigger = batch
+        .events
+        .last()
+        .ok_or("flush batch had no trigger event")?;
+    let h_tags: Vec<&[String]> = trigger
+        .event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .filter(|parts| parts.first().map(String::as_str) == Some("h"))
+        .collect();
+    let Some(h_tag) = h_tags.first() else {
+        return Err("trigger event has no channel tag");
+    };
+    if h_tags.len() != 1 || h_tag.len() != 2 || h_tag[1] != batch.channel_id.to_string() {
+        return Err("trigger event channel tags do not exactly match the batch channel");
+    }
+
+    let mut root = None;
+    let mut reply = None;
+    for tag in trigger.event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("e") {
+            continue;
+        }
+        if parts.len() != 4 {
+            return Err("trigger event has malformed thread tag");
+        }
+        let event_id = nostr::EventId::from_hex(&parts[1])
+            .map_err(|_| "trigger event has an invalid thread event id")?;
+        let slot = match parts[3].as_str() {
+            "root" => &mut root,
+            "reply" => &mut reply,
+            _ => return Err("trigger event has an unrecognized thread marker"),
+        };
+        if slot.replace(event_id).is_some() {
+            return Err("trigger event has duplicate thread markers");
+        }
+    }
+
+    let root_event_id = root.or(reply).unwrap_or(trigger.event.id);
+    Ok(TrustedPublishTarget {
+        channel_id: batch.channel_id,
+        root_event_id,
+        parent_event_id: root_event_id,
+    })
+}
+
+fn build_agent_output_event(
+    keys: &nostr::Keys,
+    target: &TrustedPublishTarget,
+    content: &str,
+) -> Result<nostr::Event, String> {
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id: target.root_event_id,
+        parent_event_id: target.parent_event_id,
+    };
+    buzz_sdk::build_message(
+        target.channel_id,
+        content,
+        Some(&thread_ref),
+        &[],
+        false,
+        &[],
+    )
+    .map_err(|error| error.to_string())?
+    .sign_with_keys(keys)
+    .map_err(|error| error.to_string())
+}
+
+fn should_publish_agent_output(
+    policy: PublishAgentOutput,
+    source: &PromptSource,
+    stop_reason: &StopReason,
+) -> bool {
+    matches!(policy, PublishAgentOutput::TriggerReply)
+        && matches!(source, PromptSource::Channel(_))
+        && matches!(stop_reason, StopReason::EndTurn | StopReason::Refusal)
+}
 
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
@@ -508,6 +601,10 @@ pub struct PromptContext {
     /// from `heartbeat_prompt` (agent self-prompting).
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
+    /// Opt-in policy for publishing completed agent text.
+    pub publish_agent_output: PublishAgentOutput,
+    /// At most one signed event survives an ambiguous local publish attempt.
+    pub pending_agent_output: Arc<Mutex<Option<nostr::Event>>>,
     pub system_prompt: Option<String>,
     /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
     /// on `session/new`. Never part of the prompt.
@@ -551,6 +648,118 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+}
+
+async fn event_confirmed_by_id(rest: &RestClient, event: &nostr::Event) -> bool {
+    let filter = nostr::Filter::new()
+        .id(event.id)
+        .kind(nostr::Kind::Custom(9));
+    match rest.query(&[filter]).await {
+        Ok(events) => events.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("id").and_then(serde_json::Value::as_str) == Some(&event.id.to_hex())
+            })
+        }),
+        Err(error) => {
+            tracing::warn!(event_id = %event.id.to_hex(), "agent output confirmation query failed: {error}");
+            false
+        }
+    }
+}
+
+async fn submit_signed_agent_output(rest: &RestClient, event: &nostr::Event) -> bool {
+    const ATTEMPTS: u8 = 3;
+    for attempt in 1..=ATTEMPTS {
+        match rest.submit_event(event).await {
+            Ok(response)
+                if response
+                    .get("accepted")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true) =>
+            {
+                return true;
+            }
+            Ok(response) => {
+                tracing::warn!(
+                    event_id = %event.id.to_hex(),
+                    attempt,
+                    response = %response,
+                    "agent output publish was not accepted; confirming exact event before retry"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event_id = %event.id.to_hex(),
+                    attempt,
+                    "agent output publish was ambiguous: {error}; confirming exact event before retry"
+                );
+            }
+        }
+        if event_confirmed_by_id(rest, event).await {
+            return true;
+        }
+    }
+    false
+}
+
+async fn publish_captured_agent_output(
+    ctx: &PromptContext,
+    batch: &FlushBatch,
+    acp: &mut AcpClient,
+) {
+    let pending = match ctx.pending_agent_output.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(_) => {
+            tracing::error!("agent output pending-event lock poisoned; refusing to publish");
+            return;
+        }
+    };
+    if let Some(event) = pending {
+        if !submit_signed_agent_output(&ctx.rest_client, &event).await {
+            if let Ok(mut slot) = ctx.pending_agent_output.lock() {
+                *slot = Some(event);
+            }
+            tracing::error!(
+                "agent output pending event remains unconfirmed; refusing newer output"
+            );
+            return;
+        }
+    }
+
+    let output = match acp.take_agent_output_capture() {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            tracing::debug!("agent output was empty; publishing silence");
+            return;
+        }
+        Err(error) => {
+            tracing::error!("agent output was discarded without publishing: {error}");
+            return;
+        }
+    };
+    let target = match trusted_publish_target(batch) {
+        Ok(target) => target,
+        Err(reason) => {
+            tracing::error!(channel = %batch.channel_id, "agent output was discarded without publishing: {reason}");
+            return;
+        }
+    };
+    let event = match build_agent_output_event(&ctx.agent_keys, &target, &output) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::error!("agent output could not be signed; refusing to publish: {error}");
+            return;
+        }
+    };
+    if !submit_signed_agent_output(&ctx.rest_client, &event).await {
+        match ctx.pending_agent_output.lock() {
+            Ok(mut slot) => *slot = Some(event),
+            Err(_) => tracing::error!(
+                "agent output pending-event lock poisoned; event could not be retained"
+            ),
+        }
+        tracing::error!("agent output could not be confirmed after retries; retained one identical pending event");
+    }
 }
 
 impl AgentPool {
@@ -2083,6 +2292,12 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            if should_publish_agent_output(ctx.publish_agent_output, &source, &stop_reason) {
+                if let Some(ref batch) = batch {
+                    publish_captured_agent_output(&ctx, batch, &mut agent.acp).await;
+                }
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -3972,8 +4187,157 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queue::BatchEvent;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn trusted_publish_target_uses_batch_last_and_rejects_untrusted_tags() {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let first = EventBuilder::new(Kind::Custom(9), "first")
+            .tag(Tag::parse(["h", &channel.to_string()]).expect("valid channel tag"))
+            .sign_with_keys(&keys)
+            .expect("sign first trigger");
+        let root = "ab".repeat(32);
+        let last = EventBuilder::new(Kind::Custom(9), "last")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).expect("valid channel tag"),
+                Tag::parse(["e", &root, "", "root"]).expect("valid root tag"),
+                Tag::parse(["e", &"cd".repeat(32), "", "reply"]).expect("valid reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign last trigger");
+        let batch = FlushBatch {
+            channel_id: channel,
+            events: vec![
+                BatchEvent {
+                    event: first,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                },
+                BatchEvent {
+                    event: last,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                },
+            ],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let target = trusted_publish_target(&batch).expect("last event is a trusted trigger");
+        assert_eq!(target.channel_id, channel);
+        assert_eq!(target.root_event_id.to_hex(), root);
+        assert_eq!(target.parent_event_id.to_hex(), root);
+
+        let top_level = EventBuilder::new(Kind::Custom(9), "top level")
+            .tag(Tag::parse(["h", &channel.to_string()]).expect("valid channel tag"))
+            .sign_with_keys(&keys)
+            .expect("sign top-level trigger");
+        let top_level_id = top_level.id;
+        let top_level_batch = FlushBatch {
+            channel_id: channel,
+            events: vec![BatchEvent {
+                event: top_level,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let top_level_target =
+            trusted_publish_target(&top_level_batch).expect("top-level trigger is trusted");
+        assert_eq!(top_level_target.root_event_id, top_level_id);
+        assert_eq!(top_level_target.parent_event_id, top_level_id);
+
+        let mismatched = EventBuilder::new(Kind::Custom(9), "bad")
+            .tag(Tag::parse(["h", &Uuid::new_v4().to_string()]).expect("valid channel tag"))
+            .sign_with_keys(&keys)
+            .expect("sign mismatched trigger");
+        let bad_batch = FlushBatch {
+            channel_id: channel,
+            events: vec![BatchEvent {
+                event: mismatched,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        assert!(
+            trusted_publish_target(&bad_batch).is_err(),
+            "a mismatched h tag must not create a publish target"
+        );
+    }
+
+    #[test]
+    fn signed_agent_output_is_a_plain_flat_kind_nine_reply() {
+        let keys = Keys::generate();
+        let target = TrustedPublishTarget {
+            channel_id: Uuid::new_v4(),
+            root_event_id: nostr::EventId::from_hex(&"ab".repeat(32)).expect("valid root id"),
+            parent_event_id: nostr::EventId::from_hex(&"ab".repeat(32)).expect("valid parent id"),
+        };
+        let event = build_agent_output_event(&keys, &target, "literal /command output")
+            .expect("trusted output should sign");
+
+        assert_eq!(event.kind, Kind::Custom(9));
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(event.content, "literal /command output");
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert_eq!(
+            tags.len(),
+            2,
+            "output must not gain p, broadcast, media, or caller tags"
+        );
+        assert_eq!(
+            tags[0],
+            vec!["h".to_string(), target.channel_id.to_string()]
+        );
+        assert_eq!(
+            tags[1],
+            vec![
+                "e".to_string(),
+                target.root_event_id.to_hex(),
+                String::new(),
+                "reply".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn output_publishing_requires_terminal_channel_turn_and_explicit_opt_in() {
+        assert!(should_publish_agent_output(
+            PublishAgentOutput::TriggerReply,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &StopReason::EndTurn,
+        ));
+        assert!(should_publish_agent_output(
+            PublishAgentOutput::TriggerReply,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &StopReason::Refusal,
+        ));
+        assert!(!should_publish_agent_output(
+            PublishAgentOutput::Off,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &StopReason::EndTurn,
+        ));
+        assert!(!should_publish_agent_output(
+            PublishAgentOutput::TriggerReply,
+            &PromptSource::Heartbeat,
+            &StopReason::EndTurn,
+        ));
+        assert!(!should_publish_agent_output(
+            PublishAgentOutput::TriggerReply,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &StopReason::MaxTokens,
+        ));
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
@@ -6384,6 +6748,8 @@ mod tests {
             max_turn_duration: Duration::from_secs(120),
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
+            publish_agent_output: PublishAgentOutput::Off,
+            pending_agent_output: Arc::new(Mutex::new(None)),
             system_prompt: None,
             session_title: None,
             team_instructions: None,

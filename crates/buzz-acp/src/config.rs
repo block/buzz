@@ -54,10 +54,23 @@ pub enum SubscribeMode {
     Config,
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum DedupMode {
     Drop,
     Queue,
+}
+
+/// Controls whether completed agent text may be published back to Buzz.
+///
+/// Publishing is disabled by default. `TriggerReply` is a deliberately narrow
+/// pilot mode that only permits trusted replies to the single configured channel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum PublishAgentOutput {
+    /// Keep ACP output local to the harness logs and observer stream.
+    #[default]
+    Off,
+    /// Publish a completed agent response as a reply to its trusted trigger.
+    TriggerReply,
 }
 
 /// How to handle new @mentions while a turn is already in-flight for that channel.
@@ -260,6 +273,15 @@ pub struct CliArgs {
 
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
+
+    /// Opt in to publishing trusted completed ACP output into a channel.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_PUBLISH_AGENT_OUTPUT",
+        default_value = "off",
+        value_enum
+    )]
+    pub publish_agent_output: PublishAgentOutput,
 
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
@@ -495,6 +517,8 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    /// Whether the harness may publish trusted completed ACP output.
+    pub publish_agent_output: PublishAgentOutput,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -666,6 +690,48 @@ fn validate_multiple_event_handling(
         ));
     }
     Ok(())
+}
+
+fn validate_trigger_reply_publishing(
+    args: &CliArgs,
+    agent_command: &str,
+) -> Result<(), ConfigError> {
+    if args.publish_agent_output != PublishAgentOutput::TriggerReply {
+        return Ok(());
+    }
+
+    let channels = args.channels.as_deref().unwrap_or_default();
+    let valid_single_channel = channels.len() == 1 && channels[0].parse::<Uuid>().is_ok();
+    let owner_configured = args
+        .agent_owner
+        .as_deref()
+        .is_some_and(|owner| !owner.trim().is_empty());
+    let kinds_are_messages = matches!(args.kinds.as_deref(), Some([9]));
+
+    let valid = normalize_agent_command_identity(agent_command) == "buzz-agent"
+        && args.agents == 1
+        && valid_single_channel
+        && args.subscribe == SubscribeMode::All
+        && kinds_are_messages
+        && args.respond_to == RespondTo::OwnerOnly
+        && owner_configured
+        && args.mcp_command.trim().is_empty()
+        && !args.no_ignore_self
+        && args.heartbeat_interval == 0
+        && args.dedup == DedupMode::Queue
+        && args.multiple_event_handling == MultipleEventHandling::Queue;
+
+    if valid {
+        Ok(())
+    } else {
+        Err(ConfigError::ConfigFile(
+            "--publish-agent-output=trigger-reply requires normalized --agent-command=buzz-agent, \
+             --agents=1, exactly one valid --channels UUID, --subscribe=all, --kinds=9, \
+             --respond-to=owner-only with --agent-owner, empty --mcp-command, ignore-self, \
+             --heartbeat-interval=0, --dedup=queue, and --multiple-event-handling=queue"
+                .into(),
+        ))
+    }
 }
 
 pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
@@ -841,6 +907,8 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
+        validate_trigger_reply_publishing(&args, &args.agent_command)?;
+
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
@@ -897,13 +965,13 @@ impl Config {
             }
         }
 
-        let agent_command = args.agent_command;
-
-        if agent_command.trim().is_empty() {
+        if args.agent_command.trim().is_empty() {
             return Err(ConfigError::ConfigFile(
                 "agent_command must not be empty".into(),
             ));
         }
+
+        let agent_command = args.agent_command;
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
@@ -1059,6 +1127,7 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            publish_agent_output: args.publish_agent_output,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1437,6 +1506,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            publish_agent_output: PublishAgentOutput::Off,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -2536,6 +2606,160 @@ channels = "ALL"
         assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
         // Dedup default must remain `queue` so steering's requirement is met.
         assert!(matches!(args.dedup, DedupMode::Queue));
+    }
+
+    #[test]
+    fn publish_agent_output_is_off_by_default_and_trigger_reply_is_opt_in() {
+        let default_args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("default CLI arguments should parse");
+        assert_eq!(
+            default_args.publish_agent_output,
+            PublishAgentOutput::Off,
+            "channel publishing must remain disabled unless explicitly requested"
+        );
+
+        let enabled_args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--publish-agent-output",
+            "trigger-reply",
+        ])
+        .expect("trigger-reply publishing CLI arguments should parse");
+        assert_eq!(
+            enabled_args.publish_agent_output,
+            PublishAgentOutput::TriggerReply
+        );
+    }
+
+    #[test]
+    fn trigger_reply_publishing_accepts_only_the_fail_closed_pilot_invariant() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let owner = "ab".repeat(32);
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--publish-agent-output",
+            "trigger-reply",
+            "--agent-command",
+            "/opt/bin/buzz-agent",
+            "--agents",
+            "1",
+            "--channels",
+            channel,
+            "--subscribe",
+            "all",
+            "--kinds",
+            "9",
+            "--respond-to",
+            "owner-only",
+            "--agent-owner",
+            &owner,
+            "--dedup",
+            "queue",
+            "--multiple-event-handling",
+            "queue",
+        ])
+        .expect("pilot invariant CLI arguments should parse");
+        assert!(
+            Config::from_args(args).is_ok(),
+            "the complete trusted single-channel configuration must be accepted"
+        );
+    }
+
+    #[test]
+    fn trigger_reply_publishing_rejects_each_relaxed_trust_boundary() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let owner = "ab".repeat(32);
+        let base = vec![
+            "buzz-acp".to_string(),
+            "--private-key".to_string(),
+            TEST_PRIVATE_KEY.to_string(),
+            "--publish-agent-output".to_string(),
+            "trigger-reply".to_string(),
+            "--agent-command".to_string(),
+            "buzz-agent".to_string(),
+            "--agents".to_string(),
+            "1".to_string(),
+            "--channels".to_string(),
+            channel.to_string(),
+            "--subscribe".to_string(),
+            "all".to_string(),
+            "--kinds".to_string(),
+            "9".to_string(),
+            "--respond-to".to_string(),
+            "owner-only".to_string(),
+            "--agent-owner".to_string(),
+            owner,
+            "--dedup".to_string(),
+            "queue".to_string(),
+            "--multiple-event-handling".to_string(),
+            "queue".to_string(),
+        ];
+
+        let rejects_replacement = |flag: &str, replacement: &str| {
+            let mut args = base.clone();
+            let index = args
+                .iter()
+                .position(|value| value == flag)
+                .expect("test fixture contains flag");
+            args[index + 1] = replacement.to_string();
+            let parsed = CliArgs::try_parse_from(args).expect("relaxed CLI arguments should parse");
+            assert!(
+                Config::from_args(parsed).is_err(),
+                "trigger-reply must reject {flag:?} relaxed to {replacement:?}"
+            );
+        };
+        for (flag, replacement) in [
+            ("--agent-command", "goose"),
+            ("--agents", "2"),
+            ("--channels", "not-a-uuid"),
+            ("--subscribe", "mentions"),
+            ("--kinds", "1"),
+            ("--respond-to", "anyone"),
+            ("--agent-owner", ""),
+            ("--dedup", "drop"),
+            ("--multiple-event-handling", "steer"),
+        ] {
+            rejects_replacement(flag, replacement);
+        }
+        rejects_replacement(
+            "--channels",
+            "123e4567-e89b-12d3-a456-426614174000,123e4567-e89b-12d3-a456-426614174001",
+        );
+
+        let mut mcp_args = base.clone();
+        mcp_args.extend(["--mcp-command".into(), "untrusted-mcp".into()]);
+        assert!(
+            Config::from_args(
+                CliArgs::try_parse_from(mcp_args).expect("MCP CLI arguments should parse")
+            )
+            .is_err(),
+            "trigger-reply must reject a configured MCP command"
+        );
+
+        let mut heartbeat_args = base.clone();
+        heartbeat_args.extend(["--heartbeat-interval".into(), "10".into()]);
+        assert!(
+            Config::from_args(
+                CliArgs::try_parse_from(heartbeat_args)
+                    .expect("heartbeat CLI arguments should parse")
+            )
+            .is_err(),
+            "trigger-reply must reject heartbeat prompts"
+        );
+
+        let mut self_loop_args = base;
+        self_loop_args.push("--no-ignore-self".into());
+        assert!(
+            Config::from_args(
+                CliArgs::try_parse_from(self_loop_args)
+                    .expect("self-loop CLI arguments should parse")
+            )
+            .is_err(),
+            "trigger-reply must reject disabled self-loop protection"
+        );
     }
 
     #[test]

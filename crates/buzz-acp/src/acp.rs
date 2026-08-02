@@ -106,7 +106,13 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    #[error("Agent output capture invalid: {0}")]
+    OutputCaptureInvalid(&'static str),
 }
+
+/// Maximum UTF-8 byte length retained from one ACP prompt response.
+const MAX_AGENT_OUTPUT_BYTES: usize = 65_536;
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
@@ -211,6 +217,10 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text from `agent_message_chunk` updates for the current prompt only.
+    agent_output_capture: String,
+    /// Why the current prompt output cannot safely be published.
+    agent_output_invalid: Option<&'static str>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +560,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            agent_output_capture: String::new(),
+            agent_output_invalid: None,
         })
     }
 
@@ -584,6 +596,28 @@ impl AcpClient {
                 payload,
             );
         }
+    }
+
+    /// Clear any previously captured agent message text before a new prompt.
+    ///
+    /// This prevents initialization, heartbeat, and prior-session output from
+    /// being attributed to the next user-triggered turn.
+    pub fn reset_agent_output_capture(&mut self) {
+        self.agent_output_capture.clear();
+        self.agent_output_invalid = None;
+    }
+
+    /// Take the current prompt's publishable agent message text.
+    ///
+    /// Returns an error when a tool call or output overflow made the response
+    /// unsafe to publish. Successful calls consume the retained text.
+    pub fn take_agent_output_capture(&mut self) -> Result<Option<String>, AcpError> {
+        if let Some(reason) = self.agent_output_invalid.take() {
+            self.agent_output_capture.clear();
+            return Err(AcpError::OutputCaptureInvalid(reason));
+        }
+        let output = std::mem::take(&mut self.agent_output_capture);
+        Ok((!output.is_empty()).then_some(output))
     }
 
     /// Send the `initialize` request and return the agent's response result value.
@@ -751,6 +785,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.reset_agent_output_capture();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1715,6 +1750,17 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    if self.agent_output_invalid.is_none() {
+                        if self.agent_output_capture.len().saturating_add(text.len())
+                            > MAX_AGENT_OUTPUT_BYTES
+                        {
+                            self.agent_output_capture.clear();
+                            self.agent_output_invalid =
+                                Some("agent message exceeds the 65536-byte limit");
+                        } else {
+                            self.agent_output_capture.push_str(text);
+                        }
+                    }
                 }
                 false
             }
@@ -1728,6 +1774,8 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                self.agent_output_capture.clear();
+                self.agent_output_invalid = Some("agent invoked an ACP tool");
                 true
             }
             "tool_call_update" => {
@@ -3433,6 +3481,61 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_output_capture_accumulates_messages_and_fails_closed() {
+        let mut client = spawn_inert_client().await;
+        client.reset_agent_output_capture();
+
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "text": "private reasoning" }
+            }}
+        }));
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": "hello " }
+            }}
+        }));
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": "world" }
+            }}
+        }));
+        assert_eq!(
+            client.take_agent_output_capture().expect("valid output"),
+            Some("hello world".to_string()),
+            "only agent_message_chunk text may be published"
+        );
+
+        client.reset_agent_output_capture();
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "tool_call",
+                "title": "shell",
+                "kind": "execute"
+            }}
+        }));
+        assert!(
+            client.take_agent_output_capture().is_err(),
+            "a tool call must invalidate all captured output"
+        );
+
+        client.reset_agent_output_capture();
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": "x".repeat(65_537) }
+            }}
+        }));
+        assert!(
+            client.take_agent_output_capture().is_err(),
+            "oversized output must fail closed instead of being truncated"
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
