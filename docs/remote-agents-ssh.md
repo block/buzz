@@ -1,4 +1,10 @@
-# Remote agents over SSH
+# Remote Agents over SSH: the SSH provider binding
+
+This document is the **SSH binding** of the provider contract specified in
+[docs/remote-agents.md](remote-agents.md). That document is normative for the wire protocol,
+the invariants (I1–I5), and the launcher/provider conformance levels; this one describes how
+`buzz-backend-ssh` realizes them on a `systemd --user` substrate, and where the binding's
+policy choices differ from the Kubernetes binding's.
 
 A **remote agent** is a managed agent whose harness runs on another host. The desktop still owns
 the agent: it mints the agent's nostr key, holds the record, and renders it beside local agents.
@@ -20,8 +26,17 @@ executable extension (`.exe`, `.com`, `.cmd`, `.bat`) is not part of the id — 
 provider as `buzz-backend-ssh.exe` on Windows, and reading that filename literally derives `ssh.exe`,
 which the id rule rejects for the dot. Discovery deduplicates on the id, so a host carrying both
 spellings offers one provider. It spawns the binary, writes one JSON request to stdin, closes it,
-and reads one JSON response from stdout. One process per op; no daemon, no state, no version
-negotiation.
+and reads one JSON response from stdout. One process per op; no daemon, no state.
+
+There is no *negotiation* — the provider declares one wire-contract version and the desktop
+either speaks it or refuses. `info` carries `"protocol_version": 1` as an **integer**
+(`protocol::PROTOCOL_VERSION`), which is the version of the provider contract in
+[docs/remote-agents.md](remote-agents.md), not this binary's `version` (its software version,
+useful in error reports and useless for compatibility). The distinction matters because the
+spec's pre-secret negotiation gate (§Discovery) stages this binary, calls `info` on the staged
+bytes, and requires an explicit supported `protocol_version` **before** it sends a request
+carrying `private_key_nsec`. Absence is an error there, not a presumed `1`, so dropping the field
+does not degrade the provider — it makes it undeployable.
 
 `buzz-backend-ssh` implements five ops.
 
@@ -49,7 +64,7 @@ so it never opens a session and never requires `provider_config`.
 ```
 
 ```json
-{"ok": true, "name": "SSH", "version": "…",
+{"ok": true, "name": "SSH", "version": "…", "protocol_version": 1,
  "description": "Run agents on a remote host over SSH, supervised by systemd --user.",
  "config_schema": {"type": "object", "required": ["ssh_host"], "properties": {…}}}
 ```
