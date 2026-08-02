@@ -7,6 +7,7 @@ mod deep_link;
 mod egress_guard;
 mod event_sync;
 mod events;
+pub mod guardian_distribution;
 mod huddle;
 mod identity_storage;
 mod key_backup;
@@ -88,9 +89,7 @@ fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
 
 #[cfg(target_os = "macos")]
 fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
-    // The window remains transparent at runtime for vibrancy. Use an opaque
-    // native backing only across the first visible frames so the previous app
-    // cannot show through before WebKit has submitted its first surface.
+    // Use opaque native backing only for the first frames so the previous app cannot show through.
     if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
         eprintln!("buzz-desktop: failed to set initial window backing: {error}");
     }
@@ -408,11 +407,7 @@ pub fn run() {
             } else {
                 migration::run_boot_migrations(&app_handle);
             }
-
-            // Resolve persisted identity key (env var → file → generate+save).
-            // This is fatal — the app should not start with an ephemeral identity
-            // that will be lost on restart, as that silently breaks channel
-            // memberships, DMs, and relay identity.
+            guardian_distribution::commands::recover_guardian_numbat_on_boot(&app_handle);
             let state = app_handle.state::<AppState>();
             if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
                 eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
@@ -735,6 +730,14 @@ pub fn run() {
             sign_out,
             decrypt_observer_event,
             build_observer_control_event,
+            read_numbat_findings,
+            guardian_distribution::commands::get_guardian_numbat_status,
+            guardian_distribution::commands::install_guardian_numbat,
+            guardian_distribution::commands::cancel_guardian_numbat_install,
+            guardian_distribution::commands::activate_guardian_numbat,
+            guardian_distribution::commands::deactivate_guardian_numbat,
+            guardian_distribution::commands::rollback_guardian_numbat,
+            guardian_distribution::commands::uninstall_guardian_numbat,
             create_auth_event,
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,

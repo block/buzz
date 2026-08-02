@@ -78,6 +78,10 @@ pub(super) fn preset_catalog_entry(
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Preset,
+        guardian_protection: crate::managed_agents::readiness::guardian_runtime_protection(
+            def.id,
+            HarnessSource::Preset,
+        ),
         definition_env: Default::default(),
     }
 }

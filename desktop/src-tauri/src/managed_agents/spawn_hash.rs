@@ -84,6 +84,13 @@ pub(crate) fn spawn_config_hash(
                     command: cmd,
                     args,
                     env: Default::default(),
+                    guardian_policy:
+                        crate::managed_agents::readiness::GuardianPermissionPolicy::Monitor,
+                    guardian_protection:
+                        crate::managed_agents::readiness::guardian_runtime_protection(
+                            "custom",
+                            crate::managed_agents::HarnessSource::Custom,
+                        ),
                 }
             });
     let runtime_meta = known_acp_runtime(&descriptor.command);
@@ -102,6 +109,7 @@ pub(crate) fn spawn_config_hash(
     // Effective env layering (baked floor → runtime metadata → definition env
     // → global → persona → agent). BTreeMap iteration is ordered, deterministic.
     descriptor.env.hash(&mut hasher);
+    descriptor.guardian_policy.hash(&mut hasher);
 
     // Record fields the spawn env writes read directly. The relay is hashed
     // resolved: every record spawns on the workspace relay (legacy pins

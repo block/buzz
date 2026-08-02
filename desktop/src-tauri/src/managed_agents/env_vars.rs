@@ -63,6 +63,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_API_TOKEN",
     "BUZZ_ACP_PRIVATE_KEY",
     "BUZZ_ACP_API_TOKEN",
+    "BUZZ_MANAGED_AGENT_PUBKEY",
     // Relay URL: overriding would let a malicious config redirect the
     // agent to an attacker-controlled relay.
     "BUZZ_RELAY_URL",
@@ -71,6 +72,8 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    "BUZZ_ACP_BROWSER_MCP_COMMAND",
+    "BUZZ_ACP_BROWSER_MCP_ARGS",
     // Security gates: respond-to mode + allowlist + legacy owner-only
     // fallback. Overriding would make the running agent's gate diverge
     // from the saved/UI-visible settings.

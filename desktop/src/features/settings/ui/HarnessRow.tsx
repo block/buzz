@@ -472,6 +472,19 @@ export function HarnessRow({
           </div>
         ) : null}
 
+        <p
+          className={cn(
+            "mt-2 text-xs",
+            runtime.guardianProtection.lockdownAllowed
+              ? "text-emerald-600 dark:text-emerald-400"
+              : "text-amber-600 dark:text-amber-400",
+          )}
+          data-testid={`doctor-runtime-guardian-${runtime.id}`}
+        >
+          Guardian {runtime.guardianProtection.level.toUpperCase()}:{" "}
+          {runtime.guardianProtection.summary}
+        </p>
+
         {runtime.authStatus.status === "config_invalid" ? (
           <p
             className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"

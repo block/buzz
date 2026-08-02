@@ -123,6 +123,7 @@ jobs:
         shell: bash
         run: |
           cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release --target "$TARGET" --manifest-path desktop/src-tauri/Cargo.toml --bin buzz-guardian-numbat
           ./scripts/bundle-sidecars.sh "$TARGET"
 
       - name: Build Windows NSIS installer (unsigned)
