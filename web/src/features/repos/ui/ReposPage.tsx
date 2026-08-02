@@ -1,6 +1,7 @@
 import { BookMarked, GitBranch } from "lucide-react";
 import { toast } from "sonner";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import buzzAppIcon from "@/assets/app-icon@3x.png";
 import { Input } from "@/shared/ui/input";
@@ -30,22 +31,24 @@ function ListItemSkeleton() {
 }
 
 function SearchEmptyState() {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center">
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-black/5 dark:bg-white/10">
         <GitBranch className="h-7 w-7 text-black/50 dark:text-white/50" />
       </div>
       <h2 className="mt-4 text-lg font-semibold text-black dark:text-white">
-        No matching repositories
+        {t("repos.noMatch")}
       </h2>
       <p className="mt-1 max-w-sm text-sm text-black/60 dark:text-white/60">
-        Try adjusting your search term.
+        {t("repos.trySearch")}
       </p>
     </div>
   );
 }
 
 function CommunityEmptyState() {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-1 items-center justify-center bg-[#F3F3F3] px-4 py-16 text-center dark:bg-[#171717]">
       <div className="flex w-full max-w-xl flex-col items-center px-6 py-10 sm:px-12 sm:py-12">
@@ -56,11 +59,10 @@ function CommunityEmptyState() {
           <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
         </div>
         <h1 className="mt-6 text-2xl font-semibold tracking-tight text-black dark:text-white">
-          This community is empty
+          {t("repos.emptyTitle")}
         </h1>
         <p className="mt-2 max-w-md text-sm leading-relaxed text-black/60 dark:text-white/60">
-          Repositories pushed to this community will show up here. Open this
-          community in the Buzz desktop app to start pushing code.
+          {t("repos.emptyDescription")}
         </p>
         <ConnectButton className="mt-6" />
       </div>
@@ -69,6 +71,7 @@ function CommunityEmptyState() {
 }
 
 export function ReposPage() {
+  const { t } = useTranslation();
   const preview = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("preview")
     : null;
@@ -90,11 +93,11 @@ export function ReposPage() {
 
   useEffect(() => {
     if (error) {
-      toast.error("Failed to load repositories", {
+      toast.error(t("repos.failed"), {
         description: error.message,
       });
     }
-  }, [error]);
+  }, [error, t]);
 
   const filteredRepos = useMemo(() => {
     if (!repos) return [];
@@ -128,7 +131,7 @@ export function ReposPage() {
       <div className="flex w-full flex-1 gap-8 bg-[#F3F3F3] px-4 py-8 dark:bg-[#171717]">
         <div className="min-w-0 flex-1">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-black dark:text-white">
-            <BookMarked className="h-4 w-4" /> Repositories
+            <BookMarked className="h-4 w-4" /> {t("repos.title")}
           </h2>
           <div className="divide-y">
             {["a", "b", "c", "d", "e"].map((key) => (
@@ -155,13 +158,13 @@ export function ReposPage() {
         </div>
 
         <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-black dark:text-white">
-          <BookMarked className="h-4 w-4" /> Repositories
+          <BookMarked className="h-4 w-4" /> {t("repos.title")}
         </h2>
 
         {/* Search + Sort bar */}
         <div className="mb-4 flex gap-3">
           <Input
-            placeholder="Find a repository..."
+            placeholder={t("repos.search")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="flex-1 border-black/10 bg-white text-black placeholder:text-black/40 dark:border-white/10 dark:bg-white/5 dark:text-white dark:placeholder:text-white/40"
@@ -169,12 +172,12 @@ export function ReposPage() {
           <select
             value={sort}
             onChange={(e) => setSort(e.target.value as SortOrder)}
-            aria-label="Sort repositories"
+            aria-label={t("repos.sort")}
             className="rounded-md border border-black/10 bg-white px-3 py-1 text-sm text-black shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-black dark:border-white/10 dark:bg-white/5 dark:text-white dark:focus-visible:ring-white"
           >
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
-            <option value="name">Name</option>
+            <option value="newest">{t("repos.newest")}</option>
+            <option value="oldest">{t("repos.oldest")}</option>
+            <option value="name">{t("repos.name")}</option>
           </select>
         </div>
 

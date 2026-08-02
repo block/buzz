@@ -57,7 +57,7 @@ class _PairingWelcomeView extends StatelessWidget {
                 ),
                 const SizedBox(height: Grid.sm),
                 Text(
-                  'Welcome to Buzz',
+                  AppLocalizations.of(context).welcomeBuzz,
                   textAlign: TextAlign.center,
                   style: context.textTheme.headlineSmall?.copyWith(
                     color: _onboardingInk,
@@ -67,7 +67,7 @@ class _PairingWelcomeView extends StatelessWidget {
                 ),
                 const SizedBox(height: Grid.xxs),
                 Text(
-                  'Scan the QR code from your desktop app\nor paste a pairing code to connect.',
+                  AppLocalizations.of(context).pairingInstructions,
                   textAlign: TextAlign.center,
                   style: context.textTheme.bodyMedium?.copyWith(
                     color: _onboardingMutedInk,
@@ -84,16 +84,18 @@ class _PairingWelcomeView extends StatelessWidget {
                           style: _onboardingButtonStyle,
                           onPressed: isBusy ? null : onScan,
                           child: isBusy && !pairingCodeExpanded
-                              ? const SizedBox(
+                              ? SizedBox(
                                   width: 20,
                                   height: 20,
                                   child: BuzzLoadingIndicator(
                                     size: 20,
                                     color: _onboardingCtaLabel,
-                                    semanticLabel: 'Opening scanner',
+                                    semanticLabel: AppLocalizations.of(
+                                      context,
+                                    ).openingScanner,
                                   ),
                                 )
-                              : const Text('Scan a QR code'),
+                              : Text(AppLocalizations.of(context).scanQr),
                         ),
                         const SizedBox(height: Grid.xxs),
                         TextButton(
@@ -101,8 +103,8 @@ class _PairingWelcomeView extends StatelessWidget {
                           onPressed: isBusy ? null : onTogglePairingCode,
                           child: Text(
                             pairingCodeExpanded
-                                ? 'Hide pairing code'
-                                : 'Use pairing code',
+                                ? AppLocalizations.of(context).hidePairingCode
+                                : AppLocalizations.of(context).usePairingCode,
                           ),
                         ),
                         AnimatedSwitcher(
@@ -171,16 +173,23 @@ class _PairingWelcomeView extends StatelessWidget {
                                         style: _onboardingButtonStyle,
                                         onPressed: isBusy ? null : onConnect,
                                         child: isBusy
-                                            ? const SizedBox(
+                                            ? SizedBox(
                                                 width: 20,
                                                 height: 20,
                                                 child: BuzzLoadingIndicator(
                                                   size: 20,
                                                   color: _onboardingCtaLabel,
-                                                  semanticLabel: 'Connecting',
+                                                  semanticLabel:
+                                                      AppLocalizations.of(
+                                                        context,
+                                                      ).connecting,
                                                 ),
                                               )
-                                            : const Text('Connect'),
+                                            : Text(
+                                                AppLocalizations.of(
+                                                  context,
+                                                ).connect,
+                                              ),
                                       ),
                                     ),
                                   ],

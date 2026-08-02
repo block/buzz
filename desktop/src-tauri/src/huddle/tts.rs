@@ -48,10 +48,14 @@ use std::{
 };
 
 use super::pocket::{
-    load_text_to_speech, load_voice_style, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
+    load_text_to_speech, load_voice_style, PocketTts, VoiceStyle, DEFAULT_VOICE, SAMPLE_RATE,
+    VOICE_FILE_EXT,
 };
-use super::preprocessing::{preprocess_for_tts, split_sentences};
+use super::preprocessing::{preprocess_for_tts_language, split_sentences};
 
+#[path = "tts_local_engine.rs"]
+mod local_engine;
+use local_engine::*;
 #[path = "tts_voice_transition.rs"]
 mod voice_transition;
 use voice_transition::*;
@@ -78,9 +82,6 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(100);
 /// the worker is blocked inside `synth_chunk`.
 const MONITOR_TICK: Duration = Duration::from_millis(10);
 const AUDIO_PRIME_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Pocket TTS is a one-step consistency model, not diffusion. Kept for API compat.
-const SYNTH_STEPS: usize = 1;
 
 /// Fade-out length in samples (8 ms at 24 kHz ≈ 192 samples).
 ///
@@ -315,9 +316,7 @@ fn tts_worker(
     let (tts_active, shutdown, cancel_signals) = control_state;
     let (cancel, voice_cancel) = cancel_signals;
     // ── 1. Initialise TTS engine ──────────────────────────────────────────────
-    let model_dir_str = model_dir.to_string_lossy().to_string();
-
-    let engine = match load_text_to_speech(&model_dir_str) {
+    let engine = match LocalTtsEngine::load(&model_dir) {
         Ok(e) => e,
         Err(e) => {
             let error = format!("TTS engine initialization failed: {e}");
@@ -334,17 +333,24 @@ fn tts_worker(
         .clone();
     let mut voice_name = DEFAULT_VOICE.to_string();
     let fallback_path = model_dir.join(format!("{DEFAULT_VOICE}.{VOICE_FILE_EXT}"));
-    let mut style = match load_voice_style(&fallback_path) {
-        Ok(s) => s,
-        Err(e) => {
-            let error = format!("TTS voice style initialization failed: {e}");
-            eprintln!("buzz-desktop: tts stage=startup status=failed reason=fallback_voice_style");
-            let _ = startup_tx.send(Err(error));
-            return;
+    let mut style = if engine.uses_reference_voice() {
+        match load_voice_style(&fallback_path) {
+            Ok(style) => Some(style),
+            Err(error) => {
+                let error = format!("TTS voice style initialization failed: {error}");
+                eprintln!(
+                    "buzz-desktop: tts stage=startup status=failed reason=fallback_voice_style"
+                );
+                let _ = startup_tx.send(Err(error));
+                return;
+            }
         }
+    } else {
+        None
     };
-    if requested_voice != DEFAULT_VOICE
-        && !reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style)
+    if engine.uses_reference_voice()
+        && requested_voice != DEFAULT_VOICE
+        && !reconcile_local_voice(&model_dir, &selected_voice, &mut voice_name, &mut style)
     {
         let _ = startup_tx.send(Err(
             "TTS selected voice and Mary fallback are unavailable".to_string()
@@ -358,7 +364,12 @@ fn tts_worker(
     // pool allocation, and graph-specific caches. Run a short dummy synthesis
     // and discard the output so the first real utterance runs at warm-session speed.
     {
-        match engine.synth_chunk("warmup", "en", &style, SYNTH_STEPS) {
+        let warmup = if engine.uses_reference_voice() {
+            "warmup"
+        } else {
+            "aquecimento"
+        };
+        match engine.synth_chunk(warmup, style.as_ref()) {
             Ok(_) => eprintln!("buzz-desktop: tts stage=warmup status=ready"),
             Err(_) => eprintln!(
                 "buzz-desktop: tts stage=warmup status=failed reason=inference first_utterance_may_be_slow=true"
@@ -388,7 +399,8 @@ fn tts_worker(
             return;
         }
     };
-    let rate = match NonZero::new(SAMPLE_RATE) {
+    let sample_rate = engine.sample_rate();
+    let rate = match NonZero::new(sample_rate) {
         Some(r) => r,
         None => {
             let _ = startup_tx.send(Err("TTS sample rate invariant violated".to_string()));
@@ -411,7 +423,7 @@ fn tts_worker(
     // player.empty() returns true before audio has started draining — causing
     // the first TTS message to be truncated after a few words.
     {
-        let silence = vec![0.0f32; SAMPLE_RATE as usize / 10]; // 100ms of silence
+        let silence = vec![0.0f32; sample_rate as usize / 10]; // 100ms of silence
         player.append(SamplesBuffer::new(channels, rate, silence));
         // Wait for the silent buffer to drain — this ensures the output stream
         // is fully initialized before the first real utterance.
@@ -499,7 +511,7 @@ fn tts_worker(
     // `tts_active` lifecycle: set on the first append while idle, cleared
     // whenever the player has fully drained — either in the idle timeout
     // arm or on item receipt before synthesis begins.
-    let silence_buf_len = (INTER_SENTENCE_SILENCE * SAMPLE_RATE as f32) as usize;
+    let silence_buf_len = (INTER_SENTENCE_SILENCE * sample_rate as f32) as usize;
     // `first_append` = "no audio queued since the player last went idle".
     // Flipped by `build_sentence_append_buffer` on the first real append; the
     // idle branch below uses it to decide when to drop `tts_active` and to
@@ -558,8 +570,8 @@ fn tts_worker(
         // Voice changes cancel the old utterance/queue and are observed here,
         // before receiving subsequent text. A bad bundled asset falls back to
         // Mary without discarding the already-warmed Pocket engine.
-        let voice_ready =
-            reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style);
+        let voice_ready = !engine.uses_reference_voice()
+            || reconcile_local_voice(&model_dir, &selected_voice, &mut voice_name, &mut style);
         acknowledge_voice_change(&voice_change_ack, &voice_cancel);
         if !voice_ready {
             continue;
@@ -622,7 +634,9 @@ fn tts_worker(
         // recv_timeout. Reconcile again after receipt so the first message
         // queued after an unpublished pipeline is installed cannot use the
         // voice captured when construction began.
-        if !reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style) {
+        if engine.uses_reference_voice()
+            && !reconcile_local_voice(&model_dir, &selected_voice, &mut voice_name, &mut style)
+        {
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=failed reason=voice_unavailable route_id={route_id}"
             );
@@ -644,7 +658,7 @@ fn tts_worker(
         }
 
         // Preprocess text.
-        let text = preprocess_for_tts(&raw_text);
+        let text = preprocess_for_tts_language(&raw_text, engine.language());
         if text.is_empty() {
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=empty reason=preprocess route_id={route_id}"
@@ -729,7 +743,7 @@ fn tts_worker(
                     break 'playback_chunks;
                 }
 
-                let synthesis = engine.synth_chunk(model_chunk, "en", &style, SYNTH_STEPS);
+                let synthesis = engine.synth_chunk(model_chunk, style.as_ref());
                 if cancel.load(Ordering::Acquire)
                     || voice_cancel.load(Ordering::Acquire)
                     || shutdown.load(Ordering::Acquire)

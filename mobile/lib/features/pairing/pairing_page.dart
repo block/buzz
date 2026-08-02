@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../l10n/app_localizations.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/tappable_flapping_bee.dart';
 import 'pairing_provider.dart';
@@ -91,7 +92,7 @@ class PairingPage extends HookConsumerWidget {
               onPressed: () => Navigator.of(context).pop(),
             ),
             title: Text(
-              'Add Community',
+              AppLocalizations.of(context).addCommunity,
               style: isVerifyingSas
                   ? null
                   : context.textTheme.titleMedium?.copyWith(
@@ -202,13 +203,16 @@ class _SasVerificationView extends StatelessWidget {
         Icon(LucideIcons.shieldCheck, size: 56, color: context.colors.primary),
         const SizedBox(height: Grid.sm),
 
-        Text('Verify Security Code', style: context.textTheme.headlineSmall),
+        Text(
+          AppLocalizations.of(context).verifySecurityCode,
+          style: context.textTheme.headlineSmall,
+        ),
         const SizedBox(height: Grid.xs),
 
         Text(
           confirmed
-              ? 'Waiting for desktop to confirm...'
-              : 'Does your desktop app show this code?',
+              ? AppLocalizations.of(context).waitingDesktop
+              : AppLocalizations.of(context).codeQuestion,
           textAlign: TextAlign.center,
           style: context.textTheme.bodyMedium?.copyWith(
             color: context.colors.onSurfaceVariant,
@@ -242,7 +246,7 @@ class _SasVerificationView extends StatelessWidget {
         const SizedBox(height: Grid.lg),
 
         Text(
-          'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
+          AppLocalizations.of(context).transferWarning,
           textAlign: TextAlign.center,
           style: context.textTheme.bodySmall?.copyWith(
             color: context.colors.onSurfaceVariant,
@@ -259,11 +263,11 @@ class _SasVerificationView extends StatelessWidget {
               BuzzLoadingIndicator(
                 size: 24,
                 color: context.colors.primary,
-                semanticLabel: 'Connecting',
+                semanticLabel: AppLocalizations.of(context).connecting,
               ),
               const SizedBox(width: Grid.twelve),
               Text(
-                'Confirmed — waiting for desktop',
+                AppLocalizations.of(context).confirmedWaiting,
                 style: context.textTheme.bodySmall?.copyWith(
                   color: context.colors.onSurfaceVariant,
                 ),
@@ -278,7 +282,7 @@ class _SasVerificationView extends StatelessWidget {
                 child: OutlinedButton.icon(
                   onPressed: onDeny,
                   icon: const Icon(LucideIcons.x),
-                  label: const Text('Cancel'),
+                  label: Text(AppLocalizations.of(context).cancel),
                 ),
               ),
               const SizedBox(width: Grid.sm),
@@ -286,7 +290,7 @@ class _SasVerificationView extends StatelessWidget {
                 child: FilledButton.icon(
                   onPressed: onConfirm,
                   icon: const Icon(LucideIcons.check),
-                  label: const Text('Codes Match'),
+                  label: Text(AppLocalizations.of(context).codesMatch),
                 ),
               ),
             ],

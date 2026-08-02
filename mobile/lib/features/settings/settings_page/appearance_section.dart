@@ -7,8 +7,14 @@ const _modeOptions = <({ThemeMode mode, String label, IconData icon})>[
   (mode: ThemeMode.dark, label: 'Dark', icon: LucideIcons.moon),
 ];
 
-String _modeLabel(ThemeMode mode) =>
-    _modeOptions.firstWhere((option) => option.mode == mode).label;
+String _modeLabel(BuildContext context, ThemeMode mode) {
+  final l10n = AppLocalizations.of(context);
+  return switch (mode) {
+    ThemeMode.system => l10n.system,
+    ThemeMode.light => l10n.light,
+    ThemeMode.dark => l10n.dark,
+  };
+}
 
 class _AppearanceSection extends ConsumerWidget {
   const _AppearanceSection();
@@ -20,18 +26,18 @@ class _AppearanceSection extends ConsumerWidget {
     final accentIndex = ref.watch(accentProvider);
 
     return AppListCard(
-      label: 'Style',
+      label: AppLocalizations.of(context).styleSection,
       children: [
         AppListRow(
           icon: LucideIcons.sunMoon,
-          title: 'Appearance',
-          value: _modeLabel(mode),
+          title: AppLocalizations.of(context).appearance,
+          value: _modeLabel(context, mode),
           trailing: const _RowChevron(),
           onTap: () => _showAppearanceModeSheet(context),
         ),
         AppListRow(
           icon: LucideIcons.palette,
-          title: 'Theme',
+          title: AppLocalizations.of(context).theme,
           value: themeSelectionLabel(schemeName, mode),
           trailing: const _RowChevron(),
           onTap: () => Navigator.of(context).push(
@@ -40,7 +46,7 @@ class _AppearanceSection extends ConsumerWidget {
         ),
         AppListRow(
           icon: LucideIcons.droplet,
-          title: 'Accent color',
+          title: AppLocalizations.of(context).accentColor,
           // The swatch *is* the value — naming the color as well would say the
           // same thing twice, so it takes the chevron's place.
           trailing: _AccentSwatch(accentIndex: accentIndex),
@@ -82,12 +88,15 @@ class _AppearanceModeSheet extends ConsumerWidget {
               Grid.gutter,
               Grid.xxs,
             ),
-            child: Text('Appearance', style: context.textTheme.titleMedium),
+            child: Text(
+              AppLocalizations.of(context).appearance,
+              style: context.textTheme.titleMedium,
+            ),
           ),
           for (final option in _modeOptions)
             AppListRow(
               icon: option.icon,
-              title: option.label,
+              title: _modeLabel(context, option.mode),
               trailing: option.mode == mode
                   ? Icon(
                       LucideIcons.check,

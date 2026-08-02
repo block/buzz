@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
@@ -85,6 +86,7 @@ import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { VoiceSettingsCard } from "./VoiceSettingsCard";
+import { LanguageSettingsCard } from "./LanguageSettingsCard";
 
 export type SettingsSection =
   | "profile"
@@ -135,6 +137,7 @@ export function isSettingsSection(value: unknown): value is SettingsSection {
 export type SettingsSectionDescriptor = {
   value: SettingsSection;
   label: string;
+  translationKey: string;
   icon: LucideIcon;
   /** If set, this section is only visible when the feature is enabled */
   featureGate?: string;
@@ -159,84 +162,100 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   {
     value: "appearance",
     label: "Appearance",
+    translationKey: "settings.appearance",
     icon: MonitorCog,
   },
   {
     value: "profile",
     label: "Profile",
+    translationKey: "settings.profile",
     icon: UserRound,
   },
   {
     value: "notifications",
     label: "Notifications",
+    translationKey: "settings.notifications",
     icon: BellRing,
   },
   {
     value: "voice",
     label: "Voice",
+    translationKey: "settings.voice",
     icon: Volume2,
   },
   {
     value: "experimental",
     label: "Experiments",
+    translationKey: "settings.experimental",
     icon: FlaskConical,
   },
   {
     value: "agents",
     label: "Agents",
+    translationKey: "settings.agents",
     icon: Bot,
     featureGate: "managed-agents",
   },
   {
     value: "channel-templates",
     label: "Templates",
+    translationKey: "settings.channelTemplates",
     icon: LayoutTemplate,
     featureGate: "channel-templates",
   },
   {
     value: "compute",
     label: "Compute",
+    translationKey: "settings.compute",
     icon: Cpu,
   },
   {
     value: "shortcuts",
     label: "Shortcuts",
+    translationKey: "settings.shortcuts",
     icon: Keyboard,
   },
   {
     value: "hosted-communities",
     label: "Hosted communities",
+    translationKey: "settings.hostedCommunities",
     icon: MessagesSquare,
   },
   {
     value: "community-members",
     label: "Invites",
+    translationKey: "settings.communityMembers",
     icon: Ticket,
   },
   {
     value: "moderation",
     label: "Moderation",
+    translationKey: "settings.moderation",
     icon: ShieldAlert,
   },
   {
     value: "custom-emoji",
     label: "Custom emoji",
+    translationKey: "settings.customEmoji",
     icon: Smile,
     featureGate: "custom-emoji",
   },
   {
     value: "local-archive",
     label: "Local archive",
+    translationKey: "settings.localArchive",
     icon: Archive,
   },
   {
     value: "mobile",
     label: "Mobile",
+    translationKey: "settings.mobile",
     icon: Smartphone,
   },
   {
     value: "updates",
     label: "Updates",
+    translationKey: "settings.updates",
     icon: Download,
   },
 ];
@@ -418,6 +437,7 @@ const ACCENT_PICKER_TRANSITION = {
 };
 
 function ThemeSettingsCard() {
+  const { t } = useTranslation();
   const {
     setTheme,
     selectedThemeName,
@@ -525,17 +545,25 @@ function ThemeSettingsCard() {
       data-testid="settings-theme"
     >
       <SettingsSectionHeader
-        title="Appearance"
-        description="Choose a theme for Buzz."
+        title={t("appearance.title")}
+        description={t("appearance.chooseTheme")}
       />
+
+      <div className="mb-6">
+        <LanguageSettingsCard />
+      </div>
 
       {/* Mode selector: System / Light / Dark */}
       <div className="mb-4 flex gap-2">
         {(
           [
-            { mode: "system" as const, label: "System", Icon: SunMoon },
-            { mode: "light" as const, label: "Light", Icon: Sun },
-            { mode: "dark" as const, label: "Dark", Icon: Moon },
+            {
+              mode: "system" as const,
+              label: t("appearance.system"),
+              Icon: SunMoon,
+            },
+            { mode: "light" as const, label: t("appearance.light"), Icon: Sun },
+            { mode: "dark" as const, label: t("appearance.dark"), Icon: Moon },
           ] as const
         ).map(({ mode, label, Icon }) => (
           <button

@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "@/app/App";
 import "@fontsource-variable/inter/wght.css";
 import "@/shared/styles/globals.css";
+import "@/shared/i18n";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";

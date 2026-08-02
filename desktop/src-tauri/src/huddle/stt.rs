@@ -235,9 +235,18 @@ fn stt_worker(
     // in k2-fsa/sherpa-onnx.)
     use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
-    let tokens_path = model_dir.join("tokens.txt");
+    let whisper_encoder = model_dir.join("tiny-encoder.int8.onnx");
+    let whisper_decoder = model_dir.join("tiny-decoder.int8.onnx");
+    let whisper_tokens = model_dir.join("tiny-tokens.txt");
+    let is_whisper =
+        whisper_encoder.is_file() && whisper_decoder.is_file() && whisper_tokens.is_file();
+    let tokens_path = if is_whisper {
+        whisper_tokens
+    } else {
+        model_dir.join("tokens.txt")
+    };
     let model_path = model_dir.join("model.int8.onnx");
-    if !tokens_path.exists() || !model_path.exists() {
+    if !tokens_path.exists() || (!is_whisper && !model_path.exists()) {
         eprintln!(
             "buzz-desktop: STT model not found at {} — STT disabled",
             model_dir.display()
@@ -247,7 +256,14 @@ fn stt_worker(
     }
 
     let mut cfg = OfflineRecognizerConfig::default();
-    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+    if is_whisper {
+        cfg.model_config.whisper.encoder = Some(whisper_encoder.to_string_lossy().into_owned());
+        cfg.model_config.whisper.decoder = Some(whisper_decoder.to_string_lossy().into_owned());
+        cfg.model_config.whisper.language = Some("pt".to_string());
+        cfg.model_config.whisper.task = Some("transcribe".to_string());
+    } else {
+        cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+    }
     cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
     cfg.model_config.num_threads = STT_NUM_THREADS;
     // Explicit — defaults are not part of the API contract, and noisy debug

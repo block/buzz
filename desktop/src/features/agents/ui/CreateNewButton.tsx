@@ -1,4 +1,5 @@
 import { Plus } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/shared/ui/button";
 
@@ -13,10 +14,11 @@ type CreateNewButtonProps = {
 export function CreateNewButton({
   ariaLabel,
   disabled = false,
-  label = "New",
+  label,
   onClick,
   variant = "default",
 }: CreateNewButtonProps) {
+  const { t } = useTranslation();
   return (
     <Button
       aria-label={ariaLabel}
@@ -27,7 +29,7 @@ export function CreateNewButton({
       variant={variant}
     >
       <Plus className="h-4 w-4" />
-      {label}
+      {label ?? t("common.new")}
     </Button>
   );
 }

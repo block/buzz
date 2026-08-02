@@ -4,6 +4,7 @@ import { App } from "@/app/App";
 import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
 import "@fontsource-variable/inter/wght.css";
 import "@/shared/styles/globals.css";
+import { currentLanguage, syncAgentResponseLanguage } from "@/shared/i18n";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
@@ -113,6 +114,7 @@ async function bootstrap() {
   configureDevE2eBridgeFromUrl();
   recoverLocalStorageQuotaOnStartup();
   await installE2eBridgeIfConfigured();
+  await syncAgentResponseLanguage(currentLanguage());
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
 }

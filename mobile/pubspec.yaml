@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   # Grapheme-cluster segmentation, for deciding whether a message body is
   # nothing but emoji. Already present transitively via the Flutter SDK;
   # declared here because we import it directly.
@@ -52,6 +54,7 @@ dev_dependencies:
   mocktail: ^1.0.4
 
 flutter:
+  generate: true
   uses-material-design: true
   assets:
     - assets/images/buzz-icon.png

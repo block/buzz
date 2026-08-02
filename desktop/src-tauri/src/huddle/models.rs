@@ -29,6 +29,8 @@ use super::pocket::{
 };
 use super::tts_voice_registry::POCKET_VOICES;
 
+#[path = "models_language.rs"]
+mod language;
 #[path = "models_voice_upgrade.rs"]
 mod voice_upgrade;
 
@@ -45,6 +47,10 @@ mod voice_upgrade;
 /// (sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2).
 /// Computed from a known-good download. Update when upgrading model versions.
 const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
+const STT_PT_ARCHIVE_SHA256: &str =
+    "c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1";
+const TTS_PT_ARCHIVE_SHA256: &str =
+    "dbc8b1d7d729fd417ea78a350ed35696c928770ac93513d3f507bd4e88eee3fd";
 
 fn pocket_artifact_url(filename: &str) -> String {
     format!(
@@ -94,9 +100,11 @@ const TTS_REFERENCE_ARTIFACT: PocketModelArtifact = PocketModelArtifact {
 /// is technically belt-and-suspenders, but it keeps the manifest semantics
 /// honest (each version tag identifies one specific set of model bytes).
 const STT_MODEL_VERSION: &str = "2";
+const STT_PT_MODEL_VERSION: &str = "1";
 
 /// Identifies the April INT8 asset set plus the official VCTK presets.
 const TTS_MODEL_VERSION: &str = "5";
+const TTS_PT_MODEL_VERSION: &str = "1";
 
 /// Filename for the version manifest written alongside model files.
 const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
@@ -154,6 +162,44 @@ unmodified.
 
 Provided \"AS IS\", without warranty of any kind, express or implied. See the
 license text for full warranty disclaimer.
+";
+
+const STT_PT_DOWNLOAD_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
+     sherpa-onnx-whisper-tiny.tar.bz2";
+const STT_PT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-whisper-tiny";
+const STT_PT_MODEL_DIR_NAME: &str = "whisper-tiny-multilingual";
+const STT_PT_EXPECTED_FILES: &[&str] = &[
+    "tiny-encoder.int8.onnx",
+    "tiny-decoder.int8.onnx",
+    "tiny-tokens.txt",
+    STT_LICENSE_FILE_NAME,
+];
+const STT_PT_LICENSE_TEXT: &str = "\
+Whisper Tiny multilingual (Portuguese speech recognition)\n\
+Copyright OpenAI and contributors.\n\
+\n\
+Licensed under the MIT License. Source model: https://github.com/openai/whisper\n\
+ONNX package supplied by sherpa-onnx: https://github.com/k2-fsa/sherpa-onnx\n\
+";
+
+const TTS_PT_DOWNLOAD_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/\
+     vits-piper-pt_BR-faber-medium-int8.tar.bz2";
+const TTS_PT_ARCHIVE_SUBDIR: &str = "vits-piper-pt_BR-faber-medium-int8";
+const TTS_PT_MODEL_DIR_NAME: &str = "piper-pt-br-faber-medium-int8";
+const TTS_PT_EXPECTED_FILES: &[&str] = &[
+    "pt_BR-faber-medium.onnx",
+    "pt_BR-faber-medium.onnx.json",
+    "tokens.txt",
+    "espeak-ng-data/sd_dict",
+    TTS_LICENSE_FILE_NAME,
+];
+const TTS_PT_LICENSE_TEXT: &str = "\
+Piper pt_BR Faber medium INT8 (Brazilian Portuguese text to speech)\n\
+Model package supplied by sherpa-onnx: https://github.com/k2-fsa/sherpa-onnx\n\
+Voice model source: https://huggingface.co/rhasspy/piper-voices\n\
+See the upstream model metadata and licenses distributed with the package.\n\
 ";
 
 // ── Pocket TTS model ──────────────────────────────────────────────────────────
@@ -598,6 +644,9 @@ pub struct ModelManager {
     models_dir: PathBuf,
     stt: ModelSlot,
     tts: ModelSlot,
+    stt_pt: ModelSlot,
+    tts_pt: ModelSlot,
+    speech_language: Arc<Mutex<String>>,
 }
 
 impl ModelManager {
@@ -610,96 +659,27 @@ impl ModelManager {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
             tts: tts_model_slot(),
+            stt_pt: ModelSlot::new(
+                STT_PT_MODEL_DIR_NAME,
+                STT_PT_EXPECTED_FILES,
+                STT_PT_MODEL_VERSION,
+            ),
+            tts_pt: ModelSlot::new(
+                TTS_PT_MODEL_DIR_NAME,
+                TTS_PT_EXPECTED_FILES,
+                TTS_PT_MODEL_VERSION,
+            ),
+            speech_language: Arc::new(Mutex::new("en-US".to_string())),
         };
         manager.tts.recover_interrupted_install(&manager.models_dir);
+        manager
+            .stt_pt
+            .recover_interrupted_install(&manager.models_dir);
+        manager
+            .tts_pt
+            .recover_interrupted_install(&manager.models_dir);
         Some(manager)
     }
-
-    // ── STT accessors ────────────────────────────────────────────────────────
-
-    /// Path to the STT model directory, or `None` if not ready.
-    pub fn stt_model_dir(&self) -> Option<PathBuf> {
-        self.stt.dir_if_ready(&self.models_dir)
-    }
-    /// `true` if all STT files are present and the manifest version matches.
-    pub fn is_stt_ready(&self) -> bool {
-        self.stt.is_ready(&self.models_dir)
-    }
-    /// Current STT download status.
-    pub fn stt_status(&self) -> ModelStatus {
-        self.stt.status()
-    }
-    /// Returns `true` once when the STT model just became ready. Resets the flag.
-    pub fn take_stt_ready(&self) -> bool {
-        self.stt.take_ready()
-    }
-
-    // ── TTS accessors ─────────────────────────────────────────────────────────
-
-    /// Path to the TTS model directory, or `None` if not ready.
-    pub fn tts_model_dir(&self) -> Option<PathBuf> {
-        self.tts.dir_if_ready(&self.models_dir)
-    }
-    /// `true` if all TTS files are present and the manifest version matches.
-    pub fn is_tts_ready(&self) -> bool {
-        self.tts.is_ready(&self.models_dir)
-    }
-    /// Current TTS download status.
-    pub fn tts_status(&self) -> ModelStatus {
-        self.tts.status()
-    }
-    /// Returns `true` once when TTS just became ready. Resets the flag.
-    pub fn take_tts_ready(&self) -> bool {
-        self.tts.take_ready()
-    }
-
-    // ── Download triggers ─────────────────────────────────────────────────────
-
-    /// Start a background STT model download. No-op if already ready or downloading.
-    ///
-    /// Also schedules a best-effort cleanup of the legacy Moonshine model
-    /// directory — but **only when the new STT model is already on disk and
-    /// Ready**. This covers the "fast-path" upgrade scenario (new model
-    /// installed by a previous build, `download_stt_model` short-circuits, the
-    /// post-install cleanup never runs). For users mid-migration (old model
-    /// present, new model still downloading) we keep the old files until the
-    /// Parakeet install finishes, avoiding unnecessary data loss if the
-    /// ~100 MB download fails. The post-install path inside
-    /// `download_stt_model` handles cleanup once the new install reaches Ready.
-    pub fn start_stt_download(&self, http_client: reqwest::Client) {
-        let manager = self.clone();
-        self.stt.start_download(
-            &self.models_dir,
-            http_client,
-            "stt",
-            move |client| async move { manager.download_stt_model(client).await },
-        );
-        if self.stt.is_ready(&self.models_dir) {
-            // Detached cleanup task — must not block startup. Gated above on
-            // the new model being Ready, so a mid-migration user keeps their
-            // existing moonshine-tiny files until Parakeet install completes.
-            let models_dir = self.models_dir.clone();
-            tauri::async_runtime::spawn(async move {
-                cleanup_legacy_moonshine_dir(&models_dir).await;
-            });
-        }
-    }
-
-    /// Start a background Pocket TTS download. No-op if already ready or downloading.
-    pub fn start_tts_download(&self, http_client: reqwest::Client) {
-        if let Err(error) = voice_upgrade::install_vctk_presets_into_v4_model(&self.models_dir) {
-            eprintln!("buzz-desktop: could not upgrade existing Pocket voices in place: {error}");
-        }
-        let manager = self.clone();
-        self.tts.start_download(
-            &self.models_dir,
-            http_client,
-            "tts",
-            move |client| async move { manager.download_tts_model(client).await },
-        );
-    }
-
-    // ── Private download implementations ─────────────────────────────────────
 
     /// Download, extract, and verify the STT model archive.
     async fn download_stt_model(&self, http_client: reqwest::Client) -> Result<(), String> {

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 
 type InviteJoinPolicy = {
   terms_markdown?: string;
@@ -86,6 +87,7 @@ export function InviteJoinPolicyNotice({
   onShowDocument: (title: string, markdown: string) => void;
   policy: InviteJoinPolicy;
 }) {
+  const { t } = useTranslation();
   const stopLabelActivation = (
     event: React.MouseEvent<HTMLButtonElement>,
     title: string,
@@ -103,21 +105,21 @@ export function InviteJoinPolicyNotice({
     >
       {policy.age_attestation_required ? (
         <PolicyCheckbox
-          accessibleLabel="I am 18 years of age or older."
+          accessibleLabel={t("invite.age")}
           checked={ageConfirmed}
           onCheckedChange={onAgeConfirmedChange}
         >
-          I am 18 years of age or older.
+          {t("invite.age")}
         </PolicyCheckbox>
       ) : null}
 
       {policy.terms_markdown || policy.privacy_markdown ? (
         <PolicyCheckbox
-          accessibleLabel="I agree to the Buzz Terms of Service and Privacy Policy."
+          accessibleLabel={t("invite.agree")}
           checked={agreementConfirmed}
           onCheckedChange={onAgreementConfirmedChange}
         >
-          I agree to the Buzz{" "}
+          {t("invite.agreePrefix")}{" "}
           {policy.terms_markdown ? (
             <button
               className="text-black no-underline underline-offset-4 hover:text-black/70 hover:underline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-black"
@@ -125,17 +127,17 @@ export function InviteJoinPolicyNotice({
               onClick={(event) =>
                 stopLabelActivation(
                   event,
-                  "Terms of Service",
+                  t("invite.terms"),
                   policy.terms_markdown ?? "",
                 )
               }
             >
-              Terms of Service
+              {t("invite.terms")}
             </button>
           ) : (
-            "Terms of Service"
+            t("invite.terms")
           )}{" "}
-          and{" "}
+          {t("invite.and")}{" "}
           {policy.privacy_markdown ? (
             <button
               className="text-black no-underline underline-offset-4 hover:text-black/70 hover:underline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-black"
@@ -143,15 +145,15 @@ export function InviteJoinPolicyNotice({
               onClick={(event) =>
                 stopLabelActivation(
                   event,
-                  "Privacy Policy",
+                  t("invite.privacy"),
                   policy.privacy_markdown ?? "",
                 )
               }
             >
-              Privacy Policy
+              {t("invite.privacy")}
             </button>
           ) : (
-            "Privacy Policy"
+            t("invite.privacy")
           )}
           .
         </PolicyCheckbox>

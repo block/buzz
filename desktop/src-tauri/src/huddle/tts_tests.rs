@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+#[path = "tts_portuguese_tests.rs"]
+mod portuguese;
 #[path = "tts_tests/token_split.rs"]
 mod token_split;
 

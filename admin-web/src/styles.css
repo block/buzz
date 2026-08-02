@@ -126,6 +126,15 @@ nav {
   box-shadow: 0 0.2rem 1rem rgb(35 30 30 / 8%);
 }
 
+.language-picker {
+  min-height: 2.4rem;
+  border: 1px solid rgb(35 30 30 / 12%);
+  border-radius: 999px;
+  padding: 0 0.75rem;
+  color: #231e1e;
+  background: white;
+}
+
 main {
   width: min(1120px, calc(100% - 3rem));
   margin: 0 auto;

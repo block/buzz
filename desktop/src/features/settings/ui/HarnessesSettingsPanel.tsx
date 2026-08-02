@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { ExternalLink, Plus, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -22,6 +23,7 @@ function GitBashCard({
     ReturnType<typeof useGitBashPrerequisiteQuery>["data"]
   >;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className={cn(
@@ -47,7 +49,9 @@ function GitBashCard({
                   : "bg-amber-500/15 text-amber-600 dark:text-amber-400",
               )}
             >
-              {prerequisite.available ? "Available" : "Action needed"}
+              {prerequisite.available
+                ? t("runtimes.available")
+                : t("runtimes.actionNeeded")}
             </span>
           </div>
           {!prerequisite.available ? (
@@ -56,13 +60,13 @@ function GitBashCard({
               onClick={() => void openUrl(prerequisite.installInstructionsUrl)}
               type="button"
             >
-              <ExternalLink className="h-4 w-4" /> Install Git for Windows
+              <ExternalLink className="h-4 w-4" /> {t("runtimes.installGit")}
             </button>
           ) : null}
         </div>
         {!prerequisite.available ? (
           <div className="mt-3 space-y-1 text-sm text-muted-foreground">
-            <p>Required for buzz-agent shell tools on Windows.</p>
+            <p>{t("runtimes.gitBashDescription")}</p>
             <p>{prerequisite.installHint}</p>
           </div>
         ) : null}
@@ -84,6 +88,7 @@ function GitBashCard({
  *   needs multi-step setup, plus the custom-harness form.
  */
 export function HarnessesSettingsPanel() {
+  const { t } = useTranslation();
   const runtimesQuery = useAcpRuntimesQuery();
   const gitBashQuery = useGitBashPrerequisiteQuery();
   const [catalogOpen, setCatalogOpen] = React.useState(false);
@@ -113,8 +118,8 @@ export function HarnessesSettingsPanel() {
     <section className="min-w-0 space-y-4" data-testid="settings-harnesses">
       <SectionHeader
         className="items-center"
-        title="Agent runtimes"
-        description="Choose which agent tools Buzz can use on this device."
+        title={t("runtimes.title")}
+        description={t("runtimes.description")}
         action={
           <Button
             disabled={isRefreshing}
@@ -130,7 +135,7 @@ export function HarnessesSettingsPanel() {
             <RefreshCw
               className={cn("h-4 w-4", isRefreshing && "animate-spin")}
             />
-            Check again
+            {t("runtimes.checkAgain")}
           </Button>
         }
       />
@@ -140,34 +145,34 @@ export function HarnessesSettingsPanel() {
           <section>
             <div className="mb-3 text-sm">
               <h2 className="text-lg font-semibold tracking-tight">
-                System prerequisites
+                {t("runtimes.prerequisites")}
               </h2>
               <p className="mt-1 text-sm font-normal text-muted-foreground">
-                Windows tools required by supported agents.
+                {t("runtimes.prerequisitesDescription")}
               </p>
             </div>
             <GitBashCard prerequisite={gitBashQuery.data} />
           </section>
         ) : null}
 
-        <section aria-label="Your runtimes">
+        <section aria-label={t("runtimes.yours")}>
           {/* The sub-header only earns its keep when another section (System
               prerequisites, Windows-only) shares the page; otherwise it just
               restates the page header. */}
           {gitBashQuery.data ? (
             <div className="mb-3 text-sm">
               <h2 className="text-lg font-semibold tracking-tight">
-                Your runtimes
+                {t("runtimes.yours")}
               </h2>
               <p className="mt-1 text-sm font-normal text-muted-foreground">
-                Ready to use, or one click from installed.
+                {t("runtimes.oneClick")}
               </p>
             </div>
           ) : null}
 
           {runtimesQuery.isLoading ? (
             <div className="rounded-2xl bg-muted/20 px-4 py-4 text-sm font-normal text-muted-foreground">
-              Checking agent runtimes...
+              {t("runtimes.checking")}
             </div>
           ) : rows.length > 0 ? (
             <div className="space-y-3" data-testid="doctor-runtime-list">
@@ -181,7 +186,7 @@ export function HarnessesSettingsPanel() {
             </div>
           ) : (
             <div className="rounded-2xl bg-amber-500/10 px-4 py-4 text-sm text-warning">
-              No agent runtimes ready yet — add one below.
+              {t("runtimes.noneReady")}
             </div>
           )}
 
@@ -200,7 +205,7 @@ export function HarnessesSettingsPanel() {
             variant="outline"
           >
             <Plus className="h-4 w-4" />
-            Add runtimes
+            {t("runtimes.add")}
           </Button>
         </section>
       </div>

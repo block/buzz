@@ -25,7 +25,7 @@ use super::{
 };
 
 const SETTINGS_FILE: &str = "tts-settings.json";
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = 2;
 const VOICE_CHANGE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 pub const POCKET_BACKEND_ID: &str = "pocket";
 
@@ -137,6 +137,7 @@ pub struct TtsSettings {
     pub version: u32,
     pub agent_text_to_speech: bool,
     pub voice_preferences: VoicePreferences,
+    pub speech_language: String,
 }
 
 impl Default for TtsSettings {
@@ -145,6 +146,7 @@ impl Default for TtsSettings {
             version: CURRENT_VERSION,
             agent_text_to_speech: true,
             voice_preferences: vec![MARY_VOICE_KEY.to_string()],
+            speech_language: "en-US".to_string(),
         }
     }
 }
@@ -272,7 +274,26 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
             voice_preferences: vec![voice_key],
+            speech_language: "en-US".to_string(),
         });
+    }
+
+    if value.get("speechLanguage").is_none() {
+        let mut settings: TtsSettings = serde_json::from_value(serde_json::json!({
+            "version": CURRENT_VERSION,
+            "agentTextToSpeech": value
+                .get("agentTextToSpeech")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+            "voicePreferences": value
+                .get("voicePreferences")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([MARY_VOICE_KEY])),
+            "speechLanguage": "en-US"
+        }))
+        .map_err(|error| format!("text-to-speech settings are invalid: {error}"))?;
+        settings.version = CURRENT_VERSION;
+        return Ok(settings);
     }
 
     let mut settings: TtsSettings = serde_json::from_value(value)
@@ -286,10 +307,19 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
     {
         settings.voice_preferences = TtsSettings::default().voice_preferences;
     }
+    if !matches!(settings.speech_language.as_str(), "en-US" | "pt-BR") {
+        settings.speech_language = TtsSettings::default().speech_language;
+    }
     Ok(settings)
 }
 
 pub(crate) fn save_to_path(path: &Path, settings: &TtsSettings) -> Result<(), String> {
+    if !matches!(settings.speech_language.as_str(), "en-US" | "pt-BR") {
+        return Err(format!(
+            "Unsupported speech language: {}",
+            settings.speech_language
+        ));
+    }
     if settings.voice_preferences.is_empty() {
         return Err("At least one voice preference is required".to_string());
     }
@@ -315,6 +345,14 @@ pub fn load_for_app(app: &AppHandle) -> (TtsSettings, Option<String>) {
         Err(error) => {
             eprintln!("buzz-desktop: {error}; preserving the file and using Mary for this session");
             (TtsSettings::default(), Some(error))
+        }
+    }
+}
+
+pub fn apply_model_language(settings: &TtsSettings) {
+    if let Some(manager) = models::global_model_manager() {
+        if let Err(error) = manager.set_speech_language(&settings.speech_language) {
+            eprintln!("buzz-desktop: could not apply speech language: {error}");
         }
     }
 }
@@ -424,11 +462,24 @@ async fn apply_tts_settings(
         ));
     }
 
-    // OFF is safety-sensitive: stop current and queued speech before any disk
+    let language_changed = current_settings(state)
+        .map(|current| current.speech_language != settings.speech_language)
+        .unwrap_or(false);
+
+    // OFF and language transitions are safety-sensitive: stop current and queued speech before any disk
     // I/O, and never resume it merely because persistence fails.
-    if !settings.agent_text_to_speech {
+    if !settings.agent_text_to_speech || language_changed {
         disable_tts_runtime(state)?;
-        commit_effective_off(state)?;
+        if !settings.agent_text_to_speech {
+            commit_effective_off(state)?;
+        }
+    }
+    if language_changed {
+        let old_stt = {
+            let mut huddle = state.huddle()?;
+            huddle.stt_pipeline.take()
+        };
+        drop(old_stt);
     }
 
     ensure_settings_writable(state)?;
@@ -440,6 +491,16 @@ async fn apply_tts_settings(
         .lock()
         .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))? =
         settings.clone();
+
+    let manager = models::global_model_manager()
+        .ok_or("model manager unavailable (home directory could not be resolved)")?;
+    manager.set_speech_language(&settings.speech_language)?;
+    if settings.agent_text_to_speech {
+        manager.start_tts_download(state.http_client.clone());
+    }
+    if state.huddle()?.transcription_enabled {
+        manager.start_stt_download(state.http_client.clone());
+    }
 
     let mut voice_change_wait = None;
     if settings.agent_text_to_speech {
@@ -461,6 +522,24 @@ async fn apply_tts_settings(
         state.emit_huddle_state_changed();
     }
     Ok(voice_change_wait)
+}
+
+#[tauri::command]
+pub async fn set_speech_language(
+    language: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TtsSettings, String> {
+    if !matches!(language.as_str(), "en-US" | "pt-BR") {
+        return Err(format!("Unsupported speech language: {language}"));
+    }
+    let transition = state.huddle_audio.tts_transition.lock().await;
+    let mut settings = current_settings(&state)?;
+    settings.speech_language = language;
+    let voice_change = apply_tts_settings(settings, &app, &state).await?;
+    drop(transition);
+    finish_durable_voice_change(voice_change).await;
+    current_settings(&state)
 }
 
 fn current_settings(state: &AppState) -> Result<TtsSettings, String> {
@@ -706,6 +785,10 @@ pub async fn delete_pocket_voice(
 }
 
 #[cfg(test)]
+#[path = "tts_settings_state_tests.rs"]
+mod state_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     const EVE_VOICE_KEY: &str = "pocket:eve";
@@ -735,9 +818,10 @@ mod tests {
         assert_eq!(
             TtsSettings::default(),
             TtsSettings {
-                version: 1,
+                version: 2,
                 agent_text_to_speech: true,
                 voice_preferences: vec!["pocket:mary".to_string()],
+                speech_language: "en-US".to_string(),
             }
         );
     }
@@ -839,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_unversioned_experiment_settings_to_v1_defaults() {
+    fn migrates_unversioned_experiment_settings_to_current_defaults() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join(SETTINGS_FILE);
         std::fs::write(&path, r#"{"voice":"legacy-experiment"}"#).expect("fixture write");
@@ -861,9 +945,10 @@ mod tests {
         assert_eq!(
             load_from_path(&path).expect("migration"),
             TtsSettings {
-                version: 1,
+                version: 2,
                 agent_text_to_speech: false,
                 voice_preferences: vec![EVE_VOICE_KEY.to_string()],
+                speech_language: "en-US".to_string(),
             }
         );
     }
@@ -897,75 +982,5 @@ mod tests {
         assert!(load_from_path(&path)
             .expect_err("future version should fail")
             .contains("newer than this Buzz build supports"));
-    }
-
-    #[test]
-    fn disabling_cancels_runtime_before_persistence_can_fail() {
-        let mut huddle = super::super::HuddleState {
-            tts_enabled: true,
-            ..super::super::HuddleState::default()
-        };
-        assert!(!huddle.tts_cancel.load(std::sync::atomic::Ordering::Acquire));
-        assert!(cancel_huddle_speech(&mut huddle).is_none());
-        assert!(!huddle.tts_enabled);
-        assert!(huddle.tts_cancel.load(std::sync::atomic::Ordering::Acquire));
-    }
-
-    #[test]
-    fn pocket_voice_update_preserves_the_latest_toggle_and_other_backends() {
-        let current = TtsSettings {
-            agent_text_to_speech: false,
-            voice_preferences: vec!["siri:aaron".to_string(), MARY_VOICE_KEY.to_string()],
-            ..TtsSettings::default()
-        };
-        let updated = settings_with_pocket_voice_from_registry(
-            current,
-            EVE_VOICE_KEY,
-            &bundled_voice_registry(),
-        )
-        .expect("available voice");
-        assert!(!updated.agent_text_to_speech);
-        assert_eq!(updated.voice_preferences, vec!["siri:aaron", EVE_VOICE_KEY]);
-    }
-
-    #[test]
-    fn failed_off_persistence_cannot_be_undone_by_a_later_voice_update() {
-        let state = crate::app_state::build_app_state();
-        commit_effective_off(&state).expect("commit effective OFF state");
-
-        // This models the next command after the OFF save fails: it must merge
-        // from effective memory state, not the stale last-persisted ON value.
-        let current = state.huddle_audio.tts.lock().expect("settings").clone();
-        let voice_update = settings_with_pocket_voice_from_registry(
-            current,
-            EVE_VOICE_KEY,
-            &bundled_voice_registry(),
-        )
-        .expect("available voice");
-        assert!(!voice_update.agent_text_to_speech);
-    }
-
-    #[test]
-    fn failed_disabled_voice_save_does_not_change_the_remembered_voice() {
-        let state = crate::app_state::build_app_state();
-        state
-            .huddle_audio
-            .tts
-            .lock()
-            .expect("settings")
-            .agent_text_to_speech = false;
-        let current = state.huddle_audio.tts.lock().expect("settings").clone();
-        let unsaved = settings_with_pocket_voice_from_registry(
-            current,
-            EVE_VOICE_KEY,
-            &bundled_voice_registry(),
-        )
-        .expect("available voice");
-
-        // This is the only pre-persistence mutation for an OFF candidate.
-        commit_effective_off(&state).expect("commit effective OFF state");
-        let remembered = state.huddle_audio.tts.lock().expect("settings").clone();
-        assert_eq!(remembered.voice_preferences, vec![MARY_VOICE_KEY]);
-        assert_eq!(unsaved.voice_preferences, vec![EVE_VOICE_KEY]);
     }
 }
