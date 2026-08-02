@@ -142,6 +142,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Sort: Recent'), findsOneWidget);
     expect(find.text('Sort: A–Z'), findsOneWidget);
+    final selectedCheck = find.byKey(const ValueKey('sort-selected-check'));
+    expect(selectedCheck, findsOneWidget);
+    expect(
+      tester.getCenter(selectedCheck).dx,
+      greaterThan(tester.getCenter(find.text('Sort: A–Z')).dx),
+    );
 
     for (final label in ['general', 'Alice']) {
       final text = tester.widget<Text>(find.text(label));

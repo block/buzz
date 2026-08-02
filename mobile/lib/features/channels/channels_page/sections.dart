@@ -338,17 +338,34 @@ class _SectionNameDialog extends HookWidget {
 const _kSortRecentMenuValue = 'sort_recent';
 const _kSortAlphaMenuValue = 'sort_alpha';
 
+PopupMenuItem<String> _sortMenuItem({
+  required String value,
+  required String label,
+  required bool selected,
+}) => PopupMenuItem(
+  value: value,
+  child: Row(
+    children: [
+      Expanded(child: Text(label)),
+      if (selected)
+        const Icon(LucideIcons.check, key: ValueKey('sort-selected-check'))
+      else
+        const SizedBox(width: 24),
+    ],
+  ),
+);
+
 List<PopupMenuEntry<String>> _sortMenuItems(ChannelSortMode current) => [
   const PopupMenuDivider(),
-  CheckedPopupMenuItem(
+  _sortMenuItem(
     value: _kSortRecentMenuValue,
-    checked: current == ChannelSortMode.recent,
-    child: const Text('Sort: Recent'),
+    label: 'Sort: Recent',
+    selected: current == ChannelSortMode.recent,
   ),
-  CheckedPopupMenuItem(
+  _sortMenuItem(
     value: _kSortAlphaMenuValue,
-    checked: current == ChannelSortMode.alpha,
-    child: const Text('Sort: A–Z'),
+    label: 'Sort: A–Z',
+    selected: current == ChannelSortMode.alpha,
   ),
 ];
 
