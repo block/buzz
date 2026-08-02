@@ -16,14 +16,38 @@ export function useAudioDevices(
 
   // Enumerate audio input devices on mount and when devices change.
   React.useEffect(() => {
+    // WebKitGTK's libcamera backend can retry a failing camera manager in a
+    // tight loop, firing `devicechange` on every cycle. Each cycle spawns a new
+    // libcamera manager and leaks file descriptors in the web process; on
+    // machines where the camera fails to enumerate ("No such device") this
+    // escalates until EMFILE aborts the app ("Too many open files", GLib
+    // "Creating pipes for GWakeup"). Throttle refreshes so the frontend can't
+    // amplify the loop, and back off after repeated failures.
+    const MIN_REFRESH_MS = 2000;
+    const BACKOFF_MS = 30_000;
+    const MAX_FAILURES = 3;
+    let lastRefresh = 0;
+    let failures = 0;
+    let backoffUntil = 0;
+
     function refreshDevices() {
+      const now = Date.now();
+      if (now < backoffUntil || now - lastRefresh < MIN_REFRESH_MS) {
+        return;
+      }
+      lastRefresh = now;
       navigator.mediaDevices
         .enumerateDevices()
-        .then((devices) =>
-          setAudioDevices(devices.filter((d) => d.kind === "audioinput")),
-        )
+        .then((devices) => {
+          failures = 0;
+          setAudioDevices(devices.filter((d) => d.kind === "audioinput"));
+        })
         .catch(() => {
-          /* best-effort */
+          failures += 1;
+          if (failures >= MAX_FAILURES) {
+            backoffUntil = Date.now() + BACKOFF_MS;
+            failures = 0;
+          }
         });
     }
     refreshDevices();
