@@ -261,12 +261,10 @@ export function AppShell() {
     if (!consumePendingCommunityRestore(activeCommunityId)) {
       return;
     }
-
     const destination = loadCommunityDestination(activeCommunityId);
     if (!destination || destination.kind === "home") {
       return;
     }
-
     const channelIsAvailable = sidebarChannels.some(
       (channel) => channel.id === destination.channelId,
     );
@@ -275,7 +273,6 @@ export function AppShell() {
       void goHome({ replace: true });
       return;
     }
-
     // The normal switch path writes the remembered channel into the hash before
     // the target community mounts, so no intermediate Inbox frame is painted.
     // Older transition callers may still arrive at neutral Home; repair those.
@@ -317,14 +314,12 @@ export function AppShell() {
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
   });
-
   const {
     followedRootIds,
     isFollowing: isFollowingThread,
     followThread,
     unfollowThread,
   } = useThreadFollows(identityQuery.data?.pubkey);
-
   const {
     markAllChannelsRead,
     markChannelRead,
