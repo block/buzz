@@ -158,7 +158,7 @@ impl Llm {
                 let v = self.post_openrouter(cfg, &body).await?;
                 parse_openai_with_reasoning_details(v)
             }
-            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek => {
+            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek | Provider::Groq => {
                 self.openai_request(
                     cfg,
                     effective_model,
@@ -168,7 +168,7 @@ impl Llm {
                         // `max` for pure OpenAI/Databricks; this per-model table is the single authority
                         // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
                         // models, and still applies corrections like none→minimal on the gpt-5 base.
-                        // DeepSeek is Chat Completions only (`OpenAiApi::Chat` in config).
+                        // DeepSeek and Groq are Chat Completions only (`OpenAiApi::Chat` in config).
                         let e =
                             effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
                         if use_responses {
@@ -271,7 +271,7 @@ impl Llm {
                 let v = self.post_openrouter(cfg, &body).await?;
                 Ok(parse_openai(v)?.text)
             }
-            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek => {
+            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek | Provider::Groq => {
                 let r = self
                     .openai_request(
                         cfg,
@@ -1918,13 +1918,14 @@ where
 ///   `x-api-key`), but Llm holds one to keep the field non-`Option`.
 /// - `Provider::OpenAi`: a static source over `OPENAI_COMPAT_API_KEY`.
 /// - `Provider::DeepSeek`: a static source over `DEEPSEEK_API_KEY`.
+/// - `Provider::Groq`: a static source over `GROQ_API_KEY`.
 /// - `Provider::Databricks`: if `DATABRICKS_TOKEN` is set, a static source.
 ///   Otherwise a `PkceOAuthTokenSource` pointed at the workspace's OIDC
 ///   discovery URL. First request without a cached token triggers a browser
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::DeepSeek => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::DeepSeek | Provider::Groq => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {

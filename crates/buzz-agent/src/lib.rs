@@ -11,7 +11,7 @@ mod mcp;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use catalog::{discover_databricks_models, discover_deepseek_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -464,6 +464,19 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                     app.cfg.provider,
                     &app.cfg.model,
                     discover_databricks_models(&app.cfg),
+                )
+                .await;
+                models
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            Provider::DeepSeek => {
+                let models = resolve_models_catalog(
+                    &app.models_cache,
+                    app.cfg.provider,
+                    &app.cfg.model,
+                    discover_deepseek_models(&app.cfg),
                 )
                 .await;
                 models

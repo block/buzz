@@ -678,6 +678,10 @@ pub enum Provider {
     /// uses Chat Completions only (not Responses). Distinct from `provider=openai`
     /// / openai-compat escape hatch.
     DeepSeek,
+    /// Groq first-party API. Chat Completions at `https://api.groq.com/openai/v1`
+    /// (override with `GROQ_BASE_URL`). Wire format is OpenAI-chat-compatible;
+    /// uses Chat Completions only (not Responses). LPU hardware for fastest inference.
+    Groq,
 }
 
 /// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
@@ -775,6 +779,7 @@ impl Config {
             env("OPENAI_COMPAT_API_KEY").as_deref(),
             env("OPENROUTER_API_KEY").as_deref(),
             env("DEEPSEEK_API_KEY").as_deref(),
+            env("GROQ_API_KEY").as_deref(),
         )?;
 
         // Universal model override — takes priority over provider-specific model
@@ -837,6 +842,16 @@ impl Config {
                 // Official API root includes /v1; trailing slash is normalized by callers.
                 env_or("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
                 OpenAiApi::Chat, // DeepSeek is Chat Completions only
+            ),
+            Provider::Groq => (
+                req("GROQ_API_KEY")?,
+                resolve_model(
+                    buzz_agent_model.as_deref(),
+                    env("GROQ_MODEL").as_deref(),
+                )
+                .ok_or_else(|| "config: GROQ_MODEL required".to_string())?,
+                env_or("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+                OpenAiApi::Chat, // Groq is Chat Completions only
             ),
         };
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
@@ -1047,6 +1062,7 @@ fn resolve_provider(
     openai_key: Option<&str>,
     openrouter_key: Option<&str>,
     deepseek_key: Option<&str>,
+    groq_key: Option<&str>,
 ) -> Result<Provider, String> {
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => {
@@ -1066,6 +1082,8 @@ fn resolve_provider(
                 "openrouter" => Err("config: OPENROUTER_API_KEY required".into()),
                 "deepseek" if present_nonempty(deepseek_key) => Ok(Provider::DeepSeek),
                 "deepseek" => Err("config: DEEPSEEK_API_KEY required".into()),
+                "groq" if present_nonempty(groq_key) => Ok(Provider::Groq),
+                "groq" => Err("config: GROQ_API_KEY required".into()),
                 _ => Err(format!(
                     "config: BUZZ_AGENT_PROVIDER={raw} not supported"
                 )),
@@ -1283,11 +1301,11 @@ mod tests {
     #[test]
     fn resolve_provider_keeps_requested_provider_when_token_present() {
         assert_eq!(
-            resolve_provider(Some("anthropic"), Some("sk-ant"), None, None, None).unwrap(),
+            resolve_provider(Some("anthropic"), Some("sk-ant"), None, None, None, None).unwrap(),
             Provider::Anthropic
         );
         assert_eq!(
-            resolve_provider(Some("openai"), None, Some("sk-openai"), None, None).unwrap(),
+            resolve_provider(Some("openai"), None, Some("sk-openai"), None, None, None).unwrap(),
             Provider::OpenAi
         );
     }
@@ -1295,17 +1313,17 @@ mod tests {
     #[test]
     fn resolve_provider_errors_when_requested_provider_key_missing() {
         // No fallback — missing key returns an error regardless of Databricks availability.
-        let err = resolve_provider(Some("anthropic"), None, None, None, None).unwrap_err();
+        let err = resolve_provider(Some("anthropic"), None, None, None, None, None).unwrap_err();
         assert!(err.contains("ANTHROPIC_API_KEY required"), "{err}");
 
-        let err = resolve_provider(Some("openai-compat"), None, Some("   "), None, None).unwrap_err();
+        let err = resolve_provider(Some("openai-compat"), None, Some("   "), None, None, None).unwrap_err();
         assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
     }
 
     #[test]
     fn resolve_provider_errors_when_provider_env_absent() {
         // No implicit inference — absent BUZZ_AGENT_PROVIDER is an error.
-        let err = resolve_provider(None, None, None, None, None).unwrap_err();
+        let err = resolve_provider(None, None, None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
     }
 
@@ -1315,19 +1333,19 @@ mod tests {
         // When BUZZ_AGENT_PROVIDER=databricks, resolve_provider succeeds regardless
         // of DATABRICKS_HOST/MODEL (those are validated later in from_env()).
         assert_eq!(
-            resolve_provider(Some("databricks"), None, None, None, None).unwrap(),
+            resolve_provider(Some("databricks"), None, None, None, None, None).unwrap(),
             Provider::Databricks
         );
         // Missing key for other providers still errors — no Databricks fallback.
-        let err = resolve_provider(Some("openai"), None, None, None, None).unwrap_err();
+        let err = resolve_provider(Some("openai"), None, None, None, None, None).unwrap_err();
         assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
-        let err = resolve_provider(None, None, None, None, None).unwrap_err();
+        let err = resolve_provider(None, None, None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
     }
 
     #[test]
     fn resolve_provider_unsupported_error_preserves_user_casing() {
-        let err = resolve_provider(Some("OpenAIish"), None, None, None, None).unwrap_err();
+        let err = resolve_provider(Some("OpenAIish"), None, None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
     }
 
@@ -2773,28 +2791,42 @@ mod tests {
     #[test]
     fn resolve_provider_openrouter_with_key() {
         assert_eq!(
-            resolve_provider(Some("openrouter"), None, None, Some("sk-or-123"), None).unwrap(),
+            resolve_provider(Some("openrouter"), None, None, Some("sk-or-123"), None, None).unwrap(),
             Provider::OpenRouter
         );
     }
 
     #[test]
     fn resolve_provider_openrouter_missing_key() {
-        let err = resolve_provider(Some("openrouter"), None, None, None, None).unwrap_err();
+        let err = resolve_provider(Some("openrouter"), None, None, None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
     }
 
     #[test]
     fn resolve_provider_deepseek_with_key() {
         assert_eq!(
-            resolve_provider(Some("deepseek"), None, None, None, Some("sk-ds-123")).unwrap(),
+            resolve_provider(Some("deepseek"), None, None, None, Some("sk-ds-123"), None).unwrap(),
             Provider::DeepSeek
         );
     }
 
     #[test]
     fn resolve_provider_deepseek_missing_key() {
-        let err = resolve_provider(Some("deepseek"), None, None, None, None).unwrap_err();
+        let err = resolve_provider(Some("deepseek"), None, None, None, None, None).unwrap_err();
         assert!(err.contains("DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn resolve_provider_groq_with_key() {
+        assert_eq!(
+            resolve_provider(Some("groq"), None, None, None, None, Some("gsk-123")).unwrap(),
+            Provider::Groq
+        );
+    }
+
+    #[test]
+    fn resolve_provider_groq_missing_key() {
+        let err = resolve_provider(Some("groq"), None, None, None, None, None).unwrap_err();
+        assert!(err.contains("GROQ_API_KEY"));
     }
 }
