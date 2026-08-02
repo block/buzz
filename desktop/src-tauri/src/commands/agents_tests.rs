@@ -295,6 +295,7 @@ fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProf
     crate::relay::AgentProfileInfo {
         display_name: name.map(str::to_string),
         picture: picture.map(str::to_string),
+        about: None,
     }
 }
 
