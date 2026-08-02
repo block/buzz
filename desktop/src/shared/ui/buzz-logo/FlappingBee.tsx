@@ -1,35 +1,186 @@
 import { useId } from "react";
+import type { ComponentType } from "react";
+
+import {
+  Bot,
+  BrainCircuit,
+  Boxes,
+  Cloud,
+  Code2,
+  Database,
+  Server,
+  Sparkles,
+  Terminal,
+} from "lucide-react";
+
+import {
+  SiGithub,
+  // SiSlack,
+  SiGmail,
+  SiNotion,
+  SiClaude,
+  SiFigma,
+  SiLinear,
+  SiJira,
+  SiDiscord,
+  SiGoogledrive,
+  SiGooglechrome,
+  SiPostgresql,
+  // SiOpenai,
+} from "react-icons/si";
+
+type FlappingBeeProps = {
+  className?: string;
+  index?: number;
+};
+
+type Integration = {
+  name: string;
+  icon: ComponentType<{
+    className?: string;
+    color?: string;
+    size?: string | number;
+  }>;
+  color: string;
+  background?: string;
+};
 
 /**
- * The Buzz bee mark with flapping wings. Geometry is identical to the static
- * {@link BuzzMark} (v8 final keyframe) — the same silhouette, rendered in
- * `currentColor` so it tints per-theme — with the wing-flap keyframes (ported
- * from the Buzz website) beating the wings on an infinite loop.
- *
- * Unlike the static mark's single `<svg>`, each wing here is its own
- * HTML-level `<svg>` layer and the flap animates those elements' CSS
- * transforms. This is deliberate: WebKit paints SVG *children* on the main
- * thread, so a transform animation on a `<circle>` freezes for as long as boot
- * work (bundle eval, first React render of the app tree) hogs the thread —
- * exactly the window in which the loading gate is on screen. Transforms on
- * HTML-level elements run on the compositor (Core Animation in WKWebView) and
- * keep flapping regardless. The `bee-wing-layer` masks reproduce the slot
- * cutouts over the wings so the layered build stays pixel-identical to the
- * masked single-SVG mark (see animations.css).
- *
- * Everything is plain SVG + CSS (no JS/SMIL), so it paints on the very first
- * frame and the flap starts as soon as styles load. Reduced motion falls back
- * to the static silhouette via the CSS media query.
+ * Keep the original component name so nothing else in the
+ * Buzz/Orbit animation architecture needs to change.
  */
-export function FlappingBee({ className }: { className?: string }) {
-  const maskId = `flapping-bee-cutouts-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
+const INTEGRATIONS: Integration[] = [
+  {
+    name: "GitHub",
+    icon: SiGithub,
+    color: "#FFFFFF",
+  },
+  // {
+  //   name: "Slack",
+  //   icon: SiSlack,
+  //   color: "#E01E5A",
+  // },
+  {
+    name: "Gmail",
+    icon: SiGmail,
+    color: "#EA4335",
+  },
+  {
+    name: "Notion",
+    icon: SiNotion,
+    color: "#FFFFFF",
+  },
+  {
+    name: "Claude",
+    icon: SiClaude,
+    color: "#D97757",
+  },
+  // {
+  //   name: "OpenAI / Codex",
+  //   icon: SiOpenai,
+  //   color: "#FFFFFF",
+  // },
+  {
+    name: "Cursor",
+    icon: Code2,
+    color: "#FFFFFF",
+  },
+  {
+    name: "Antigravity",
+    icon: Sparkles,
+    color: "#A855F7",
+  },
+  {
+    name: "Google Drive",
+    icon: SiGoogledrive,
+    color: "#4285F4",
+  },
+  {
+    name: "Discord",
+    icon: SiDiscord,
+    color: "#5865F2",
+  },
+  {
+    name: "Figma",
+    icon: SiFigma,
+    color: "#F24E1E",
+  },
+  {
+    name: "Linear",
+    icon: SiLinear,
+    color: "#FFFFFF",
+  },
+  {
+    name: "Jira",
+    icon: SiJira,
+    color: "#2684FF",
+  },
+  {
+    name: "Chrome",
+    icon: SiGooglechrome,
+    color: "#4285F4",
+  },
+  {
+    name: "PostgreSQL",
+    icon: SiPostgresql,
+    color: "#4169E1",
+  },
+  {
+    name: "MCP Server",
+    icon: Server,
+    color: "#A855F7",
+  },
+  {
+    name: "AI Agent",
+    icon: Bot,
+    color: "#D60FD9",
+  },
+  {
+    name: "AI Memory",
+    icon: BrainCircuit,
+    color: "#7C3AED",
+  },
+  {
+    name: "Terminal Agent",
+    icon: Terminal,
+    color: "#22C55E",
+  },
+  {
+    name: "Database",
+    icon: Database,
+    color: "#3B82F6",
+  },
+  {
+    name: "Cloud",
+    icon: Cloud,
+    color: "#06B6D4",
+  },
+  {
+    name: "Tools",
+    icon: Boxes,
+    color: "#8B5CF6",
+  },
+];
 
-  // Wing geometry from the 466x309 mark: circles r=91.7 at (91.7, 154.5) and
-  // (374.3, 154.5). Each wing layer is the circle's bounding box, positioned
-  // as percentages of the mark: top 62.8/309, size 183.4/466 x 183.4/309.
+export function FlappingBee({
+  className,
+  index = 0,
+}: FlappingBeeProps) {
+  const maskId = `flapping-bee-cutouts-${useId().replace(
+    /[^a-zA-Z0-9_-]/g,
+    "",
+  )}`;
+
   const wingLayer =
-    "bee-wing-layer absolute top-[20.3236%] h-[59.3528%] w-[39.3562%]";
-  const wingSvg = "bee-wing block h-full w-full";
+    "bee-wing-layer absolute left-0 top-0 h-full w-full";
+
+  const wingSvg =
+    "bee-wing block h-full w-full overflow-visible";
+
+  const integration =
+    INTEGRATIONS[index % INTEGRATIONS.length];
+
+  const Icon = integration.icon;
 
   return (
     <div
@@ -37,79 +188,207 @@ export function FlappingBee({ className }: { className?: string }) {
       className={[
         "buzz-mark",
         "bee-sprite",
+        "group",
         "relative",
-        "aspect-[466/309]",
+        "flex",
+        "aspect-square",
+        "items-center",
+        "justify-center",
         className,
       ]
         .filter(Boolean)
         .join(" ")}
     >
-      <div className={`${wingLayer} bee-wing-layer-left left-0`}>
+      {/* =====================================================
+          COLORED AMBIENT GLOW
+      ===================================================== */}
+
+      <div className={`${wingLayer} bee-wing-layer-left`}>
         <svg
           aria-hidden="true"
           className={`${wingSvg} bee-wing-left`}
-          viewBox="0 0 183.4 183.4"
-          fill="currentColor"
+          viewBox="0 0 100 100"
         >
-          <circle cx="91.7" cy="91.7" r="91.7" />
+          <defs>
+            <radialGradient
+              id={`${maskId}-glow`}
+              cx="50%"
+              cy="50%"
+              r="50%"
+            >
+              <stop
+                offset="0%"
+                stopColor={integration.color}
+                stopOpacity="0.32"
+              />
+
+              <stop
+                offset="45%"
+                stopColor={integration.color}
+                stopOpacity="0.12"
+              />
+
+              <stop
+                offset="100%"
+                stopColor={integration.color}
+                stopOpacity="0"
+              />
+            </radialGradient>
+          </defs>
+
+          <circle
+            cx="50"
+            cy="50"
+            r="48"
+            fill={`url(#${maskId}-glow)`}
+          />
         </svg>
       </div>
-      <div className={`${wingLayer} bee-wing-layer-right right-0`}>
+
+      {/* =====================================================
+          ORBIT RING
+      ===================================================== */}
+
+      <div className={`${wingLayer} bee-wing-layer-right`}>
         <svg
           aria-hidden="true"
           className={`${wingSvg} bee-wing-right`}
-          viewBox="0 0 183.4 183.4"
-          fill="currentColor"
+          viewBox="0 0 100 100"
         >
-          <circle cx="91.7" cy="91.7" r="91.7" />
+          <circle
+            cx="50"
+            cy="50"
+            r="32"
+            fill="none"
+            stroke={integration.color}
+            strokeWidth="1"
+            strokeOpacity="0.13"
+          />
+
+          <circle
+            cx="50"
+            cy="50"
+            r="41"
+            fill="none"
+            stroke={integration.color}
+            strokeWidth="0.6"
+            strokeOpacity="0.06"
+          />
         </svg>
       </div>
-      {/* Body last in DOM order and positioned, so it paints over the wings —
-          matching the single-SVG mark where the body rect draws on top. */}
+
+      {/* =====================================================
+          INTEGRATION ICON
+      ===================================================== */}
+
+      <div
+        className="
+          relative
+          z-10
+          flex
+          h-[74%]
+          w-[74%]
+          items-center
+          justify-center
+          rounded-[26%]
+          border
+          border-white/[0.12]
+          bg-[#111111]/80
+          shadow-[0_5px_20px_rgba(0,0,0,0.28)]
+          backdrop-blur-md
+          transition-transform
+          duration-300
+          group-hover:scale-110
+        "
+      >
+        <Icon
+          className="h-[55%] w-[55%]"
+          color={integration.color}
+        />
+      </div>
+
+      {/* =====================================================
+          SMALL ORBIT BRAND SPARK
+      ===================================================== */}
+
       <svg
         aria-hidden="true"
-        className="relative block h-full w-full"
-        viewBox="0 0 466 309"
-        fill="currentColor"
+        className="
+          absolute
+          -right-[5%]
+          -top-[6%]
+          z-20
+          h-[29%]
+          w-[29%]
+          overflow-visible
+        "
+        viewBox="0 0 100 100"
       >
         <defs>
-          <mask
-            id={maskId}
-            x="-80"
-            y="-80"
-            width="626"
-            height="469"
-            maskUnits="userSpaceOnUse"
-            maskContentUnits="userSpaceOnUse"
+          <linearGradient
+            id={`${maskId}-orbit-gradient`}
+            x1="20"
+            y1="90"
+            x2="78"
+            y2="5"
+            gradientUnits="userSpaceOnUse"
           >
-            <rect x="-80" y="-80" width="626" height="469" fill="#fff" />
-            <ellipse cx="193.3" cy="84.4" rx="27" ry="27" fill="#000" />
-            <ellipse cx="276" cy="84.4" rx="27" ry="27" fill="#000" />
-            <rect
-              x="166.3"
-              y="157.2"
-              width="136.9"
-              height="38.3"
-              rx="5"
-              fill="#000"
+            <stop
+              offset="0%"
+              stopColor="#3D42D9"
             />
-            <rect
-              x="166.9"
-              y="235.1"
-              width="136.2"
-              height="37.6"
-              rx="5"
-              fill="#000"
+
+            <stop
+              offset="48%"
+              stopColor="#7626E2"
             />
-          </mask>
+
+            <stop
+              offset="100%"
+              stopColor="#D60FD9"
+            />
+          </linearGradient>
         </defs>
-        <rect
-          x="128"
-          y="0"
-          width="210"
-          height="309"
-          rx="34"
-          mask={`url(#${maskId})`}
+
+        <path
+          d="
+            M50 3
+
+            C53 25
+             59 38
+             70 43
+
+            C76 46
+             84 48
+             97 50
+
+            C84 53
+             76 56
+             70 61
+
+            C59 70
+             54 82
+             50 97
+
+            C47 82
+             41 70
+             30 61
+
+            C24 56
+             16 53
+             3 50
+
+            C16 47
+             24 45
+             30 41
+
+            C41 34
+             47 22
+             50 3
+
+            Z
+          "
+          fill={`url(#${maskId}-orbit-gradient)`}
         />
       </svg>
     </div>
