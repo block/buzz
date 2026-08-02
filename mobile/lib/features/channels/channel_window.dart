@@ -295,7 +295,16 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
     }
     return ChannelWindowStore(
       pages: current.pages,
-      liveOverlay: current.liveOverlay,
+      // Non-broadcast replies are retained only as a short-lived fallback so
+      // the root count updates before the relay recount arrives. Once the
+      // authoritative summary covers that reply, keeping the raw event would
+      // grow this overlay forever because channel pages contain top-level rows.
+      liveOverlay: current.liveOverlay.where((candidate) {
+        final thread = candidate.threadReference;
+        if (thread.parentId == null || thread.rootId != rootId) return true;
+        if (_isBroadcastReply(candidate)) return true;
+        return candidate.createdAt > event.createdAt;
+      }).toList(),
       liveAux: current.liveAux,
       liveThreadSummaries: {
         ...current.liveThreadSummaries,
@@ -322,6 +331,19 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
     );
   }
 
+  final thread = event.threadReference;
+  final liveSummary = thread.rootId == null
+      ? null
+      : current.liveThreadSummaries[thread.rootId];
+  if (thread.parentId != null &&
+      !_isBroadcastReply(event) &&
+      liveSummary != null &&
+      liveSummary.createdAt >= event.createdAt) {
+    // The summary and reply can arrive through different relay paths. If the
+    // authoritative recount won that race, do not re-add its covered reply.
+    return current;
+  }
+
   final inPages = current.pages.any(
     (page) => page.rows.any((row) => row.event.id == event.id),
   );
@@ -342,6 +364,12 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
     liveOverlay: overlay,
     liveAux: current.liveAux,
     liveThreadSummaries: current.liveThreadSummaries,
+  );
+}
+
+bool _isBroadcastReply(NostrEvent event) {
+  return event.tags.any(
+    (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
   );
 }
 
