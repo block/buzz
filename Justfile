@@ -154,9 +154,22 @@ _ensure-sidecar-stubs:
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     mkdir -p desktop/src-tauri/binaries
     for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        stub="desktop/src-tauri/binaries/${bin}-${TARGET}"
+        real="${TARGET_DIR}/debug/${bin}"
+        # Copy the real binary when it's been built (e.g. after `just build`),
+        # so `just dev` stages a working sidecar instead of a 0-byte stub that
+        # the app later tries to exec (-> os error 13). Fall back to an empty
+        # stub only when the binary isn't built yet, preserving the prior
+        # tauri-config-validation behavior.
+        if [ -s "$real" ]; then
+            cp "$real" "$stub"
+            chmod +x "$stub"
+        else
+            touch "$stub"
+        fi
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
