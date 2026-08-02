@@ -65,6 +65,7 @@ export type SetupStepActions = {
 export type DefaultConfigStepActions = {
   back: () => void;
   complete: () => void;
+  returnToSetup: () => void;
 };
 
 export type SetupStepRuntimeState = {

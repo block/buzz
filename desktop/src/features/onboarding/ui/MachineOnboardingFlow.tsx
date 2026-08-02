@@ -103,6 +103,7 @@ export function MachineOnboardingFlow({
     },
     [],
   );
+  const showSetupPage = React.useCallback(() => setPage("setup"), []);
 
   const loadFreshIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -379,8 +380,9 @@ export function MachineOnboardingFlow({
           ) : (
             <DefaultConfigStep
               actions={{
-                back: () => setPage("setup"),
+                back: showSetupPage,
                 complete: () => complete(selectedPubkey ?? undefined),
+                returnToSetup: showSetupPage,
               }}
               direction="forward"
               readyRuntimeIds={readyRuntimeIds}
