@@ -288,7 +288,9 @@ already the retry, and it is the same button every other host failure offers.
 
 `validate_provider_config` rejects any config key whose word-split contains
 `secret`/`password`/`token`/`key`/`credential`, and drops it silently. That is why the identity
-field is `ssh_identity_file` and not `ssh_key_path`.
+field is `ssh_identity_file` and not `ssh_key_path`, and why the host-key file is
+`ssh_known_hosts_file` and not `ssh_host_key_file` — the latter splits into a forbidden `key` and
+would arrive as absent with no error anywhere.
 
 | key | required | notes |
 |---|---|---|
@@ -296,7 +298,15 @@ field is `ssh_identity_file` and not `ssh_key_path`.
 | `ssh_user` | no | Ignored when `ssh_host` already contains `@`. |
 | `ssh_port` | no | Number or numeric string, `1..=65535`. Default 22. |
 | `ssh_identity_file` | no | Passed as `ssh -i`. Defaults to `~/.ssh/config` and the agent. |
+| `ssh_known_hosts_file` | no | Passed as `ssh -o UserKnownHostsFile=<path>`. Defaults to `~/.ssh/known_hosts`. |
 | `buzz_acp_path` | no | Absolute path to `buzz-acp` on the host. Defaults to whatever is on the host's PATH. |
+
+`ssh_known_hosts_file` is for a deploying user whose host keys do not live at the default path — a
+shared or generated `known_hosts`, or one kept per-fleet rather than per-user. It selects *which
+file* the host key is checked against and nothing else: `StrictHostKeyChecking` is unchanged, so a
+key missing from the named file fails exactly as one missing from the default would. Left unset the
+option is not passed at all and the `ssh` argv is byte-identical to what it was before the field
+existed, which is what makes it safe to add to every existing record.
 
 There is no `unit_scope`. All deploys are `systemctl --user`.
 
@@ -671,7 +681,10 @@ the public key to `~/.ssh/authorized_keys`, or `tailscale set --ssh` on the host
 
 **`Host key verification failed`.** The host key is not in `known_hosts`, and `BatchMode` cannot
 prompt to accept it. Connect once with `ssh` by hand to review and accept the key. This is expected
-for any manually typed address; tailnet peers are exempt.
+for any manually typed address; tailnet peers are exempt. If the key *is* on record but in a file
+other than `~/.ssh/known_hosts`, name that file in `ssh_known_hosts_file` rather than copying the
+entry across — the provider passes it as `-o UserKnownHostsFile=<path>` and checks the key exactly
+as strictly there.
 
 **The device dropdown disappeared.** `tailscale status --json` no longer reports
 `BackendState: "Running"` — most often a logged-out daemon, which exits 0 with
