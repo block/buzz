@@ -15,6 +15,7 @@ use buzz_core::kind::{
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
+use buzz_db::channel_discovery::{nip29_admins_tags, nip29_members_tags, nip29_metadata_tags};
 
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
@@ -1051,108 +1052,28 @@ pub async fn emit_group_discovery_events(
     let members = state.db.get_members(tenant.community(), channel_id).await?;
 
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
-    let group_id = channel_id.to_string();
 
-    {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        tags.push(Tag::parse(["name", &channel.name])?);
-        if let Some(ref desc) = channel.description {
-            if !desc.is_empty() {
-                tags.push(Tag::parse(["about", desc])?);
-            }
-        }
-        if channel.visibility == "private" {
-            tags.push(Tag::parse(["private"])?);
-        } else {
-            // Explicit "public" tag complements NIP-29's absence-of-"private" convention,
-            // making channel visibility self-describing for clients.
-            tags.push(Tag::parse(["public"])?);
-        }
-        // NIP-29 hidden tag: hint to clients not to show DMs in public group lists.
-        // Not a security boundary — access control is handled by channel-scoped storage.
-        if channel.channel_type == "dm" {
-            tags.push(Tag::parse(["hidden"])?);
-            // Include participant pubkeys in kind:39000 for DMs so clients can
-            // resolve display names without a separate kind:39002 fetch.
-            for m in &members {
-                let pubkey_hex = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pubkey_hex])?);
-            }
-        }
-        // Buzz channels always require explicit membership
-        tags.push(Tag::parse(["closed"])?);
-        // Channel type tag so clients can distinguish stream/forum/dm without inference
-        tags.push(Tag::parse(["t", &channel.channel_type])?);
-        // Optional topic / purpose for richer client UX
-        if let Some(ref topic) = channel.topic {
-            if !topic.is_empty() {
-                tags.push(Tag::parse(["topic", topic])?);
-            }
-        }
-        if let Some(ref purpose) = channel.purpose {
-            if !purpose.is_empty() {
-                tags.push(Tag::parse(["purpose", purpose])?);
-            }
-        }
-        // Archived state — clients use this to hide channels from the sidebar.
-        if channel.archived_at.is_some() {
-            tags.push(Tag::parse(["archived", "true"])?);
-        }
-        // Ephemeral channel TTL — clients use this to show countdown timers.
-        if let Some(ttl) = channel.ttl_seconds {
-            tags.push(Tag::parse(["ttl", &ttl.to_string()])?);
-        }
-        if let Some(ref deadline) = channel.ttl_deadline {
-            tags.push(Tag::parse(["ttl_deadline", &deadline.to_rfc3339()])?);
-        }
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
+    // The tag shapes live in buzz-db so `buzz-admin reconcile-channels` republishes
+    // exactly what the relay emits. They drifted once, and the symptom was silent:
+    // reconcile dropped the `archived` tag, so archived channels came back in every
+    // sidebar while the database still said archived.
+    for (kind, tags) in [
+        (
             KIND_NIP29_GROUP_METADATA,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
-    }
-
-    {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        for m in members
-            .iter()
-            .filter(|m| m.role == "owner" || m.role == "admin")
-        {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
-        }
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
+            nip29_metadata_tags(&channel, &members),
+        ),
+        (
             KIND_NIP29_GROUP_ADMINS,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
-    }
-
-    {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        for m in &members {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
-            // because the canonical relay is implicit (this event is signed by it).
-            tags.push(Tag::parse(["p", &pubkey_hex, "", &m.role])?);
-        }
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
+            nip29_admins_tags(channel_id, &members),
+        ),
+        (
             KIND_NIP29_GROUP_MEMBERS,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
+            nip29_members_tags(channel_id, &members),
+        ),
+    ] {
+        let tags: Vec<Tag> = tags.into_iter().map(Tag::parse).collect::<Result<_, _>>()?;
+        emit_addressable_discovery_event(tenant, state, channel_id, kind, tags, &relay_pubkey_hex)
+            .await?;
     }
 
     Ok(())
