@@ -491,10 +491,10 @@ export type AcpAvailabilityStatus =
   | "available"
   | "adapter_missing"
   | "adapter_outdated"
+  | "cli_outdated"
+  | "compatibility_unknown"
   | "cli_missing"
   | "not_installed";
-
-/** Authentication/login status for a CLI-based ACP runtime. */
 export type AuthStatus =
   | { status: "logged_in" }
   | { status: "logged_out" }

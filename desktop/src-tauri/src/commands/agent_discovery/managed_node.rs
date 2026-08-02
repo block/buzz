@@ -469,14 +469,17 @@ fn managed_npm_prefix_hint() -> String {
     "Buzz could not create its private Node tools directory. Check app-data directory permissions, restart Buzz, then click Install again.".to_string()
 }
 
-pub(super) fn managed_npm_command(command: &str) -> Result<Option<String>, Box<InstallStepResult>> {
+pub(super) fn managed_npm_command(
+    step: &str,
+    command: &str,
+) -> Result<Option<String>, Box<InstallStepResult>> {
     if !is_npm_global_install(command) {
         return Ok(None);
     }
 
     let Some(prefix) = crate::managed_agents::buzz_managed_npm_prefix() else {
         return Err(Box::new(InstallStepResult {
-            step: "adapter".to_string(),
+            step: step.to_string(),
             command: command.to_string(),
             success: false,
             stdout: String::new(),
@@ -487,7 +490,7 @@ pub(super) fn managed_npm_command(command: &str) -> Result<Option<String>, Box<I
     };
     if let Err(error) = std::fs::create_dir_all(&prefix) {
         return Err(Box::new(InstallStepResult {
-            step: "adapter".to_string(),
+            step: step.to_string(),
             command: command.to_string(),
             success: false,
             stdout: String::new(),
@@ -558,6 +561,17 @@ mod tests {
                 "'/tmp/Buzz Node'"
             ),
             "npm install --global --prefix '/tmp/Buzz Node' @agentclientprotocol/codex-acp"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cli_install_uses_private_prefix() {
+        assert_eq!(
+            rewrite_npm_global_install(
+                "npm install -g example-acp-runtime@latest",
+                "'/tmp/Buzz Node'"
+            ),
+            "npm install --global --prefix '/tmp/Buzz Node' example-acp-runtime@latest"
         );
     }
 

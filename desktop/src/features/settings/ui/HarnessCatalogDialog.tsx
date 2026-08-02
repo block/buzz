@@ -1,5 +1,11 @@
 import * as React from "react";
-import { ChevronRight, ExternalLink, Plus, Search } from "lucide-react";
+import {
+  ChevronRight,
+  ExternalLink,
+  Plus,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
@@ -229,7 +235,12 @@ export function HarnessCatalogDialog({
               {selectedId === CUSTOM_ENTRY_ID ? (
                 <CustomHarnessDetail onDone={() => onOpenChange(false)} />
               ) : selectedEntry ? (
-                <CatalogDetail entry={selectedEntry} key={selectedEntry.id} />
+                <CatalogDetail
+                  checking={runtimesQuery.isFetching}
+                  entry={selectedEntry}
+                  key={selectedEntry.id}
+                  onCheckAgain={() => void runtimesQuery.refetch()}
+                />
               ) : isLoading ? (
                 <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
                   <CatalogDetailSkeleton />
@@ -391,7 +402,15 @@ function CatalogListItem({
   );
 }
 
-function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
+function CatalogDetail({
+  checking,
+  entry,
+  onCheckAgain,
+}: {
+  checking: boolean;
+  entry: AcpRuntimeCatalogEntry;
+  onCheckAgain: () => void;
+}) {
   const install = useInstallAcpRuntimeMutation();
   const [installError, setInstallError] = React.useState<string | null>(null);
   const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
@@ -432,7 +451,10 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
   // The outline docs button only shows when the entry needs no setup action
   // (already ready) — pair it with a hint so the muted styling reads as
   // "nothing to do here" rather than a broken primary button.
-  const isSecondaryCta = action.kind !== "install" && action.kind !== "docs";
+  const isSecondaryCta =
+    action.kind !== "install" &&
+    action.kind !== "retry" &&
+    action.kind !== "docs";
 
   const primaryCta =
     action.kind === "install" ? (
@@ -444,6 +466,18 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
       >
         {install.isPending ? <Spinner className="mr-2 h-3.5 w-3.5" /> : null}
         {action.label}
+      </Button>
+    ) : action.kind === "retry" ? (
+      <Button
+        data-testid={`harness-catalog-retry-${entry.id}`}
+        disabled={checking}
+        onClick={onCheckAgain}
+        type="button"
+      >
+        <RefreshCw
+          className={cn("mr-1 h-3.5 w-3.5", checking && "animate-spin")}
+        />
+        {checking ? "Checking…" : action.label}
       </Button>
     ) : docsUrl ? (
       <Button

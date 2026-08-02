@@ -2894,6 +2894,23 @@ mod tests {
         observed
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_inherits_parent_buzz_context() {
+        const VAR: &str = "BUZZ_ACP_PARENT_CONTEXT_TEST";
+        const VALUE: &str = "inherited";
+        let previous = std::env::var_os(VAR);
+        std::env::set_var(VAR, VALUE);
+
+        let observed = spawn_named_and_read_child_env("test-runtime", VAR, &[]).await;
+
+        match previous {
+            Some(value) => std::env::set_var(VAR, value),
+            None => std::env::remove_var(VAR),
+        }
+        assert_eq!(observed, VALUE);
+    }
+
     /// Buzz-owned Hermes processes get the configured-MCP isolation default,
     /// and an explicit persona entry still overrides it (defaults are applied
     /// before `extra_env`, so the later `Command::env` write wins).

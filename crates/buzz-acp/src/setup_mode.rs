@@ -64,6 +64,10 @@ pub(crate) enum AcpAvailabilityStatus {
     AdapterMissing,
     /// ACP adapter binary is from the deprecated package (< 1.0). Reinstall required.
     AdapterOutdated,
+    /// Runtime CLI is installed but does not implement the required ACP host contract.
+    CliOutdated,
+    /// Runtime contract verification could not complete; retry without mutating the install.
+    CompatibilityUnknown,
     /// CLI binary missing; ACP adapter may be present.
     CliMissing,
     /// Neither adapter nor CLI found.
@@ -101,8 +105,8 @@ pub(crate) enum RequirementPayload {
         setup_copy: String,
         /// Granular install/auth state — determines copy and CTA routing on
         /// the desktop card. `Available` means tooling is present but login
-        /// is needed; the other three variants mean the tooling itself is
-        /// missing and the probe was skipped.
+        /// is needed; other variants describe install or compatibility gates
+        /// that prevented the auth probe from running.
         availability: AcpAvailabilityStatus,
     },
     /// The CLI is installed but its config file could not be parsed.
@@ -115,6 +119,8 @@ pub(crate) enum RequirementPayload {
     },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
+    /// A custom harness command cannot be resolved on PATH.
+    MissingBinary { command: String },
 }
 
 impl RequirementPayload {
@@ -153,6 +159,26 @@ impl RequirementPayload {
                         harness
                     )
                 }
+                AcpAvailabilityStatus::CliOutdated => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "update the {} CLI — the installed version lacks Buzz's required ACP runtime contract (open Agent runtimes in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::CompatibilityUnknown => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "check the {} runtime again — Buzz could not verify its ACP runtime contract",
+                        harness
+                    )
+                }
                 AcpAvailabilityStatus::CliMissing => {
                     let harness = probe_args
                         .first()
@@ -188,6 +214,9 @@ impl RequirementPayload {
             }
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
+            }
+            RequirementPayload::MissingBinary { command } => {
+                format!("install `{command}` or add it to PATH")
             }
         }
     }
@@ -257,14 +286,20 @@ impl SetupPayload {
                 .requirements
                 .iter()
                 .any(|r| matches!(r, RequirementPayload::GitBash));
-            let all_external = self
-                .requirements
-                .iter()
-                .all(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
-            let any_external = self
-                .requirements
-                .iter()
-                .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+            let all_external = self.requirements.iter().all(|r| {
+                matches!(
+                    r,
+                    RequirementPayload::CliConfigInvalid { .. }
+                        | RequirementPayload::MissingBinary { .. }
+                )
+            });
+            let any_external = self.requirements.iter().any(|r| {
+                matches!(
+                    r,
+                    RequirementPayload::CliConfigInvalid { .. }
+                        | RequirementPayload::MissingBinary { .. }
+                )
+            });
 
             let footer = if has_doctor_requirement {
                 "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
@@ -756,6 +791,7 @@ mod tests {
         for availability in [
             AcpAvailabilityStatus::AdapterMissing,
             AcpAvailabilityStatus::AdapterOutdated,
+            AcpAvailabilityStatus::CliOutdated,
             AcpAvailabilityStatus::CliMissing,
             AcpAvailabilityStatus::NotInstalled,
         ] {
@@ -1103,6 +1139,34 @@ mod tests {
             sentinel_json.contains(r#""availability":"adapter_missing""#),
             "sentinel must carry availability=adapter_missing; got: {sentinel_json:?}"
         );
+    }
+
+    #[test]
+    fn cli_login_availability_contract_states_survive_sentinel_round_trip() {
+        for availability in ["cli_outdated", "compatibility_unknown"] {
+            let raw = make_desktop_cli_login_json(availability);
+            let payload = SetupPayload::from_raw_env_value(Some(raw))
+                .unwrap()
+                .expect("must parse");
+            let body = payload.nudge_body();
+            let sentinel_json = extract_sentinel_json(&body);
+            assert!(
+                sentinel_json.contains(&format!(r#""availability":"{availability}""#)),
+                "sentinel must carry availability={availability}; got: {sentinel_json:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_payload_deserializes_missing_binary_requirement() {
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Custom","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":"my-agent"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::MissingBinary { command }] if command == "my-agent"
+        ));
     }
 
     #[test]

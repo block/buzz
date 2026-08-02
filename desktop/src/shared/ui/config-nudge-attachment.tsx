@@ -111,6 +111,10 @@ function cliLoginMessage(
       return `${harness} ACP adapter isn't installed`;
     case "adapter_outdated":
       return `${harness} ACP adapter is outdated — reinstall required`;
+    case "cli_outdated":
+      return `${harness} CLI is outdated — update required`;
+    case "compatibility_unknown":
+      return `${harness} runtime compatibility couldn't be verified`;
     case "available":
       // Tooling is present but authentication is needed — fall back to
       // the backend-supplied copy which has the exact login command.

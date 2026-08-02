@@ -66,6 +66,28 @@ const OPENCLAW_NOT_INSTALLED = {
   source: "preset",
 } as const;
 
+/** Claude Code builtin with an installed but outdated ACP adapter. */
+const CLAUDE_ADAPTER_OUTDATED = {
+  id: "claude",
+  label: "Claude Code",
+  avatar_url: "",
+  availability: "adapter_outdated",
+  command: "claude-agent-acp",
+  binary_path: "/usr/local/bin/claude-agent-acp",
+  default_args: [],
+  mcp_command: null,
+  install_hint:
+    "Buzz talks to the Claude Code CLI through an ACP adapter. Install the current adapter.",
+  install_instructions_url:
+    "https://github.com/agentclientprotocol/claude-agent-acp",
+  can_auto_install: true,
+  requires_external_cli: true,
+  underlying_cli_path: "/usr/local/bin/claude",
+  node_required: false,
+  auth_status: { status: "logged_in" },
+  source: "builtin",
+} as const;
+
 /** Cursor preset — deliberately has NO bundled logo (brand assets not
  * licensed for redistribution). Must render the terminal glyph, never
  * initials. */
@@ -269,15 +291,7 @@ test.describe("your harnesses split", () => {
     // same machine-wide replacement confirmation the runtime row shows —
     // never mutate straight from the catalog CTA.
     await installMockBridge(page, {
-      acpRuntimesCatalog: [
-        HERMES_AVAILABLE,
-        {
-          ...OPENCLAW_NOT_INSTALLED,
-          availability: "adapter_outdated",
-          binary_path: "/usr/local/bin/openclaw",
-          can_auto_install: true,
-        },
-      ],
+      acpRuntimesCatalog: [HERMES_AVAILABLE, CLAUDE_ADAPTER_OUTDATED],
     });
     await openHarnessSettings(page);
     await openCatalog(page);
@@ -291,19 +305,19 @@ test.describe("your harnesses split", () => {
           ).filter((command) => command === "install_acp_runtime").length,
       );
 
-    await page.getByTestId("harness-catalog-list-item-openclaw").click();
-    await expect(
-      page.getByTestId("harness-catalog-status-openclaw"),
-    ).toHaveText("Update needed");
-    const updateButton = page.getByTestId("harness-catalog-install-openclaw");
+    await page.getByTestId("harness-catalog-list-item-claude").click();
+    await expect(page.getByTestId("harness-catalog-status-claude")).toHaveText(
+      "Update needed",
+    );
+    const updateButton = page.getByTestId("harness-catalog-install-claude");
     await expect(updateButton).toHaveText("Update");
 
     // Cancel path: clicking Update opens the warning, no mutation fires.
     await updateButton.click();
     const dialog = page.getByRole("alertdialog");
-    await expect(dialog).toContainText("Update OpenClaw adapter?");
+    await expect(dialog).toContainText("Update Claude Code adapter?");
     await expect(dialog).toContainText(
-      "This replaces the machine-wide openclaw adapter.",
+      "This replaces the machine-wide claude-agent-acp adapter.",
     );
     // Generic runtimes must never get Codex's package copy.
     await expect(dialog).not.toContainText("codex-acp");
@@ -314,7 +328,7 @@ test.describe("your harnesses split", () => {
 
     // Confirm path: exactly one install fires after confirmation.
     await updateButton.click();
-    await page.getByTestId("harness-catalog-confirm-update-openclaw").click();
+    await page.getByTestId("harness-catalog-confirm-update-claude").click();
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
     await expect.poll(installCalls).toBe(1);
     // No duplicate mutation after the flow settles.

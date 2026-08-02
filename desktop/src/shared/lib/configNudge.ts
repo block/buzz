@@ -33,6 +33,8 @@ export type ConfigNudgeRequirement =
        * - "available"         → tooling installed, needs login
        * - "adapter_missing"   → CLI installed but ACP adapter missing
        * - "adapter_outdated"  → ACP adapter present but unsupported/outdated; reinstall required
+       * - "cli_outdated"      → CLI present but missing the required hosting contract
+       * - "compatibility_unknown" → runtime contract check failed; retry required
        * - "cli_missing"       → ACP adapter installed but CLI missing
        * - "not_installed"     → neither adapter nor CLI found
        */
@@ -153,6 +155,8 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
         (r.availability === "available" ||
           r.availability === "adapter_missing" ||
           r.availability === "adapter_outdated" ||
+          r.availability === "cli_outdated" ||
+          r.availability === "compatibility_unknown" ||
           r.availability === "cli_missing" ||
           r.availability === "not_installed")
       );

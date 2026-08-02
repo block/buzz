@@ -1,8 +1,6 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
@@ -10,18 +8,22 @@ use crate::managed_agents::{
     HarnessSource,
 };
 
+mod builtins;
+mod compatibility;
 mod presets;
 mod runtime_metadata;
 
+use builtins::KNOWN_ACP_RUNTIMES;
+#[cfg(test)]
+use builtins::{BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL};
+use compatibility::{
+    cached_runtime_compatibility, clear_compatibility_cache, probe_runtime_compatibility,
+    probe_runtime_compatibility_at, RuntimeCompatibility,
+};
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use runtime_metadata::{KnownAcpRuntime, RuntimeAuthProbe};
 
-const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
-const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
-const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const BUZZ_AGENT_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
@@ -71,140 +73,6 @@ fn common_binary_paths() -> &'static [PathBuf] {
         paths
     })
 }
-
-const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
-    KnownAcpRuntime {
-        id: "goose",
-        label: "Goose",
-        commands: &["goose"],
-        aliases: &[],
-        avatar_url: GOOSE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("goose"),
-        cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
-        // Goose's stable release currently publishes only the Unix installer;
-        // its official Windows instructions intentionally point at this main-branch script.
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex\""],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
-        adapter_install_hint: "",
-        skill_dir: Some(".goose/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: Some("GOOSE_MODEL"),
-        provider_env_var: Some("GOOSE_PROVIDER"),
-        provider_locked: false,
-        default_env: &[("GOOSE_MODE", "auto")],
-        config_file_path: Some("~/.config/goose/config.yaml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: true,
-        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-    KnownAcpRuntime {
-        id: "claude",
-        label: "Claude Code",
-        commands: &["claude-agent-acp", "claude-code-acp"],
-        aliases: &["claude-code", "claudecode"],
-        avatar_url: CLAUDE_CODE_AVATAR_URL,
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: Some("claude"),
-        cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
-        cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
-        cli_install_hint: "Buzz talks to Claude Code through the Claude Code CLI.",
-        adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
-        skill_dir: Some(".claude/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: true,
-        default_env: &[],
-        config_file_path: Some("~/.claude/settings.json"),
-        config_file_format: Some("json"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run the Claude CLI to complete authentication."),
-        auth_probe_args: Some(&["claude", "auth", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "codex",
-        label: "Codex",
-        commands: &["codex-acp"],
-        aliases: &[],
-        avatar_url: CODEX_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: false,
-        underlying_cli: Some("codex"),
-        cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
-        cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
-        adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
-        cli_install_hint: "Buzz talks to Codex through the Codex CLI.",
-        adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
-        skill_dir: Some(".codex/skills"),
-        supports_acp_model_switching: false,
-        model_env_var: None,
-        provider_env_var: None,
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.codex/config.toml"),
-        config_file_format: Some("toml"),
-        supports_acp_native_config: false,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        required_normalized_fields: &[],
-        login_hint: Some("Run `codex login` to authenticate."),
-        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
-        auth_probe_args: Some(&["codex", "login", "status"]),
-    },
-    KnownAcpRuntime {
-        id: "buzz-agent",
-        label: "Buzz Agent",
-        commands: &["buzz-agent"],
-        aliases: &[],
-        avatar_url: BUZZ_AGENT_AVATAR_URL,
-        mcp_command: Some("buzz-dev-mcp"),
-        mcp_hooks: true,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "https://github.com/block/buzz",
-        adapter_install_instructions_url: "https://github.com/block/buzz",
-        cli_install_hint: "Ships with the Buzz desktop app.",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: true,
-        model_env_var: Some("BUZZ_AGENT_MODEL"),
-        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: None,
-        config_file_format: None,
-        supports_acp_native_config: false,
-        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
-        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
-        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    },
-];
 
 /// Skill discovery directories declared by known runtimes.
 pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
@@ -600,6 +468,7 @@ pub fn clear_resolve_cache() {
     // Also invalidate the adapter-availability cache so a freshly-installed
     // adapter is reflected the next time the summary builder checks the badge.
     clear_adapter_availability_cache();
+    clear_compatibility_cache();
 }
 
 // ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
@@ -1001,12 +870,12 @@ pub(crate) fn find_command(command: &str) -> Option<PathBuf> {
     resolve_command(command)
 }
 
-/// Returns true when the runtime has at least one adapter install step that
-/// is an npm global install. Used to determine whether Node.js is required.
+/// Returns true when the runtime has at least one install step that uses npm.
 fn runtime_needs_npm(runtime: &KnownAcpRuntime) -> bool {
     runtime
-        .adapter_install_commands
+        .cli_install_commands_for_os()
         .iter()
+        .chain(runtime.adapter_install_commands.iter())
         .any(|cmd| is_npm_global_install(cmd))
 }
 
@@ -1020,105 +889,6 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
     t.starts_with("npm install -g ")
         || t.starts_with("npm i -g ")
         || t.starts_with("npm uninstall -g ")
-}
-
-/// Run a CLI auth probe with a 10-second process-level timeout.
-///
-/// Spawns the probe CLI as a child process. Stdout and stderr are drained on
-/// background threads to prevent pipe-buffer deadlock. On timeout the child is
-/// killed and `Unknown` is returned; no orphaned threads or processes are left
-/// behind. Returns `Unknown` on timeout.
-fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
-    use crate::managed_agents::readiness::cli_probe;
-
-    let augmented_path = cli_probe::augmented_path();
-
-    let mut command = std::process::Command::new(binary_path);
-    command.args(&probe_args[1..]);
-    if let Some(ref path) = augmented_path {
-        command.env("PATH", path);
-    }
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    crate::util::configure_no_window(&mut command);
-
-    let mut child = match command.spawn() {
-        Ok(c) => c,
-        Err(_) => return AuthStatus::Unknown,
-    };
-
-    // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stdout_pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stderr_pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    // Save PID for kill-on-timeout before moving child into the wait thread.
-    let child_pid = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let wait_thread = std::thread::spawn(move || {
-        let _ = tx.send(child.wait());
-    });
-
-    // 10-second timeout for auth probes.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let exit_status = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(child_pid as i32, libc::SIGTERM);
-            }
-            #[cfg(not(unix))]
-            let _ = child_pid;
-            drop(rx);
-            let _ = wait_thread.join();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            return AuthStatus::Unknown;
-        }
-        match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
-            Ok(Ok(status)) => break status,
-            Ok(Err(_)) => {
-                let _ = wait_thread.join();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
-            }
-        }
-    };
-
-    let _ = wait_thread.join();
-    let _ = stdout_thread.join();
-    let stderr_bytes = stderr_thread.join().unwrap_or_default();
-
-    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
-        cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
-        cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
-        cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
-            diagnostic: stderr_excerpt,
-        },
-    }
 }
 
 pub fn command_availability(command: &str) -> CommandAvailabilityInfo {
@@ -1163,6 +933,61 @@ pub(crate) fn classify_runtime(
         (AcpAvailabilityStatus::AdapterMissing, None, None)
     } else {
         (AcpAvailabilityStatus::NotInstalled, None, None)
+    }
+}
+
+fn availability_with_compatibility(
+    availability: AcpAvailabilityStatus,
+    compatibility: RuntimeCompatibility,
+) -> AcpAvailabilityStatus {
+    if availability != AcpAvailabilityStatus::Available {
+        return availability;
+    }
+    match compatibility {
+        RuntimeCompatibility::Compatible => AcpAvailabilityStatus::Available,
+        RuntimeCompatibility::Incompatible => AcpAvailabilityStatus::CliOutdated,
+        RuntimeCompatibility::Unknown => AcpAvailabilityStatus::CompatibilityUnknown,
+    }
+}
+
+pub(crate) fn availability_with_cached_compatibility(
+    runtime: &KnownAcpRuntime,
+    availability: AcpAvailabilityStatus,
+) -> AcpAvailabilityStatus {
+    // A missing cache entry means discovery has not probed yet. Let launch
+    // reach the shared boundary, which verifies the exact executable.
+    cached_runtime_compatibility(runtime)
+        .map(|compatibility| availability_with_compatibility(availability.clone(), compatibility))
+        .unwrap_or(availability)
+}
+
+pub(crate) fn verify_runtime_contract(
+    runtime: Option<&'static KnownAcpRuntime>,
+    effective_command: &str,
+) -> Result<String, String> {
+    let resolved_path = resolve_command(effective_command);
+    let resolved_command = resolved_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| effective_command.to_string());
+    let Some(runtime) = runtime else {
+        return Ok(resolved_command);
+    };
+    let compatibility = match resolved_path {
+        Some(path) => probe_runtime_compatibility_at(runtime, &path),
+        None if runtime.compatibility_probe_args.is_none() => RuntimeCompatibility::Compatible,
+        None => RuntimeCompatibility::Unknown,
+    };
+    match compatibility {
+        RuntimeCompatibility::Compatible => Ok(resolved_command),
+        RuntimeCompatibility::Incompatible => Err(format!(
+            "{} does not provide Buzz's required self-contained ACP stdio runtime. Update the CLI.",
+            runtime.label
+        )),
+        RuntimeCompatibility::Unknown => Err(format!(
+            "Buzz could not verify {}'s self-contained ACP runtime contract. Check the CLI and try again.",
+            runtime.label
+        )),
     }
 }
 
@@ -1342,6 +1167,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
         }
     }
 
+    availability =
+        availability_with_compatibility(availability, probe_runtime_compatibility(runtime));
+
     // Warm the adapter-availability cache for the badge fallback.
     // The cache is scoped to the codex runtime; other runtimes leave it
     // unchanged. Invalidated by `clear_resolve_cache`.
@@ -1369,6 +1197,13 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
         AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
         AcpAvailabilityStatus::AdapterMissing => adapter_hint.to_string(),
         AcpAvailabilityStatus::AdapterOutdated => adapter_hint.to_string(),
+        AcpAvailabilityStatus::CliOutdated => cli_hint.to_string(),
+        AcpAvailabilityStatus::CompatibilityUnknown => {
+            format!(
+                "Buzz could not verify the {} runtime contract. Check again.",
+                runtime.label
+            )
+        }
         AcpAvailabilityStatus::NotInstalled => {
             if !cli_hint.is_empty() && !adapter_hint.is_empty() {
                 format!("{cli_hint} {adapter_hint}")
@@ -1384,6 +1219,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             runtime.adapter_install_instructions_url
         }
         AcpAvailabilityStatus::Available
+        | AcpAvailabilityStatus::CliOutdated
+        | AcpAvailabilityStatus::CompatibilityUnknown
         | AcpAvailabilityStatus::CliMissing
         | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
     };
@@ -1474,14 +1311,32 @@ pub fn discover_acp_runtimes_from(
             if partial.entry.availability != AcpAvailabilityStatus::Available {
                 return None;
             }
-            let probe_args = partial.runtime.auth_probe_args?;
+            let probe = partial.runtime.auth_probe?;
+            let probe_args = probe.args;
             // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
             let binary_path = resolve_command(probe_args[0])?;
             let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
+            let usable_exit_codes = probe.usable_exit_codes;
 
             let handle = std::thread::spawn(move || {
+                use crate::managed_agents::readiness::cli_probe;
+
                 let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();
-                probe_auth_status(&binary_path, &refs)
+                match cli_probe::login_probe(
+                    &binary_path,
+                    &refs,
+                    usable_exit_codes,
+                    cli_probe::augmented_path().as_deref(),
+                ) {
+                    cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
+                    cli_probe::ProbeOutcome::Unknown => AuthStatus::Unknown,
+                    cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
+                    cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => {
+                        AuthStatus::ConfigInvalid {
+                            diagnostic: stderr_excerpt,
+                        }
+                    }
+                }
             });
             Some((idx, handle))
         })
@@ -1505,7 +1360,7 @@ pub fn discover_acp_runtimes_from(
         if partial.entry.auth_status == AuthStatus::Unknown {
             partial.entry.auth_status = if partial.entry.availability
                 == AcpAvailabilityStatus::Available
-                && partial.runtime.auth_probe_args.is_none()
+                && partial.runtime.auth_probe.is_none()
             {
                 AuthStatus::NotApplicable
             } else {

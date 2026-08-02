@@ -587,15 +587,16 @@ pub struct ManagedAgentLogResponse {
 pub enum AcpAvailabilityStatus {
     Available,
     AdapterMissing,
-    /// Adapter binary is present but unsupported — either the deprecated
-    /// package or a version below the supported floor. Reinstall required.
+    /// Adapter binary is present but unsupported. Reinstall required.
     AdapterOutdated,
+    /// Runtime CLI does not implement the required hosting contract.
+    CliOutdated,
+    /// The runtime contract could not be verified due to an operational probe failure.
+    CompatibilityUnknown,
     CliMissing,
     NotInstalled,
 }
-
 /// Authentication/login status for a CLI-based ACP runtime.
-///
 /// Serializes as a tagged union `{ status: "...", diagnostic?: "..." }` so
 /// the TypeScript side can exhaustively switch on `status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -615,15 +616,14 @@ pub enum AuthStatus {
     /// Probe was not attempted (runtime unavailable or probe timed out).
     Unknown,
 }
-
 /// Origin of an ACP runtime catalog entry. Serializes as a lowercase string
 /// so the TypeScript consumer can switch on it without numeric comparisons.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessSource {
-    /// Compiled into the app — one of the four first-class runtimes.
+    /// Compiled into the app as a first-class runtime.
     Builtin,
-    /// Static preset entry with bundled logo, PATH-probed, not editable/deletable.
+    /// Static bundled preset, PATH-probed and not editable/deletable.
     Preset,
     /// Loaded at runtime from the user's `custom_harnesses/` directory.
     Custom,

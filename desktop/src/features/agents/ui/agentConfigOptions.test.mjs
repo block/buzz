@@ -231,6 +231,9 @@ test("getPersonaModelOptions for buzz-agent with no provider returns default mod
 test("formatModelDiscoveryErrorStatus returns a non-null status for runtime unavailable errors", () => {
   for (const availability of [
     "adapter_missing",
+    "adapter_outdated",
+    "cli_outdated",
+    "compatibility_unknown",
     "cli_missing",
     "not_installed",
   ]) {

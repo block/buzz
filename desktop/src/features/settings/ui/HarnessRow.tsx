@@ -198,7 +198,10 @@ function RuntimeActions({
   // must not claim otherwise.
   const isAuthNeeded =
     isAvailable && runtime.authStatus.status === "logged_out";
-  const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
+  const canInstall =
+    runtime.canAutoInstall &&
+    !runtime.nodeRequired &&
+    runtime.availability !== "compatibility_unknown";
   const isWorking = isInstalling || isConnecting;
 
   return (
@@ -241,7 +244,10 @@ function RuntimeActions({
           type="button"
           variant="outline"
         >
-          {runtime.availability === "adapter_outdated" ? "Update" : "Install"}
+          {runtime.availability === "adapter_outdated" ||
+          runtime.availability === "cli_outdated"
+            ? "Update"
+            : "Install"}
         </Button>
       ) : null}
     </div>

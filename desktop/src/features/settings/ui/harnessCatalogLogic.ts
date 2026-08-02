@@ -29,6 +29,7 @@ const ROW_SORT_PRIORITY: Record<string, number> = {
 export function isYourHarnessEntry(entry: AcpRuntimeCatalogEntry): boolean {
   if (entry.source === "custom") return true;
   if (entry.availability === "available") return true;
+  if (entry.availability === "compatibility_unknown") return false;
   return entry.canAutoInstall && !entry.nodeRequired;
 }
 
@@ -142,7 +143,10 @@ export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
     case "adapter_missing":
       return "Adapter needed";
     case "adapter_outdated":
+    case "cli_outdated":
       return "Update needed";
+    case "compatibility_unknown":
+      return "Check failed";
     case "cli_missing":
     case "not_installed":
       return "CLI needed";
@@ -178,6 +182,7 @@ export function adapterUpdateWarning(entry: AcpRuntimeCatalogEntry): string {
 
 export type CatalogPrimaryAction =
   | { kind: "install"; label: string }
+  | { kind: "retry"; label: string }
   | { kind: "docs"; label: string }
   | { kind: "none" };
 
@@ -213,10 +218,17 @@ export function catalogPrimaryAction(
   entry: AcpRuntimeCatalogEntry,
 ): CatalogPrimaryAction {
   if (entry.availability === "available") return { kind: "none" };
+  if (entry.availability === "compatibility_unknown") {
+    return { kind: "retry", label: "Check again" };
+  }
   if (entry.canAutoInstall && !entry.nodeRequired) {
     return {
       kind: "install",
-      label: entry.availability === "adapter_outdated" ? "Update" : "Install",
+      label:
+        entry.availability === "adapter_outdated" ||
+        entry.availability === "cli_outdated"
+          ? "Update"
+          : "Install",
     };
   }
   if (entry.installInstructionsUrl.trim().length > 0) {

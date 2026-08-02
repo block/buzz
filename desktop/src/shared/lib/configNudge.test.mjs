@@ -102,6 +102,47 @@ test("extractConfigNudge parses cli_login with adapter_outdated availability", (
   );
 });
 
+test("extractConfigNudge parses cli_login with cli_outdated availability", () => {
+  const payload = {
+    agent_name: "Example Runtime",
+    agent_pubkey: ATLAS_PUBKEY,
+    requirements: [
+      {
+        surface: "cli_login",
+        probe_args: ["example-runtime", "auth", "status"],
+        setup_copy: "run model setup",
+        availability: "cli_outdated",
+      },
+    ],
+  };
+  assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
+});
+
+test("extractConfigNudge parses cli_login with unknown compatibility", () => {
+  const payload = {
+    agent_name: "Example Runtime",
+    agent_pubkey: ATLAS_PUBKEY,
+    requirements: [
+      {
+        surface: "cli_login",
+        probe_args: ["example-runtime", "auth", "status"],
+        setup_copy: "run model setup",
+        availability: "compatibility_unknown",
+      },
+    ],
+  };
+  assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
+});
+
+test("extractConfigNudge parses missing_binary requirement", () => {
+  const payload = {
+    agent_name: "Custom",
+    agent_pubkey: ATLAS_PUBKEY,
+    requirements: [{ surface: "missing_binary", command: "custom-agent" }],
+  };
+  assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
+});
+
 test("extractConfigNudge returns null for cli_login without availability", () => {
   // availability is required — old-format payloads (no availability field)
   // must not parse so stale nudge JSON from before the Doctor-CTA update

@@ -11,61 +11,16 @@ use crate::{
     relay::query_relay,
 };
 
+mod install_planning;
 mod post_install_verification;
+
+use install_planning::{plan_adapter_install, should_install_cli};
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
     static ACTIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
-///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) below its
-/// minimum supported version.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
-///
-/// This is a pure planning function: it never spawns a process.  Tests use it to
-/// assert the correct install command is selected without touching real npm.
-pub(crate) fn plan_adapter_install<'c>(
-    runtime_id: &str,
-    adapter_path: Option<&std::path::Path>,
-    adapter_install_commands: &'c [&'c str],
-    adapter_probe_path: Option<&str>,
-) -> Option<Vec<&'c str>> {
-    match adapter_path {
-        // Adapter present and current — no install needed.
-        Some(_) if runtime_id != "codex" => None,
-        Some(path)
-            if !crate::managed_agents::codex_adapter_is_outdated_with_path(
-                path,
-                adapter_probe_path,
-            ) =>
-        {
-            None
-        }
-        // Codex adapter is outdated: uninstall the old package first so npm
-        // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
-        Some(_) => Some(vec![
-            "npm uninstall -g @zed-industries/codex-acp",
-            "npm install -g @agentclientprotocol/codex-acp",
-        ]),
-        // Adapter missing: use the catalog's install commands directly.
-        None => Some(adapter_install_commands.to_vec()),
-    }
 }
 
 #[tauri::command]
@@ -312,14 +267,37 @@ fn install_acp_runtime_blocking(
 
     let mut steps = Vec::new();
 
-    // Phase 1: Install CLI if missing and commands are available.
-    // Today every entry in `cli_install_commands` is a curl-pipe; npm-backed
-    // adapter installs live in Phase 2 below where they are rewritten to a
-    // Buzz-private prefix before execution.
+    // Phase 1: Install or update the CLI when missing or incompatible.
     if let Some(cli) = runtime.underlying_cli {
-        if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd, &reporter);
+        let availability = crate::managed_agents::discover_acp_runtime_availability(runtime_id);
+        if should_install_cli(
+            crate::managed_agents::resolve_command(cli).is_some(),
+            availability,
+        ) {
+            let commands = runtime.cli_install_commands_for_os();
+            let use_managed_npm = commands.iter().any(|cmd| is_npm_global_install(cmd))
+                && managed_node_runtime_supported();
+            if use_managed_npm {
+                if let Err(step) = ensure_managed_node_runtime_blocking() {
+                    reporter.record_step(&mut steps, *step);
+                    return Ok(reporter.failed(steps));
+                }
+            }
+
+            for cmd in commands {
+                let planned = match if use_managed_npm {
+                    managed_npm_command("cli", cmd)
+                } else {
+                    Ok(None)
+                } {
+                    Ok(Some(command)) => command,
+                    Ok(None) => cmd.to_string(),
+                    Err(step) => {
+                        reporter.record_step(&mut steps, *step);
+                        return Ok(reporter.failed(steps));
+                    }
+                };
+                let result = run_install_command_with_retry("cli", &planned, &reporter);
                 let success = result.success;
                 steps.push(result);
                 if !success {
@@ -355,7 +333,7 @@ fn install_acp_runtime_blocking(
 
         for cmd in cmds {
             let planned = match if use_managed_npm {
-                managed_npm_command(cmd)
+                managed_npm_command("adapter", cmd)
             } else {
                 Ok(None)
             } {
@@ -1088,6 +1066,13 @@ mod tests {
     fn test_is_npm_global_install_accepts_catalog_codex_command() {
         assert!(is_npm_global_install(
             "npm install -g @agentclientprotocol/codex-acp"
+        ));
+    }
+
+    #[test]
+    fn test_is_npm_global_install_accepts_cli_package() {
+        assert!(is_npm_global_install(
+            "npm install -g example-acp-runtime@latest"
         ));
     }
 

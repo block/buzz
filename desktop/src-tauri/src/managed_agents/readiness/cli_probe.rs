@@ -1,6 +1,174 @@
+use std::io::Read;
 use std::path::Path;
+use std::process::{ExitStatus, Stdio};
+use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use crate::managed_agents::runtime::build_augmented_path;
+
+const LOGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
+const OUTPUT_SETTLE_TIMEOUT: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProbeOutputStream {
+    Stdout,
+    Stderr,
+}
+
+pub(crate) struct BoundedProbeOutput {
+    pub status: ExitStatus,
+    pub bytes: Vec<u8>,
+    pub truncated: bool,
+}
+
+enum CaptureEvent {
+    Bytes(Vec<u8>),
+    Finished,
+    Failed,
+}
+
+fn bounded_capture(reader: impl Read + Send + 'static, max_bytes: usize) -> Receiver<CaptureEvent> {
+    let (sender, receiver) = sync_channel(1);
+    std::thread::spawn(move || {
+        let mut reader = reader.take((max_bytes + 1) as u64);
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(CaptureEvent::Finished);
+                    return;
+                }
+                Ok(read) => {
+                    if sender
+                        .send(CaptureEvent::Bytes(buffer[..read].to_vec()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = sender.send(CaptureEvent::Failed);
+                    return;
+                }
+            }
+        }
+    });
+    receiver
+}
+
+pub(crate) fn run_bounded_probe(
+    binary_path: &Path,
+    probe_args: &[&str],
+    augmented_path: Option<&str>,
+    timeout: Duration,
+    stream: ProbeOutputStream,
+    max_bytes: usize,
+) -> Result<BoundedProbeOutput, ()> {
+    let mut command = std::process::Command::new(binary_path);
+    command
+        .args(&probe_args[1..])
+        .stdin(Stdio::null())
+        .stdout(if matches!(stream, ProbeOutputStream::Stdout) {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stderr(if matches!(stream, ProbeOutputStream::Stderr) {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
+    crate::util::configure_no_window(&mut command);
+
+    let mut child = command.spawn().map_err(|_| ())?;
+    let reader: Box<dyn Read + Send> = match stream {
+        ProbeOutputStream::Stdout => Box::new(child.stdout.take().ok_or(())?),
+        ProbeOutputStream::Stderr => Box::new(child.stderr.take().ok_or(())?),
+    };
+    let capture = bounded_capture(reader, max_bytes);
+    let deadline = Instant::now() + timeout;
+    let mut settle_deadline = None;
+    let mut status = None;
+    let mut capture_finished = false;
+    let mut bytes = Vec::with_capacity(max_bytes.min(4096));
+
+    loop {
+        if !capture_finished {
+            loop {
+                match capture.try_recv() {
+                    Ok(CaptureEvent::Bytes(chunk)) => {
+                        bytes.extend_from_slice(&chunk);
+                        if bytes.len() > max_bytes {
+                            let _ = child.kill();
+                            let status = child.wait().ok().or(status).ok_or(())?;
+                            return Ok(BoundedProbeOutput {
+                                status,
+                                bytes,
+                                truncated: true,
+                            });
+                        }
+                    }
+                    Ok(CaptureEvent::Finished) => {
+                        capture_finished = true;
+                        break;
+                    }
+                    Ok(CaptureEvent::Failed) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(());
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(());
+                    }
+                }
+            }
+        }
+
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit_status)) => {
+                    status = Some(exit_status);
+                    settle_deadline = Some((Instant::now() + OUTPUT_SETTLE_TIMEOUT).min(deadline));
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(());
+                }
+            }
+        }
+
+        let now = Instant::now();
+        if let Some(status) = status.filter(|_| capture_finished) {
+            return Ok(BoundedProbeOutput {
+                status,
+                bytes,
+                truncated: false,
+            });
+        }
+        if status.is_some_and(|_| settle_deadline.is_some_and(|settle| now >= settle)) {
+            return Ok(BoundedProbeOutput {
+                status: status.expect("status checked"),
+                bytes,
+                truncated: false,
+            });
+        }
+        if now >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Build the augmented PATH for CLI probes and other native child processes
 /// (auth commands, `buzz-acp models` discovery), including nvm's default
@@ -26,6 +194,8 @@ pub(crate) fn augmented_path() -> Option<String> {
 pub(crate) enum ProbeOutcome {
     /// The CLI reported a successful login (exit 0).
     LoggedIn,
+    /// Buzz could not determine auth state because the probe failed operationally.
+    Unknown,
     /// The CLI exited non-zero without a config-parse signal — treat as
     /// "not authenticated."
     LoggedOut,
@@ -56,27 +226,48 @@ const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown 
 pub(crate) fn login_probe(
     binary_path: &Path,
     probe_args: &[&str],
+    usable_exit_codes: &[i32],
     augmented_path: Option<&str>,
 ) -> ProbeOutcome {
-    let mut command = std::process::Command::new(binary_path);
-    command.args(&probe_args[1..]);
-    if let Some(path) = augmented_path {
-        command.env("PATH", path);
-    }
-    crate::util::configure_no_window(&mut command);
+    login_probe_with_timeout(
+        binary_path,
+        probe_args,
+        usable_exit_codes,
+        augmented_path,
+        LOGIN_PROBE_TIMEOUT,
+    )
+}
 
-    match command.output() {
-        Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
-        Ok(o) => classify_probe_output(&o.stderr, false),
-        Err(_) => ProbeOutcome::LoggedOut,
+fn login_probe_with_timeout(
+    binary_path: &Path,
+    probe_args: &[&str],
+    usable_exit_codes: &[i32],
+    augmented_path: Option<&str>,
+    timeout: Duration,
+) -> ProbeOutcome {
+    let Ok(output) = run_bounded_probe(
+        binary_path,
+        probe_args,
+        augmented_path,
+        timeout,
+        ProbeOutputStream::Stderr,
+        MAX_PROBE_STDERR_BYTES,
+    ) else {
+        return ProbeOutcome::Unknown;
+    };
+    if output.truncated || output.status.code().is_none() {
+        return ProbeOutcome::Unknown;
     }
+    let usable = output
+        .status
+        .code()
+        .is_some_and(|code| usable_exit_codes.contains(&code));
+    classify_probe_output(&output.bytes, usable)
 }
 
 /// Classify collected probe output into a `ProbeOutcome`.
 ///
-/// Shared between `login_probe` (which has the full `Output`) and the
-/// process-level timeout path in `probe_auth_status` (which drains stderr
-/// on a background thread and collects it separately).
+/// Shared by the bounded native probe and ACP authentication status handling.
 pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> ProbeOutcome {
     if exit_success {
         return ProbeOutcome::LoggedIn;
@@ -153,6 +344,7 @@ mod tests {
             super::login_probe(
                 &script_path,
                 &["fake-codex", "login", "status"],
+                &[0],
                 Some(&augmented_path),
             ),
             ProbeOutcome::LoggedIn,
@@ -186,6 +378,7 @@ mod tests {
         let outcome = super::login_probe(
             &script_path,
             &["fake-codex-bad-config", "login", "status"],
+            &[0],
             None,
         );
         assert!(
@@ -224,12 +417,104 @@ mod tests {
         let outcome = super::login_probe(
             &script_path,
             &["fake-codex-logged-out", "login", "status"],
+            &[0],
             None,
         );
         assert_eq!(
             outcome,
             ProbeOutcome::LoggedOut,
             "non-config stderr should produce LoggedOut"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_accepts_runtime_declared_usable_exit_code() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("expiring-auth");
+        fs::write(&script_path, "#!/bin/sh\nexit 2\n").expect("write script");
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+        assert_eq!(
+            super::login_probe(&script_path, &["expiring-auth"], &[0, 2], None),
+            ProbeOutcome::LoggedIn
+        );
+        assert_eq!(
+            super::login_probe(&script_path, &["expiring-auth"], &[0], None),
+            ProbeOutcome::LoggedOut
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_times_out() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("hung-auth");
+        fs::write(&script_path, "#!/bin/sh\nwhile :; do :; done\n").expect("write script");
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+        assert_eq!(
+            super::login_probe_with_timeout(
+                &script_path,
+                &["hung-auth"],
+                &[0],
+                None,
+                Duration::from_millis(10),
+            ),
+            ProbeOutcome::Unknown
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_times_out_after_stderr_closes() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("silent-hung-auth");
+        fs::write(&script_path, "#!/bin/sh\nexec 2>&-\nwhile :; do :; done\n")
+            .expect("write script");
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+        assert_eq!(
+            super::login_probe_with_timeout(
+                &script_path,
+                &["silent-hung-auth"],
+                &[0],
+                None,
+                Duration::from_millis(10),
+            ),
+            ProbeOutcome::Unknown
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_rejects_oversized_stderr() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("noisy-auth");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nhead -c 20000 /dev/zero >&2\nexit 1\n",
+        )
+        .expect("write script");
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+        assert_eq!(
+            super::login_probe(&script_path, &["noisy-auth"], &[0], None),
+            ProbeOutcome::Unknown
         );
     }
 

@@ -20,7 +20,6 @@ use crate::{
 };
 
 /// Subset of the goose file config exposed to the frontend for gate evaluation.
-///
 /// Only the fields the dialog gate needs. This tracks which requirements are already satisfied in the
 /// harness config file, so it can show "Set in goose config" rather than
 /// surfacing a false missing-key marker.
@@ -636,10 +635,10 @@ mod tests {
             context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
             required_normalized_fields: &["model", "provider"],
             login_hint: None,
-            auth_probe_args: None,
+            auth_probe: None,
+            compatibility_probe_args: None,
         }
     }
-
     fn agent_record() -> ManagedAgentRecord {
         ManagedAgentRecord {
             pubkey: "agent".to_string(),

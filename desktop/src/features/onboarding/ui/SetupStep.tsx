@@ -253,6 +253,21 @@ function RuntimeStatus({
     );
   }
 
+  if (runtime.availability === "compatibility_unknown") {
+    return (
+      <Button
+        aria-label={`Check ${runtime.label} again`}
+        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        disabled={runtimesQuery.isFetching}
+        onClick={() => void runtimesQuery.refetch()}
+        type="button"
+        variant="ghost"
+      >
+        {runtimesQuery.isFetching ? "CHECKING…" : "CHECK AGAIN"}
+      </Button>
+    );
+  }
+
   const installLabel = installError ? "RETRY INSTALL" : "INSTALL";
   if (runtime.canAutoInstall) {
     return (
@@ -346,6 +361,27 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     );
   }
 
+  if (runtime.availability === "cli_outdated") {
+    return (
+      <>
+        <p className="text-xs leading-4 text-white">
+          CLI detected but outdated — update required.
+        </p>
+        <p className="mt-1 text-xs leading-4 text-white">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
+  if (runtime.availability === "compatibility_unknown") {
+    return (
+      <p className="text-xs leading-4 text-white">
+        Runtime compatibility couldn't be verified. Check again.
+      </p>
+    );
+  }
+
   if (runtime.availability === "cli_missing") {
     return (
       <>
@@ -384,6 +420,12 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   }
   if (runtime.availability === "adapter_outdated") {
     return "ACP adapter detected but outdated — reinstall required.";
+  }
+  if (runtime.availability === "cli_outdated") {
+    return "CLI detected but outdated — update required.";
+  }
+  if (runtime.availability === "compatibility_unknown") {
+    return "Runtime compatibility couldn't be verified.";
   }
   if (
     runtime.availability === "cli_missing" ||

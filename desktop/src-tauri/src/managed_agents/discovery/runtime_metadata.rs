@@ -1,3 +1,12 @@
+/// Authentication probe contract for a known ACP runtime.
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeAuthProbe {
+    /// CLI args for probing authentication status. `args[0]` is the binary name.
+    pub args: &'static [&'static str],
+    /// Exit codes that mean the configured credentials are currently usable.
+    pub usable_exit_codes: &'static [i32],
+}
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -59,9 +68,12 @@ pub(crate) struct KnownAcpRuntime {
     /// Human-readable hint shown in Doctor when the runtime is available but not
     /// authenticated. `None` for runtimes that have no login step (goose, buzz-agent).
     pub login_hint: Option<&'static str>,
-    /// CLI args for probing authentication status. `args[0]` is the binary name;
-    /// the remainder are the subcommand. `None` for runtimes with no login step.
-    pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Authentication status contract. `None` for runtimes with no login step.
+    pub auth_probe: Option<RuntimeAuthProbe>,
+    /// CLI args for proving that the installed runtime supports Buzz's required
+    /// hosting contract. Exit zero must emit the exact supported JSON contract;
+    /// other completed results are incompatible, while operational failures are unknown.
+    pub compatibility_probe_args: Option<&'static [&'static str]>,
 }
 
 impl KnownAcpRuntime {

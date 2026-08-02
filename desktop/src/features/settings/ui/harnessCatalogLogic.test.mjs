@@ -65,6 +65,18 @@ describe("isYourHarnessEntry", () => {
     );
   });
 
+  it("excludes compatibility failures from installable rows", () => {
+    assert.equal(
+      isYourHarnessEntry(
+        entry({
+          availability: "compatibility_unknown",
+          canAutoInstall: true,
+        }),
+      ),
+      false,
+    );
+  });
+
   it("excludes presets needing manual setup", () => {
     assert.equal(
       isYourHarnessEntry(
@@ -270,6 +282,14 @@ describe("entryStatusLabel", () => {
       "Update needed",
     );
     assert.equal(
+      entryStatusLabel(entry({ availability: "cli_outdated" })),
+      "Update needed",
+    );
+    assert.equal(
+      entryStatusLabel(entry({ availability: "compatibility_unknown" })),
+      "Check failed",
+    );
+    assert.equal(
       entryStatusLabel(entry({ availability: "cli_missing" })),
       "CLI needed",
     );
@@ -360,6 +380,27 @@ describe("catalogPrimaryAction", () => {
         entry({ availability: "adapter_outdated", canAutoInstall: true }),
       ),
       { kind: "install", label: "Update" },
+    );
+  });
+
+  it("update label for outdated CLIs", () => {
+    assert.deepEqual(
+      catalogPrimaryAction(
+        entry({ availability: "cli_outdated", canAutoInstall: true }),
+      ),
+      { kind: "install", label: "Update" },
+    );
+  });
+
+  it("does not offer install for unknown compatibility", () => {
+    assert.deepEqual(
+      catalogPrimaryAction(
+        entry({
+          availability: "compatibility_unknown",
+          canAutoInstall: true,
+        }),
+      ),
+      { kind: "retry", label: "Check again" },
     );
   });
 

@@ -87,3 +87,20 @@ test("adapter-outdated warning stays hint-free reinstall copy", () => {
   );
   assert.equal(warning, "Amp ACP adapter is outdated — reinstall to continue.");
 });
+
+test("cli-outdated warning requests a CLI update", () => {
+  const warning = runtimeAvailabilityWarning(
+    entry({ availability: "cli_outdated", label: "Example Runtime" }),
+  );
+  assert.equal(warning, "Example Runtime CLI is outdated — update to continue.");
+});
+
+test("unknown compatibility asks for another check, not an update", () => {
+  const warning = runtimeAvailabilityWarning(
+    entry({ availability: "compatibility_unknown", label: "Example Runtime" }),
+  );
+  assert.equal(
+    warning,
+    "Example Runtime couldn't be verified. Check again before starting it.",
+  );
+});
