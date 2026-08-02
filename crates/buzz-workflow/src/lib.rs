@@ -316,6 +316,21 @@ impl WorkflowEngine {
         community_id: CommunityId,
         event: &buzz_core::StoredEvent,
     ) -> Result<(), WorkflowError> {
+        self.on_event_as_actor(community_id, event, &event.event.pubkey.to_hex())
+            .await
+    }
+
+    /// Process a stored event using an actor authenticated by the relay ingest path.
+    ///
+    /// Unlike caller-controlled event tags, `actor_pubkey_hex` must come from a
+    /// trusted server-side authentication context. Relay-signed attributed
+    /// events use this entrypoint; ordinary callers should use [`Self::on_event`].
+    pub async fn on_event_as_actor(
+        self: &Arc<Self>,
+        community_id: CommunityId,
+        event: &buzz_core::StoredEvent,
+        actor_pubkey_hex: &str,
+    ) -> Result<(), WorkflowError> {
         let Some(channel_id) = event.channel_id else {
             tracing::debug!(
                 event_id = %event.event.id.to_hex(),
@@ -351,15 +366,10 @@ impl WorkflowEngine {
             return Ok(());
         }
 
-        let trigger_ctx = build_trigger_context(event);
-
-        let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("Failed to serialize trigger context: {e}");
-                return Ok(());
-            }
-        };
+        let mut trigger_ctx = build_trigger_context(event);
+        trigger_ctx.author = actor_pubkey_hex.to_owned();
+        trigger_ctx.author_name = actor_pubkey_hex.to_owned();
+        let mut hydrated_trigger_ctx: Option<executor::TriggerContext> = None;
 
         for workflow in workflows.iter() {
             let def: WorkflowDef = match serde_json::from_value(workflow.definition.clone()) {
@@ -395,6 +405,28 @@ impl WorkflowEngine {
                 continue;
             }
 
+            let run_trigger_ctx = match hydrated_trigger_ctx.as_ref() {
+                Some(ctx) => ctx.clone(),
+                None => {
+                    let mut ctx = trigger_ctx.clone();
+                    self.hydrate_trigger_display_names(community_id, channel_id, &mut ctx)
+                        .await;
+                    hydrated_trigger_ctx = Some(ctx.clone());
+                    ctx
+                }
+            };
+
+            let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&run_trigger_ctx) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to serialize workflow trigger context"
+                    );
+                    continue;
+                }
+            };
+
             let trigger_event_id_bytes = event.event.id.as_bytes().to_vec();
             let run_id = match self
                 .db
@@ -421,7 +453,7 @@ impl WorkflowEngine {
 
             let engine = Arc::clone(self);
             let def_clone = def.clone();
-            let ctx_clone = trigger_ctx.clone();
+            let ctx_clone = run_trigger_ctx;
 
             tokio::spawn(async move {
                 let result =
@@ -434,6 +466,54 @@ impl WorkflowEngine {
         }
 
         Ok(())
+    }
+
+    /// Best-effort enrichment for human-readable workflow templates.
+    ///
+    /// Trigger matching stays on the event-only context so ordinary events do
+    /// not pay profile/channel lookup costs. Once a workflow is known to fire,
+    /// resolve names from the same community. Lookup failures retain the
+    /// deterministic pubkey/UUID fallbacks rather than dropping the run.
+    async fn hydrate_trigger_display_names(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        trigger_ctx: &mut executor::TriggerContext,
+    ) {
+        let author_bytes = hex::decode(&trigger_ctx.author).ok();
+        let user_lookup = async {
+            match author_bytes {
+                Some(bytes) => self.db.get_user(community_id, &bytes).await,
+                None => Ok(None),
+            }
+        };
+        let (user_result, channel_result) =
+            tokio::join!(user_lookup, self.db.get_channel(community_id, channel_id));
+
+        match user_result {
+            Ok(Some(user)) => {
+                if let Some(display_name) = user.display_name.filter(|name| !name.trim().is_empty())
+                {
+                    trigger_ctx.author_name = display_name;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                error = %error,
+                community_id = %community_id,
+                author = %trigger_ctx.author,
+                "Workflow trigger author-name lookup failed; using pubkey fallback"
+            ),
+        }
+        match channel_result {
+            Ok(channel) => trigger_ctx.channel_name = channel.name,
+            Err(error) => tracing::warn!(
+                error = %error,
+                community_id = %community_id,
+                channel_id = %channel_id,
+                "Workflow trigger channel-name lookup failed; using UUID fallback"
+            ),
+        }
     }
 
     /// Interval prefilter: decide whether the interval workflow should fire this
@@ -956,9 +1036,9 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     let kind_u32 = event_kind_u32(&event.event);
     let content = event.event.content.clone();
 
-    // Workflow conditions make authorization decisions from `trigger_author`,
-    // so it must come from the event signature. An `actor` tag is ordinary
-    // signer-controlled metadata and cannot speak for another pubkey.
+    // This context is derived from the signed event alone. The relay entrypoint
+    // overwrites it with the authenticated actor supplied by the ingest path;
+    // never trust a caller-controlled `actor` tag for workflow authorization.
     let author = event.event.pubkey.to_hex();
 
     // For reaction events (NIP-25), the content field holds the emoji character
@@ -1000,18 +1080,114 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         event.event.id.to_hex()
     };
 
+    let channel_id = event
+        .channel_id
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let change_request = extract_change_request(&content);
+    let message_url = if channel_id.is_empty() {
+        String::new()
+    } else {
+        format!("buzz://message?channel={channel_id}&id={message_id}")
+    };
+
     executor::TriggerContext {
         text: content,
+        author_name: author.clone(),
         author,
-        channel_id: event
-            .channel_id
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
+        channel_name: channel_id.clone(),
+        channel_id,
         timestamp: event.event.created_at.as_secs().to_string(),
         emoji,
         message_id,
+        change_request_url: change_request
+            .as_ref()
+            .map(|reference| reference.url.clone())
+            .unwrap_or_default(),
+        change_request_number: change_request
+            .as_ref()
+            .map(|reference| reference.number.clone())
+            .unwrap_or_default(),
+        change_request_provider: change_request
+            .as_ref()
+            .map(|reference| reference.provider.clone())
+            .unwrap_or_default(),
+        change_request_kind: change_request
+            .map(|reference| reference.kind)
+            .unwrap_or_default(),
+        message_url,
         webhook_fields: HashMap::new(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangeRequestReference {
+    url: String,
+    number: String,
+    provider: String,
+    kind: String,
+}
+
+/// Extract the first supported code-hosting change request from message text.
+///
+/// Provider-specific parsing stays behind this boundary so workflow templates
+/// remain stable when support expands beyond GitHub pull requests.
+fn extract_change_request(text: &str) -> Option<ChangeRequestReference> {
+    extract_github_pull_request(text)
+}
+
+/// Extract one canonical GitHub pull-request reference.
+///
+/// Message text is intentionally treated as prose rather than HTML. Candidates
+/// are whitespace-delimited URLs with common Markdown punctuation trimmed; the
+/// returned URL drops query/fragment suffixes and normalizes to HTTPS.
+fn extract_github_pull_request(text: &str) -> Option<ChangeRequestReference> {
+    text.split_whitespace().find_map(|word| {
+        let url_start = word
+            .find("https://github.com/")
+            .or_else(|| word.find("http://github.com/"))?;
+        let candidate = word[url_start..].trim_end_matches(|c: char| {
+            matches!(
+                c,
+                '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | ',' | ';' | '.' | ':' | '!'
+            )
+        });
+        let without_scheme = candidate
+            .strip_prefix("https://")
+            .or_else(|| candidate.strip_prefix("http://"))?;
+        let path = without_scheme
+            .strip_prefix("github.com/")?
+            .split(['?', '#'])
+            .next()?;
+        let mut segments = path.split('/');
+        let owner = segments.next()?.trim();
+        let repository = segments.next()?.trim();
+        if segments.next()? != "pull" {
+            return None;
+        }
+        let number = segments.next()?.trim_end_matches(['.', ':', '!']);
+        let valid_owner = !owner.is_empty()
+            && !owner.starts_with('-')
+            && !owner.ends_with('-')
+            && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        let valid_repository = !repository.is_empty()
+            && repository
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !valid_owner
+            || !valid_repository
+            || number.is_empty()
+            || !number.chars().all(|c| c.is_ascii_digit())
+        {
+            return None;
+        }
+        Some(ChangeRequestReference {
+            url: format!("https://github.com/{owner}/{repository}/pull/{number}"),
+            number: number.to_owned(),
+            provider: "github".to_owned(),
+            kind: "pull_request".to_owned(),
+        })
+    })
 }
 
 /// Pure authority decision for [`WorkflowEngine::check_owner_authority`].
@@ -1048,6 +1224,54 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_canonical_github_pull_request_from_markdown_prose() {
+        assert_eq!(
+            extract_change_request("Opened [the fix](https://github.com/block/buzz/pull/987)."),
+            Some(ChangeRequestReference {
+                url: "https://github.com/block/buzz/pull/987".to_owned(),
+                number: "987".to_owned(),
+                provider: "github".to_owned(),
+                kind: "pull_request".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_github_pull_request_with_query_or_fragment() {
+        assert_eq!(
+            extract_change_request(
+                "Review https://github.com/ascension/hive/pull/631/files?diff=split#discussion"
+            ),
+            Some(ChangeRequestReference {
+                url: "https://github.com/ascension/hive/pull/631".to_owned(),
+                number: "631".to_owned(),
+                provider: "github".to_owned(),
+                kind: "pull_request".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_non_pull_request_github_urls() {
+        assert_eq!(
+            extract_change_request("https://github.com/block/buzz/issues/987"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_markdown_delimiters_inside_github_owner_or_repository() {
+        assert_eq!(
+            extract_change_request("https://github.com/block](evil/buzz/pull/987"),
+            None
+        );
+        assert_eq!(
+            extract_change_request("https://github.com/block/buzz](evil/pull/987"),
+            None
+        );
+    }
 
     #[test]
     fn cron_fire_instant_matches_within_window() {
@@ -1552,9 +1776,22 @@ steps:
 
         assert_eq!(ctx.text, "hello world");
         assert_eq!(ctx.author, stored.event.pubkey.to_hex());
+        assert_eq!(ctx.author_name, ctx.author);
         assert_eq!(ctx.channel_id, stored.channel_id.unwrap().to_string());
+        assert_eq!(ctx.channel_name, ctx.channel_id);
         assert_eq!(ctx.timestamp, stored.event.created_at.as_secs().to_string());
         assert_eq!(ctx.message_id, stored.event.id.to_hex());
+        assert_eq!(
+            ctx.message_url,
+            format!(
+                "buzz://message?channel={}&id={}",
+                ctx.channel_id, ctx.message_id
+            )
+        );
+        assert_eq!(ctx.change_request_url, "");
+        assert_eq!(ctx.change_request_number, "");
+        assert_eq!(ctx.change_request_provider, "");
+        assert_eq!(ctx.change_request_kind, "");
         // Non-reaction events have empty emoji.
         assert_eq!(ctx.emoji, "");
         assert!(ctx.webhook_fields.is_empty());
@@ -1576,6 +1813,30 @@ steps:
     }
 
     #[test]
+    fn build_trigger_context_ignores_forged_actor_tag() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let attacker = Keys::generate();
+        let claimed_actor = Keys::generate().public_key().to_hex();
+        let target = EventBuilder::new(Kind::Custom(9), "target")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign target");
+        let event = EventBuilder::new(Kind::Reaction, "🚀")
+            .tags([
+                Tag::parse(["e", &target.id.to_hex()]).expect("target tag"),
+                Tag::parse(["actor", &claimed_actor]).expect("forged actor tag"),
+            ])
+            .sign_with_keys(&attacker)
+            .expect("sign forged reaction");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+
+        let ctx = build_trigger_context(&stored);
+
+        assert_eq!(ctx.author, attacker.public_key().to_hex());
+        assert_ne!(ctx.author, claimed_actor);
+    }
+
+    #[test]
     fn build_trigger_context_no_channel_id() {
         use nostr::{EventBuilder, Keys, Kind};
         let keys = Keys::generate();
@@ -1589,6 +1850,32 @@ steps:
 
         assert_eq!(ctx.channel_id, "");
         assert_eq!(ctx.text, "msg");
+        assert_eq!(ctx.message_url, "");
+    }
+
+    #[test]
+    fn build_trigger_context_extracts_pull_request_fields() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let keys = Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(9),
+            "Ready: https://github.com/block/buzz/pull/123/files",
+        )
+        .tags([])
+        .sign_with_keys(&keys)
+        .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+
+        let ctx = build_trigger_context(&stored);
+
+        assert_eq!(
+            ctx.change_request_url,
+            "https://github.com/block/buzz/pull/123"
+        );
+        assert_eq!(ctx.change_request_number, "123");
+        assert_eq!(ctx.change_request_provider, "github");
+        assert_eq!(ctx.change_request_kind, "pull_request");
     }
 
     #[test]
@@ -1769,6 +2056,15 @@ steps:
         buzz_core::StoredEvent::new(event, Some(channel_id))
     }
 
+    async fn trigger_message(
+        engine: &Arc<WorkflowEngine>,
+        community: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<(), WorkflowError> {
+        let event = message_event(channel_id);
+        engine.on_event(community, &event).await
+    }
+
     /// The event path must stop creating runs the moment the workflow's owner
     /// loses channel membership — even while the workflow row is still
     /// `enabled` (the disable-on-removal side effect is a separate, relay-side
@@ -1803,8 +2099,7 @@ steps:
         let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
 
         // Owner is an active member: the event fires the workflow.
-        engine
-            .on_event(community, &message_event(channel_id))
+        trigger_message(&engine, community, channel_id)
             .await
             .expect("on_event while member");
         let runs = db
@@ -1819,8 +2114,7 @@ steps:
             .expect("remove member");
 
         // Workflow row is still enabled — only the authority gate stands.
-        engine
-            .on_event(community, &message_event(channel_id))
+        trigger_message(&engine, community, channel_id)
             .await
             .expect("on_event after removal");
         let runs = db
@@ -1878,8 +2172,7 @@ steps:
             .expect("create owner workflow");
 
         let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
-        engine
-            .on_event(community, &message_event(channel_id))
+        trigger_message(&engine, community, channel_id)
             .await
             .expect("on_event");
 

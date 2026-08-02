@@ -37,6 +37,28 @@ pub struct TriggerContext {
     pub emoji: String,
     /// Event ID of the triggering message (hex string).
     pub message_id: String,
+    /// Human-readable display name for the triggering author.
+    #[serde(default)]
+    pub author_name: String,
+    /// Human-readable name for the triggering channel.
+    #[serde(default)]
+    pub channel_name: String,
+    /// Canonical URL for a code-hosting change request extracted from the
+    /// triggering text.
+    #[serde(default)]
+    pub change_request_url: String,
+    /// Provider-local change-request number extracted from the triggering text.
+    #[serde(default)]
+    pub change_request_number: String,
+    /// Code-hosting provider for the change request (for example, `github`).
+    #[serde(default)]
+    pub change_request_provider: String,
+    /// Provider-neutral change-request kind (for example, `pull_request`).
+    #[serde(default)]
+    pub change_request_kind: String,
+    /// Buzz deep link to the triggering message.
+    #[serde(default)]
+    pub message_url: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
 }
@@ -54,6 +76,13 @@ impl TriggerContext {
             "timestamp" => Some(&self.timestamp),
             "emoji" => Some(&self.emoji),
             "message_id" => Some(&self.message_id),
+            "author_name" => Some(&self.author_name),
+            "channel_name" => Some(&self.channel_name),
+            "change_request_url" => Some(&self.change_request_url),
+            "change_request_number" => Some(&self.change_request_number),
+            "change_request_provider" => Some(&self.change_request_provider),
+            "change_request_kind" => Some(&self.change_request_kind),
+            "message_url" => Some(&self.message_url),
             other => self.webhook_fields.get(other).map(|s| s.as_str()),
         }
     }
@@ -213,6 +242,11 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 /// | `trigger.timestamp`               | `trigger_timestamp`       |
 /// | `trigger.emoji`                   | `trigger_emoji`           |
 /// | `trigger.message_id`              | `trigger_message_id`      |
+/// | `trigger.change_request_url`       | `trigger_change_request_url` |
+/// | `trigger.change_request_number`    | `trigger_change_request_number` |
+/// | `trigger.change_request_provider`  | `trigger_change_request_provider` |
+/// | `trigger.change_request_kind`      | `trigger_change_request_kind` |
+/// | `trigger.message_url`              | `trigger_message_url`     |
 /// | `steps.STEP_ID.output.FIELD`      | `steps_STEP_ID_output_FIELD` |
 ///
 /// Also registers string helper functions that the `cron` crate's `evalexpr` v11
@@ -293,6 +327,23 @@ pub fn build_eval_context(
         ("trigger_timestamp", trigger_ctx.timestamp.as_str()),
         ("trigger_emoji", trigger_ctx.emoji.as_str()),
         ("trigger_message_id", trigger_ctx.message_id.as_str()),
+        (
+            "trigger_change_request_url",
+            trigger_ctx.change_request_url.as_str(),
+        ),
+        (
+            "trigger_change_request_number",
+            trigger_ctx.change_request_number.as_str(),
+        ),
+        (
+            "trigger_change_request_provider",
+            trigger_ctx.change_request_provider.as_str(),
+        ),
+        (
+            "trigger_change_request_kind",
+            trigger_ctx.change_request_kind.as_str(),
+        ),
+        ("trigger_message_url", trigger_ctx.message_url.as_str()),
     ];
 
     for (name, val) in &trigger_fields {
@@ -403,9 +454,14 @@ pub fn resolve_step_templates(
     };
 
     match &step.action {
-        SendMessage { text, channel } => Ok(SendMessage {
+        SendMessage {
+            text,
+            channel,
+            reply_to,
+        } => Ok(SendMessage {
             text: t(text)?,
             channel: t_opt(channel)?,
+            reply_to: t_opt(reply_to)?,
         }),
         SendDm { to, text } => Ok(SendDm {
             to: t(to)?,
@@ -546,7 +602,11 @@ pub async fn dispatch_action(
     let result = serving_write
         .protect(async {
             match action {
-                SendMessage { text, channel } => {
+                SendMessage {
+                    text,
+                    channel,
+                    reply_to,
+                } => {
                     // Look up workflow metadata for destination validation and
                     // attribution, scoped to the run's community — the same run/workflow
                     // UUID may exist in another community, so a bare-id lookup could
@@ -586,7 +646,13 @@ pub async fn dispatch_action(
 
                     let event_id = engine
                         .action_sink()?
-                        .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                        .send_message_with_reply(
+                            community_id,
+                            &channel_id,
+                            text,
+                            &owner_pubkey_hex,
+                            reply_to.as_deref(),
+                        )
                         .await
                         .map_err(WorkflowError::from)?;
 
@@ -1266,6 +1332,13 @@ mod tests {
             timestamp: "1700000000".to_owned(),
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
+            author_name: "Staff Engineer".to_owned(),
+            channel_name: "engineering".to_owned(),
+            change_request_url: "https://github.com/block/buzz/pull/123".to_owned(),
+            change_request_number: "123".to_owned(),
+            change_request_provider: "github".to_owned(),
+            change_request_kind: "pull_request".to_owned(),
+            message_url: "buzz://message?channel=channel-uuid-here&id=event-id-hex".to_owned(),
             webhook_fields: HashMap::new(),
         }
     }
@@ -1282,6 +1355,50 @@ mod tests {
         let ctx = make_trigger();
         let out = resolve_template("By {{trigger.author}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "By abc123def456");
+    }
+
+    #[test]
+    fn resolve_human_readable_pr_context() {
+        let ctx = make_trigger();
+        let out = resolve_template(
+            "PR #{{trigger.change_request_number}} by {{trigger.author_name}} in #{{trigger.channel_name}}: [open]({{trigger.change_request_url}}) · [message]({{trigger.message_url}})",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "PR #123 by Staff Engineer in #engineering: [open](https://github.com/block/buzz/pull/123) · [message](buzz://message?channel=channel-uuid-here&id=event-id-hex)"
+        );
+    }
+
+    #[test]
+    fn resolve_send_message_reply_to_from_prior_step() {
+        let ctx = make_trigger();
+        let step = Step {
+            id: "instructions".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::SendMessage {
+                text: "Choose an action".to_owned(),
+                channel: None,
+                reply_to: Some("{{steps.prompt.output.event_id}}".to_owned()),
+            },
+        };
+        let outputs = HashMap::from([(
+            "prompt".to_owned(),
+            json!({ "event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+        )]);
+
+        let resolved = resolve_step_templates(&step, &ctx, &outputs).unwrap();
+        match resolved {
+            ActionDef::SendMessage { reply_to, .. } => assert_eq!(
+                reply_to.as_deref(),
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            ),
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1805,10 +1922,23 @@ mod tests {
         let ctx = make_trigger();
         assert_eq!(ctx.get_field("text"), Some("P1 incident in production"));
         assert_eq!(ctx.get_field("author"), Some("abc123def456"));
+        assert_eq!(ctx.get_field("author_name"), Some("Staff Engineer"));
         assert_eq!(ctx.get_field("channel_id"), Some("channel-uuid-here"));
+        assert_eq!(ctx.get_field("channel_name"), Some("engineering"));
         assert_eq!(ctx.get_field("timestamp"), Some("1700000000"));
         assert_eq!(ctx.get_field("emoji"), Some("fire"));
         assert_eq!(ctx.get_field("message_id"), Some("event-id-hex"));
+        assert_eq!(
+            ctx.get_field("change_request_url"),
+            Some("https://github.com/block/buzz/pull/123")
+        );
+        assert_eq!(ctx.get_field("change_request_number"), Some("123"));
+        assert_eq!(ctx.get_field("change_request_provider"), Some("github"));
+        assert_eq!(ctx.get_field("change_request_kind"), Some("pull_request"));
+        assert_eq!(
+            ctx.get_field("message_url"),
+            Some("buzz://message?channel=channel-uuid-here&id=event-id-hex")
+        );
     }
 
     #[test]
@@ -1831,10 +1961,17 @@ mod tests {
         let ctx = TriggerContext::default();
         assert_eq!(ctx.text, "");
         assert_eq!(ctx.author, "");
+        assert_eq!(ctx.author_name, "");
         assert_eq!(ctx.channel_id, "");
+        assert_eq!(ctx.channel_name, "");
         assert_eq!(ctx.timestamp, "");
         assert_eq!(ctx.emoji, "");
         assert_eq!(ctx.message_id, "");
+        assert_eq!(ctx.change_request_url, "");
+        assert_eq!(ctx.change_request_number, "");
+        assert_eq!(ctx.change_request_provider, "");
+        assert_eq!(ctx.change_request_kind, "");
+        assert_eq!(ctx.message_url, "");
         assert!(ctx.webhook_fields.is_empty());
     }
 

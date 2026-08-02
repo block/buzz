@@ -532,6 +532,7 @@ async fn dispatch_persistent_event_inner(
     {
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();
+        let workflow_actor_pubkey_hex = actor_pubkey_hex.to_owned();
         let trigger_kind = kind_u32.to_string();
         let workflow_community_host = tenant.host().to_owned();
         // The event was stored under `tenant.community()`; `StoredEvent` does
@@ -542,7 +543,11 @@ async fn dispatch_persistent_event_inner(
         let workflow_community = tenant.community();
         tokio::spawn(async move {
             if let Err(e) = workflow_engine
-                .on_event(workflow_community, &workflow_event)
+                .on_event_as_actor(
+                    workflow_community,
+                    &workflow_event,
+                    &workflow_actor_pubkey_hex,
+                )
                 .await
             {
                 tracing::error!(event_id = ?workflow_event.event.id, "Workflow trigger failed: {e}");

@@ -112,6 +112,25 @@ function StepConfigFields({
               </p>
             ) : null}
           </div>
+          <div className="space-y-1.5">
+            <FieldLabel htmlFor={`${prefix}-reply-to`}>
+              Reply to event (optional)
+            </FieldLabel>
+            <Input
+              autoCapitalize="off"
+              disabled={disabled}
+              id={`${prefix}-reply-to`}
+              onChange={(event) =>
+                onUpdate({ ...step, replyTo: event.target.value })
+              }
+              placeholder="e.g. {{steps.step_1.output.event_id}}"
+              value={step.replyTo ?? ""}
+            />
+            <p className="text-xs text-muted-foreground">
+              Use an event ID or a prior send-message step output to post this
+              message as a threaded reply.
+            </p>
+          </div>
         </div>
       );
     case "send_dm":
