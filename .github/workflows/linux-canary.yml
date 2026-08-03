@@ -170,7 +170,7 @@ jobs:
           ./scripts/bundle-sidecars.sh
 
       - name: Build Linux Tauri app
-        run: cd desktop && pnpm tauri build --ci --bundles deb,appimage --config src-tauri/tauri.canary.conf.json
+        run: cd desktop && pnpm tauri build --ci --bundles deb,appimage --features mesh-llm --config src-tauri/tauri.canary.conf.json
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
