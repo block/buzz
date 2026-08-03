@@ -12,7 +12,16 @@ WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 # Derive a stable base port from the worktree root so the same worktree always
 # gets the same ports. This keeps the Tauri dev config stable between runs and
 # preserves Cargo's build cache.
-BASE_PORT=$(python3 -c "import hashlib,sys; h=int(hashlib.sha256(sys.argv[1].encode()).hexdigest(), 16); print(10000 + h % 55000)" "$WORKTREE_ROOT")
+if command -v python3 >/dev/null 2>&1 && python3 -c "import sys" >/dev/null 2>&1; then
+    PYTHON_BIN=python3
+elif command -v python >/dev/null 2>&1 && python -c "import sys" >/dev/null 2>&1; then
+    PYTHON_BIN=python
+else
+    echo "Python 3 is required to configure the desktop development environment" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+BASE_PORT=$($PYTHON_BIN -c "import hashlib,sys; h=int(hashlib.sha256(sys.argv[1].encode()).hexdigest(), 16); print(10000 + h % 55000)" "$WORKTREE_ROOT")
 export BUZZ_VITE_PORT=$BASE_PORT
 export BUZZ_HMR_PORT=$((BASE_PORT + 1))
 export BUZZ_RELAY_PORT=3000
@@ -25,7 +34,7 @@ if [[ "${BUZZ_RESET_WEBVIEW_STATE:-0}" == "1" ]]; then
     DEV_URL="${DEV_URL}?resetDevState=1"
 fi
 
-BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev\",\"productName\":\"Buzz Dev\"}"
+BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"pnpm exec vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev\",\"productName\":\"Buzz Dev\"}"
 unset VITE_DEV_BRANCH
 
 # In worktrees, extract a label from the branch name and derive a unique app
@@ -86,10 +95,10 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         GENERATE_DEV_ICON="$WORKTREE_ROOT/scripts/generate-dev-icon.swift"
         BASE_ICON="$WORKTREE_ROOT/desktop/src-tauri/icons/icon.icns"
 
-        if swift "$GENERATE_DEV_ICON" "$BASE_ICON" "$DEV_ICON" "$BUZZ_WORKTREE_LABEL"; then
+        if command -v swift >/dev/null 2>&1 && swift "$GENERATE_DEV_ICON" "$BASE_ICON" "$DEV_ICON" "$BUZZ_WORKTREE_LABEL"; then
             echo "🌳 Worktree: ${BUZZ_WORKTREE_LABEL}"
             export VITE_DEV_BRANCH="$BUZZ_WORKTREE_LABEL"
-            BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev.${BUZZ_INSTANCE_SLUG}\",\"productName\":\"Buzz Dev (${BUZZ_WORKTREE_LABEL})\",\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
+            BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"pnpm exec vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev.${BUZZ_INSTANCE_SLUG}\",\"productName\":\"Buzz Dev (${BUZZ_WORKTREE_LABEL})\",\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
         fi
     fi
 fi

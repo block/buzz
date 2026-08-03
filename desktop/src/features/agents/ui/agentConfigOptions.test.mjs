@@ -5,6 +5,7 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  requiredCredentialEnvKeys,
   resetConfigForHarnessChange,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
@@ -65,6 +66,15 @@ test("getPersonaProviderOptions with no hideProviderIds omits the tail for a kno
     tail?.id !== "anthropic" || tail?.label === "Anthropic",
     "no duplicate tail for known provider",
   );
+});
+
+test("getPersonaProviderOptions includes local Ollama without a credential requirement", () => {
+  const options = getPersonaProviderOptions("", "buzz-agent");
+  assert.equal(
+    options.some((option) => option.id === "ollama" && option.label === "Ollama (local)"),
+    true,
+  );
+  assert.deepEqual(requiredCredentialEnvKeys("buzz-agent", "ollama"), []);
 });
 
 test("getPersonaProviderOptions appends (current) tail for an unknown saved provider", () => {

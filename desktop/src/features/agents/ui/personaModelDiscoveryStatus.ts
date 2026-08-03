@@ -25,6 +25,8 @@ function providerObjectLabel(provider: string): string {
       return "OpenAI";
     case "openai-compat":
       return "OpenAI-compatible";
+    case "ollama":
+      return "Ollama";
     default:
       return provider.trim() || "this provider";
   }

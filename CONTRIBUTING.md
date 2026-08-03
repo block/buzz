@@ -125,6 +125,21 @@ error such as:
 The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
 ```
 
+#### Windows: native desktop development
+
+Install the standard Tauri prerequisites (Microsoft C++ Build Tools and
+WebView2), Git for Windows, and Python 3. Run Buzz commands from Git Bash so
+the repository's Bash recipes use Git for Windows rather than WSL:
+
+```bash
+cd /c/path/to/buzz
+just desktop-standalone
+```
+
+The standalone recipe builds the native agent sidecars and launches the
+desktop without Docker or a local relay. Python may be installed as either
+`python3` or `python`; the launcher detects both names.
+
 If you're only touching the relay, CLI, or other server-side crates, you can
 skip this and run the narrower recipes instead — `just fmt-check`, `just
 clippy`, `just test-unit`, and `just test` need no GTK.

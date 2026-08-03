@@ -42,6 +42,7 @@ const KNOWN_LLM_PROVIDER_IDS = [
   "databricks_v2",
   "openai",
   "openai-compat",
+  "ollama",
   "openrouter",
 ] as const;
 
@@ -96,6 +97,11 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
     requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
     secretEnvVar: "OPENAI_COMPAT_API_KEY",
   },
+  ollama: {
+    // Local Ollama uses its loopback OpenAI-compatible endpoint and does not
+    // require a secret. The Rust runtime supplies the endpoint default.
+    requiredEnvKeys: [],
+  },
   databricks: {
     // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
     requiredEnvKeys: ["DATABRICKS_HOST"],
@@ -125,6 +131,7 @@ export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
+  { id: "ollama", label: "Ollama (local)" },
   { id: "openrouter", label: "OpenRouter" },
   { id: "relay-mesh", label: "Buzz shared compute" },
   { id: "databricks", label: "Databricks" },
@@ -286,6 +293,7 @@ export function providerRequiresExplicitModel(
     trimmedProvider === "anthropic" ||
     trimmedProvider === "openai" ||
     trimmedProvider === "openai-compat" ||
+    trimmedProvider === "ollama" ||
     trimmedProvider === "openrouter"
   );
 }
