@@ -38,6 +38,19 @@ pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 type SlidingWindowCounter = (u32, Instant);
 type ScopedRateLimiter = DashMap<ScopedPubkeyKey, SlidingWindowCounter>;
 
+/// Runtime resources used exclusively by Git transport and policy handling.
+///
+/// This bundle is absent when Git support is disabled, preventing the relay
+/// from constructing object-store, cache, or subprocess-concurrency state.
+pub struct GitRuntime {
+    /// Bounds concurrent Git subprocess operations across the relay.
+    pub semaphore: Arc<Semaphore>,
+    /// Durable object-store backend for Git packs and manifests.
+    pub store: crate::api::git::store::GitStore,
+    /// Process-local immutable pack/index cache.
+    pub pack_cache: Arc<crate::api::git::pack_cache::GitPackCache>,
+}
+
 /// Per-connection entry in the connection manager.
 struct ConnEntry {
     tx: mpsc::Sender<WsMessage>,
@@ -514,11 +527,6 @@ pub struct AppState {
     pub conn_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent message handler tasks.
     pub handler_semaphore: Arc<Semaphore>,
-    /// Semaphore limiting concurrent git subprocess operations across
-    /// the whole relay. Bounds resource use; **not** writer
-    /// serialization — that's the CAS at the manifest pointer (spec
-    /// §Push step 7, `Inv_NoFork`).
-    pub git_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent media upload parsing/transcoding work.
     pub media_upload_semaphore: Arc<Semaphore>,
 
@@ -559,14 +567,8 @@ pub struct AppState {
     /// `storage_sweep` module docs; shared with the usage-metrics tick via
     /// `Arc` the same way other cross-tick poller state lives on `AppState`.
     pub storage_sweep: Arc<tokio::sync::Mutex<crate::storage_sweep::StorageSweepState>>,
-    /// Git object-store backend (content-addressed packs/manifests plus
-    /// CAS-guarded manifest pointer). This is the durable git source of truth;
-    /// see `api::git::store` and `docs/git-on-object-storage.md`.
-    pub git_store: crate::api::git::store::GitStore,
-    /// Process-local, byte-bounded cache of immutable Git pack/index pairs.
-    /// Object storage remains authoritative; this only avoids repeated reads
-    /// and index generation for content-addressed packs.
-    pub git_pack_cache: Arc<crate::api::git::pack_cache::GitPackCache>,
+    /// Git-only runtime resources, absent when `BUZZ_GIT_ENABLED=false`.
+    pub git: Option<Arc<GitRuntime>>,
     /// Audio relay room manager — tracks active huddle audio rooms.
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
@@ -689,25 +691,33 @@ impl AppState {
             tracing::warn!("audit log worker exited (expected on shutdown)");
         });
 
-        let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
-        let git_store = crate::api::git::store::GitStore::new(
-            &config.media.s3_endpoint,
-            &config.media.s3_access_key,
-            &config.media.s3_secret_key,
-            &config.media.s3_bucket,
-            &config.media.s3_region,
-            config.media.s3_addressing_style,
-        )
-        .expect("media storage was already constructed with this S3 config");
-        let git_pack_cache = Arc::new(
-            crate::api::git::pack_cache::GitPackCache::new(
-                &config.git_pack_cache_path,
-                config.git_pack_cache_max_bytes,
-                config.git_pack_cache_max_concurrent_populations,
+        let git = if config.git_enabled {
+            let store = crate::api::git::store::GitStore::new(
+                &config.media.s3_endpoint,
+                &config.media.s3_access_key,
+                &config.media.s3_secret_key,
+                &config.media.s3_bucket,
+                &config.media.s3_region,
+                config.media.s3_addressing_style,
             )
-            .expect("git pack cache path must be available"),
-        );
+            .expect("media storage was already constructed with this S3 config");
+            let pack_cache = Arc::new(
+                crate::api::git::pack_cache::GitPackCache::new(
+                    &config.git_pack_cache_path,
+                    config.git_pack_cache_max_bytes,
+                    config.git_pack_cache_max_concurrent_populations,
+                )
+                .expect("git pack cache path must be available"),
+            );
+            Some(Arc::new(GitRuntime {
+                semaphore: Arc::new(Semaphore::new(config.git_max_concurrent_ops)),
+                store,
+                pack_cache,
+            }))
+        } else {
+            None
+        };
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
@@ -727,7 +737,6 @@ impl AppState {
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
-            git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
             media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,
             relay_keypair,
@@ -764,8 +773,7 @@ impl AppState {
             storage_sweep: Arc::new(tokio::sync::Mutex::new(
                 crate::storage_sweep::StorageSweepState::default(),
             )),
-            git_store,
-            git_pack_cache,
+            git,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
@@ -812,6 +820,11 @@ impl AppState {
     /// must no-op to today's behavior. Set once by `main.rs` after boot.
     pub fn mesh(&self) -> Option<&crate::mesh_boot::MeshHandle> {
         self.mesh.get()
+    }
+
+    /// Returns Git-only runtime resources when Git support is enabled.
+    pub fn git_runtime(&self) -> Option<&GitRuntime> {
+        self.git.as_deref()
     }
 
     /// Record an event ID as locally-published for dedup, scoped to the
@@ -1256,9 +1269,14 @@ mod tests {
     }
 
     async fn test_state() -> Arc<AppState> {
+        test_state_with_git_enabled(true).await
+    }
+
+    async fn test_state_with_git_enabled(git_enabled: bool) -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.git_enabled = git_enabled;
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -1290,6 +1308,13 @@ mod tests {
             media_storage,
         );
         Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn disabled_git_omits_git_runtime() {
+        let state = test_state_with_git_enabled(false).await;
+
+        assert!(state.git_runtime().is_none());
     }
 
     #[test]

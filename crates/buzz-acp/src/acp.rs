@@ -74,6 +74,20 @@ impl StopReason {
     }
 }
 
+/// Cloneable terminal prompt state retained across the pool's control-signal
+/// selection boundary.
+///
+/// `last_prompt_id == None` only means cancellation is no longer possible; it
+/// does not identify the terminal outcome. Successful outcomes retain their
+/// exact stop reason. Errors deliberately retain no clone of [`AcpError`] and
+/// are represented as `Failed`, which lets the pool fail closed without
+/// inventing a successful result.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PromptTerminalSnapshot {
+    Succeeded(StopReason),
+    Failed,
+}
+
 /// Errors that can occur in the ACP client.
 #[derive(Debug, thiserror::Error)]
 pub enum AcpError {
@@ -106,7 +120,13 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    #[error("Agent output capture invalid: {0}")]
+    OutputCaptureInvalid(&'static str),
 }
+
+/// Maximum UTF-8 byte length retained from one ACP prompt response.
+const MAX_AGENT_OUTPUT_BYTES: usize = 65_536;
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
@@ -162,6 +182,9 @@ pub struct AcpClient {
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
     last_prompt_id: Option<u64>,
+    /// One-shot terminal outcome for the narrow completed-before-control race.
+    /// Reset before every prompt and consumed by whichever pool branch wins.
+    terminal_prompt_snapshot: Option<PromptTerminalSnapshot>,
     /// Hard deadline for the current turn, set by `session_prompt_with_idle_timeout`.
     /// Inherited by `cancel_with_cleanup` so the drain loop shares the same budget
     /// rather than starting a fresh timer (prevents double-jeopardy).
@@ -211,6 +234,10 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text from `agent_message_chunk` updates for the current prompt only.
+    agent_output_capture: String,
+    /// Why the current prompt output cannot safely be published.
+    agent_output_invalid: Option<&'static str>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -542,6 +569,7 @@ impl AcpClient {
             pending_permission_id: None,
             permission_responded: false,
             last_prompt_id: None,
+            terminal_prompt_snapshot: None,
             current_hard_deadline: None,
             observer: None,
             observer_agent_index: None,
@@ -550,6 +578,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            agent_output_capture: String::new(),
+            agent_output_invalid: None,
         })
     }
 
@@ -584,6 +614,28 @@ impl AcpClient {
                 payload,
             );
         }
+    }
+
+    /// Clear any previously captured agent message text before a new prompt.
+    ///
+    /// This prevents initialization, heartbeat, and prior-session output from
+    /// being attributed to the next user-triggered turn.
+    pub fn reset_agent_output_capture(&mut self) {
+        self.agent_output_capture.clear();
+        self.agent_output_invalid = None;
+    }
+
+    /// Take the current prompt's publishable agent message text.
+    ///
+    /// Returns an error when a tool call or output overflow made the response
+    /// unsafe to publish. Successful calls consume the retained text.
+    pub fn take_agent_output_capture(&mut self) -> Result<Option<String>, AcpError> {
+        if let Some(reason) = self.agent_output_invalid.take() {
+            self.agent_output_capture.clear();
+            return Err(AcpError::OutputCaptureInvalid(reason));
+        }
+        let output = std::mem::take(&mut self.agent_output_capture);
+        Ok((!output.is_empty()).then_some(output))
     }
 
     /// Send the `initialize` request and return the agent's response result value.
@@ -768,6 +820,8 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.terminal_prompt_snapshot = None;
+        self.reset_agent_output_capture();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -791,6 +845,7 @@ impl AcpClient {
         tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
+            self.terminal_prompt_snapshot = Some(PromptTerminalSnapshot::Failed);
             self.current_hard_deadline = None;
             return Err(e);
         }
@@ -805,11 +860,23 @@ impl AcpClient {
             )
             .await;
 
+        // Parse before clearing `last_prompt_id`: a wire-level success can still
+        // be a protocol failure (missing or unknown stopReason). Retain the
+        // exact successful stop reason for the pool's completed-before-control
+        // branch; retain only `Failed` for errors so that branch cannot invent
+        // a successful completion.
+        let prompt_result = match result {
+            Ok(result) => self.parse_stop_reason(&result),
+            Err(error) => Err(error),
+        };
+
         // On timeout errors, leave current_hard_deadline set so cancel_with_cleanup
         // can inherit the remaining budget. Clear it on all other outcomes.
-        match &result {
-            Ok(_) => {
+        match &prompt_result {
+            Ok(stop_reason) => {
                 self.last_prompt_id = None;
+                self.terminal_prompt_snapshot =
+                    Some(PromptTerminalSnapshot::Succeeded(stop_reason.clone()));
                 self.current_hard_deadline = None;
             }
             Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout { .. }) => {
@@ -818,10 +885,11 @@ impl AcpClient {
             }
             Err(_) => {
                 self.last_prompt_id = None;
+                self.terminal_prompt_snapshot = Some(PromptTerminalSnapshot::Failed);
                 self.current_hard_deadline = None;
             }
         }
-        self.parse_stop_reason(&result?)
+        prompt_result
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -842,6 +910,15 @@ impl AcpClient {
     /// Returns `true` if a `session/prompt` request is currently in flight.
     pub fn has_in_flight_prompt(&self) -> bool {
         self.last_prompt_id.is_some()
+    }
+
+    /// Consume the terminal prompt outcome retained for a control-signal race.
+    ///
+    /// The ordinary prompt-result branch calls this only to discard its own
+    /// snapshot. The completed-before-control branch uses it to preserve an
+    /// exact successful stop reason or fail closed on `Failed`/`None`.
+    pub(crate) fn take_terminal_prompt_snapshot(&mut self) -> Option<PromptTerminalSnapshot> {
+        self.terminal_prompt_snapshot.take()
     }
 
     /// Most recently observed goose `_meta.goose.activeRunId` from a
@@ -1732,6 +1809,17 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    if self.agent_output_invalid.is_none() {
+                        if self.agent_output_capture.len().saturating_add(text.len())
+                            > MAX_AGENT_OUTPUT_BYTES
+                        {
+                            self.agent_output_capture.clear();
+                            self.agent_output_invalid =
+                                Some("agent message exceeds the 65536-byte limit");
+                        } else {
+                            self.agent_output_capture.push_str(text);
+                        }
+                    }
                 }
                 false
             }
@@ -1745,6 +1833,8 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                self.agent_output_capture.clear();
+                self.agent_output_invalid = Some("agent invoked an ACP tool");
                 true
             }
             "tool_call_update" => {
@@ -3552,6 +3642,125 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_output_capture_accumulates_messages_and_fails_closed() {
+        let mut client = spawn_inert_client().await;
+        client.reset_agent_output_capture();
+
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "text": "private reasoning" }
+            }}
+        }));
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": "hello " }
+            }}
+        }));
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": "world" }
+            }}
+        }));
+        assert_eq!(
+            client.take_agent_output_capture().expect("valid output"),
+            Some("hello world".to_string()),
+            "only agent_message_chunk text may be published"
+        );
+
+        client.reset_agent_output_capture();
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "tool_call",
+                "title": "shell",
+                "kind": "execute"
+            }}
+        }));
+        assert!(
+            client.take_agent_output_capture().is_err(),
+            "a tool call must invalidate all captured output"
+        );
+
+        client.reset_agent_output_capture();
+        client.handle_session_update(&serde_json::json!({
+            "params": { "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": "x".repeat(65_537) }
+            }}
+        }));
+        assert!(
+            client.take_agent_output_capture().is_err(),
+            "oversized output must fail closed instead of being truncated"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_prompt_snapshot_preserves_max_tokens_after_marker_clears() {
+        let mut client = spawn_script(
+            r#"
+                read -r _prompt
+                printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"max_tokens"}}'
+                sleep 1
+            "#,
+        )
+        .await;
+
+        assert_eq!(
+            client
+                .session_prompt_with_idle_timeout(
+                    "snapshot-session",
+                    "trigger",
+                    std::time::Duration::from_secs(2),
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .expect("max_tokens is a valid terminal result"),
+            StopReason::MaxTokens
+        );
+        assert!(!client.has_in_flight_prompt());
+        assert_eq!(
+            client.take_terminal_prompt_snapshot(),
+            Some(PromptTerminalSnapshot::Succeeded(StopReason::MaxTokens))
+        );
+        assert_eq!(
+            client.take_terminal_prompt_snapshot(),
+            None,
+            "terminal snapshots must be consumed exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_prompt_snapshot_fails_closed_for_malformed_stop_reason() {
+        let mut client = spawn_script(
+            r#"
+                read -r _prompt
+                printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"not-real"}}'
+                sleep 1
+            "#,
+        )
+        .await;
+
+        let error = client
+            .session_prompt_with_idle_timeout(
+                "snapshot-session",
+                "trigger",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect_err("unknown stopReason must remain a protocol error");
+        assert!(matches!(error, AcpError::Protocol(_)));
+        assert!(!client.has_in_flight_prompt());
+        assert_eq!(
+            client.take_terminal_prompt_snapshot(),
+            Some(PromptTerminalSnapshot::Failed),
+            "a cleared marker must not turn a protocol failure into success"
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

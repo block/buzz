@@ -8,13 +8,13 @@ use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
 use crate::handoff::HandoffOutcome;
 use crate::hints::SkillEntry;
-use crate::llm::Llm;
+use crate::llm::{append_web_search_sources, render_web_search_text, Llm};
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
 use crate::types::{
     AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent, TurnTotalState,
+    ToolResultContent, TurnTotalState, WebSearchResponse, WebSearchSource,
 };
 use crate::wire::{self, WireSender};
 
@@ -28,6 +28,59 @@ const ERROR_REFLECTION_SUFFIX: &str =
 /// speech. The shared `stop_max_rejections` budget can cut this lower — see
 /// [`Config::require_reply`](crate::config::Config::require_reply).
 const MAX_REPLY_NAGS: u32 = 2;
+
+#[derive(Default)]
+struct WebSearchTurn {
+    sources: Vec<WebSearchSource>,
+    citations: Vec<crate::types::WebSearchCitation>,
+}
+
+impl WebSearchTurn {
+    fn record(&mut self, response: Option<&WebSearchResponse>) {
+        let Some(response) = response else {
+            return;
+        };
+        for source in &response.sources {
+            if !self.sources.iter().any(|known| known.url == source.url) {
+                self.sources.push(source.clone());
+            }
+        }
+        self.citations.extend(response.citations.iter().cloned());
+    }
+
+    fn used(&self) -> bool {
+        !self.sources.is_empty() || !self.citations.is_empty()
+    }
+
+    fn render_terminal(
+        &self,
+        text: &str,
+        terminal_response: Option<&WebSearchResponse>,
+    ) -> Result<String, AgentError> {
+        if self.sources.is_empty() {
+            return Err(AgentError::Llm("web search sources missing".into()));
+        }
+        let terminal_citations = terminal_response
+            .map(|response| response.citations.as_slice())
+            .unwrap_or(&[]);
+        if terminal_citations.is_empty() {
+            return Err(AgentError::Llm("web search citations missing".into()));
+        }
+        if self
+            .citations
+            .iter()
+            .any(|citation| !self.sources.iter().any(|source| source.url == citation.url))
+        {
+            return Err(AgentError::Llm(
+                "web search citation URL not present in sources".into(),
+            ));
+        }
+
+        let mut rendered = render_web_search_text(text, terminal_citations, &self.sources)?;
+        append_web_search_sources(&mut rendered, &self.sources);
+        Ok(rendered)
+    }
+}
 
 /// Server label on the synthetic reply-guard objection.
 ///
@@ -184,6 +237,7 @@ impl RunCtx<'_> {
         // successful publish. See `is_buzz_reply_call`.
         let mut buzz_reply_call_seen = false;
         let mut reply_nags = 0u32;
+        let mut web_search_turn = WebSearchTurn::default();
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -301,6 +355,24 @@ impl RunCtx<'_> {
                 *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
             }
 
+            web_search_turn.record(response.web_search.as_ref());
+            let terminal_web_search_text =
+                if response.tool_calls.is_empty() && web_search_turn.used() {
+                    Some(
+                        web_search_turn
+                            .render_terminal(&response.text, response.web_search.as_ref())?,
+                    )
+                } else {
+                    None
+                };
+            let history_reasoning_details = if response.responses_output_items.is_empty() {
+                response.reasoning_details.clone()
+            } else {
+                Some(json!({
+                    "_buzz_web_search_response_items": response.responses_output_items,
+                }))
+            };
+
             if !response.reasoning.is_empty() {
                 wire::send(
                     self.wire,
@@ -315,14 +387,19 @@ impl RunCtx<'_> {
                 .await;
             }
 
-            if !response.text.is_empty() {
+            if !response.text.is_empty()
+                && (response.tool_calls.is_empty() || !web_search_turn.used())
+            {
+                let text = terminal_web_search_text
+                    .as_deref()
+                    .unwrap_or(&response.text);
                 wire::send(
                     self.wire,
                     wire::session_update(
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_message_chunk",
-                            "content": { "type": "text", "text": &response.text }
+                            "content": { "type": "text", "text": text }
                         }),
                     ),
                 )
@@ -338,7 +415,7 @@ impl RunCtx<'_> {
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
-                    reasoning_details: response.reasoning_details.clone(),
+                    reasoning_details: history_reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
@@ -391,7 +468,7 @@ impl RunCtx<'_> {
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
                 tool_calls: calls.clone(),
-                reasoning_details: response.reasoning_details,
+                reasoning_details: history_reasoning_details,
             });
 
             if let Some(stop) = self.execute_calls(&calls).await {
@@ -896,6 +973,38 @@ fn map_stop(p: ProviderStop) -> StopReason {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn web_search_function_round_defers_validation_until_terminal_response() {
+        let mut turn = WebSearchTurn::default();
+        // The first Responses result invokes hosted search and a client function
+        // call. It has no final text citation yet, so it must only record state.
+        turn.record(Some(&WebSearchResponse {
+            sources: vec![WebSearchSource {
+                url: "https://one.example/a".into(),
+                markdown_destination: "https://one.example/a".into(),
+                title: "One".into(),
+            }],
+            citations: Vec::new(),
+        }));
+        let error = turn.render_terminal("answer", None).unwrap_err();
+        assert!(error.to_string().contains("web search citations missing"));
+
+        let terminal = WebSearchResponse {
+            sources: Vec::new(),
+            citations: vec![crate::types::WebSearchCitation {
+                start: 0,
+                end: 4,
+                url: "https://one.example/a".into(),
+            }],
+        };
+        turn.record(Some(&terminal));
+
+        assert_eq!(
+            turn.render_terminal("cite", Some(&terminal)).unwrap(),
+            "[[1]](<https://one.example/a>)\n\n### Sources\n1. [One](<https://one.example/a>)"
+        );
+    }
 
     /// The shapes the guard must recognize as a publish attempt. Callers apply
     /// the registry checks first; these cover the name suffix and command text.

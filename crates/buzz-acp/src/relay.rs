@@ -434,6 +434,44 @@ impl RestClient {
         }
         serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
     }
+
+    /// Submit one signed event without transport retries.
+    ///
+    /// Durable publishers use this when an ambiguous write must be confirmed
+    /// by event ID before the identical event is retried.
+    pub async fn submit_event_once(&self, event: &Event) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(event)
+            .map_err(|error| RelayError::Http(format!("event serialize error: {error}")))?;
+        let url = format!("{}/events", self.base_url);
+        let auth = self.nip98_header("POST", &url, Some(&body_bytes))?;
+        let mut request = self
+            .http
+            .post(&url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json");
+        if let Some(auth_tag) = &self.auth_tag_json {
+            request = request.header("x-auth-tag", auth_tag);
+        }
+        let response = request
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|error| RelayError::Http(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(RelayError::Http(format!(
+                "POST /events returned HTTP {}",
+                response.status()
+            )));
+        }
+        let text = response
+            .text()
+            .await
+            .map_err(|error| RelayError::Http(error.to_string()))?;
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|error| RelayError::Http(error.to_string()))
+    }
 }
 
 /// Events the harness cares about.
@@ -4348,6 +4386,41 @@ mod tests {
             .custom_created_at(ts)
             .sign_with_keys(keys)
             .expect("signing should succeed")
+    }
+
+    #[tokio::test]
+    async fn single_attempt_event_submission_does_not_retry_a_rejection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("read test HTTP address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept first request");
+            let mut request = [0_u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request)
+                .await
+                .expect("read first request");
+            tokio::io::AsyncWriteExt::write_all(
+                &mut stream,
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write rejection");
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        });
+        let keys = Keys::generate();
+        let client = RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{address}"),
+            keys: keys.clone(),
+            auth_tag_json: None,
+        };
+        let event = make_test_event(&keys, 1);
+
+        assert!(client.submit_event_once(&event).await.is_err());
+        assert!(server.await.expect("join HTTP server"));
     }
 
     async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {

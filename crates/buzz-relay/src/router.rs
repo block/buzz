@@ -46,9 +46,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(RequestBodyLimitLayer::new(media_body_limit))
         .with_state(state.clone());
 
-    let git_router = api::git::git_router(state.clone());
-
-    let git_policy_router = api::git::git_policy_router(state.clone());
+    let git_enabled = state.config.git_enabled;
+    let git_router = git_enabled.then(|| api::git::git_router(state.clone()));
+    let git_policy_router = git_enabled.then(|| api::git::git_policy_router(state.clone()));
 
     let admin_enabled = state.config.admin.is_some();
     let admin_web_dir = state
@@ -133,10 +133,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // Merge — each sub-router carries its own body limit.
     // Metrics → Trace → CORS applied once over the combined router.
-    let mut merged = api_router
-        .merge(media_router)
-        .merge(git_router)
-        .merge(git_policy_router);
+    let mut merged = api_router.merge(media_router);
+    if let Some(git_router) = git_router {
+        merged = merged.merge(git_router);
+    }
+    if let Some(git_policy_router) = git_policy_router {
+        merged = merged.merge(git_policy_router);
+    }
     if let Some(admin_router) = admin_router {
         merged = merged.merge(admin_router);
     }
@@ -149,7 +152,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         let admin_files = admin_web_dir.map(ServeDir::new);
         let web_index = web_dir.as_ref().map(|dir| dir.join("index.html"));
         let web_files = web_dir.map(ServeDir::new);
-        let serve_git_web_gui = state.config.serve_git_web_gui;
+        let serve_git_web_gui = git_enabled && state.config.serve_git_web_gui;
         let fallback_state = state.clone();
         let spa_fallback = tower::service_fn(move |req: axum::extract::Request| {
             let admin_index = admin_index.clone();
@@ -329,7 +332,7 @@ async fn nip11_or_ws_handler(
         }
         Err(_) => {
             // Browser requesting HTML and Git web GUI is enabled → serve SPA.
-            if state.config.serve_git_web_gui {
+            if state.config.git_enabled && state.config.serve_git_web_gui {
                 if let Some(ref dir) = state.config.web_dir {
                     if accept.contains("text/html") {
                         let index = dir.join("index.html");
@@ -459,6 +462,115 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    async fn router_test_state(
+        git_enabled: bool,
+        web_dir: Option<std::path::PathBuf>,
+    ) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.git_enabled = git_enabled;
+        config.serve_git_web_gui = web_dir.is_some();
+        config.web_dir = web_dir;
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn disabled_git_routes_are_absent_while_default_routes_remain_mounted() {
+        let git_transport =
+            "/git/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/demo/info/refs";
+        let git_policy = "/internal/git/policy";
+
+        let disabled = build_router(router_test_state(false, None).await);
+        for path in [git_transport, git_policy] {
+            let response = disabled
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+                .await
+                .expect("router response");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must be absent"
+            );
+        }
+
+        let enabled = build_router(router_test_state(true, None).await);
+        for path in [git_transport, git_policy] {
+            let response = enabled
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+                .await
+                .expect("router response");
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must remain mounted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_git_does_not_serve_repository_web_gui_paths() {
+        let temp = tempfile::tempdir().expect("temporary web directory");
+        std::fs::write(temp.path().join("index.html"), "Git browser").expect("web index");
+        let web_dir = Some(temp.path().to_path_buf());
+
+        let disabled = build_router(router_test_state(false, web_dir.clone()).await);
+        let disabled_response = disabled
+            .oneshot(
+                Request::get("/repos/demo")
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(disabled_response.status(), StatusCode::NOT_FOUND);
+
+        let enabled = build_router(router_test_state(true, web_dir).await);
+        let enabled_response = enabled
+            .oneshot(
+                Request::get("/repos/demo")
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(enabled_response.status(), StatusCode::OK);
+    }
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {

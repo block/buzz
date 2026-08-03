@@ -42,6 +42,7 @@ base64 = "0.22"
 hex = { workspace = true }
 sha2 = { workspace = true }
 urlencoding = "2"
+url = { workspace = true }
 webbrowser = "1"
 
 [target.'cfg(unix)'.dependencies]

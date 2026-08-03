@@ -322,7 +322,7 @@ fn acquire_git_permit(
     state: &Arc<AppState>,
     operation: &'static str,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
-    Arc::clone(&state.git_semaphore)
+    Arc::clone(&git_runtime(state)?.semaphore)
         .try_acquire_owned()
         .map_err(|_| {
             metrics::counter!(
@@ -336,6 +336,24 @@ fn acquire_git_permit(
                 .body(Body::from("git service busy"))
                 .unwrap()
         })
+}
+
+/// Small error used when a Git handler is reached without a Git runtime.
+#[derive(Clone, Copy, Debug)]
+struct GitDisabled;
+
+impl From<GitDisabled> for Response {
+    fn from(_: GitDisabled) -> Self {
+        (
+            StatusCode::NOT_FOUND,
+            "Git support is disabled on this relay",
+        )
+            .into_response()
+    }
+}
+
+fn git_runtime(state: &AppState) -> Result<&crate::state::GitRuntime, GitDisabled> {
+    state.git_runtime().ok_or(GitDisabled)
 }
 
 /// Convert a [`HydrateError`] to the HTTP response shape the read+write
@@ -692,8 +710,13 @@ pub async fn info_refs(
     if service == "git-upload-pack" {
         // Load just the verified manifest — no object materialization, no
         // permit. `Ok(None)` = pointer absent = repo never existed → 404.
-        match load_manifest_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo)
-            .await
+        match load_manifest_for_read(
+            &git_runtime(&state)?.store,
+            &auth.tenant,
+            &params.owner,
+            &params.repo,
+        )
+        .await
         {
             Ok(Some(manifest)) if fast_path_eligible(&manifest) => {
                 let body = build_upload_pack_advertisement(&manifest);
@@ -738,12 +761,12 @@ async fn info_refs_subprocess(
     let _permit = acquire_git_permit(state, "info_refs")?;
 
     let repo = match hydrate_for_read(
-        &state.git_store,
+        &git_runtime(state)?.store,
         tenant,
         &params.owner,
         &params.repo,
         HydrationOptions {
-            pack_cache: &state.git_pack_cache,
+            pack_cache: &git_runtime(state)?.pack_cache,
             scratch_dir: &state.config.git_repo_path,
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
@@ -945,12 +968,12 @@ pub async fn upload_pack(
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
     let repo = match hydrate_for_read(
-        &state.git_store,
+        &git_runtime(&state)?.store,
         &auth.tenant,
         &params.owner,
         &params.repo,
         HydrationOptions {
-            pack_cache: &state.git_pack_cache,
+            pack_cache: &git_runtime(&state)?.pack_cache,
             scratch_dir: &state.config.git_repo_path,
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
@@ -1036,12 +1059,12 @@ pub async fn receive_pack(
     // travels with the workspace into finalize_push so the CAS predicates
     // on the same pointer ETag the workspace was hydrated from.
     let (repo, parent_state) = hydrate_for_write(
-        &state.git_store,
+        &git_runtime(&state)?.store,
         &auth.tenant,
         &params.owner,
         &params.repo,
         HydrationOptions {
-            pack_cache: &state.git_pack_cache,
+            pack_cache: &git_runtime(&state)?.pack_cache,
             scratch_dir: &state.config.git_repo_path,
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
@@ -1708,6 +1731,13 @@ pub(crate) struct PushContext {
 /// constructor of a push 2xx, so the seam is structural (not by
 /// convention).
 async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
+    let Some(git) = state.git_runtime() else {
+        return (
+            StatusCode::NOT_FOUND,
+            "Git support is disabled on this relay",
+        )
+            .into_response();
+    };
     // The push fence, part 0 — **a rejected push publishes nothing.**
     //
     // `ctx.pack.ok` is false when git aborted the ref updates: either the
@@ -1742,7 +1772,7 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     // hydrate) to the CAS predicate here — no re-reading of the pointer
     // between hydrate and CAS.
     let success = match cas_publish(
-        &state.git_store,
+        &git.store,
         &ctx.tenant,
         ctx.repo_handle.path(),
         &ctx.owner,

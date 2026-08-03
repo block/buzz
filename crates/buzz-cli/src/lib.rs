@@ -547,9 +547,12 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name portable --type stream --visibility open --channel 11111111-2222-4333-8444-555555555555\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
     )]
     Create {
+        /// Channel UUID. Defaults to a generated UUID v4.
+        #[arg(long, value_name = "UUID")]
+        channel: Option<Uuid>,
         /// Channel name
         #[arg(long)]
         name: String,
@@ -2050,6 +2053,77 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn channels_create_accepts_an_explicit_channel_uuid() {
+        let expected = Uuid::parse_str("11111111-2222-4333-8444-555555555555")
+            .expect("test channel UUID is valid");
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "buzz",
+                "channels",
+                "create",
+                "--name",
+                "portable",
+                "--type",
+                "stream",
+                "--visibility",
+                "open",
+                "--channel",
+                "11111111-2222-4333-8444-555555555555",
+            ])
+            .expect("explicit channel UUID should parse");
+        let create = matches
+            .subcommand_matches("channels")
+            .and_then(|channels| channels.subcommand_matches("create"))
+            .expect("channels create matches are present");
+
+        assert_eq!(create.get_one::<Uuid>("channel"), Some(&expected));
+    }
+
+    #[test]
+    fn channels_create_leaves_channel_uuid_unset_when_omitted() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "buzz",
+                "channels",
+                "create",
+                "--name",
+                "generated",
+                "--type",
+                "stream",
+                "--visibility",
+                "open",
+            ])
+            .expect("channels create without an explicit UUID should parse");
+        let create = matches
+            .subcommand_matches("channels")
+            .and_then(|channels| channels.subcommand_matches("create"))
+            .expect("channels create matches are present");
+
+        assert_eq!(create.get_one::<Uuid>("channel"), None);
+    }
+
+    #[test]
+    fn channels_create_rejects_a_malformed_channel_uuid() {
+        let error = Cli::command()
+            .try_get_matches_from([
+                "buzz",
+                "channels",
+                "create",
+                "--name",
+                "portable",
+                "--type",
+                "stream",
+                "--visibility",
+                "open",
+                "--channel",
+                "not-a-uuid",
+            ])
+            .expect_err("malformed channel UUID should be rejected");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

@@ -233,6 +233,9 @@ pub struct Config {
     /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
     /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
+    /// Whether the relay exposes and initializes Git support. Defaults to true
+    /// for compatibility; set `BUZZ_GIT_ENABLED=false` to disable it.
+    pub git_enabled: bool,
     /// Parent directory for process-isolated immutable pack cache sessions.
     pub git_pack_cache_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
@@ -760,16 +763,26 @@ impl Config {
             );
         }
 
-        // Git server config
-        let git_repo_path = ensure_git_repo_path(
-            std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
-        )?;
-        let git_pack_cache_path = ensure_git_path(
-            "BUZZ_GIT_PACK_CACHE_PATH",
-            std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| git_repo_path.join(".pack-cache")),
-        )?;
+        // Git server config. Keep the configured paths as data while disabled,
+        // but do not create them: a Git-free deployment must not acquire any
+        // Git-local runtime state during configuration loading.
+        let git_enabled = parse_bool("BUZZ_GIT_ENABLED", true)?;
+        let git_repo_path = std::env::var("BUZZ_GIT_REPO_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("./repos"));
+        let git_pack_cache_path = std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| git_repo_path.join(".pack-cache"));
+        let git_repo_path = if git_enabled {
+            ensure_git_repo_path(git_repo_path)?
+        } else {
+            git_repo_path
+        };
+        let git_pack_cache_path = if git_enabled {
+            ensure_git_path("BUZZ_GIT_PACK_CACHE_PATH", git_pack_cache_path)?
+        } else {
+            git_pack_cache_path
+        };
         let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -798,6 +811,9 @@ impl Config {
             .unwrap_or(20);
         let git_hook_hmac_secret: String = std::env::var("BUZZ_GIT_HOOK_HMAC_SECRET")
             .unwrap_or_else(|_| {
+                if !git_enabled {
+                    return String::new();
+                }
                 // Generate a random secret if not configured (dev mode).
                 let secret: [u8; 32] = rand::random();
                 hex::encode(secret)
@@ -922,7 +938,10 @@ impl Config {
         // Reject explicitly-configured secrets that are too short.
         // The auto-generated fallback is always 64 hex chars (32 bytes), so this
         // only fires when someone sets BUZZ_GIT_HOOK_HMAC_SECRET to a weak value.
-        if std::env::var("BUZZ_GIT_HOOK_HMAC_SECRET").is_ok() && git_hook_hmac_secret.len() < 32 {
+        if git_enabled
+            && std::env::var("BUZZ_GIT_HOOK_HMAC_SECRET").is_ok()
+            && git_hook_hmac_secret.len() < 32
+        {
             return Err(ConfigError::InvalidValue(
                 "BUZZ_GIT_HOOK_HMAC_SECRET must be at least 32 characters (16 bytes hex)"
                     .to_string(),
@@ -969,6 +988,7 @@ impl Config {
             audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
+            git_enabled,
             git_pack_cache_path,
             git_max_pack_bytes,
             git_max_repo_bytes,
@@ -1051,6 +1071,44 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+        assert!(config.git_enabled, "git should remain enabled by default");
+    }
+
+    #[test]
+    fn disabled_git_does_not_create_runtime_directories() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let temp = tempfile::tempdir().expect("temporary git configuration directory");
+        let repo_path = temp.path().join("repo");
+        let cache_path = temp.path().join("cache");
+        let previous_enabled = std::env::var_os("BUZZ_GIT_ENABLED");
+        let previous_repo_path = std::env::var_os("BUZZ_GIT_REPO_PATH");
+        let previous_cache_path = std::env::var_os("BUZZ_GIT_PACK_CACHE_PATH");
+        let previous_hook_secret = std::env::var_os("BUZZ_GIT_HOOK_HMAC_SECRET");
+
+        std::env::set_var("BUZZ_GIT_REPO_PATH", &repo_path);
+        std::env::set_var("BUZZ_GIT_PACK_CACHE_PATH", &cache_path);
+        std::env::set_var("BUZZ_GIT_HOOK_HMAC_SECRET", "weak");
+        for value in ["false", "0"] {
+            std::env::set_var("BUZZ_GIT_ENABLED", value);
+            let config = Config::from_env().expect("disabled git config");
+            assert!(!config.git_enabled);
+        }
+
+        restore_env("BUZZ_GIT_ENABLED", previous_enabled);
+        restore_env("BUZZ_GIT_REPO_PATH", previous_repo_path);
+        restore_env("BUZZ_GIT_PACK_CACHE_PATH", previous_cache_path);
+        restore_env("BUZZ_GIT_HOOK_HMAC_SECRET", previous_hook_secret);
+
+        assert!(!repo_path.exists());
+        assert!(!cache_path.exists());
+    }
+
+    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
     }
 
     #[test]
