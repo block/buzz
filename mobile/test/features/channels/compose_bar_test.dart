@@ -2264,6 +2264,7 @@ void main() {
         session.debugHandleSocketMessageForTest,
       );
       session.debugAttachSocketForTest(socket);
+      await session.debugHandleConnected();
 
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
