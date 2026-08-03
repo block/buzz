@@ -2316,6 +2316,7 @@ pub fn build_agent_job_cancel(
         None,
         agent_job_content(payload)?,
     )
+    .map(|builder| builder.allow_self_tagging())
 }
 
 /// Build a failed, cancelled, or lost durable agent-job event (kind 43006).

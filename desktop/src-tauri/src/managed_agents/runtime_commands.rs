@@ -24,7 +24,7 @@ fn active_job_status(
 ) -> Option<buzz_runtime_pkg::protocol::JobStatus> {
     status
         .active_job
-        .and_then(|job_id| tauri::async_runtime::block_on(controller.jobs_status(job_id)).ok())
+        .and_then(|job_id| super::block_on_runtime_io(controller.jobs_status(job_id)).ok())
 }
 
 pub(crate) fn connect_runtime_receipt(
@@ -102,15 +102,35 @@ pub(crate) fn connect_legacy_runtime_receipt(
                         receipt.key.pubkey.clone(),
                         &receipt.key.relay_url,
                     );
-                    let proof_matches = receipt_key.as_ref().ok() == Some(key)
-                        && receipt.pid == process.child.id()
-                        && receipt.lock_protocol_version == super::RUNTIME_LOCK_PROTOCOL_VERSION
-                        && receipt.lock_path_hash == super::runtime_lock_path_hash(&lock_path)
-                        && buzz_runtime_pkg::process_matches_marker(
+                    let key_matches = receipt_key.as_ref().ok() == Some(key);
+                    let pid_matches = receipt.pid == process.child.id();
+                    let protocol_matches =
+                        receipt.lock_protocol_version == super::RUNTIME_LOCK_PROTOCOL_VERSION;
+                    let lock_hash_matches =
+                        receipt.lock_path_hash == super::runtime_lock_path_hash(&lock_path);
+                    let marker_matches = buzz_runtime_pkg::process_matches_marker(
+                        receipt.pid,
+                        &receipt.process_start_marker,
+                    );
+                    let lock_is_held = super::pair_lock_is_held(app, key)?;
+                    let proof_matches = key_matches
+                        && pid_matches
+                        && protocol_matches
+                        && lock_hash_matches
+                        && marker_matches
+                        && lock_is_held;
+                    if !proof_matches {
+                        eprintln!(
+                            "[DEBUG-receipt-proof] child_pid={} receipt_pid={} key={} protocol={} lock_hash={} marker={} lock_held={}",
+                            process.child.id(),
                             receipt.pid,
-                            &receipt.process_start_marker,
-                        )
-                        && super::pair_lock_is_held(app, key)?;
+                            key_matches,
+                            protocol_matches,
+                            lock_hash_matches,
+                            marker_matches,
+                            lock_is_held,
+                        );
+                    }
                     if proof_matches {
                         let receipt = super::LegacyManagedAgentRuntimeReceipt {
                             schema_version: receipt.schema_version,
@@ -236,8 +256,7 @@ pub fn list_managed_agent_runtimes(
     let probe_results = probes
         .into_iter()
         .map(|(key, controller)| {
-            let result = tauri::async_runtime::block_on(controller.status())
-                .map_err(|error| error.to_string());
+            let result = super::block_on_runtime_io(controller.status());
             let active_job = result
                 .as_ref()
                 .ok()
@@ -351,7 +370,7 @@ pub(crate) fn start_pair(
             return Ok(status_for(&app, record, &key, Some(runtime), None));
         }
         if let Some(controller) = runtime.controller.clone() {
-            if let Ok(control_status) = tauri::async_runtime::block_on(controller.status()) {
+            if let Ok(control_status) = super::block_on_runtime_io(controller.status()) {
                 let active_job = active_job_status(&controller, &control_status);
                 runtime.apply_authenticated_status(&control_status, active_job);
                 return Ok(status_for(&app, record, &key, Some(runtime), None));
@@ -603,7 +622,7 @@ pub fn stop_managed_agent_runtime(
             .controller
             .as_ref()
             .ok_or_else(|| "runtime has no authenticated controller".to_string())?;
-        if let Err(error) = tauri::async_runtime::block_on(controller.shutdown()) {
+        if let Err(error) = super::block_on_runtime_io(controller.shutdown()) {
             runtimes.insert(key.clone(), runtime);
             return Err(format!(
                 "generation-fenced runtime shutdown failed: {error}"
@@ -842,148 +861,5 @@ pub async fn reconcile_managed_agent_runtimes(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn payload(
-        relay_url: &str,
-        lifecycle: ManagedAgentRuntimeLifecycle,
-        error: Option<&str>,
-    ) -> super::super::ManagedAgentRuntimeLifecycleObserverPayload {
-        super::super::ManagedAgentRuntimeLifecycleObserverPayload {
-            pubkey: "aa".repeat(32),
-            relay_url: relay_url.into(),
-            start_nonce: "test-generation".into(),
-            lifecycle,
-            error: error.map(str::to_owned),
-        }
-    }
-
-    fn record_with_relay(relay_url: &str) -> super::super::ManagedAgentRecord {
-        serde_json::from_str(&format!(
-            r#"{{
-                "pubkey": "{}",
-                "name": "pin-test",
-                "relay_url": "{relay_url}",
-                "acp_command": "buzz-acp",
-                "agent_command": "goose",
-                "agent_args": [],
-                "mcp_command": "",
-                "turn_timeout_seconds": 320,
-                "system_prompt": "",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
-            }}"#,
-            "aa".repeat(32)
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn legacy_relay_pin_is_ignored_for_fan_out() {
-        // Zero-touch cutover (#2122): a record carrying a creation-era
-        // `relay_url` pin must fan out exactly like an unpinned one — the
-        // stored field is parsed but never consulted. See
-        // `effective_agent_relay_url`.
-        let unpinned = record_with_relay("");
-        let pinned = record_with_relay("wss://one.example");
-        for record in [&unpinned, &pinned] {
-            assert_eq!(
-                crate::relay::effective_agent_relay_url(&record.relay_url, "wss://two.example"),
-                "wss://two.example"
-            );
-        }
-    }
-
-    #[test]
-    fn unkeyable_relay_degrades_to_failed_row() {
-        // A requested URL that cannot form a pair key must still yield a
-        // Failed row keyed by the raw requested string, so one bad community
-        // never aborts the rest of the reconcile batch.
-        let record = record_with_relay("");
-        let status = unkeyable_failed_status(
-            &record,
-            "not a url".to_string(),
-            "relay access probe timed out".to_string(),
-            &[],
-            &super::super::GlobalAgentConfig::default(),
-        );
-        assert!(matches!(
-            status.lifecycle,
-            ManagedAgentRuntimeLifecycle::Failed
-        ));
-        assert_eq!(status.relay_url, "not a url");
-        assert_eq!(status.requested_relay_url.as_deref(), Some("not a url"));
-        assert_eq!(status.pubkey, record.pubkey);
-        assert_eq!(
-            status.error.as_deref(),
-            Some("relay access probe timed out")
-        );
-        assert!(status.pid.is_none());
-    }
-
-    #[test]
-    fn runtime_key_rejects_non_hex_pubkeys() {
-        assert!(ManagedAgentRuntimeKey::new("../not-a-key", "wss://relay.example").is_err());
-        assert!(ManagedAgentRuntimeKey::new("gg".repeat(32), "wss://relay.example").is_err());
-    }
-
-    #[test]
-    fn runtime_key_canonicalizes_hex_pubkeys() {
-        let key = ManagedAgentRuntimeKey::new("AA".repeat(32), "wss://relay.example").unwrap();
-        assert_eq!(key.pubkey, "aa".repeat(32));
-    }
-
-    #[test]
-    fn observer_lifecycle_key_preserves_exact_canonical_pair() {
-        let first = payload(
-            "WSS://Relay.Example:443/",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        let key = observer_lifecycle_key(&first.pubkey, &first).unwrap();
-        assert_eq!(key.pubkey, first.pubkey);
-        assert_eq!(key.relay_url, "wss://relay.example");
-
-        let other = payload(
-            "wss://other.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        assert_ne!(key, observer_lifecycle_key(&other.pubkey, &other).unwrap());
-    }
-
-    #[test]
-    fn observer_lifecycle_rejects_cross_agent_and_desktop_states() {
-        let ready = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        assert!(observer_lifecycle_key(&"bb".repeat(32), &ready).is_err());
-
-        let stopped = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Stopped,
-            None,
-        );
-        assert!(observer_lifecycle_key(&stopped.pubkey, &stopped).is_err());
-    }
-
-    #[test]
-    fn observer_lifecycle_enforces_failed_error_contract() {
-        let failed = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Failed,
-            None,
-        );
-        assert!(observer_lifecycle_key(&failed.pubkey, &failed).is_err());
-
-        let ready_with_error = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            Some("unexpected"),
-        );
-        assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
-    }
-}
+#[path = "runtime_commands_tests.rs"]
+mod tests;

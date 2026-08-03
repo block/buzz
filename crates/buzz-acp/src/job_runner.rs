@@ -269,8 +269,7 @@ fn run(spec_path: &Path, environment: RunnerEnvironment) -> Result<()> {
     let descendant_check = governed_tree_has_descendants(runner_pid, &job_object);
     let descendant_error_code = match descendant_check {
         Ok(false) => None,
-        Ok(true) => Some("driver_descendants_survived"),
-        Err(_) => Some("driver_descendants_unverified"),
+        Ok(true) | Err(_) => Some("orphan_suspected"),
     };
     if let Some(error_code) = descendant_error_code {
         let terminal = RunnerReceipt {

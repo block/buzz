@@ -122,14 +122,14 @@ pub(crate) fn adopt_schema_v2_runtime(
     if observed_marker != receipt.process_start_marker {
         return Err("runtime process start marker does not match receipt".into());
     }
-    let controller = tauri::async_runtime::block_on(
+    let controller = super::super::block_on_runtime_io(
         buzz_runtime_pkg::client::RuntimeClient::from_validated_receipt(
             &receipt,
             buzz_runtime_pkg::protocol::Capability::Controller,
         ),
     )
     .map_err(|error| format!("runtime hello authentication failed: {error}"))?;
-    let status = tauri::async_runtime::block_on(controller.status())
+    let status = super::super::block_on_runtime_io(controller.status())
         .map_err(|error| format!("runtime status authentication failed: {error}"))?;
     if status.runtime_id != receipt.runtime_id || status.generation != receipt.generation {
         return Err("runtime status does not match receipt generation".into());

@@ -67,7 +67,7 @@ fn stop_managed_agent_pair(
             .controller
             .as_ref()
             .ok_or_else(|| "runtime has no authenticated controller".to_string())?;
-        if let Err(error) = tauri::async_runtime::block_on(controller.shutdown()) {
+        if let Err(error) = super::super::block_on_runtime_io(controller.shutdown()) {
             runtimes.insert(key.clone(), runtime);
             return Err(format!(
                 "generation-fenced runtime shutdown failed: {error}"

@@ -51,6 +51,61 @@ fn managed_adapter_binary_must_be_a_desktop_or_test_profile_sibling() {
 }
 
 #[test]
+fn bundled_sibling_candidate_uses_app_or_test_target_directory() {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    assert_eq!(
+        super::adapter::bundled_sibling_candidate(
+            std::path::Path::new("/bundle/buzz-desktop"),
+            "buzz-dev-mcp",
+        ),
+        Some(std::path::PathBuf::from(format!(
+            "/bundle/buzz-dev-mcp{suffix}"
+        ))),
+    );
+    assert_eq!(
+        super::adapter::bundled_sibling_candidate(
+            std::path::Path::new("/target/debug/deps/desktop-tests"),
+            "buzz-dev-mcp",
+        ),
+        Some(std::path::PathBuf::from(format!(
+            "/target/debug/buzz-dev-mcp{suffix}"
+        ))),
+    );
+}
+
+#[test]
+fn canonical_executable_rejects_empty_build_placeholder() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join(format!("buzz-agent{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&path, []).expect("write placeholder");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark placeholder executable");
+    }
+    assert!(
+        super::adapter::canonical_executable(&path).is_none(),
+        "an empty Cargo placeholder must not shadow the real workspace binary"
+    );
+
+    std::fs::write(&path, b"not-empty").expect("write executable fixture");
+    assert_eq!(
+        super::adapter::canonical_executable(&path),
+        Some(std::fs::canonicalize(&path).expect("canonical fixture")),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synchronous_control_rpc_bridge_does_not_nest_runtime() {
+    let value =
+        crate::managed_agents::block_on_runtime_io(async { Ok::<_, std::io::Error>(42_u8) })
+            .expect("control RPC bridge");
+    assert_eq!(value, 42);
+}
+#[test]
 fn buzz_agent_resolved_via_path() {
     assert!(known_acp_runtime("/usr/local/bin/buzz-agent").is_some_and(|p| p.mcp_hooks));
 }

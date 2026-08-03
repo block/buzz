@@ -939,7 +939,7 @@ pub fn start_managed_agent_process(
         if runtime
             .controller
             .as_ref()
-            .is_some_and(|controller| tauri::async_runtime::block_on(controller.status()).is_ok())
+            .is_some_and(|controller| super::block_on_runtime_io(controller.status()).is_ok())
         {
             return Ok(());
         }

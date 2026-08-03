@@ -1,3 +1,5 @@
+use std::future::Future;
+
 mod agent_env;
 pub(crate) mod agent_events;
 pub(crate) mod agent_snapshot;
@@ -45,6 +47,27 @@ static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
     PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run a short control-plane RPC from synchronous Desktop state code without
+/// nesting a Tokio runtime. Tauri commands run on Tokio worker threads, where
+/// `tauri::async_runtime::block_on` panics unless the worker first yields its
+/// executor role with `block_in_place`.
+pub(crate) fn block_on_runtime_io<F, T, E>(future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+                .map_err(|error| error.to_string())
+        }
+        Ok(_) => Err(
+            "managed runtime control I/O cannot block a single-thread Tokio executor".to_string(),
+        ),
+        Err(_) => tauri::async_runtime::block_on(future).map_err(|error| error.to_string()),
+    }
 }
 
 pub use backend::*;

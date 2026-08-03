@@ -228,7 +228,7 @@ mod tests {
             .payload
             .is_terminal());
 
-        let cancel = sign(
+        let requester_cancel = sign(
             build_agent_job_cancel(
                 f.channel,
                 f.target.public_key(),
@@ -238,11 +238,27 @@ mod tests {
             .unwrap(),
             &f.requester,
         );
-        assert_tag_shape(&cancel, &["h", "p", "job", "e"]);
+        assert_tag_shape(&requester_cancel, &["h", "p", "job", "e"]);
         assert!(matches!(
-            parse_agent_job_event(&cancel).unwrap().payload,
+            parse_agent_job_event(&requester_cancel).unwrap().payload,
             AgentJobPayload::Cancel(_)
         ));
+
+        let target_cancel = sign(
+            build_agent_job_cancel(
+                f.channel,
+                f.target.public_key(),
+                f.request_id,
+                &cancel(f.job),
+            )
+            .unwrap(),
+            &f.target,
+        );
+        assert_tag_shape(&target_cancel, &["h", "p", "job", "e"]);
+        assert_eq!(
+            parse_agent_job_event(&target_cancel).unwrap().peer,
+            f.target.public_key()
+        );
 
         let error = sign(
             build_agent_job_error(

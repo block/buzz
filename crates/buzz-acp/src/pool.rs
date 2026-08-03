@@ -1136,18 +1136,31 @@ async fn claim_batch_assignment(
     let Some(source) = batch.events.first() else {
         return Ok(None);
     };
+    let source_event_id = source.event.id.to_hex();
     let assignment = claim_source_assignment(
         store,
         batch.channel_id,
-        source.event.id.to_hex(),
+        source_event_id.clone(),
         &source.event.content,
         session_id,
     )
     .await?;
-    if let Some(status) = &ctx.work_status {
-        status.refresh();
+    let assignment = assignment_for_prompt_source(assignment, batch.channel_id, &source_event_id);
+    if assignment.is_some() {
+        if let Some(status) = &ctx.work_status {
+            status.refresh();
+        }
     }
-    Ok(Some(assignment))
+    Ok(assignment)
+}
+fn assignment_for_prompt_source(
+    assignment: buzz_runtime::AssignmentRecord,
+    channel_id: Uuid,
+    source_event_id: &str,
+) -> Option<buzz_runtime::AssignmentRecord> {
+    (assignment.channel_id == channel_id
+        && assignment.source_event_id.as_deref() == Some(source_event_id))
+    .then_some(assignment)
 }
 
 async fn claim_source_assignment(
@@ -1194,11 +1207,14 @@ async fn claim_source_assignment(
         _ => None,
     };
     if let Some(job) = matching_job {
+        let job_id = job.job_id;
         assignment = store
-            .link_assignment_job(&assignment.assignment_id, job.job_id, chrono::Utc::now())
+            .link_assignment_job(&assignment.assignment_id, job_id, chrono::Utc::now())
             .await
             .map_err(store_error)?;
-        assignment = project_already_terminal_job(store, assignment, job).await?;
+        if let Some(current_job) = store.get_job(job_id).await.map_err(store_error)? {
+            assignment = project_already_terminal_job(store, assignment, &current_job).await?;
+        }
     }
     Ok(assignment)
 }
@@ -1217,19 +1233,42 @@ async fn project_already_terminal_job(
         _ => return Ok(assignment),
     };
     let evidence = terminal_job_evidence(job);
-    let request = buzz_runtime::AssignmentSetStateRequest {
-        state: target,
-        summary: None,
-        reason: (target != buzz_runtime::AssignmentState::Completed).then_some(evidence.clone()),
-        blocker: None,
-        approval_gate_id: None,
-        delivery_evidence: (target == buzz_runtime::AssignmentState::Completed).then_some(evidence),
-        reply_event_id: None,
-    };
-    store
-        .set_assignment_state(&assignment.assignment_id, request, chrono::Utc::now())
-        .await
-        .map_err(store_error)
+    let reason = (target != buzz_runtime::AssignmentState::Completed).then_some(evidence.clone());
+    let delivery_evidence =
+        (target == buzz_runtime::AssignmentState::Completed).then_some(evidence);
+    let now = chrono::Utc::now();
+    let result = store
+        .set_assignment_state(
+            &assignment.assignment_id,
+            buzz_runtime::AssignmentSetStateRequest {
+                state: target,
+                summary: None,
+                reason: reason.clone(),
+                blocker: None,
+                approval_gate_id: None,
+                delivery_evidence: delivery_evidence.clone(),
+                reply_event_id: None,
+            },
+            now,
+        )
+        .await;
+    match result {
+        Ok(updated) => Ok(updated),
+        Err(buzz_runtime::StoreError::TerminalAssignment { state, .. }) => {
+            let mut terminal = assignment;
+            terminal.state = state;
+            terminal.reason = (state != buzz_runtime::AssignmentState::Completed)
+                .then_some(reason)
+                .flatten();
+            terminal.delivery_evidence = (state == buzz_runtime::AssignmentState::Completed)
+                .then_some(delivery_evidence)
+                .flatten();
+            terminal.last_progress_at = now;
+            terminal.updated_at = now;
+            Ok(terminal)
+        }
+        Err(error) => Err(store_error(error)),
+    }
 }
 
 fn terminal_job_evidence(job: &buzz_runtime::JobRecord) -> String {
@@ -5164,6 +5203,109 @@ mod tests {
         assert!(block.contains("state \"completed\""));
         assert!(!block.contains(&source_event_id));
         assert!(!block.contains(&job_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn normal_prompt_assignment_id_drives_non_job_states_and_releases_next_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            buzz_runtime::StoreHandle::open(directory.path().join("runtime.sqlite3")).unwrap();
+        let channel_id = Uuid::new_v4();
+        let source_event_id = "a".repeat(64);
+        let assignment = claim_source_assignment(
+            &store,
+            channel_id,
+            source_event_id.clone(),
+            "review the incident",
+            "session-1",
+        )
+        .await
+        .unwrap();
+        let block = format_assignment_block(&assignment);
+        let prompt_assignment_id = block
+            .lines()
+            .find_map(|line| line.strip_prefix("Authenticated assignment ID: "))
+            .expect("normal prompt must expose an authenticated assignment ID");
+
+        assert_eq!(prompt_assignment_id, assignment.assignment_id);
+        assert!(
+            assignment_for_prompt_source(assignment.clone(), channel_id, &source_event_id)
+                .is_some()
+        );
+        assert!(
+            assignment_for_prompt_source(assignment.clone(), channel_id, &"b".repeat(64)).is_none()
+        );
+        assert!(
+            assignment_for_prompt_source(assignment.clone(), Uuid::new_v4(), &source_event_id)
+                .is_none()
+        );
+
+        let waiting = store
+            .set_assignment_state(
+                prompt_assignment_id,
+                buzz_runtime::AssignmentSetStateRequest {
+                    state: buzz_runtime::AssignmentState::Waiting,
+                    summary: None,
+                    reason: Some("waiting for reviewer".into()),
+                    blocker: None,
+                    approval_gate_id: None,
+                    delivery_evidence: None,
+                    reply_event_id: None,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.state, buzz_runtime::AssignmentState::Waiting);
+
+        let blocked = store
+            .set_assignment_state(
+                prompt_assignment_id,
+                buzz_runtime::AssignmentSetStateRequest {
+                    state: buzz_runtime::AssignmentState::Blocked,
+                    summary: None,
+                    reason: None,
+                    blocker: Some("reviewer unavailable".into()),
+                    approval_gate_id: None,
+                    delivery_evidence: None,
+                    reply_event_id: None,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.state, buzz_runtime::AssignmentState::Blocked);
+
+        let completed = store
+            .set_assignment_state(
+                prompt_assignment_id,
+                buzz_runtime::AssignmentSetStateRequest {
+                    state: buzz_runtime::AssignmentState::Completed,
+                    summary: None,
+                    reason: None,
+                    blocker: None,
+                    approval_gate_id: None,
+                    delivery_evidence: Some("review delivered in source thread".into()),
+                    reply_event_id: None,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.state, buzz_runtime::AssignmentState::Completed);
+        assert!(store.active_assignment().await.unwrap().is_none());
+
+        let next = claim_source_assignment(
+            &store,
+            Uuid::new_v4(),
+            "c".repeat(64),
+            "new unrelated work",
+            "session-2",
+        )
+        .await
+        .unwrap();
+        assert_ne!(next.assignment_id, prompt_assignment_id);
+        assert_eq!(next.state, buzz_runtime::AssignmentState::Reading);
     }
 
     #[test]

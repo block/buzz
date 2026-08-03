@@ -998,7 +998,29 @@ impl JobSupervisor {
             .list_jobs(JobListFilter::default())
             .await
             .map_err(store_error)?;
-        let mut first_error = None;
+        let mut first_error = jobs
+            .iter()
+            .find(|job| {
+                job.state.is_terminal()
+                    && matches!(
+                        job.error_code.as_deref(),
+                        Some(
+                            "shutdown_runner_identity_missing"
+                                | "shutdown_runner_identity_unverified"
+                                | "shutdown_process_tree_survived"
+                        )
+                    )
+                    && match job.runner.as_ref() {
+                        Some(identity) => recorded_tree_is_empty(identity) != Ok(true),
+                        None => true,
+                    }
+            })
+            .map(|_| {
+                control(
+                    "shutdown_reconciliation_required",
+                    "a prior shutdown could not verify runner-tree termination",
+                )
+            });
 
         for job in jobs.into_iter().filter(|job| !job.state.is_terminal()) {
             let Some(runner) = job.runner.clone() else {
@@ -1010,6 +1032,13 @@ impl JobSupervisor {
                     .await
                 {
                     first_error.get_or_insert(error);
+                } else {
+                    first_error.get_or_insert_with(|| {
+                        control(
+                            "shutdown_runner_identity_missing",
+                            "runner identity is unavailable; runtime remains active",
+                        )
+                    });
                 }
                 continue;
             };
@@ -1022,6 +1051,13 @@ impl JobSupervisor {
                     .await
                 {
                     first_error.get_or_insert(error);
+                } else {
+                    first_error.get_or_insert_with(|| {
+                        control(
+                            "shutdown_runner_identity_unverified",
+                            "runner identity could not be verified; runtime remains active",
+                        )
+                    });
                 }
                 continue;
             }
@@ -1338,6 +1374,19 @@ impl JobSupervisor {
                     .map_err(store_error)?;
                 self.project_terminal_assignment(&committed).await;
                 Ok(committed)
+            }
+            RunnerReceiptState::Failed
+                if receipt.error_code.as_deref() == Some("orphan_suspected") =>
+            {
+                self.terminal_error(
+                    job,
+                    JobState::Lost,
+                    AgentJobErrorState::Lost,
+                    "orphan_suspected",
+                    "Legacy Harness runner left an unverified command descendant",
+                    false,
+                )
+                .await
             }
             RunnerReceiptState::Failed => {
                 self.terminal_error(
@@ -1908,6 +1957,25 @@ async fn terminate_verified_tree(identity: &RunnerIdentity) -> Result<(), Contro
 fn process_group_alive(pgid: nix::unistd::Pid) -> Result<bool, ControlError> {
     crate::job_runner::process_group_has_live_members(pgid.as_raw() as u32, None)
         .map_err(|error| control("runner_cancel_failed", error.to_string()))
+}
+
+fn recorded_tree_is_empty(identity: &RunnerIdentity) -> Result<bool, ControlError> {
+    #[cfg(unix)]
+    {
+        if identity.process_group != identity.pid.to_string() {
+            return Err(control(
+                "shutdown_reconciliation_required",
+                "recorded runner process-group identity is invalid",
+            ));
+        }
+        return process_group_alive(nix::unistd::Pid::from_raw(identity.pid as i32))
+            .map(|alive| !alive);
+    }
+    #[cfg(windows)]
+    {
+        crate::job_windows::is_empty(&identity.process_group)
+            .map_err(|error| control("shutdown_reconciliation_required", error.to_string()))
+    }
 }
 
 #[cfg(unix)]
@@ -2731,6 +2799,80 @@ mod tests {
             }
             payload => panic!("expected progress payload, got {payload:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_persists_lost_and_refuses_ack_for_unverified_runner() {
+        let agent = Keys::generate();
+        let requester = Keys::generate();
+        let (_directory, supervisor, runtime) = remote_fixture(agent);
+        let store = supervisor.inner.store.clone();
+        let shutdown_rx = supervisor.inner.shutdown_tx.subscribe();
+        let job_id = Uuid::new_v4();
+        let created_at = Utc::now();
+        store
+            .create_remote_job(NewJob {
+                job_id,
+                request_event_id: EventId::all_zeros().to_hex(),
+                requester_pubkey: requester.public_key().to_hex(),
+                executable: runtime
+                    .lh_executable
+                    .clone()
+                    .expect("configured LH executable"),
+                request: JobStartRequest {
+                    channel_id: Uuid::new_v4(),
+                    source_event_id: None,
+                    driver: "lh".into(),
+                    argv: vec!["run".into()],
+                    cwd: runtime.state_dir.to_string_lossy().into_owned(),
+                    summary: "unverified shutdown runner".into(),
+                },
+                attempt: 1,
+                created_at,
+            })
+            .await
+            .expect("seed requested job");
+        let requested = store
+            .get_job(job_id)
+            .await
+            .expect("read requested job")
+            .expect("requested job exists");
+        store
+            .transition_job(
+                transition(
+                    &requested,
+                    JobState::Running,
+                    Some(RunnerIdentity {
+                        pid: std::process::id(),
+                        start_marker: "forged-start-marker".into(),
+                        process_group: std::process::id().to_string(),
+                    }),
+                    created_at,
+                ),
+                None,
+            )
+            .await
+            .expect("record unverified runner");
+
+        let error = supervisor
+            .handle(AuthorizedCapability::Controller, ControlOperation::Shutdown)
+            .await
+            .expect_err("unverified runner must prevent shutdown acknowledgement");
+        assert_eq!(error.code, "shutdown_runner_identity_unverified");
+        let terminal = store
+            .get_job(job_id)
+            .await
+            .expect("read terminal job")
+            .expect("terminal job exists");
+        assert_eq!(terminal.state, JobState::Lost);
+        assert_eq!(
+            terminal.error_code.as_deref(),
+            Some("shutdown_runner_identity_unverified")
+        );
+        assert!(
+            !*shutdown_rx.borrow(),
+            "failed reconciliation must leave the runtime active"
+        );
     }
 
     #[tokio::test]

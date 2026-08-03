@@ -823,6 +823,7 @@ mod tests {
             .collect::<Vec<_>>();
         EventBuilder::new(Kind::Custom(kind as u16), content.to_string())
             .tags(tags)
+            .allow_self_tagging()
             .sign_with_keys(keys)
             .expect("sign test event")
     }

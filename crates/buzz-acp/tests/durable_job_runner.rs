@@ -200,7 +200,7 @@ fn detached_runner_ignores_turn_deadlines_drains_streams_and_redacts_runtime_sec
 
 #[cfg(unix)]
 #[test]
-fn successful_driver_with_live_descendant_is_failed_and_tree_is_reaped() {
+fn successful_driver_with_live_descendant_writes_orphan_receipt_and_reaps_tree() {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
 
@@ -264,10 +264,7 @@ fn successful_driver_with_live_descendant_is_failed_and_tree_is_reaped() {
     );
     let receipt = read_runner_receipt(&runtime, job_id, 1).expect("read terminal receipt");
     assert_eq!(receipt.state, RunnerReceiptState::Failed);
-    assert_eq!(
-        receipt.error_code.as_deref(),
-        Some("driver_descendants_survived")
-    );
+    assert_eq!(receipt.error_code.as_deref(), Some("orphan_suspected"));
     let reap_deadline = Instant::now() + Duration::from_secs(2);
     while buzz_runtime::process_matches_marker(descendant_pid, &descendant_marker)
         && Instant::now() < reap_deadline
