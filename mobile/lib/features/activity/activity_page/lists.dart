@@ -36,7 +36,7 @@ class _RemindersList extends ConsumerWidget {
     return RefreshIndicator(
       onRefresh: onRefresh,
       child: ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+        padding: _activityScrollPadding(context),
         itemCount: reminders.length,
         itemBuilder: (context, index) {
           final reminder = reminders[index];
@@ -97,7 +97,7 @@ class _DraftsList extends StatelessWidget {
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+      padding: _activityScrollPadding(context),
       itemCount: drafts.length,
       itemBuilder: (context, index) {
         final draft = drafts[index];

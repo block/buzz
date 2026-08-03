@@ -23,6 +23,8 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
+import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 final _pngBytes = Uint8List.fromList([
@@ -392,6 +394,152 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('starts compact and grows to the full-width composer', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      expect(find.byType(TextField), findsNothing);
+      expect(find.byTooltip('Add attachment').hitTestable(), findsOneWidget);
+      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byKey(const ValueKey('composer-footer-gradient')), findsOne);
+      final composerBackdrop = find.descendant(
+        of: find.byKey(const ValueKey('composer-footer-gradient')),
+        matching: find.byType(MobileTabFooterBackdrop),
+      );
+      expect(composerBackdrop, findsOneWidget);
+      expect(
+        tester.getSize(composerBackdrop).height,
+        mobileTabFooterBackdropHeight(tester.element(composerBackdrop)),
+      );
+      final compactDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(
+        compactDecoration.borderRadius,
+        BorderRadius.circular(Radii.dialog + Grid.quarter),
+      );
+      final compactWidth = tester
+          .getSize(find.byKey(const ValueKey('composer-width-transition')))
+          .width;
+
+      await _expandComposer(tester);
+
+      final expandedWidth = tester
+          .getSize(find.byKey(const ValueKey('composer-width-transition')))
+          .width;
+      final expandedDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(compactWidth, closeTo(expandedWidth * 0.85, 0.5));
+      expect(
+        expandedDecoration.borderRadius,
+        BorderRadius.circular(Radii.dialog),
+      );
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.byIcon(LucideIcons.atSign), findsOneWidget);
+      expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+      expect(find.byIcon(LucideIcons.smilePlus), findsOneWidget);
+      expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
+    });
+
+    testWidgets('returns to the compact capsule when the keyboard drops', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      final focusNode = tester
+          .widget<TextField>(find.byType(TextField))
+          .focusNode!;
+      expect(focusNode.hasFocus, isTrue);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.reset);
+      await tester.pump();
+
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TextField), findsNothing);
+      expect(focusNode.hasFocus, isFalse);
+      final compactDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(
+        compactDecoration.borderRadius,
+        BorderRadius.circular(Radii.dialog + Grid.quarter),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('attachment control responds while the composer is expanding', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('mounted composer does not carry draft text across an in-place '
         'identity switch', (tester) async {
       final keysA = nostr.Keys.generate();
@@ -492,6 +640,94 @@ void main() {
 
       expect(textField.controller!.text, 'hello :meow:world');
       expect(textField.controller!.selection.baseOffset, 12);
+      expect(find.byType(TextField), findsOneWidget);
+      expect(textField.focusNode!.hasFocus, isTrue);
+    });
+
+    testWidgets('composer controls use selection haptics', (tester) async {
+      final hapticCalls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'HapticFeedback.vibrate') {
+              hapticCalls.add(call);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      hapticCalls.clear();
+
+      await tester.tap(find.byIcon(LucideIcons.atSign));
+      tester.widget<TextField>(find.byType(TextField)).controller!.clear();
+      await tester.pump();
+      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.pump();
+      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.bold));
+      await tester.pump();
+      await tester.tap(find.byTooltip('Close formatting'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Add attachment'));
+      await tester.pumpAndSettle();
+
+      expect(hapticCalls, hasLength(6));
+      expect(
+        hapticCalls.every(
+          (call) => call.arguments == 'HapticFeedbackType.selectionClick',
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('composer suggestions use the shared popover treatment', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: [_makeChannel(name: 'general', channelType: 'stream')],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.pumpAndSettle();
+
+      final surface = find.byKey(const ValueKey('channel-suggestions-popover'));
+      final material = tester.widget<Material>(surface);
+      final shape = material.shape! as RoundedRectangleBorder;
+      expect(shape.borderRadius, BorderRadius.circular(Radii.popover));
+      expect(shape.side.color, Colors.black.withValues(alpha: 0.04));
+      expect(material.elevation, appPopoverElevation);
+      expect(
+        material.shadowColor,
+        appPopoverShadowColor(tester.element(surface)),
+      );
+      expect(
+        tester.widget<Text>(find.text('general')).style?.fontFamily,
+        'Inter',
+      );
     });
 
     testWidgets('native All Photos picker failures show an error', (
@@ -587,6 +823,60 @@ void main() {
 
         expect(presentCalls, 1);
         expect(textField.focusNode?.hasFocus, isTrue);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('leaving a focused composer dismisses the native keyboard', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var dismissCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+          case 'present':
+            return true;
+          case 'dismiss':
+            dismissCalls += 1;
+            return null;
+        }
+        return null;
+      });
+
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _expandComposer(tester);
+        final focusNode = tester
+            .widget<TextField>(find.byType(TextField))
+            .focusNode!;
+        expect(focusNode.hasFocus, isTrue);
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        expect(focusNode.hasFocus, isTrue);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+
+        expect(focusNode.hasFocus, isFalse);
+        expect(dismissCalls, 1);
       } finally {
         await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
         await tester.pumpWidget(const SizedBox.shrink());
@@ -1191,6 +1481,10 @@ void main() {
         ),
       );
 
+      final compactComposerWidth = tester
+          .getSize(find.byKey(const ValueKey('composer-width-transition')))
+          .width;
+
       await _openAttachmentMenu(tester);
       await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
@@ -1201,6 +1495,12 @@ void main() {
       );
       expect(find.byTooltip('Back to attachment options'), findsWidgets);
       expect(find.text('All photos'), findsOneWidget);
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('attachment-surface-popover')))
+            .width,
+        closeTo(compactComposerWidth / 0.85, 0.5),
+      );
 
       await tester.tap(find.byKey(const ValueKey('recent-photo-two')));
       await tester.pumpAndSettle();
@@ -1265,12 +1565,22 @@ void main() {
       await _openAttachmentMenu(tester);
 
       final menu = find.byKey(const ValueKey('attachment-menu'));
+      final surface = find.byKey(const ValueKey('attachment-surface-popover'));
       final rows = [
         for (final label in ['camera', 'photos', 'video', 'files'])
           find.byKey(ValueKey('attachment-menu-item-$label')),
       ];
       final menuRect = tester.getRect(menu);
 
+      final material = tester.widget<Material>(surface);
+      final shape = material.shape! as RoundedRectangleBorder;
+      expect(shape.borderRadius, BorderRadius.circular(Radii.popover));
+      expect(shape.side.color, Colors.black.withValues(alpha: 0.04));
+      expect(material.elevation, appPopoverElevation);
+      expect(
+        material.shadowColor,
+        appPopoverShadowColor(tester.element(surface)),
+      );
       expect(menuRect.size, const Size(216, 264));
       for (final row in rows) {
         expect(tester.getSize(row).height, 52);
@@ -1280,6 +1590,7 @@ void main() {
       for (final label in ['Camera', 'Photos', 'Video', 'Files']) {
         final text = tester.widget<Text>(find.text(label));
         expect(text.style?.fontSize, 20);
+        expect(text.style?.fontFamily, 'Inter');
       }
       final icons = [
         for (final label in ['camera', 'photos', 'video', 'files'])
@@ -1316,6 +1627,48 @@ void main() {
               tester.getRect(rows[index - 1]).bottom,
           Grid.xxs,
         );
+      }
+    });
+
+    testWidgets('tapping outside dismisses the Android attachment menu', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _openAttachmentMenu(tester);
+        expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('attachment-dismiss-barrier')),
+          findsOneWidget,
+        );
+
+        await tester.tapAt(const Offset(24, 24));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('attachment-menu')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('attachment-dismiss-barrier')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('attachment-trigger-closed')).hitTestable(),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
       }
     });
 
@@ -1376,6 +1729,9 @@ void main() {
                 }) async {},
           ),
         );
+        final compactComposerWidth = tester
+            .getSize(find.byKey(const ValueKey('composer-width-transition')))
+            .width;
 
         await _openAttachmentMenu(tester);
         await tester.tap(find.text('Camera'));
@@ -1396,6 +1752,12 @@ void main() {
         expect(
           find.byKey(const ValueKey('camera-initialization-ready')),
           findsOneWidget,
+        );
+        expect(
+          tester
+              .getSize(find.byKey(const ValueKey('attachment-surface-popover')))
+              .width,
+          closeTo(compactComposerWidth / 0.85, 0.5),
         );
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;

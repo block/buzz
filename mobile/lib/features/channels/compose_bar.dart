@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
+import 'dart:ui' show FlutterView;
 
 import 'package:camera/camera.dart' as camera;
 import 'package:flutter/foundation.dart';
@@ -19,8 +20,10 @@ import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -48,6 +51,7 @@ part 'compose_bar/ios_attachment_popover.dart';
 part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
 part 'compose_bar/layout.dart';
+part 'compose_bar/dock.dart';
 
 const _maxConcurrentImageUploads = 3;
 
@@ -84,6 +88,7 @@ class ComposeBar extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useMemoized(_MarkdownEditingController.new);
+    useListenable(controller);
     useEffect(() => controller.dispose, [controller]);
 
     // Restore and persist unsent text as a local draft so the Activity
@@ -126,7 +131,13 @@ class ComposeBar extends HookConsumerWidget {
       return () => controller.removeListener(persistDraft);
     }, [controller, draftKey, draftIdentity]);
     final focusNode = useFocusNode();
+    useEffect(
+      () =>
+          () => _dismissComposerKeyboard(focusNode),
+      [focusNode],
+    );
     final isComposerExpanded = useState(false);
+    final isEmojiPickerOpen = useState(false);
     final attachmentSurface = useState(_AttachmentSurface.closed);
     final iosAttachmentPopover = useMemoized(
       _IOSAttachmentPopoverController.new,
@@ -144,6 +155,7 @@ class ComposeBar extends HookConsumerWidget {
     final clipboardHasImage = useState(false);
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
+    final canSend = controller.text.trim().isNotEmpty || hasAttachments;
     final customEmoji = ref.watch(customEmojiListProvider);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final composerExpansionController = useAnimationController(
@@ -154,6 +166,42 @@ class ComposeBar extends HookConsumerWidget {
     final composerExpansionProgress = composerExpansionValue
         .clamp(0.0, 1.0)
         .toDouble();
+
+    void collapseComposer() {
+      if (!isComposerExpanded.value) return;
+      showFormatting.value = false;
+      isComposerExpanded.value = false;
+    }
+
+    // A focus loss covers deliberate dismiss gestures. The metrics observer
+    // also catches the system back/swipe dismissal path, where the platform can
+    // hide the keyboard while Flutter keeps the TextField focused.
+    useEffect(() {
+      void collapseWhenUnfocused() {
+        if (!focusNode.hasFocus && !isEmojiPickerOpen.value) {
+          collapseComposer();
+        }
+      }
+
+      focusNode.addListener(collapseWhenUnfocused);
+      return () => focusNode.removeListener(collapseWhenUnfocused);
+    }, [focusNode]);
+
+    final appView = View.of(context);
+    useEffect(() {
+      final observer = _ComposerKeyboardMetricsObserver(
+        view: appView,
+        onKeyboardHidden: () {
+          collapseComposer();
+          // Android Back and iOS dismissal gestures can hide the keyboard
+          // without changing Flutter focus. Clear it as well so reopening the
+          // compact capsule establishes a new text-input connection.
+          focusNode.unfocus();
+        },
+      );
+      WidgetsBinding.instance.addObserver(observer);
+      return () => WidgetsBinding.instance.removeObserver(observer);
+    }, [appView, focusNode]);
 
     final resolvedHint =
         hintText ??
@@ -167,8 +215,8 @@ class ComposeBar extends HookConsumerWidget {
         composerExpansionController.animateWith(
           SpringSimulation(
             SpringDescription.withDurationAndBounce(
-              duration: const Duration(milliseconds: 280),
-              bounce: 0.16,
+              duration: const Duration(milliseconds: 220),
+              bounce: 0.08,
             ),
             composerExpansionController.value,
             target,
@@ -887,64 +935,16 @@ class ComposeBar extends HookConsumerWidget {
 
     // Suggestions and attachments live in the overlay so showing them cannot
     // reflow the composer. Both stay anchored just above the capsule.
-    return Padding(
-      padding: EdgeInsets.only(
-        left: Grid.twelve,
-        right: Grid.twelve,
-        bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
-      ),
-      child: OverlayPortal.overlayChildLayoutBuilder(
+    final composerWidthFactor = 0.85 + 0.15 * composerExpansionProgress;
+    return _ComposerDockFrame(
+      widthFactor: composerWidthFactor,
+      child: _ComposerOverlayPortal(
         controller: suggestionOverlayController,
-        overlayChildBuilder: (context, layoutInfo) {
-          final composerOrigin = MatrixUtils.transformPoint(
-            layoutInfo.childPaintTransform,
-            Offset.zero,
-          );
-          return ValueListenableBuilder<_AttachmentSurface>(
-            valueListenable: attachmentSurface,
-            builder: (context, surface, _) {
-              final surfaceDuration = reducedMotion
-                  ? Duration.zero
-                  : Duration(
-                      milliseconds:
-                          surface == _AttachmentSurface.camera ||
-                              surface == _AttachmentSurface.photos
-                          ? 320
-                          : 250,
-                    );
-              final expandedSurfaceCoversComposer =
-                  surface == _AttachmentSurface.camera ||
-                  surface == _AttachmentSurface.photos;
-              final overlayAnchorY =
-                  composerOrigin.dy +
-                  (expandedSurfaceCoversComposer
-                      ? layoutInfo.childSize.height + Grid.twelve
-                      : 0);
-              return AnimatedPositioned(
-                duration: surfaceDuration,
-                curve:
-                    surface == _AttachmentSurface.camera ||
-                        surface == _AttachmentSurface.photos
-                    ? const Cubic(0.34, 1.25, 0.64, 1)
-                    : const Cubic(0.22, 1, 0.36, 1),
-                left: composerOrigin.dx,
-                bottom: layoutInfo.overlaySize.height - overlayAnchorY,
-                width: layoutInfo.childSize.width,
-                child: ClipRect(
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: Grid.xxs),
-                    child: surface == _AttachmentSurface.closed
-                        ? _SuggestionPanelMotion(
-                            duration: surfaceDuration,
-                            alignment: Alignment.bottomLeft,
-                            child: buildOverlayPanel(surface),
-                          )
-                        : buildOverlayPanel(surface),
-                  ),
-                ),
-              );
-            },
-          );
+        attachmentSurface: attachmentSurface,
+        reducedMotion: reducedMotion,
+        buildOverlayPanel: buildOverlayPanel,
+        onDismissAttachmentSurface: () {
+          attachmentSurface.value = _AttachmentSurface.closed;
         },
         child: _ComposeBarLayout(
           attachments: attachments.value,
@@ -977,12 +977,18 @@ class ComposeBar extends HookConsumerWidget {
           },
           onEmoji: () {
             attachmentSurface.value = _AttachmentSurface.closed;
-            showEmojiPicker(context: context, onSelect: insertEmoji);
+            isEmojiPickerOpen.value = true;
+            _showComposerEmojiPicker(context, insertEmoji, () {
+              if (!context.mounted) return;
+              isEmojiPickerOpen.value = false;
+              focusNode.requestFocus();
+            });
           },
           onOpenFormatting: () {
             attachmentSurface.value = _AttachmentSurface.closed;
             showFormatting.value = true;
           },
+          canSend: canSend,
           hasPendingUploads: hasPendingUploads,
           isSending: isSending.value,
         ),
