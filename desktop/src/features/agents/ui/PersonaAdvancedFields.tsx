@@ -102,7 +102,9 @@ export function PersonaAdvancedFields({
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            How many conversations each running instance handles at once (1–32).
+            Default for newly created instances (1–32). Existing instances keep
+            their own worker count. Higher values allow simultaneous
+            conversations and may start additional provider processes.
           </p>
         </div>
       </div>

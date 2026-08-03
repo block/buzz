@@ -171,11 +171,19 @@ export function EditAgentAdvancedFields({
             disabled={disabled}
             id="edit-agent-parallelism"
             inputMode="numeric"
+            max={32}
+            min={1}
             onChange={(event) => onParallelismChange(event.target.value)}
             placeholder="1"
+            type="number"
             value={parallelism}
           />
         </div>
+        <p className="text-xs text-muted-foreground">
+          This is the instance&apos;s actual worker count. Higher values allow
+          simultaneous conversations and may start additional provider
+          processes.
+        </p>
       </div>
 
       {/* Relay URL: intentionally no editor. The legacy per-record relay pin

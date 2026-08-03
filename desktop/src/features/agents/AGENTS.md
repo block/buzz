@@ -147,6 +147,12 @@ with a TypeScript lookup table or an id comparison in a component.
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
+12. **Persona parallelism is a creation default; instance parallelism is the
+    running worker count.** Editing a persona changes what newly minted
+    instances inherit and does not rewrite existing managed-agent records.
+    Editing an existing instance is routed through its profile's Edit action.
+    Both frontend validity and the `update_managed_agent` backend command must
+    enforce the harness-supported range of 1 through 32.
 
 ## The tests that enforce this
 

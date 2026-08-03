@@ -234,7 +234,7 @@ export interface EditAgentFormValidityInput {
  * Mirrors the harness/backend validation so the user sees a disabled button
  * instead of a round-tripped error:
  * - name is required;
- * - parallelism / timeout must be blank or parseable integers;
+ * - parallelism must be blank or an integer from 1 through 32;
  * - a previously-set ACP command cannot be cleared to empty (spawn failure);
  * - allowlist respond-to mode needs at least one entry;
  * - a pinned "Custom command" runtime (custom selection with inheritance
@@ -246,9 +246,12 @@ export interface EditAgentFormValidityInput {
 export function computeEditAgentFormValidity(
   input: EditAgentFormValidityInput,
 ): boolean {
+  const parsedParallelism = Number(input.parallelism);
   const parallelismValid =
     input.parallelism.trim() === "" ||
-    !Number.isNaN(Number.parseInt(input.parallelism, 10));
+    (Number.isInteger(parsedParallelism) &&
+      parsedParallelism >= 1 &&
+      parsedParallelism <= 32);
   const acpCommandValid = !(
     input.agentAcpCommand && input.acpCommand.trim() === ""
   );
