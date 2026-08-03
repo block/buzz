@@ -352,7 +352,7 @@ void main() {
   );
 
   test(
-    'keeps an unacknowledged publish across a long background disconnect',
+    'replays a dispatched ACK-lost event after a background interval beyond its acknowledgement timeout',
     () async {
       final session = RelaySessionNotifier();
       final container = ProviderContainer(
@@ -375,6 +375,7 @@ void main() {
       expect(firstSocket.sentPayloads, hasLength(1));
 
       session.debugPauseNow();
+      await Future<void>.delayed(const Duration(seconds: 9));
       final replacementSocket = _testSocket();
       session.debugAttachSocketForTest(replacementSocket);
       session.debugHandleConnected();
@@ -389,6 +390,62 @@ void main() {
       await expectLater(publish, completion(_event()));
     },
   );
+
+  test('same-tick resume then send dispatches one replacement event', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory: _controlledSocketFactory(sockets),
+    );
+    final container = _authenticatedContainer(session, keychain.nsec);
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+    sockets.single.connectSuccessfully();
+
+    session.debugHandleDisconnected();
+    session.onAppResumed();
+    final event = _event();
+    final publish = session.publish(event);
+    expect(sockets, hasLength(2));
+    expect(sockets.last.sentPayloads, isEmpty);
+
+    sockets.last.connectSuccessfully();
+    expect(sockets.last.sentPayloads, hasLength(1));
+    expect((sockets.last.sentPayloads.single[1] as Map)['id'], event.id);
+    session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
+    await expectLater(publish, completion(event));
+  });
+
+  test('same-tick send then resume dispatches one replacement event', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory: _controlledSocketFactory(sockets),
+    );
+    final container = _authenticatedContainer(session, keychain.nsec);
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+    sockets.single.connectSuccessfully();
+
+    session.debugHandleDisconnected();
+    final event = _event();
+    final publish = session.publish(event);
+    session.onAppResumed();
+    expect(sockets, hasLength(2));
+    expect(sockets.last.sentPayloads, isEmpty);
+
+    sockets.last.connectSuccessfully();
+    expect(sockets.last.sentPayloads, hasLength(1));
+    expect((sockets.last.sentPayloads.single[1] as Map)['id'], event.id);
+    session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
+    await expectLater(publish, completion(event));
+  });
 
   test('delivers the same live event to each matching subscription', () async {
     final session = RelaySessionNotifier();
@@ -450,33 +507,46 @@ void main() {
     },
   );
 
-  test('flushes mixed-age buffered events before a disconnect', () async {
-    final session = RelaySessionNotifier();
-    final container = ProviderContainer(
-      overrides: [relaySessionProvider.overrideWith(() => session)],
-    );
-    addTearDown(container.dispose);
-    container.read(relaySessionProvider);
-    final subscription = container.listen(relaySessionProvider, (_, _) {});
-    addTearDown(subscription.close);
-    await Future<void>.delayed(Duration.zero);
-    final delivered = <String>[];
-    const filter = NostrFilter(kinds: EventKind.channelEventKinds, limit: 50);
-    final subscribe = session.subscribe(
-      filter,
-      (event) => delivered.add(event.id),
-    );
-    session.debugHandleMessage(['EOSE', 'l-1']);
-    final unsubscribe = await subscribe;
+  test(
+    'disconnect flushes mixed-age buffered events before reconnect',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final session = RelaySessionNotifier(
+        socketFactory: _controlledSocketFactory(sockets),
+      );
+      final container = _authenticatedContainer(session, keychain.nsec);
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+      final delivered = <String>[];
+      const filter = NostrFilter(kinds: EventKind.channelEventKinds, limit: 50);
+      final subscribe = session.subscribe(
+        filter,
+        (event) => delivered.add(event.id),
+      );
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
 
-    session.debugHandleMessage(['EVENT', 'l-1', _eventWithId('old').toJson()]);
-    session.debugHandleMessage(['EVENT', 'l-1', _eventWithId('new').toJson()]);
-    session.debugFlushEventBuffer();
-    session.debugHandleDisconnected();
+      session.debugHandleMessage([
+        'EVENT',
+        'l-1',
+        _eventWithId('old').toJson(),
+      ]);
+      session.debugHandleMessage([
+        'EVENT',
+        'l-1',
+        _eventWithId('new').toJson(),
+      ]);
+      sockets.single.disconnectWith(null);
 
-    expect(delivered, ['event-old', 'event-new']);
-    unsubscribe();
-  });
+      expect(delivered, ['event-old', 'event-new']);
+      unsubscribe();
+    },
+  );
 
   test(
     'retains recent delivery keys across a bounded dedup rollover',
