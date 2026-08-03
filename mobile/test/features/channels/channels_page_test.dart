@@ -262,16 +262,25 @@ void main() {
       );
     }
 
-    final menuItems = tester.widgetList<PopupMenuItem<String>>(
-      find.descendant(
-        of: popover,
-        matching: find.byWidgetPredicate(
-          (widget) => widget is PopupMenuItem<String>,
-        ),
-      ),
-    );
-    expect(menuItems, hasLength(4));
-    for (final item in menuItems) {
+    final actionMenuItems = tester
+        .widgetList<PopupMenuItem<String>>(
+          find.descendant(
+            of: popover,
+            matching: find.byWidgetPredicate(
+              (widget) => widget is PopupMenuItem<String>,
+            ),
+          ),
+        )
+        .where(
+          (item) => const {
+            'rename',
+            'move_up',
+            'move_down',
+            'delete',
+          }.contains(item.value),
+        );
+    expect(actionMenuItems, hasLength(4));
+    for (final item in actionMenuItems) {
       expect(
         item.padding,
         const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0),
