@@ -37,6 +37,7 @@ import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
+import { agentDefaultsSaveErrorMessage } from "@/features/agents/ui/agentDefaultsSaveError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
@@ -230,7 +231,7 @@ export function AgentDefaultsEditor({
       }
     } catch (err) {
       setSaveState("error");
-      setSaveError(typeof err === "string" ? err : "Couldn't save.");
+      setSaveError(agentDefaultsSaveErrorMessage(err));
     } finally {
       onSavingChange?.(false);
     }
