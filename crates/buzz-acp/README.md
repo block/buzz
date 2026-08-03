@@ -131,6 +131,7 @@ servers:
   "servers": [
     {
       "name": "analytics",
+      "transport": "stdio",
       "command": "/opt/mcp/analytics-server",
       "args": ["--stdio"],
       "env": {
