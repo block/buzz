@@ -28,6 +28,7 @@ pub mod agents;
 pub mod audio_output;
 pub mod jitter;
 pub mod models;
+pub mod overlay;
 pub mod pipeline;
 pub mod playout;
 pub mod pocket;

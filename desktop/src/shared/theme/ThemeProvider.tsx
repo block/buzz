@@ -396,7 +396,7 @@ async function applyBuzzVibrancy(themeName: string) {
 }
 
 /** Apply cached CSS vars synchronously to prevent FOUC. */
-function applyCachedVars(): string | null {
+export function applyCachedThemeVars(): string | null {
   try {
     const cached = window.localStorage.getItem(CACHE_KEY);
     if (!cached) return null;
@@ -486,7 +486,7 @@ export function ThemeProvider({
 }: ThemeProviderProps) {
   // Apply cached vars synchronously before first render
   const [selectedTheme, setSelectedTheme] = useState<string>(() => {
-    applyCachedVars();
+    applyCachedThemeVars();
     return readStoredTheme(defaultTheme);
   });
   const [isDark, setIsDark] = useState<boolean>(() => {

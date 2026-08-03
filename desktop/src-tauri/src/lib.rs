@@ -562,7 +562,6 @@ pub fn run() {
             }
 
             try_regenerate_nest(&app_handle);
-
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
@@ -909,6 +908,7 @@ pub fn run() {
             list_audio_output_devices,
             set_audio_output_device,
             get_audio_output_device,
+            huddle::overlay::voice_overlay_window,
             start_pairing,
             confirm_pairing_sas,
             cancel_pairing,

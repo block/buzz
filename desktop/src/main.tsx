@@ -8,12 +8,16 @@ import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
-import { ThemeProvider } from "@/shared/theme/ThemeProvider";
+import {
+  applyCachedThemeVars,
+  ThemeProvider,
+} from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
+import { VoiceOverlayRoot } from "@/features/huddle/VoiceOverlayRoot";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -94,6 +98,21 @@ function renderApp() {
   );
 }
 
+function renderVoiceOverlay() {
+  applyCachedThemeVars();
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <TooltipProvider delayDuration={300}>
+        <VoiceOverlayRoot />
+      </TooltipProvider>
+    </React.StrictMode>,
+  );
+}
+
+function isVoiceOverlayWindow() {
+  return window.location.hash === "#/voice-overlay";
+}
+
 async function installE2eBridgeIfConfigured() {
   // The mock bridge is compiled only into dev and explicit E2E builds. A
   // pre-bootstrap global alone must never activate mock IPC in production.
@@ -113,6 +132,10 @@ async function bootstrap() {
   configureDevE2eBridgeFromUrl();
   recoverLocalStorageQuotaOnStartup();
   await installE2eBridgeIfConfigured();
+  if (isVoiceOverlayWindow()) {
+    renderVoiceOverlay();
+    return;
+  }
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
 }
