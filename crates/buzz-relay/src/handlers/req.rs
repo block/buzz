@@ -847,19 +847,38 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
         })
 }
 
-/// Extract a channel UUID from a single filter's `#h` tag.
+/// Extract the channel UUID from a single filter's `#h` tag, or `None` unless
+/// the filter is scoped to exactly one channel.
+///
+/// Mirrors [`extract_channel_id_from_filters`]: a filter naming multiple
+/// distinct channels has no single `channel_id` predicate. Taking the first
+/// value instead would silently narrow the query — `nostr::Filter` stores tag
+/// values in a sorted set, so "first" is the lexicographically smallest
+/// channel id and every other listed channel would be dropped before `LIMIT`.
+/// Multi-channel filters are pushed down as an `EventQuery::channel_ids`
+/// IN-list in [`filter_to_query_params`] instead.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
-            }
-        }
+    match channel_ids_in_filter(filter).as_slice() {
+        [only] => Some(*only),
+        _ => None,
     }
-    None
+}
+
+/// All distinct parseable channel UUIDs in a single filter's `#h` values, in
+/// the set's (sorted) order. Empty when the filter carries no `#h` tag or no
+/// value parses as a UUID.
+fn channel_ids_in_filter(filter: &Filter) -> Vec<uuid::Uuid> {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    filter
+        .generic_tags
+        .get(&h_tag)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.parse::<uuid::Uuid>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -978,8 +997,25 @@ fn filter_to_query_params(
         (None, None)
     };
 
+    // Multi-channel `#h` pushdown: a filter naming several channels has no
+    // single `channel_id` predicate (the extractor returns `None` for it), so
+    // push the whole set as a `channel_ids` IN-list. Without this, the query
+    // falls back to the caller's full access scope and busy unrelated channels
+    // can starve the requested channels' rows past `LIMIT` before the Rust
+    // post-filter runs. `apply_access_scope_to_query` intersects this list
+    // with the caller's accessible channels, so it never widens access.
+    let channel_ids = if channel_id.is_none() {
+        match channel_ids_in_filter(filter).as_slice() {
+            [] | [_] => None,
+            many => Some(many.to_vec()),
+        }
+    } else {
+        None
+    };
+
     EventQuery {
         channel_id,
+        channel_ids,
         kinds,
         pubkey,
         since,
@@ -998,14 +1034,26 @@ fn filter_to_query_params(
 /// Push the caller's authorized channel set into logically global historical
 /// queries so SQL `LIMIT` counts visible rows. Channel-less events remain in
 /// scope by `EventQuery::channel_ids` contract; an explicit single-channel
-/// filter keeps its narrower `channel_id` predicate.
+/// filter keeps its narrower `channel_id` predicate, and an explicit
+/// multi-channel filter keeps its `channel_ids` IN-list intersected with the
+/// access scope.
 pub(crate) fn apply_access_scope_to_query(
     query: &mut EventQuery,
     channel_id: Option<uuid::Uuid>,
     accessible_channels: &[uuid::Uuid],
 ) {
     if channel_id.is_none() {
-        query.channel_ids = Some(accessible_channels.to_vec());
+        query.channel_ids = Some(match query.channel_ids.take() {
+            // Multi-`#h` filter: keep only the requested channels the caller
+            // can access. An empty intersection stays `Some(vec![])` — the SQL
+            // layer treats that as "global events only" (fail closed), never
+            // as "no restriction".
+            Some(requested) => requested
+                .into_iter()
+                .filter(|ch| accessible_channels.contains(ch))
+                .collect(),
+            None => accessible_channels.to_vec(),
+        });
     }
 }
 
@@ -1577,6 +1625,97 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    /// Two UUIDs with a guaranteed lexicographic order, so tests can pin that
+    /// the sorted-set iteration order no longer decides the query scope.
+    fn ordered_channel_pair() -> (uuid::Uuid, uuid::Uuid) {
+        let first: uuid::Uuid = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+        let last: uuid::Uuid = "ffffffff-ffff-4fff-bfff-fffffffffffe".parse().unwrap();
+        (first, last)
+    }
+
+    fn filter_with_channels(a: uuid::Uuid, b: uuid::Uuid) -> Filter {
+        Filter::new()
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), a.to_string())
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), b.to_string())
+    }
+
+    #[test]
+    fn single_filter_single_channel_extracts() {
+        let channel_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            extract_channel_id_from_filter(&filter_with_channel(channel_id)),
+            Some(channel_id)
+        );
+    }
+
+    #[test]
+    fn single_filter_multi_channel_does_not_narrow_to_first() {
+        // Regression: this used to return the lexicographically smallest id,
+        // silently dropping every other listed channel from the SQL scope.
+        let (first, last) = ordered_channel_pair();
+        assert_eq!(
+            extract_channel_id_from_filter(&filter_with_channels(first, last)),
+            None
+        );
+        assert_eq!(
+            extract_channel_id_from_filter(&filter_with_channels(last, first)),
+            None
+        );
+    }
+
+    #[test]
+    fn multi_channel_filter_pushes_channel_ids_in_list() {
+        let (first, last) = ordered_channel_pair();
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let filter = filter_with_channels(first, last);
+        let query = filter_to_query_params(&filter, None, community);
+        assert_eq!(query.channel_id, None);
+        let ids = query.channel_ids.expect("multi-#h must push channel_ids");
+        assert!(ids.contains(&first) && ids.contains(&last));
+    }
+
+    #[test]
+    fn single_channel_filter_keeps_channel_id_predicate() {
+        let channel_id = uuid::Uuid::new_v4();
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let filter = filter_with_channel(channel_id);
+        let query = filter_to_query_params(&filter, Some(channel_id), community);
+        assert_eq!(query.channel_id, Some(channel_id));
+        assert_eq!(query.channel_ids, None);
+    }
+
+    #[test]
+    fn access_scope_intersects_multi_channel_filter() {
+        // The Desktop Workflows regression shape: a channel that sorts BEFORE
+        // the target (e.g. a DM) must not evict the target from the scope.
+        let (dm, apiary) = ordered_channel_pair();
+        let other = uuid::Uuid::new_v4();
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let filter = filter_with_channels(dm, apiary);
+        let mut query = filter_to_query_params(&filter, None, community);
+
+        apply_access_scope_to_query(&mut query, None, &[dm, apiary, other]);
+
+        let ids = query.channel_ids.expect("scope must remain channel-bound");
+        assert!(ids.contains(&apiary), "later-sorting channel must survive");
+        assert!(ids.contains(&dm));
+        assert!(!ids.contains(&other), "access scope must not widen the filter");
+    }
+
+    #[test]
+    fn access_scope_empty_intersection_fails_closed() {
+        let (a, b) = ordered_channel_pair();
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let filter = filter_with_channels(a, b);
+        let mut query = filter_to_query_params(&filter, None, community);
+
+        apply_access_scope_to_query(&mut query, None, &[uuid::Uuid::new_v4()]);
+
+        // Some(vec![]) = "global events only" in the SQL layer — never
+        // "no restriction".
+        assert_eq!(query.channel_ids, Some(Vec::new()));
     }
 
     #[test]
