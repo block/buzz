@@ -2334,6 +2334,21 @@ async fn finalize_push_inner(
     response
 }
 
+/// Deadline for collecting the four-byte compatibility-probe body.
+///
+/// The probe middleware reads the request body *before* authentication, so a
+/// client that presents the exact probe headers and then withholds the body
+/// would otherwise park an unauthenticated task indefinitely. On expiry the
+/// middleware fails closed into the normal authentication path, which rejects
+/// the unauthenticated request without reading a body.
+///
+/// Git and curl write the probe headers and the `0000` body in the same
+/// segment, so a real probe never waits on this; 10s only bounds how long a
+/// forged probe can hold a task. It is tighter than its surroundings: the
+/// relay's `axum::serve` installs no hyper timer, so the header phase of an
+/// unauthenticated connection has no deadline at all today (#4424).
+const PROBE_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Admit Git's unauthenticated four-byte compatibility probe for a smart
 /// HTTP service.
 ///
@@ -2348,6 +2363,7 @@ async fn finalize_push_inner(
 async fn git_compatibility_probe(
     request_mime: &'static [u8],
     result_mime: &'static str,
+    body_timeout: Duration,
     request: axum::http::Request<Body>,
     next: axum::middleware::Next,
 ) -> Response {
@@ -2374,8 +2390,13 @@ async fn git_compatibility_probe(
     }
 
     let (parts, body) = request.into_parts();
-    match axum::body::to_bytes(body, 4).await {
-        Ok(bytes) if bytes.as_ref() == b"0000" => {
+    // Bound the pre-auth body collection: a candidate that withholds its
+    // declared four bytes must not park an unauthenticated task. On expiry,
+    // fall through to the normal authentication path exactly like a stream
+    // failure below — the unauthenticated request is rejected without its
+    // body ever being read.
+    match tokio::time::timeout(body_timeout, axum::body::to_bytes(body, 4)).await {
+        Ok(Ok(bytes)) if bytes.as_ref() == b"0000" => {
             // Git sends this unauthenticated flush packet before a large,
             // authenticated chunked request. The response is deliberately
             // path-independent: do not resolve a tenant, inspect repository
@@ -2391,14 +2412,21 @@ async fn git_compatibility_probe(
             );
             response
         }
-        Ok(bytes) => {
+        Ok(Ok(bytes)) => {
             next.run(axum::http::Request::from_parts(parts, Body::from(bytes)))
                 .await
         }
-        Err(_) => {
-            // The declared four-byte body exceeded the hard collection limit
-            // or failed to stream. Preserve the normal authentication path;
-            // an unauthenticated request is rejected before its body is read.
+        Ok(Err(_)) | Err(_) => {
+            // The declared four-byte body exceeded the hard collection limit,
+            // failed to stream, or was withheld past the collection deadline.
+            // Preserve the normal authentication path; an unauthenticated
+            // request is rejected before its body is read. That is what makes
+            // the empty substitute body safe: `upload_pack` and `receive_pack`
+            // both extract `GitAuth` from the request parts before touching
+            // the body, and a candidate by definition carries no
+            // `Authorization`, so it is answered 401 without decoding. If
+            // either service ever admits anonymous requests, this branch must
+            // answer 401 itself instead of falling through.
             next.run(axum::http::Request::from_parts(parts, Body::empty()))
                 .await
         }
@@ -2429,14 +2457,26 @@ pub fn git_router(state: Arc<AppState>) -> Router {
             "/git/{owner}/{repo}/git-upload-pack",
             post(upload_pack).route_layer(axum::middleware::from_fn(|request, next| {
                 let (request_mime, result_mime) = UPLOAD_PACK_PROBE_MIMES;
-                git_compatibility_probe(request_mime, result_mime, request, next)
+                git_compatibility_probe(
+                    request_mime,
+                    result_mime,
+                    PROBE_BODY_TIMEOUT,
+                    request,
+                    next,
+                )
             })),
         )
         .route(
             "/git/{owner}/{repo}/git-receive-pack",
             post(receive_pack).route_layer(axum::middleware::from_fn(|request, next| {
                 let (request_mime, result_mime) = RECEIVE_PACK_PROBE_MIMES;
-                git_compatibility_probe(request_mime, result_mime, request, next)
+                git_compatibility_probe(
+                    request_mime,
+                    result_mime,
+                    PROBE_BODY_TIMEOUT,
+                    request,
+                    next,
+                )
             })),
         )
         .merge(super::settings::router())
@@ -2459,10 +2499,13 @@ mod track_c_tests {
 
     /// A probe test router mounting `git_compatibility_probe` for one service
     /// on its real route path, exactly as `git_router()` mounts it. The inner
-    /// handler marks near-miss fallthrough with `x-probe-next: reached`.
-    fn git_probe_test_router(
+    /// handler marks near-miss fallthrough with `x-probe-next: reached`. The
+    /// body-collection timeout is injectable so stall tests do not sleep for
+    /// the production constant.
+    fn git_probe_test_router_with_timeout(
         route: &str,
         (request_mime, result_mime): (&'static [u8], &'static str),
+        body_timeout: Duration,
     ) -> Router {
         Router::new().route(
             route,
@@ -2474,9 +2517,13 @@ mod track_c_tests {
                     .unwrap()
             })
             .route_layer(axum::middleware::from_fn(move |request, next| {
-                git_compatibility_probe(request_mime, result_mime, request, next)
+                git_compatibility_probe(request_mime, result_mime, body_timeout, request, next)
             })),
         )
+    }
+
+    fn git_probe_test_router(route: &str, mimes: (&'static [u8], &'static str)) -> Router {
+        git_probe_test_router_with_timeout(route, mimes, PROBE_BODY_TIMEOUT)
     }
 
     fn git_probe_request(
@@ -2626,6 +2673,115 @@ mod track_c_tests {
             );
             assert_eq!(response.headers().get("x-probe-next").unwrap(), "reached");
         }
+    }
+
+    /// A request body that never yields its declared bytes — the wire shape
+    /// of a client that sends the exact probe headers and then withholds the
+    /// four-byte body forever.
+    fn stalled_probe_body() -> Body {
+        Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >())
+    }
+
+    #[tokio::test]
+    async fn git_compatibility_probe_candidate_with_withheld_body_fails_closed_in_time() {
+        // An exact probe candidate that never sends its body must be bounded
+        // by the collection deadline and fail closed into the normal path
+        // (the teapot handler here; authentication in production) instead of
+        // parking an unauthenticated task forever.
+        for (route_template, mimes) in [
+            (
+                "/git/{owner}/{repo}/git-receive-pack",
+                RECEIVE_PACK_PROBE_MIMES,
+            ),
+            (
+                "/git/{owner}/{repo}/git-upload-pack",
+                UPLOAD_PACK_PROBE_MIMES,
+            ),
+        ] {
+            let service_suffix = route_template.rsplit('/').next().unwrap();
+            let request_mime_str = std::str::from_utf8(mimes.0).unwrap();
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/git/alice/repo/{service_suffix}"))
+                .header("content-type", request_mime_str)
+                .header("content-length", "4")
+                .body(stalled_probe_body())
+                .unwrap();
+
+            let started = std::time::Instant::now();
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                git_probe_test_router_with_timeout(
+                    route_template,
+                    mimes,
+                    Duration::from_millis(50),
+                )
+                .oneshot(request),
+            )
+            .await
+            .expect("stalled probe candidate must be bounded by the collection deadline")
+            .unwrap();
+
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{service_suffix}: deadline must fire at the configured bound"
+            );
+            assert_eq!(
+                response.status(),
+                StatusCode::IM_A_TEAPOT,
+                "{service_suffix}: expiry must fail closed into the normal path"
+            );
+            assert_eq!(response.headers().get("x-probe-next").unwrap(), "reached");
+        }
+    }
+
+    #[tokio::test]
+    async fn git_compatibility_probe_dropped_stalled_future_never_reaches_handler() {
+        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached_flag = reached.clone();
+        let (request_mime, result_mime) = RECEIVE_PACK_PROBE_MIMES;
+        let router = Router::new().route(
+            "/git/{owner}/{repo}/git-receive-pack",
+            post(move || {
+                let reached = reached_flag.clone();
+                async move {
+                    reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            })
+            .route_layer(axum::middleware::from_fn(move |request, next| {
+                git_compatibility_probe(
+                    request_mime,
+                    result_mime,
+                    Duration::from_secs(60),
+                    request,
+                    next,
+                )
+            })),
+        );
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/git/alice/repo/git-receive-pack")
+            .header("content-type", std::str::from_utf8(request_mime).unwrap())
+            .header("content-length", "4")
+            .body(stalled_probe_body())
+            .unwrap();
+
+        let response_future = router.oneshot(request);
+        tokio::select! {
+            _ = response_future => panic!("stalled probe candidate must not produce a response yet"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        // The future was dropped by the select while parked on body
+        // collection; the inner handler must never run afterwards.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !reached.load(std::sync::atomic::Ordering::SeqCst),
+            "dropped stalled probe future must never invoke the handler"
+        );
     }
 
     fn oid_sha1() -> String {
