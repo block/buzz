@@ -1,4 +1,5 @@
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
+mod app_protocols;
 mod app_state;
 mod archive;
 mod builderlab;
@@ -354,14 +355,7 @@ pub fn run() {
     #[cfg(not(buzz_updater_enabled))]
     let builder = builder;
 
-    let app = builder
-        .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
-            let app = ctx.app_handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let response = media_proxy::handle_buzz_media(&app, &request).await;
-                responder.respond(response);
-            });
-        })
+    let app = app_protocols::register(builder)
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
@@ -721,6 +715,15 @@ pub fn run() {
             get_relay_ws_url,
             get_relay_http_url,
             get_media_proxy_port,
+            connect_mcp_app_server,
+            list_mcp_app_tools,
+            list_mcp_app_resources,
+            call_mcp_app_tool,
+            read_mcp_app_resource,
+            inspect_mcp_app_resource,
+            prepare_mcp_app_view,
+            release_mcp_app_view,
+            disconnect_mcp_app_server,
             fetch_link_preview_title,
             discover_acp_auth_methods,
             discover_acp_providers,

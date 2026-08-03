@@ -42,6 +42,7 @@ type ChannelScreenHeaderProps = {
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
   onToggleMembers: () => void;
+  navigation?: React.ReactNode;
 };
 
 export function ChannelScreenHeader({
@@ -62,6 +63,7 @@ export function ChannelScreenHeader({
   onJoinChannel,
   onManageChannel,
   onToggleMembers,
+  navigation,
 }: ChannelScreenHeaderProps) {
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
@@ -150,6 +152,7 @@ export function ChannelScreenHeader({
           )
         ) : undefined
       }
+      navigation={navigation}
       statusBadge={
         <ChannelHeaderStatusBadge
           ephemeralDisplay={activeChannelEphemeralDisplay}

@@ -712,6 +712,37 @@ Defines `parse_relay_message`, `OkResponse`, `RelayMessage` directly in `src/lib
 
 ---
 
+### Desktop channel apps
+
+Buzz Desktop can install an MCP App as a channel tab. The Tauri host reads the
+app resource and sanitizes its Content Security Policy (CSP) before the user
+reviews the requested domains and browser permissions. Buzz stores that
+approved policy with the channel installation.
+
+Buzz reads the resource again when the user opens the tab. The current policy
+must be a subset of the approved policy. The trusted outer frame then places the
+app HTML in an opaque-origin iframe with `allow-scripts`. The app can call
+MCP tools that are visible to app callers through the host bridge. An app can
+request a channel post, but Buzz publishes the exact attributed message only
+after user approval.
+
+For each MCP tool call, Buzz can add host-owned binding context under
+`params._meta["xyz.block.buzz/context"]`. The current context contains available
+community, channel, and app-installation references. Buzz removes any
+caller-supplied value under the `xyz.block.buzz/*` host namespace before it adds
+the current host value. These references are routing context, not authorization.
+This contract does not currently define thread, project, or external Space
+references.
+
+See the [MCP App channel-host trust-boundary diagram](docs/architecture/mcp-app-channel-host.mmd).
+
+This host is disabled on Windows until the WebView2 subframe IPC boundary has
+been verified. The desktop UI does not advertise channel Apps on that platform,
+the Rust connection boundary rejects them, and the untrusted App protocol is
+not registered.
+
+---
+
 ## 7. Security Model
 
 Every security-sensitive operation uses an explicit, verified pattern. No implicit trust.
