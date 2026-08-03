@@ -102,6 +102,69 @@ test("parseSupportedLinkPreview rejects malformed Buzz git URLs", () => {
   }
 });
 
+const BUZZ_EVENT_ID =
+  "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
+
+test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
+  assert.deepEqual(
+    parseSupportedLinkPreview(
+      `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
+    ),
+    {
+      kind: "buzz-pull-request",
+      href: `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
+      provider: "Buzz",
+      title: "buzz-world #c3b589fa",
+      typeLabel: "PR",
+    },
+  );
+  assert.deepEqual(
+    parseSupportedLinkPreview(
+      `buzz://issue?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
+    )?.typeLabel,
+    "issue",
+  );
+  assert.deepEqual(
+    parseSupportedLinkPreview(`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`),
+    {
+      kind: "buzz-repository",
+      href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`,
+      provider: "Buzz",
+      title: "buzz-world",
+      typeLabel: "repo",
+    },
+  );
+});
+
+test("parseSupportedLinkPreview rejects malformed buzz:// entity links", () => {
+  for (const href of [
+    `buzz://pr?owner=${BUZZ_OWNER}&d=buzz-world`,
+    `buzz://pr?id=short&owner=${BUZZ_OWNER}&d=buzz-world`,
+    `buzz://issue?id=${BUZZ_EVENT_ID}&owner=nope&d=buzz-world`,
+    `buzz://repo?owner=${BUZZ_OWNER}&d=.hidden`,
+  ]) {
+    assert.equal(parseSupportedLinkPreview(href), null, href);
+  }
+});
+
+test("extractSupportedLinkPreviews picks up buzz:// links in prose", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      `PR is up: buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world — review please.`,
+    ).map((preview) => [preview.kind, preview.title]),
+    [["buzz-pull-request", "buzz-world #c3b589fa"]],
+  );
+});
+
+test("extractSupportedLinkPreviews uses markdown labels for buzz:// links", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      `[Add header links](buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world)`,
+    ).map((preview) => preview.title),
+    ["Add header links"],
+  );
+});
+
 test("parseSupportedLinkPreview parses Linear issue URLs", () => {
   assert.deepEqual(
     parseSupportedLinkPreview(

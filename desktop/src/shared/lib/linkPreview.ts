@@ -1,4 +1,15 @@
+import {
+  buildIssueLink,
+  buildPullRequestLink,
+  buildRepoLink,
+  isEntityLink,
+  parseEntityLink,
+  type ParsedEntityLink,
+} from "./entityLink";
+
 export type SupportedLinkPreviewKind =
+  | "buzz-pull-request"
+  | "buzz-issue"
   | "buzz-repository"
   | "github-pull-request"
   | "github-issue"
@@ -37,9 +48,9 @@ export type SupportedLinkPreview = {
 // their distinctive path shape (`/git/<64-hex-pubkey>/<repo>`) rather than by
 // hostname, and require an explicit scheme.
 const SUPPORTED_URL_RE =
-  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+)/gi;
+  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+|buzz:\/\/(?:pr|issue|repo)\?[^\s<>"'\]]+)/gi;
 const MARKDOWN_SUPPORTED_LINK_RE =
-  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+)\)/gi;
+  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+|buzz:\/\/(?:pr|issue|repo)\?[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
 
 type HiddenRange = {
@@ -271,6 +282,55 @@ function createPreview(
   };
 }
 
+/**
+ * Placeholder title shown before (or instead of) the relay event lookup in
+ * `useResolvedLinkPreviews` resolves the real `subject` / repo name.
+ * Exported so the resolver can tell "still the fallback" apart from a
+ * markdown-label override it must not overwrite.
+ */
+export function buzzEntityFallbackTitle(link: ParsedEntityLink): string {
+  if (link.type === "repo") return link.dtag;
+  return `${link.dtag} #${link.id.slice(0, 8)}`;
+}
+
+/**
+ * Map a `buzz://pr|issue|repo` deep link onto a preview card. The href is
+ * rebuilt through the canonical builders so equivalent links (case or query
+ * order variants) dedupe to a single card.
+ */
+function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
+  const parsed = parseEntityLink(href);
+  if (!parsed.ok) return null;
+
+  const link = parsed.value;
+  const title = buzzEntityFallbackTitle(link);
+  if (link.type === "pr") {
+    return {
+      kind: "buzz-pull-request",
+      href: buildPullRequestLink(link),
+      provider: "Buzz",
+      title,
+      typeLabel: "PR",
+    };
+  }
+  if (link.type === "issue") {
+    return {
+      kind: "buzz-issue",
+      href: buildIssueLink(link),
+      provider: "Buzz",
+      title,
+      typeLabel: "issue",
+    };
+  }
+  return {
+    kind: "buzz-repository",
+    href: buildRepoLink(link),
+    provider: "Buzz",
+    title,
+    typeLabel: "repo",
+  };
+}
+
 const BUZZ_GIT_PATH_RE =
   /^\/git\/[a-f0-9]{64}\/([a-zA-Z0-9._-]+?)(?:\.git)?\/?$/;
 
@@ -449,9 +509,13 @@ function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
 export function parseSupportedLinkPreview(
   href: string,
 ): SupportedLinkPreview | null {
+  const candidate = trimUrlCandidate(href);
+  if (isEntityLink(candidate)) {
+    return parseBuzzEntityPreview(candidate);
+  }
+
   let parsed: URL;
   try {
-    const candidate = trimUrlCandidate(href);
     parsed = new URL(
       /^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`,
     );

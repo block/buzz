@@ -60,8 +60,12 @@ pub async fn cmd_open_pr(
         buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?,
     )?;
     let event = client.sign_event(builder)?;
+    let event_id = event.id.to_hex();
     let resp = client.submit_event(event).await?;
-    println!("{resp}");
+    // `link` renders as a rich preview card in Buzz Desktop when included in
+    // a chat message — agents announce PRs with it (see base_prompt.md).
+    let link = crate::links::pull_request_link(&event_id, repo_owner, repo_id);
+    crate::client::print_create_response(&resp, "link", &link);
     Ok(())
 }
 

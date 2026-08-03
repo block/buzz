@@ -1,9 +1,20 @@
 # Buzz Entity Links
 
-Status: **draft spec**. A first slice is implemented on this branch:
-HTTPS relay git clone URLs (`{relay-origin}/git/<pubkey>/<repo>`) render as
-Buzz repository preview cards in chat (see `desktop/src/shared/lib/linkPreview.ts`).
-Everything else below is unimplemented design.
+Status: **partially implemented**. Done on this branch:
+
+- Slice 0 — HTTPS relay git clone URLs (`{relay-origin}/git/<pubkey>/<repo>`)
+  render as Buzz repository preview cards in chat
+  (`desktop/src/shared/lib/linkPreview.ts`).
+- Slice 1 — `buzz://pr|issue|repo` deep links: `entityLink.ts`
+  builders/parser, preview cards with relay title enrichment, in-timeline
+  click navigation to `/projects/$projectId`.
+- Slice 3 (create-command part) — `crates/buzz-cli/src/links.rs`, `link`
+  output field on `pr open` / `issues create` / `repos create`, base prompt
+  guidance, cross-language golden-format tests.
+
+Still unimplemented: OS-level deep links (slice 2), `link` on get commands,
+the `buzz://project` scheme (waiting on NIP-MP landing), and the follow-ups
+in slice 4.
 
 ## Problem
 
@@ -71,10 +82,13 @@ buzz://issue?id=<event-id-hex>&owner=<pubkey-hex>&d=<repo-dtag>
 - `d` is the addressable `d`-tag. For `repo`/`project` links the
   (`owner`, `d`) pair is the full `30617:<owner>:<d>` /
   `30621:<owner>:<d>` coordinate.
-- For `pr`/`issue` links, `id` identifies the kind `1618` / `1621` event and
-  is sufficient on its own; `owner` + `d` are **routing hints** that let the
-  client navigate (and render a fallback card) without waiting for an event
-  lookup. Parsers must accept links missing the hints.
+- For `pr`/`issue` links, `id` identifies the kind `1618` / `1621` event;
+  `owner` + `d` are the routing coordinate that lets the client navigate
+  (and render a fallback card) without an event lookup. **v1 decision:** the
+  implemented parser requires all three parameters — the CLI always emits
+  them, and accepting hint-less links would force an event lookup before any
+  navigation. A future revision can relax this without breaking existing
+  links.
 
 Validation rules match the existing codebase: `owner` and `id` are
 `/^[a-f0-9]{64}$/`; `d` follows addressable d-tag rules already enforced in
@@ -134,11 +148,12 @@ a nice-to-have and explicitly deferred to a follow-up.
 
 ### New module
 
-`desktop/src/features/projects/lib/entityLink.ts` (sibling to
-`messageLink.ts`):
+`desktop/src/shared/lib/entityLink.ts` (placed in `shared/lib` rather than
+the projects feature so `linkPreview.ts` — also `shared/lib` — can import
+it without a feature→shared boundary violation):
 
-- `buildRepoLink`, `buildProjectLink`, `buildPullRequestLink`,
-  `buildIssueLink`
+- `buildRepoLink`, `buildPullRequestLink`, `buildIssueLink`
+  (`buildProjectLink` deferred with the `project` scheme)
 - `parseEntityLink(url): EntityLinkParseResult` (discriminated union, same
   shape as `parseMessageLink`)
 - `isEntityLink(href)` cheap pre-check for the markdown renderer
@@ -153,15 +168,14 @@ both sources.
 
 ## Click handling and OS deep links
 
-**In-timeline click**: navigate via `useAppNavigation.goProject()`. The
-`/projects/$projectId` route already accepts `pullRequestId`, `issueId`,
-`repositoryId` search params, so:
+**In-timeline click** *(implemented)*: navigate via
+`useAppNavigation.goProject()`. On `main` the `/projects/$projectId` route
+id is `<owner-pubkey>:<dtag>` (see `parseProjectRouteId` in
+`features/projects/hooks.ts`), which is exactly the link's coordinate — no
+read-model resolution step is needed:
 
-- `pr` / `issue` → resolve the repo coordinate to the project that lists it
-  (via the existing project read models); open
-  `/projects/<projectId>?pullRequestId=<id>` (or `issueId`). If the repo is
-  not in any explicit project, open its implicit repository card.
-- `repo` / `project` → open the corresponding detail screen.
+- `pr` / `issue` → `/projects/<owner>:<d>?pullRequestId=<id>` (or `issueId`).
+- `repo` → `/projects/<owner>:<d>`.
 
 If resolution fails (entity not visible in this community), show the same
 kind of toast fallback used for unresolvable message links.
@@ -216,16 +230,18 @@ No persona changes needed — the base prompt applies to all managed agents.
 0. **HTTPS clone-URL repo cards** *(done, this branch)* — recognize relay
    `/git/<pubkey>/<repo>` URLs in `linkPreview.ts`, `Buzz` provider card
    with the `BuzzMark` logo, href rewritten to the web repo page.
-1. **Link core + cards** — `entityLink.ts`, detection in `linkPreview.ts`,
-   `Buzz` card variant in `link-preview-attachment.tsx`, in-timeline click
-   navigation, relay title enrichment. Unit tests
-   (`entityLink.test.mjs`, extended `linkPreview.test.mjs`) + one Playwright
-   spec with the mock bridge (`desktop/tests/e2e/`).
+1. **Link core + cards** *(done, this branch)* — `entityLink.ts`, detection
+   in `linkPreview.ts`, `Buzz` card variant in
+   `link-preview-attachment.tsx`, in-timeline click navigation, relay title
+   enrichment (with `resetLinkPreviewTitleCache()` wired into
+   `resetCommunityState()`). Unit tests (`entityLink.test.mjs`, extended
+   `linkPreview.test.mjs`).
 2. **OS deep links** — `deep_link.rs` + listener hook + `deep-link.ts`
    parity tests.
-3. **CLI + agent prompt** — `links.rs` helper, `link` output field on
-   create/get commands, base prompt paragraph, cross-language golden-format
-   test.
+3. **CLI + agent prompt** *(create commands done, this branch)* — `links.rs`
+   helper, `link` output field on `pr open` / `issues create` /
+   `repos create`, base prompt paragraph, cross-language golden-format test.
+   Still open: `link` on the get commands.
 4. **Follow-ups (separate)** — status chips on PR/issue cards, mobile
    pill/card rendering, web PR/issue routes + HTTPS link recognition,
    cross-community `relay=` parameter.
