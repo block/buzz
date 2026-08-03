@@ -22,7 +22,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     _manager?.dispose();
     _manager = null;
 
-    _storage = CommunityThemeStorage(ref.read(savedPrefsProvider));
+    _storage = ref.watch(communityThemeStorageProvider);
     final config = ref.watch(relayConfigProvider);
     final session = ref.watch(relaySessionProvider);
     final pubkey = pubkeyFromNsec(config.nsec);
@@ -123,6 +123,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
       unawaited(_storage.writeLegacy(preference));
       return;
     }
+    _manager?.stage(preference);
     unawaited(_persistAndPublish(pubkey, relayUrl, preference));
   }
 
@@ -134,7 +135,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     if (!await _storage.write(pubkey, relayUrl, preference)) return;
     if (!await _storage.writeOutbox(pubkey, relayUrl, preference)) return;
     if (_pubkey == pubkey && _relayUrl == relayUrl) {
-      _manager?.publish(preference);
+      _manager?.publishStaged(preference);
     }
   }
 
@@ -167,6 +168,10 @@ CommunityThemeCrypto _crypto(String nsec, String pubkey) {
     decrypt: (ciphertext) => nip44Decrypt(key, ciphertext),
   );
 }
+
+final communityThemeStorageProvider = Provider<CommunityThemeStorage>(
+  (ref) => CommunityThemeStorage(ref.watch(savedPrefsProvider)),
+);
 
 final communityThemeProvider =
     NotifierProvider<CommunityThemeNotifier, CommunityThemePreference>(

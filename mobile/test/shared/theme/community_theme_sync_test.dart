@@ -58,9 +58,8 @@ void main() {
       final applied = <CommunityThemePreference>[];
       final session = _FakeSession(
         history: [
-          _event(id: 'a', createdAt: 50, content: jsonEncode(local.toJson())),
           _event(
-            id: 'b',
+            id: 'z',
             createdAt: 50,
             content: jsonEncode(
               const CommunityThemePreference(
@@ -70,6 +69,7 @@ void main() {
               ).toJson(),
             ),
           ),
+          _event(id: 'a', createdAt: 50, content: jsonEncode(local.toJson())),
         ],
       );
       final manager = _manager(
@@ -79,10 +79,20 @@ void main() {
       );
 
       await manager.initialize();
-      expect(applied.single.theme, 'dracula');
+      expect(applied.single.theme, 'buzz');
 
       session.emit(
-        _event(id: 'aa', createdAt: 50, content: jsonEncode(local.toJson())),
+        _event(
+          id: 'z',
+          createdAt: 50,
+          content: jsonEncode(
+            const CommunityThemePreference(
+              theme: 'dracula',
+              accent: '#ef4444',
+              followSystem: false,
+            ).toJson(),
+          ),
+        ),
       );
       expect(applied, hasLength(1));
     },
@@ -191,7 +201,7 @@ void main() {
       );
       final history = Completer<List<NostrEvent>>();
       final session = _FakeSession(historyFuture: history.future);
-      final relay = _FakeSignedRelay(eventId: 'published-z');
+      final relay = _FakeSignedRelay(eventId: 'published-a');
       final applied = <CommunityThemePreference>[];
       final manager = _manager(
         session,
@@ -205,7 +215,7 @@ void main() {
       final createdAt = relay.submittedEvents.single.createdAt;
       history.complete([
         _event(
-          id: 'published-a',
+          id: 'published-z',
           createdAt: createdAt,
           content: jsonEncode(stale.toJson()),
         ),

@@ -176,10 +176,21 @@ class CommunityThemeSyncManager {
     limit: limit,
   );
 
-  void publish(CommunityThemePreference preference) {
+  void stage(CommunityThemePreference preference) {
     if (_disposed) return;
     _pending = preference;
     _publishRetryAttempt = 0;
+    _publishTimer?.cancel();
+    _publishTimer = null;
+  }
+
+  void publish(CommunityThemePreference preference) {
+    stage(preference);
+    publishStaged(preference);
+  }
+
+  void publishStaged(CommunityThemePreference preference) {
+    if (_disposed || _pending != preference) return;
     _schedulePublish(debounce);
   }
 
@@ -265,7 +276,8 @@ class CommunityThemeSyncManager {
     if (_pending != null) return;
     if (remote.createdAt < _lastCreatedAt ||
         (remote.createdAt == _lastCreatedAt &&
-            remote.eventId.compareTo(_lastEventId) <= 0)) {
+            _lastEventId.isNotEmpty &&
+            remote.eventId.compareTo(_lastEventId) >= 0)) {
       return;
     }
     _lastCreatedAt = remote.createdAt;
@@ -292,5 +304,5 @@ NostrEvent _newerEvent(NostrEvent left, NostrEvent right) {
   if (right.createdAt != left.createdAt) {
     return right.createdAt > left.createdAt ? right : left;
   }
-  return right.id.compareTo(left.id) > 0 ? right : left;
+  return right.id.compareTo(left.id) < 0 ? right : left;
 }
