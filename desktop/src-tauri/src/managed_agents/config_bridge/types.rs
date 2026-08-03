@@ -137,6 +137,13 @@ pub struct RuntimeConfigSurface {
     pub advanced: Vec<ConfigField>,
     pub extensions: Vec<ExtensionEntry>,
     pub sources: ConfigSourceReport,
+    /// The model this session was asked to run but the harness refused, having
+    /// fallen back to its own default. `None` when the request was honoured or
+    /// nothing was requested. Lets the UI distinguish "running the default
+    /// because you picked nothing" from "running the default because your pick
+    /// was rejected" — states the `model` field alone renders identically.
+    #[serde(default)]
+    pub unapplied_model_request: Option<String>,
 }
 
 /// Raw config values extracted from a runtime's config file.
@@ -176,6 +183,17 @@ pub struct SessionConfigCache {
     /// stale session whose persona model was edited mid-life.
     #[serde(default)]
     pub model_overridden: bool,
+    /// The model this session was asked to run, as reported by the harness —
+    /// `None` when no model was requested. Paired with [`Self::model_applied`]
+    /// because `model_overridden: false` alone cannot distinguish "nothing was
+    /// requested" from "the request was rejected".
+    #[serde(default)]
+    pub requested_model: Option<String>,
+    /// Whether the harness accepted [`Self::requested_model`]. A `Some`
+    /// `requested_model` with `model_applied: false` means the harness fell
+    /// back to its own default and the agent is not running what was asked.
+    #[serde(default)]
+    pub model_applied: bool,
     pub goose_native_config: Option<serde_json::Value>,
     pub captured_at: String,
 }

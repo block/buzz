@@ -64,6 +64,12 @@ pub(crate) fn read_config_surface(
         .cloned();
 
     let model_overridden = session_cache.is_some_and(|c| c.model_overridden);
+    // A model the operator asked for that the harness refused, having fallen
+    // back to its own default. `model_overridden` cannot express this: it is
+    // false both here and when nothing was ever requested, which is why the
+    // wrong model has been running silently (#2692, #4004, #2265).
+    let unapplied_model_request =
+        session_cache.and_then(|c| c.requested_model.clone().filter(|_| !c.model_applied));
 
     let normalized = NormalizedConfig {
         model: Some(apply_runtime_override(
@@ -210,6 +216,7 @@ pub(crate) fn read_config_surface(
         advanced,
         extensions,
         sources,
+        unapplied_model_request,
     }
 }
 
