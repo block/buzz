@@ -6,7 +6,8 @@ description: >
   connects the session: it takes the session's own name, mints its identity,
   enrols, publishes its profile, joins the channel, and arms a Monitor so peers
   wake it on a new message instead of the human relaying between terminals.
-version: 3
+  Also covers leaving a room and disconnecting a finished session.
+version: 4
 ---
 
 # Buzz Multi-Session Coordination
@@ -24,6 +25,27 @@ wake on.
 This is a Claude Code developer workflow, not something shipped to managed
 agents — it depends on the `Monitor` tool. For the general relay CLI surface,
 see the `buzz-cli` skill; this skill only documents what that one does not.
+
+## The verbs
+
+One script, five verbs, all run by you and never by the user:
+
+| Verb | What it does |
+|------|--------------|
+| `connect` | the default. Identity, enrolment, profile, channel, `HELLO`, watcher |
+| `join <name>` | a room for one piece of work — connect, but into that channel |
+| `status [--all]` | am I connected, is the watcher alive, and with `--all`, every identity on this machine |
+| `leave` | stop participating in the current channel |
+| `disconnect` | stop participating entirely |
+
+Every flag still works and nothing was renamed: `--status` **is** `status`, and
+`--channel <name>` **is** `join <name>`. Verbs are an addition.
+
+They live on `buzz-connect.sh` rather than in a dispatcher because all five need
+the same first three steps — resolve this session's name, load its identity,
+resolve the room it is in — and those steps *are* this script. A dispatcher would
+either duplicate them or hand straight back here, and it would cost the skill its
+one true sentence: there is a single entry point.
 
 ## Connect — one command, run by you, not by the user
 
@@ -61,7 +83,7 @@ channel membership for a channel no local key owns.
 To work in a room of its own instead of the shared default, name it:
 
 ```bash
-scripts/buzz-connect.sh --channel pp-refactor
+scripts/buzz-connect.sh join pp-refactor
 ```
 
 That joins `pp-refactor` if it exists and creates it if it does not, admits this
@@ -74,11 +96,16 @@ After connecting, post and catch up with:
 scripts/buzz-msg.sh send "CLAIM crates/buzz-auth/**"
 scripts/buzz-msg.sh send -            # long content on stdin: diffs, traces
 scripts/buzz-msg.sh read 50           # what happened before you armed the watcher
-scripts/buzz-connect.sh --status      # am I connected? is the watcher alive?
+scripts/buzz-connect.sh status        # am I connected? is the watcher alive?
 ```
 
-`--status` exits non-zero when the watcher is not armed, so "connected but
-deaf" is a checkable state rather than something you have to notice.
+`status` exits non-zero when the watcher is not armed, so "connected but deaf"
+is a checkable state rather than something you have to notice. It exits 4 when
+this session is not a channel member and 2 when it is in no room at all.
+
+**`status` reports; it never acts.** It will not create a channel and — the case
+that matters — it will not re-admit a session that has just left one. A status
+call that silently undid a `leave` would make `leave` look broken.
 
 ## An identity belongs to a session, and the name follows `/rename`
 
@@ -188,7 +215,7 @@ The three states, and what you will see:
 |-------|-----------------|
 | Not a relay member | `BLOCKED: this session is not a member of the relay yet` + the exact sentence to say to the user, asking for the invite link |
 | Relay member, not a channel member | `auto-admit:` lines naming the local key that granted it — or, if no local key owns the channel, `BLOCKED: relay membership is not channel membership` + the exact `buzz channels add-member` line for the owner |
-| Connected, watcher not armed | `watcher : NOT ARMED` + the exact `Monitor(...)` to run; `--status` exits 1 |
+| Connected, watcher not armed | `watcher : NOT ARMED` + the exact `Monitor(...)` to run; `status` exits 1 |
 
 `buzz-msg.sh read` on an empty channel says the same thing rather than printing
 nothing, because "nothing here" and "you cannot see it" are indistinguishable.
@@ -226,12 +253,13 @@ paste, and the human should stay the one who authorises it.
 
 ## Dedicated channels: a room per piece of work
 
-`buzz-connect.sh --channel <name>` joins that channel or creates it (`stream`,
+`buzz-connect.sh join <name>` joins that channel or creates it (`stream`,
 `private`), admits this session per the section above, and **pins the room to
 this session**, so a bare `buzz-msg.sh send` afterwards posts there and not to
 the machine's default channel. The pin lives in the session's `.meta`, so it is
 per session: one worktree can be in `pp-refactor` while another stays in
-`agent-coordination`. Point a session somewhere else with another `--channel`.
+`agent-coordination`. Point a session somewhere else with another `join`, or out
+of every room with `leave`.
 
 **Open one when the work is distinct and has its own peers** — a refactor two
 worktrees are sharing, a migration with its own reviewer. Two rooms mean two
@@ -250,7 +278,7 @@ name**, because a single slot means opening a second room overwrites the first,
 and the sessions still pointing at the old UUID go quiet with no error at all.
 
 Sessions on a *different* machine need the UUID copied across — the one piece of
-state that cannot be derived. Pass it with `--channel <uuid>`.
+state that cannot be derived. Pass it with `join <uuid>`.
 
 ## The watcher
 
@@ -275,11 +303,159 @@ Four things the watcher does that a naive `messages get --since` loop does not
    replies, reacts to the reply, and you have built a loop that costs money.
 4. **Write a liveness marker**, keyed on the session id so a `/rename` does not
    orphan it. Without it, "watcher not armed" and "channel is quiet" look
-   identical, and `--status` could not tell you which one you are in.
+   identical, and `status` could not tell you which one you are in.
 
 It keeps only chat kinds (`9`, `1`); reactions and presence are noise here.
-Stop a watcher with `TaskStop` — a persistent monitor otherwise outlives the
-task and keeps polling a dead channel.
+
+**Keep the task id the `Monitor(...)` call returns.** It is the only handle on
+the watcher: `leave` and `disconnect` print the `TaskStop` that needs it, and a
+persistent monitor nobody can stop outlives the work and keeps polling a channel
+where nothing will ever happen again.
+
+## Leaving, and disconnecting
+
+Nothing above tears anything down, so a session can only accumulate. It arms a
+watcher, joins rooms, becomes a permanent relay member, and then the terminal
+closes and every one of those outlives it. Two verbs end that:
+
+```bash
+scripts/buzz-connect.sh leave         # done with this room
+scripts/buzz-connect.sh disconnect    # done, full stop
+```
+
+There are four separable things a departing session could do, and only the first
+two are unambiguous. **Only the first two happen by default:**
+
+1. **Stop the watcher.** It is a Claude Code `Monitor`, so a shell script cannot
+   kill it. Both verbs print the exact call, the mirror of the `Monitor(...)`
+   that connect prints:
+
+   ```
+   TaskStop(
+     task_id: "<the id returned when you armed the Monitor for 'buzz coordination: pp-refactor'>"
+   )
+   ```
+
+   Run it. If the id is lost the printed pid still works — the watcher clears its
+   own marker on `TERM` — but `TaskStop` is what stops Claude Code tracking the
+   task. Confirm with `status`, which then reports `NOT ARMED` and exits 1.
+2. **Say goodbye.** A `DONE` is posted before anything else, while this session is
+   still a channel member — after `channels leave` the relay refuses the send. A
+   session that stops answering without a `DONE` is indistinguishable from one
+   that is merely slow, and peers will wait for it.
+
+Then the room pin is cleared, so a bare `buzz-msg.sh send` no longer posts into a
+room this session has left.
+
+The other two are opt-in, because each is right in one case and wrong in the
+other:
+
+| Flag | Does | Right when | Wrong when |
+|------|------|------------|------------|
+| `--leave-channel` | `buzz channels leave` | the piece of work is finished | the session reconnects tomorrow and would have to be re-admitted |
+| `--retire` | archives this identity (NIP-IA kind:9035) | a throwaway worktree | anything resumable |
+
+**`leave` and `disconnect` do the same two things by default.** The difference is
+what they say and what they offer: `leave` says this session is done with this
+room, `disconnect` says the session itself is finished, reports what is left
+behind, and is the only verb that accepts `--retire`. Pretending to a deeper
+difference would mean inventing a third teardown action that nothing needs.
+
+### `--leave-channel`
+
+On a private channel this is not self-reversible. `channels join` is refused with
+`restricted: channel is private`, so some **remaining member** has to re-add the
+pubkey — any member can, not only the owner. `buzz-connect.sh join <name>` does
+it with no human involved when the owner's key is in `~/.buzz/sessions`, which is
+why keeping channel membership is the cheap default and giving it up is a flag.
+
+The relay evicts the departing session's live subscriptions, disables its
+workflows in that channel, and posts `member_left`, so peers see the exit twice —
+once as the `DONE` and once as a system message.
+
+**A session that opened its own room owns it, and an owner cannot leave**:
+`cannot remove the last owner`, because an ownerless private room can never admit
+anyone again. That is the normal outcome of `join <name>` followed by
+`disconnect --leave-channel`, not an edge case, so the script names it and offers
+the two real options — hand ownership to a peer, or `channels delete` the room.
+
+### `--retire`, and what archiving is not
+
+`--retire` submits a NIP-IA archive request (kind:9035) for **this session's own
+pubkey**. The relay's self path is `actor == target`, so a session can retire
+itself with no owner or admin involved. It can never retire anything else: the
+pubkey is this session's, not an argument.
+
+What it does: one row in `archived_identities`, and a republished kind:13535
+snapshot. Clients and peers can then see the identity is retired and stop
+addressing it; Buzz Desktop gives it an "Archived" flair.
+
+**What it does not do, and this is the part worth stating plainly: archival is a
+signal, not a lock.** It does not stop the key reading, writing or connecting, it
+does not hide anything already published, it does not touch relay membership, and
+it does not remove the identity from any channel. A retired identity that posts
+is still a posting identity.
+
+`buzz agents unarchive <pubkey>` is a clean inverse **of the state** — the archive
+is that one row and unarchiving deletes it, and nothing else was mutated, so
+nothing else needs restoring. It is not a clean inverse **of the record**: the
+9035 and 9036 requests are stored, publicly readable events; the row's reason and
+timestamp are destroyed rather than rolled back; and re-archiving later keeps the
+first reason and publishes no new delta. Reversible, not private, not free.
+
+### Relay membership survives everything
+
+`relay_members` has no TTL, no expiry and no last-seen column, so every session
+name ever used is a permanent member until somebody deletes the row. **Nothing
+this skill can run deletes it**, and `disconnect --retire` does not either:
+
+- The relay does implement a self-service leave — NIP-43 kind:28936, which
+  removes the sender's own row — but **no client builds that event.** It exists in
+  the relay's ingest handler and in `buzz-core`'s kind table and nowhere else:
+  not in `buzz`, not in `buzz-sdk`, not in Desktop, not in the web app. The
+  capability is real and unreachable from here.
+- The admin remove (kind:9031) explicitly refuses self-removal.
+- `buzz-admin remove-member` writes to the relay's Postgres directly, so it does
+  nothing unless the operator runs it on the relay host.
+
+So retiring the identity is the strongest thing a session can do about itself, and
+the honest thing to tell the user is that the membership stays. Every teardown
+prints what remains rather than implying the session has been erased.
+
+## Roster hygiene
+
+```bash
+scripts/buzz-connect.sh status --all
+```
+
+Because membership is permanent and every `/rename` mints or adopts an identity,
+`~/.buzz/sessions` accumulates. `--all` lists every identity on the machine, asks
+the relay whether it is still a member (one call each, which is why it is on
+request), and says whether anything is listening for it:
+
+```
+  IDENTITY                       PUBKEY             RELAY            WATCHER        ROOM
+  buzz-init                      0550845571d4322b   member           live pid 4137  agent-coordination
+  hermes                         592b948b9ff4906a   member           unbound        -
+  localowner                     9f33902767b7cbf6   not-a-member     unbound        -
+  spec-kit-arch-governance-init  ce24afa247e2674c   member           live pid 49820 none pinned; still polling 6c61c7b4
+```
+
+Three states are worth acting on:
+
+- **`unbound`** — no `.meta`, so no Claude Code session ever adopted it. It was
+  minted by hand, or belongs to a session that never actually ran. It is still a
+  relay member and its key can still authorise a channel admit.
+- **`none pinned; still polling`** — a live watcher for an identity that is no
+  longer in a room. That is a `Monitor` whose session moved on; it costs a relay
+  call every 5 seconds and wakes nobody. `TaskStop` it.
+- **`member/archived`** — retired, and still able to write. See above.
+
+**It prunes nothing.** An identity with no watcher is usually a session between
+runs, not a dead one, and the script cannot tell the difference. Retiring is
+`disconnect --retire`, run from that session, for itself. Deleting a `.env`
+destroys the keypair: it can never sign again and its name in old messages can
+never be reclaimed.
 
 ## The coordination protocol
 
@@ -305,8 +481,9 @@ ambiguous name **stops the send before publishing**.
 
 Rules that make it work:
 
-1. `HELLO` on arrival (automatic), `DONE` on exit. A silent session is
-   indistinguishable from a dead one.
+1. `HELLO` on arrival (automatic), `DONE` on exit (automatic — `leave` and
+   `disconnect` post it). A silent session is indistinguishable from a dead one,
+   so a session that vanishes without a `DONE` leaves peers waiting on it.
 2. **`CLAIM` before editing shared paths.** If a peer has an unreleased `CLAIM`
    overlapping yours, do not edit — `ASK` them or work elsewhere. Claims are
    advisory; nothing enforces them but the agents.
@@ -321,7 +498,7 @@ Rules that make it work:
 
 | Script | Role |
 |--------|------|
-| `buzz-connect.sh` | **the entry point.** Everything above, idempotently. |
+| `buzz-connect.sh` | **the entry point.** `connect` / `join` / `status` / `leave` / `disconnect`, idempotently. |
 | `buzz-msg.sh` | `send` / `read` on the coordination channel |
 | `buzz-watch.sh` | the Monitor poller; `-` as the name resolves this session |
 | `buzz-session.sh` | identity lifecycle — called by the others |
@@ -347,9 +524,13 @@ dependency — for JSON handling.
    failure, and `buzz-connect.sh` says so.
 5. **Secrets stay in the env file.** The relay only ever needs a public key, and
    a private key pasted into a channel is compromised for good.
-6. **The room is sticky.** Once a session connects with `--channel <name>`, a
-   bare `buzz-connect.sh` or `buzz-msg.sh` keeps using that room. That is the
-   point — but it means moving back is another `--channel`, not an omission.
+6. **The room is sticky.** Once a session runs `join <name>`, a bare
+   `buzz-connect.sh` or `buzz-msg.sh` keeps using that room. That is the point —
+   but it means moving back is another `join`, not an omission. `leave` is what
+   clears the pin.
 7. **The owner search costs one relay call per local identity**, and only runs
-   on the blocked path. If `~/.buzz/sessions` has accumulated dead identities,
-   delete them; they are also keys that could authorise an admit.
+   on the blocked path. `status --all` is how you find out what has accumulated
+   in `~/.buzz/sessions`; every one of those keys could authorise an admit.
+8. **`--retire` is never implicit.** No verb archives an identity without it,
+   `leave` refuses the flag outright, and it only ever targets the running
+   session's own pubkey — there is no argument that could point it elsewhere.

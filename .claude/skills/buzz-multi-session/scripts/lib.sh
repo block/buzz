@@ -159,6 +159,22 @@ sys.stdout.write("".join(out))
 ' "$f" > "$tmp" && mv "$tmp" "$f" && chmod 600 "$f"
 }
 
+# meta_unset NAME KEY — drop a key. Used when a session leaves a room: a stale
+# pin would keep buzz-msg.sh posting into a channel this session is no longer in.
+meta_unset() {
+  local f tmp
+  f=$(meta_file "$1")
+  [ -f "$f" ] || return 0
+  tmp=$(mktemp -t buzz-meta) || return 1
+  chmod 600 "$tmp"
+  KEY="$2" python3 -c '
+import os, sys
+key = os.environ["KEY"] + "="
+with open(sys.argv[1]) as fh:
+    sys.stdout.write("".join(l for l in fh if not l.startswith(key)))
+' "$f" > "$tmp" && mv "$tmp" "$f" && chmod 600 "$f"
+}
+
 # The identity belongs to the session, not to its current name: /rename changes
 # the name, so look the identity up by the session id it was minted under.
 identity_for_session() {
@@ -333,7 +349,11 @@ except Exception:
 
 # _as_identity <identity-name> <buzz args...> — one CLI call under another local
 # key, in a subshell so the caller's identity is never replaced in this process.
-# Only the two functions below may call it, and both pass a literal verb.
+# Every call site passes a literal verb, and there are exactly three:
+# `channels members` and `channels list` (reads, used to find an owner and to
+# probe relay membership for the roster) and `channels add-member --role member`
+# — the only verb here that changes anything, and the only one that is printed
+# before it runs.
 AS_OUT=""
 AS_ERR=""
 _as_identity() {
@@ -502,4 +522,288 @@ watcher_pid() {  # prints the pid of a live watcher for this session, else fails
   case "$pid" in ''|*[!0-9]*) rm -f "$m"; return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || { rm -f "$m"; return 1; }   # stale: process gone
   printf '%s' "$pid"
+}
+
+# The roster looks at OTHER identities, so it cannot use CLAUDE_CODE_SESSION_ID.
+# It goes the long way round: the identity's .meta records the session id it was
+# minted under, and the marker is named after that. An identity with no .meta was
+# never adopted by a Claude Code session at all, which is worth saying out loud.
+identity_watch_state() {   # prints "live <pid> <channel>" | "stale <pid>" | "none" | "unbound"
+  local name="$1" sid m pid ch
+  sid=$(meta_get "$name" BUZZ_SESSION_ID) || { printf 'unbound'; return 0; }
+  m="$SESSION_DIR/.watch-$sid"
+  [ -f "$m" ] || { printf 'none'; return 0; }
+  pid=$(sed -n '1p' "$m" 2>/dev/null)
+  ch=$(sed -n '2p' "$m" 2>/dev/null)
+  case "$pid" in ''|*[!0-9]*) printf 'none'; return 0 ;; esac
+  if kill -0 "$pid" 2>/dev/null; then printf 'live %s %s' "$pid" "$ch"
+  else printf 'stale %s' "$pid"; fi
+}
+
+# identity_relay_state NAME — one authenticated read under that identity's key.
+# The same probe buzz-connect.sh uses for itself, which is why it is trustworthy:
+# "member" here means exactly what "relay : member" means on connect.
+identity_relay_state() {
+  local name="$1"
+  if _as_identity "$name" channels list --limit 1; then printf 'member'; return 0; fi
+  case "$AS_ERR" in
+    *relay_membership_required*) printf 'not-a-member' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# archived_pubkeys — the relay's current NIP-IA archive snapshot (kind 13535),
+# one pubkey per line. `agents archived` verifies the snapshot's authorship and
+# signature itself and fails rather than returning a false empty.
+archived_pubkeys() {
+  buzz_run agents archived || return 1
+  printf '%s' "$BUZZ_OUT" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+rows = doc.get("archived", []) if isinstance(doc, dict) else doc
+for row in rows if isinstance(rows, list) else []:
+    if isinstance(row, str):
+        print(row)
+    elif isinstance(row, dict):
+        pk = row.get("pubkey") or row.get("target") or row.get("target_pubkey") or ""
+        if pk:
+            print(pk)
+'
+}
+
+# roster_report — every identity on this machine, whether the relay still counts
+# it as a member, and whether anything is listening on its behalf.
+#
+# It never deletes anything. The point is that relay membership has no expiry, so
+# identities accumulate silently; the fix is to make them visible, not to guess
+# which ones the user is finished with.
+roster_report() {
+  local f name pk pid ch archived state relay room live=0 unbound=0 total=0 orphan=0
+  archived=$(archived_pubkeys 2>/dev/null || printf '')
+  echo ""
+  echo "roster   : identities in $SESSION_DIR"
+  echo "           (one relay call per identity, so this is only done on request)"
+  echo ""
+  printf '  %-30s %-18s %-16s %-14s %s\n' IDENTITY PUBKEY RELAY WATCHER ROOM
+  for f in "$SESSION_DIR"/*.env; do
+    [ -f "$f" ] || continue
+    total=$((total + 1))
+    name=$(basename "$f" .env)
+    pk=$(identity_field "$f" BUZZ_PUBKEY || printf '?')
+    relay=$(identity_relay_state "$name")
+    case "$archived" in *"$pk"*) relay="$relay/archived" ;; esac
+    state=$(identity_watch_state "$name")
+    room=$(meta_get "$name" BUZZ_SESSION_CHANNEL_NAME || printf '')
+    case "$state" in
+      "live "*)
+        live=$((live + 1))
+        pid=${state#live }; ch=${pid#* }; pid=${pid%% *}
+        state="live pid $pid"
+        # A watcher still polling a room the identity is no longer pinned to is
+        # the leak this whole verb exists for: the session went away, the Monitor
+        # did not, and it will poll until the Claude Code session ends.
+        if [ -z "$room" ]; then
+          room="none pinned; still polling ${ch:0:8}"
+          orphan=$((orphan + 1))
+        fi ;;
+      unbound)
+        unbound=$((unbound + 1)) ;;
+    esac
+    printf '  %-30s %-18s %-16s %-14s %s\n' \
+      "$name" "${pk:0:16}" "$relay" "$state" "${room:--}"
+  done
+  [ "$total" != 0 ] || { echo "  (none — run buzz-connect.sh)"; return 0; }
+  cat <<EOF
+
+  $total identities, $live with a live watcher.
+
+  WATCHER   live = a Monitor is polling for it now. none = nothing is listening,
+            but the identity is still a relay member and still holds a key.
+            unbound = no .meta, so no Claude Code session ever adopted it: it was
+            minted by hand or is left over from a session that never ran.
+  RELAY     member = the relay still accepts writes from that key. Membership has
+            no expiry, so it stays a member until an operator removes it.
+
+  Nothing here is pruned automatically — an identity with no watcher is usually a
+  session that is between runs, not a dead one. To retire one deliberately, from
+  that session, for itself:
+
+    buzz-connect.sh disconnect --retire
+
+  Deleting an identity's .env destroys its keypair: it can never sign again, and
+  the name it used in old messages can never be reclaimed. Do that only for an
+  identity you can name and know is finished.
+EOF
+  [ "$orphan" = 0 ] || cat <<EOF
+
+  $orphan watcher(s) are polling a room their identity is no longer pinned to.
+  That is a Monitor whose session has moved on; stop it with TaskStop. Until then
+  it costs a relay call every 5 seconds and wakes nobody.
+EOF
+  [ "$unbound" = 0 ] || cat <<EOF
+
+  $unbound identity/identities have no session binding: no .meta, so no Claude
+  Code session ever adopted them. They are still relay members and their keys can
+  authorise a channel admit (see BUZZ_AUTO_ADMIT), so leaving them in place is a
+  decision, not an oversight.
+EOF
+}
+
+# --- teardown -----------------------------------------------------------------
+# Four separable actions, and only the first two are unambiguous, so only the
+# first two happen by default:
+#
+#   1. stop the watcher   — always. It is a Claude Code Monitor, so this script
+#                           cannot kill it; it prints the exact TaskStop call.
+#   2. say goodbye        — always. A session that stops answering without a DONE
+#                           is indistinguishable from one that is just slow.
+#   3. leave the channel  — --leave-channel. Right for a finished piece of work,
+#                           wrong for a session that reconnects tomorrow.
+#   4. retire the identity — --retire. Right for a throwaway worktree, wrong for
+#                           anything resumable. Never implicit.
+#
+# Reads SESSION_NAME, SESSION_DISPLAY, PUBKEY, CHANNEL, CHANNEL_NAME.
+teardown() {
+  local verb="$1" do_leave="$2" do_retire="$3" note_text="${4:-}"
+  local msg pid room
+  room="${CHANNEL_NAME:-$CHANNEL}"
+
+  # 1. Goodbye first, while this session is still a channel member — after
+  #    `channels leave` the relay refuses the send.
+  if [ -n "$CHANNEL" ]; then
+    if [ "$verb" = leave ]; then
+      msg="DONE $SESSION_DISPLAY: leaving $room"
+    else
+      msg="DONE $SESSION_DISPLAY: disconnecting, this session is finished"
+    fi
+    [ -n "$note_text" ] && msg="$msg — $note_text"
+    if buzz_run messages send --channel "$CHANNEL" --content "$msg"; then
+      echo "goodbye  : posted to $room"
+      echo "           $msg"
+    else
+      note "warning: could not post DONE to $room: ${BUZZ_ERR:-(no detail)}"
+      note "         peers will see this session go quiet without an explanation."
+    fi
+  fi
+
+  # 2. The watcher. A shell script cannot stop a Monitor — print the call, the
+  #    mirror of the Monitor(...) that connect prints.
+  if pid=$(watcher_pid "$SESSION_NAME"); then
+    cat <<EOF
+watcher  : running (pid $pid). It is a Claude Code Monitor, so this script
+           cannot stop it. Stop it now — otherwise it keeps polling $room
+           after this session is gone:
+
+TaskStop(
+  task_id: "<the id returned when you armed the Monitor for 'buzz coordination: $room'>"
+)
+
+           If that id is lost, 'kill $pid' also ends it — the watcher clears its
+           own marker on TERM — but TaskStop is what stops Claude Code tracking
+           the task. Confirm with: buzz-connect.sh status
+EOF
+  else
+    echo "watcher  : not running — nothing to stop."
+  fi
+
+  # 3. Unpin the room. The pin is what makes a bare `buzz-msg.sh send` post here;
+  #    leaving it set after a leave would route messages into a room this session
+  #    is no longer in, which fails with 'not a channel member' and reads as a bug.
+  meta_unset "$SESSION_NAME" BUZZ_SESSION_CHANNEL
+  meta_unset "$SESSION_NAME" BUZZ_SESSION_CHANNEL_NAME
+  echo "room     : unpinned. 'buzz-msg.sh send' no longer posts to $room."
+
+  # 4. Opt-in: leave the channel.
+  if [ "$do_leave" = 1 ] && [ -n "$CHANNEL" ]; then
+    if buzz_run channels leave --channel "$CHANNEL"; then
+      cat <<EOF
+channel  : left '$room'. The relay evicted this session's live subscriptions
+           and posted 'member_left' into the room, so peers see it.
+           This is not self-reversible on a private channel: 'channels join' is
+           refused with 'restricted: channel is private'. Any remaining member of
+           the room can re-add this pubkey, and 'buzz-connect.sh join $room'
+           does it with no human involved when the owner's key is in
+           $SESSION_DIR.
+EOF
+    else
+      # The session that opened a dedicated room is its owner, so this is the
+      # normal outcome of `join <name>` followed by `disconnect --leave-channel`,
+      # not an edge case. The relay refuses because a room with no owner can never
+      # admit anyone again.
+      case "$BUZZ_ERR" in
+        *"last owner"*)
+          cat >&2 <<EOF
+channel  : NOT left. This session owns '$room' and is its last owner, so the
+           relay refuses — an ownerless private room can never admit anyone
+           again. Choose one, or keep the membership:
+             hand it over  buzz channels add-member --channel $CHANNEL \\
+                             --pubkey <peer> --role owner
+             end the room  buzz channels delete --channel $CHANNEL
+EOF
+          ;;
+        *) note "warning: could not leave '$room': ${BUZZ_ERR:-(no detail)}" ;;
+      esac
+    fi
+  elif [ "$verb" = disconnect ] && [ -n "$CHANNEL" ]; then
+    echo "channel  : still a member of '$room' — pass --leave-channel to give up"
+    echo "           the membership. Keeping it is what makes a reconnect free."
+  fi
+
+  # 5. Opt-in: retire the identity.
+  if [ "$do_retire" = 1 ]; then
+    retire_identity || return 5
+  fi
+
+  # 6. What is left, said plainly. Every teardown leaves residue and pretending
+  #    otherwise is how six identities accumulated in the first place.
+  cat <<EOF
+remains  : keypair  $(identity_file "$SESSION_NAME")  (mode 600)
+           relay    this pubkey is still a relay member, and stays one.
+           relay_members has no expiry column, so membership lasts until someone
+           deletes the row. Nothing this session can run deletes it: the relay
+           does accept a self-service leave (NIP-43 kind:28936, which removes the
+           sender's own row), but no client builds that event — it is in the relay
+           and in buzz-core's kind table and nowhere else, so buzz, buzz-sdk,
+           Desktop and the web app cannot send it. The admin remove (kind:9031)
+           refuses self-removal outright, and 'buzz-admin remove-member' writes to
+           the relay's Postgres directly, so it does nothing unless the operator
+           runs it on the relay host. Retiring the identity (--retire) is the
+           strongest thing this session can do about itself.
+EOF
+  return 0
+}
+
+# retire_identity — NIP-IA kind:9035 for this session's own pubkey. Self-service
+# because the relay's self consent path is actor == target; this never touches
+# another identity, and there is no flag here that could make it.
+retire_identity() {
+  cat <<EOF
+retire   : submitting a NIP-IA archive request (kind 9035) for THIS session's own
+           identity, $PUBKEY.
+           What it does: the relay adds one row to archived_identities and
+           republishes its kind:13535 snapshot, so clients and peers can see the
+           identity is retired and stop addressing it. Buzz Desktop shows it with
+           an 'Archived' flair.
+           What it does not do: it does not block this key from reading, writing
+           or connecting, does not hide anything it already published, does not
+           touch relay membership, and does not remove it from any channel.
+           Archival is a signal to readers, not a lock.
+           Reversal: 'buzz agents unarchive $PUBKEY' restores the relay's state
+           exactly — the archive is that one row and unarchiving deletes it. It
+           does not restore the record: the 9035 and 9036 requests are stored,
+           publicly readable events, and the archive row's reason and timestamp
+           are destroyed rather than rolled back. Re-archiving later keeps the
+           first reason and publishes nothing new. So it is reversible, and it is
+           not private and not free.
+EOF
+  if buzz_run agents archive "$PUBKEY" --reason retired; then
+    echo "retire   : archived. Peers reading the snapshot will treat '$SESSION_NAME' as retired."
+    return 0
+  fi
+  note "retire   : FAILED — ${BUZZ_ERR:-(no detail)}"
+  note "           The identity is unchanged and is still an active relay member."
+  return 1
 }

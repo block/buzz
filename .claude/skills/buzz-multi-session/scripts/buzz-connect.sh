@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
-# buzz-connect.sh — connect this Claude Code session to the coordination channel.
+# buzz-connect.sh — this session's whole relationship with the coordination
+# channel: joining it, checking it, and ending it.
 #
-#   buzz-connect.sh [--channel <uuid-or-name>] [--status] [--quiet-hello]
+#   buzz-connect.sh [connect]              connect (the default)
+#   buzz-connect.sh join <name>            open or enter a room for one piece of work
+#   buzz-connect.sh status [--all]         am I connected, is the watcher alive
+#   buzz-connect.sh leave                  stop participating in the current channel
+#   buzz-connect.sh disconnect             stop participating entirely
 #
-# This is the skill's only entry point. Running it does everything a session
-# needs, in one step and idempotently:
+# The verbs live here rather than in a dispatcher because every one of them needs
+# the same first three steps — resolve this session's name, load its identity,
+# resolve the room it is in — and those steps are this script. A dispatcher would
+# either re-implement them or immediately hand back here.
+#
+# Every flag still works, and the verbs are additions rather than replacements:
+# `--status` is `status`, `--channel <name>` is `join <name>`.
+#
+#   buzz-connect.sh [--channel <uuid-or-name>] [--invite <link>] [--status]
+#                   [--quiet-hello] [--all] [--leave-channel] [--retire]
+#
+# CONNECT (the default) does everything a session needs, in one step and
+# idempotently:
 #
 #   1. resolves this session's name (the /rename title, see buzz-session-name.sh)
 #   2. mints or adopts its Buzz identity, following a /rename rather than
@@ -16,14 +32,26 @@
 #   7. announces HELLO
 #   8. prints the exact Monitor command to arm, or reports the live watcher
 #
-# A dedicated room for one piece of work, joined or created in the same step:
+# JOIN <name> is connect with a room named: it joins that channel or creates it,
+# admits this session, and pins the room so a bare `buzz-msg.sh send` posts
+# there. The UUID is cached per name, so a machine can hold several rooms at
+# once. If the channel already exists and its owner's key is in ~/.buzz/sessions,
+# this session is admitted automatically and told so (BUZZ_AUTO_ADMIT=0 turns
+# that off).
 #
-#   buzz-connect.sh --channel pp-refactor
+# LEAVE and DISCONNECT do only the two unambiguous things: post DONE so peers
+# know this session is gone rather than slow, and print the TaskStop that stops
+# the watcher. Everything that cannot be undone by re-running connect is an
+# explicit opt-in:
 #
-# The name is remembered per session and its UUID is cached per name, so a
-# machine can hold several dedicated channels at once. If the channel already
-# exists and its owner's key is in ~/.buzz/sessions, this session is admitted
-# to it automatically and told so (BUZZ_AUTO_ADMIT=0 turns that off).
+#   --leave-channel   give up channel membership (`buzz channels leave`). On a
+#                     private channel the owner must re-admit you afterwards.
+#   --retire          archive this session's identity (NIP-IA kind:9035). For a
+#                     throwaway worktree, never for anything resumable.
+#
+# STATUS --all lists every identity on this machine, whether the relay still
+# counts it as a member, and whether anything is listening for it. It prunes
+# nothing.
 #
 # The only step that cannot be automated is authorising a new pubkey on a closed
 # relay with no invite code available. That produces one clearly worded ask.
@@ -42,21 +70,68 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
 
+USAGE="usage: $0 [connect|join <name>|status|leave|disconnect] [options]
+  connect                       (default) join the current room and arm a watcher
+  join <name>                   open or enter a room for one piece of work
+  status [--all]                am I connected, is the watcher alive
+  leave [--leave-channel]       stop participating in the current channel
+  disconnect [--leave-channel] [--retire]
+                                stop participating entirely
+options: --channel <uuid-or-name> --invite <link-or-code> --status --quiet-hello"
+
+# Verbs are an addition, not a replacement: --status is still status, and
+# --channel <name> is still join <name>. A bare run is still connect.
+VERB=connect
+case "${1:-}" in
+  connect|status|leave|disconnect) VERB="$1"; shift ;;
+  join)
+    VERB="join"; shift
+    case "${1:-}" in
+      ''|-*) die "usage: $0 join <channel-name-or-uuid>" ;;
+    esac
+    CHANNEL_ARG="$1"; shift ;;
+esac
+
 STATUS_ONLY=0
 SAY_HELLO=1
-CHANNEL_ARG=""
+CHANNEL_ARG="${CHANNEL_ARG:-}"
 INVITE_ARG=""
+SHOW_ALL=0
+LEAVE_CHANNEL=0
+RETIRE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --channel) CHANNEL_ARG="${2:-}"; shift ;;
     --invite) INVITE_ARG="${2:-}"; shift ;;
-    --status) STATUS_ONLY=1; SAY_HELLO=0 ;;
+    --status) [ "$VERB" = connect ] && VERB=status ;;
     --quiet-hello) SAY_HELLO=0 ;;
-    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
-    *) die "usage: $0 [--channel <uuid-or-name>] [--invite <link-or-code>] [--status] [--quiet-hello]" ;;
+    --all) SHOW_ALL=1 ;;
+    --leave-channel) LEAVE_CHANNEL=1 ;;
+    --retire) RETIRE=1 ;;
+    -h|--help) sed -n '2,66p' "$0"; exit 0 ;;
+    *) die "$USAGE" ;;
   esac
   shift
 done
+
+# Refuse a flag that does not belong to the verb rather than ignoring it. A
+# --retire that silently did nothing would be the worst possible outcome here,
+# and so would one that fired on a verb the caller did not think was destructive.
+case "$VERB" in
+  status)
+    [ "$RETIRE" = 0 ] && [ "$LEAVE_CHANNEL" = 0 ] \
+      || die "--retire and --leave-channel are not status flags; see 'disconnect'" ;;
+  leave)
+    [ "$RETIRE" = 0 ] \
+      || die "--retire is not a 'leave' flag. Leaving a room does not retire the
+identity that was in it. If this session is finished for good:
+  $0 disconnect --retire" ;;
+  connect|join)
+    [ "$RETIRE" = 0 ] && [ "$LEAVE_CHANNEL" = 0 ] \
+      || die "--retire and --leave-channel are teardown flags; see 'leave' and 'disconnect'" ;;
+esac
+[ "$VERB" = status ] || [ "$SHOW_ALL" = 0 ] || die "--all is a 'status' flag"
+if [ "$VERB" = status ]; then STATUS_ONLY=1; SAY_HELLO=0; fi
 
 check_config_perms
 require_buzz
@@ -102,6 +177,24 @@ fi
 
 printf 'session  : %s\nidentity : %s\npubkey   : %s\nrelay    : %s\n' \
   "$SESSION_DISPLAY" "$SESSION_NAME" "$PUBKEY" "$RELAY"
+
+# --- teardown ----------------------------------------------------------------
+# leave and disconnect stop here. They deliberately skip the relay probe, the
+# profile publish and the auto-admit: a session that is going away should not
+# enrol itself or get itself readmitted on the way out, and the two things that
+# always have to happen — DONE, and stopping the watcher — must still happen when
+# the relay is unreachable.
+if [ "$VERB" = leave ] || [ "$VERB" = disconnect ]; then
+  if ! resolve_channel "$CHANNEL_ARG" 0; then
+    note "note: no channel to leave (looked for '${CHANNEL_NAME:-?}')."
+    note "      Stopping the watcher and clearing local state anyway."
+    CHANNEL=""
+  else
+    echo "channel  : ${CHANNEL_NAME:-<uuid>} ($CHANNEL)"
+  fi
+  teardown "$VERB" "$LEAVE_CHANNEL" "$RETIRE"
+  exit $?
+fi
 
 # --- 4. relay membership -----------------------------------------------------
 # A single cheap authenticated read is the membership probe.
@@ -159,7 +252,19 @@ else
 fi
 
 # --- 6. channel --------------------------------------------------------------
-if ! resolve_channel "$CHANNEL_ARG" 1; then
+# status reports; it does not act. It must not create a channel and — the case
+# that actually bites — it must not re-admit a session that has just left one,
+# which would make `leave` look like it silently failed.
+CREATE=1
+[ "$STATUS_ONLY" = 1 ] && CREATE=0
+if ! resolve_channel "$CHANNEL_ARG" "$CREATE"; then
+  if [ "$STATUS_ONLY" = 1 ]; then
+    echo "channel  : none — this session is not in a room. Join one with"
+    echo "           '$(basename "$0")' for the default channel, or"
+    echo "           '$(basename "$0") join <name>' for a room of its own."
+    [ "$SHOW_ALL" = 1 ] && roster_report
+    exit 2
+  fi
   note "could not find or create channel '${CHANNEL_NAME:-?}': ${BUZZ_ERR:-(no detail)}"
   exit 2
 fi
@@ -202,10 +307,18 @@ sys.stdout.write("%s\t%s" % (member, owner))
     MEMBER=$(printf '%s' "$CHECK" | cut -f1)
     OWNER=$(printf '%s' "$CHECK" | cut -f2)
   fi
-  if [ -z "$MEMBER" ] \
-     && ! join_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY"; then
-    diagnose_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY" "$OWNER"
-    exit 4
+  if [ -z "$MEMBER" ]; then
+    if [ "$STATUS_ONLY" = 1 ]; then
+      echo "channel  : NOT a member of '${CHANNEL_NAME:-$CHANNEL}'. Peers' messages"
+      echo "           cannot reach this session and its sends will be refused."
+      echo "           Rejoin with: $(basename "$0") join ${CHANNEL_NAME:-$CHANNEL}"
+      [ "$SHOW_ALL" = 1 ] && roster_report
+      exit 4
+    fi
+    if ! join_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY"; then
+      diagnose_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY" "$OWNER"
+      exit 4
+    fi
   fi
 fi
 
@@ -235,6 +348,7 @@ fi
 WATCH_CMD="$HERE/buzz-watch.sh - $CHANNEL 5"
 if PID=$(watcher_pid "$SESSION_NAME"); then
   echo "watcher  : running (pid $PID)"
+  [ "$SHOW_ALL" = 1 ] && roster_report
   exit 0
 fi
 
@@ -242,6 +356,7 @@ if [ "$STATUS_ONLY" = 1 ]; then
   # Exit non-zero so "connected but deaf" is a checkable state, not prose.
   echo "watcher  : NOT ARMED — peers' messages cannot wake this session."
   echo "           Arm it with: Monitor(command: \"$WATCH_CMD\", persistent: true)"
+  [ "$SHOW_ALL" = 1 ] && roster_report
   exit 1
 fi
 
@@ -255,6 +370,10 @@ Monitor(
   description: "buzz coordination: ${CHANNEL_NAME:-$CHANNEL}",
   persistent: true
 )
+
+Keep the task id that call returns — 'buzz-connect.sh leave' and 'disconnect'
+print the TaskStop that needs it, and a watcher nobody can stop outlives the
+session and keeps polling.
 
 Post and catch up with (they load this session's identity themselves):
   $HERE/buzz-msg.sh send "STATUS ..."
