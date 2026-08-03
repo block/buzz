@@ -1400,11 +1400,8 @@ test("create channel exposes templates when the library is empty", async ({
   await openCreateChannelDialog(page);
 
   const templateControl = page.getByTestId("create-channel-template");
-  await expect(templateControl).toHaveText("Blank channel");
+  await expect(templateControl).toHaveText("Create a channel template…");
   await templateControl.click();
-  await page
-    .getByRole("menuitem", { name: "Create new channel template…" })
-    .click();
 
   await expect(
     page.getByText("Create template", { exact: true }),

@@ -144,54 +144,70 @@ export function CreateChannelFormFields({
         )}
       >
         <span className="text-sm font-medium text-foreground">Start with</span>
-        <DropdownMenu modal={false}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label={`Start with: ${selectedTemplate?.name ?? "Blank channel"}`}
-              className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
-              data-testid="create-channel-template"
-              disabled={isCreating}
-              id="create-channel-template"
-              type="button"
-              variant="ghost"
-            >
-              <span className="truncate text-right">
-                {selectedTemplate?.name ?? "Blank channel"}
-              </span>
-              <ChevronDown className="size-4 shrink-0 text-muted-foreground/70" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            onCloseAutoFocus={(event) => event.preventDefault()}
-            style={{
-              minWidth: "var(--radix-dropdown-menu-trigger-width)",
-            }}
+        {form.templates.length === 0 ? (
+          <Button
+            className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[70%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
+            data-testid="create-channel-template"
+            disabled={isCreating}
+            onClick={() => setIsCreateTemplateOpen(true)}
+            type="button"
+            variant="ghost"
           >
-            <DropdownMenuRadioGroup
-              onValueChange={(templateId) =>
-                form.handleTemplateChange(
-                  templateId === NO_TEMPLATE_VALUE ? "" : templateId,
-                )
-              }
-              value={form.selectedTemplateId ?? NO_TEMPLATE_VALUE}
+            <Plus className="size-4 shrink-0 text-muted-foreground/70" />
+            <span className="truncate text-right">
+              Create a channel template…
+            </span>
+          </Button>
+        ) : (
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={`Start with: ${selectedTemplate?.name ?? "Blank channel"}`}
+                className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
+                data-testid="create-channel-template"
+                disabled={isCreating}
+                id="create-channel-template"
+                type="button"
+                variant="ghost"
+              >
+                <span className="truncate text-right">
+                  {selectedTemplate?.name ?? "Blank channel"}
+                </span>
+                <ChevronDown className="size-4 shrink-0 text-muted-foreground/70" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              onCloseAutoFocus={(event) => event.preventDefault()}
+              style={{
+                minWidth: "var(--radix-dropdown-menu-trigger-width)",
+              }}
             >
-              <DropdownMenuRadioItem value={NO_TEMPLATE_VALUE}>
-                Blank channel
-              </DropdownMenuRadioItem>
-              {form.templates.map((template) => (
-                <DropdownMenuRadioItem key={template.id} value={template.id}>
-                  {template.name}
+              <DropdownMenuRadioGroup
+                onValueChange={(templateId) =>
+                  form.handleTemplateChange(
+                    templateId === NO_TEMPLATE_VALUE ? "" : templateId,
+                  )
+                }
+                value={form.selectedTemplateId ?? NO_TEMPLATE_VALUE}
+              >
+                <DropdownMenuRadioItem value={NO_TEMPLATE_VALUE}>
+                  Blank channel
                 </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => setIsCreateTemplateOpen(true)}>
-              <Plus className="size-4" />
-              Create new channel template…
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+                {form.templates.map((template) => (
+                  <DropdownMenuRadioItem key={template.id} value={template.id}>
+                    {template.name}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => setIsCreateTemplateOpen(true)}>
+                <Plus className="size-4" />
+                Create new channel template…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         <TemplateFormDialog
           onCreated={form.handleTemplateCreated}
           onOpenChange={setIsCreateTemplateOpen}
