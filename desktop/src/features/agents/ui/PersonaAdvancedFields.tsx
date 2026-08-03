@@ -10,6 +10,7 @@ import {
 } from "../lib/agentParallelism";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import {
+  CARD_MINT_KEY_ANNOTATIONS,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
@@ -146,6 +147,7 @@ export function PersonaAdvancedFields({
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
         hiddenKeys={hiddenEnvKeys}
+        keyAnnotations={CARD_MINT_KEY_ANNOTATIONS}
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}

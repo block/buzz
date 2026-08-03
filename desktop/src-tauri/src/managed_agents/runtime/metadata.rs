@@ -57,32 +57,6 @@ pub(crate) fn resolve_session_title(display_name: Option<&str>, name: &str) -> O
         .find(|value| !value.is_empty())
 }
 
-/// Resolve effective prompt/model/provider using definition-authoritative
-/// semantics for linked instances.
-///
-/// Used by `agent_config.rs` to inject persona defaults into the config surface
-/// before running the reader.
-pub(crate) fn resolve_effective_prompt_model_provider(
-    persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-    record_prompt: Option<String>,
-    record_model: Option<String>,
-    record_provider: Option<String>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    match persona_id.and_then(|pid| personas.iter().find(|p| p.id == pid)) {
-        Some(p) => {
-            fn non_blank(v: Option<&str>) -> Option<String> {
-                v.filter(|s| !s.trim().is_empty()).map(str::to_owned)
-            }
-            let prompt = non_blank(Some(&p.system_prompt));
-            let model = non_blank(p.model.as_deref());
-            let provider = non_blank(p.provider.as_deref());
-            (prompt, model, provider)
-        }
-        None => (record_prompt, record_model, record_provider),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::resolve_session_title;

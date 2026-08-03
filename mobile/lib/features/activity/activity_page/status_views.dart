@@ -6,7 +6,12 @@ class _LoadingSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.separated(
-      padding: const EdgeInsets.all(Grid.gutter),
+      padding: _activityScrollPadding(
+        context,
+        horizontal: Grid.gutter,
+        top: Grid.gutter,
+        bottom: Grid.gutter,
+      ),
       itemCount: 8,
       separatorBuilder: (_, _) => const SizedBox(height: Grid.xs),
       itemBuilder: (context, _) => Row(

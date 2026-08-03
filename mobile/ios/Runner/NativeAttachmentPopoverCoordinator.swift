@@ -1,3 +1,4 @@
+import CoreText
 import Flutter
 import UIKit
 
@@ -276,7 +277,7 @@ enum NativeAttachmentMenuLayout {
   static func itemHeight(
     compatibleWith traitCollection: UITraitCollection
   ) -> CGFloat {
-    let labelHeight = UIFont.preferredFont(
+    let labelHeight = NativeAttachmentMenuTypography.font(
       forTextStyle: labelTextStyle,
       compatibleWith: traitCollection
     ).lineHeight
@@ -313,12 +314,71 @@ enum NativeAttachmentMenuLayout {
   }
 }
 
+enum NativeAttachmentMenuTypography {
+  static let interPostScriptName = "InterVariable"
+
+  private static let registeredInter: Bool = {
+    let fontURL = Bundle.main.bundleURL
+      .appendingPathComponent("Frameworks")
+      .appendingPathComponent("App.framework")
+      .appendingPathComponent("flutter_assets")
+      .appendingPathComponent("assets")
+      .appendingPathComponent("fonts")
+      .appendingPathComponent("InterVariable.ttf")
+    guard FileManager.default.fileExists(atPath: fontURL.path) else {
+      return false
+    }
+    return CTFontManagerRegisterFontsForURL(
+      fontURL as CFURL,
+      .process,
+      nil
+    )
+  }()
+
+  static func font(
+    forTextStyle textStyle: UIFont.TextStyle,
+    compatibleWith traitCollection: UITraitCollection? = nil
+  ) -> UIFont {
+    _ = registeredInter
+    let scaledPointSize = UIFontMetrics(forTextStyle: textStyle).scaledValue(
+      for: 20,
+      compatibleWith: traitCollection
+    )
+    let preferredFont = UIFont.preferredFont(
+      forTextStyle: textStyle,
+      compatibleWith: traitCollection
+    )
+    guard
+      let interFont = UIFont(
+        name: interPostScriptName,
+        size: scaledPointSize
+      )
+    else {
+      return preferredFont
+    }
+    return interFont
+  }
+}
+
+enum NativeAttachmentPopoverStyle {
+  static let cornerRadius: CGFloat = 20
+  static let shadowOpacity: Float = 0.18
+  static let shadowRadius: CGFloat = 12
+  static let shadowOffset = CGSize(width: 0, height: 6)
+  static let borderWidth: CGFloat = 1
+}
+
 func makeNativeAttachmentMenuButton(
   title: String,
   symbol: String,
-  action: UIAction
+  action: @escaping () -> Void
 ) -> UIButton {
-  let button = UIButton(primaryAction: action)
+  let button = UIButton(
+    primaryAction: UIAction { _ in
+      UISelectionFeedbackGenerator().selectionChanged()
+      action()
+    }
+  )
   button.accessibilityLabel = title
 
   let symbolConfiguration = UIImage.SymbolConfiguration(
@@ -338,7 +398,7 @@ func makeNativeAttachmentMenuButton(
   let titleLabel = UILabel()
   titleLabel.text = title
   titleLabel.textColor = .label
-  titleLabel.font = .preferredFont(
+  titleLabel.font = NativeAttachmentMenuTypography.font(
     forTextStyle: NativeAttachmentMenuLayout.labelTextStyle
   )
   titleLabel.adjustsFontForContentSizeCategory = true

@@ -127,19 +127,6 @@ class RunnerTests: XCTestCase {
     )
   }
 
-  func testEmbeddedPhotoPickerAppliesOneZoomInStepWithoutAnimation() {
-    var zoomInCalls = 0
-    var animationsWereEnabled = true
-
-    EmbeddedPhotoPickerLayout.applyPreferredScale {
-      zoomInCalls += 1
-      animationsWereEnabled = UIView.areAnimationsEnabled
-    }
-
-    XCTAssertEqual(zoomInCalls, 1)
-    XCTAssertFalse(animationsWereEnabled)
-  }
-
   func testNativeAttachmentMenuUsesRoomyRowsAndInsets() {
     let traits = UITraitCollection(preferredContentSizeCategory: .large)
     let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
@@ -153,6 +140,28 @@ class RunnerTests: XCTestCase {
     )
     XCTAssertEqual(NativeAttachmentMenuLayout.itemSpacing, 8)
     XCTAssertEqual(NativeAttachmentMenuLayout.labelTextStyle, .title3)
+  }
+
+  func testNativeAttachmentMenuUsesInterAndSharedPopoverChrome() {
+    let font = NativeAttachmentMenuTypography.font(
+      forTextStyle: NativeAttachmentMenuLayout.labelTextStyle
+    )
+    var didSelect = false
+    let button = makeNativeAttachmentMenuButton(
+      title: "Photos",
+      symbol: "photo",
+      action: { didSelect = true }
+    )
+    let titleLabel = button.subviews.compactMap { $0 as? UILabel }.first
+
+    XCTAssertTrue(font.fontName.hasPrefix("Inter"))
+    XCTAssertTrue(titleLabel?.font.fontName.hasPrefix("Inter") == true)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.cornerRadius, 20)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.borderWidth, 1)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.shadowOpacity, 0.18)
+
+    button.sendActions(for: .primaryActionTriggered)
+    XCTAssertTrue(didSelect)
   }
 
   func testNativeAttachmentMenuGrowsAndScrollsForAccessibilityText() {
