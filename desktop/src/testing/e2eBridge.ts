@@ -61,6 +61,7 @@ import type {
   RawInstallRuntimeResult,
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
+import type { ProjectConnection } from "@/shared/api/tauriProjectConnections";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type TestIdentity = {
@@ -261,6 +262,7 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    projectConnections?: ProjectConnection[];
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
       ephemeral_added: boolean;
@@ -2974,6 +2976,171 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+let mockProjectConnections: ProjectConnection[] = [];
+
+function projectConnectionScopesEqual(
+  left: ProjectConnection["projectScope"],
+  right: ProjectConnection["projectScope"],
+) {
+  return (
+    left.relayUrl === right.relayUrl &&
+    left.operatorPubkey === right.operatorPubkey &&
+    left.repoAddress === right.repoAddress
+  );
+}
+
+function cloneProjectConnection(
+  connection: ProjectConnection,
+): ProjectConnection {
+  return {
+    ...connection,
+    args: [...connection.args],
+    capabilityIds: [...connection.capabilityIds],
+    discoveredTools: [...connection.discoveredTools],
+    envKeys: [...connection.envKeys],
+    health: { ...connection.health },
+    projectScope: { ...connection.projectScope },
+  };
+}
+
+function resetMockProjectConnections(config?: E2eConfig) {
+  mockProjectConnections = (config?.mock?.projectConnections ?? []).map(
+    cloneProjectConnection,
+  );
+}
+
+function handleListProjectConnections(args: {
+  projectScope: ProjectConnection["projectScope"];
+}) {
+  return mockProjectConnections
+    .filter((connection) =>
+      projectConnectionScopesEqual(connection.projectScope, args.projectScope),
+    )
+    .map(cloneProjectConnection);
+}
+
+function handleCreateProjectConnection(args: {
+  input: {
+    projectScope: ProjectConnection["projectScope"];
+    name: string;
+    provider: string;
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+    executionAcknowledged: boolean;
+  };
+}) {
+  if (!args.input.executionAcknowledged) {
+    throw new Error("Review and acknowledge this local program before saving.");
+  }
+  const now = new Date().toISOString();
+  const connection: ProjectConnection = {
+    id: crypto.randomUUID(),
+    projectScope: { ...args.input.projectScope },
+    name: args.input.name,
+    provider: args.input.provider,
+    capabilityIds: [],
+    discoveredTools: [],
+    command: args.input.command,
+    args: [...args.input.args],
+    envKeys: Object.keys(args.input.env),
+    health: { status: "not_tested", lastVerifiedAt: null, detail: null },
+    createdAt: now,
+    updatedAt: now,
+  };
+  mockProjectConnections.push(connection);
+  return cloneProjectConnection(connection);
+}
+
+function handleUpdateProjectConnection(args: {
+  input: {
+    id: string;
+    projectScope: ProjectConnection["projectScope"];
+    name: string;
+    provider: string;
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+    removeEnvKeys?: string[];
+    executionAcknowledged: boolean;
+  };
+}) {
+  const connection = mockProjectConnections.find(
+    (candidate) =>
+      candidate.id === args.input.id &&
+      projectConnectionScopesEqual(
+        candidate.projectScope,
+        args.input.projectScope,
+      ),
+  );
+  if (!connection) throw new Error("Connection not found.");
+  const nextArgs = [...args.input.args];
+  const executionChanged =
+    connection.command !== args.input.command ||
+    JSON.stringify(connection.args) !== JSON.stringify(nextArgs) ||
+    Object.keys(args.input.env).length > 0 ||
+    (args.input.removeEnvKeys?.length ?? 0) > 0;
+  if (executionChanged && !args.input.executionAcknowledged) {
+    throw new Error(
+      "Review and acknowledge the changed program, arguments, and credentials before saving.",
+    );
+  }
+  connection.name = args.input.name;
+  connection.provider = args.input.provider;
+  connection.command = args.input.command;
+  connection.args = nextArgs;
+  connection.envKeys = [
+    ...new Set(
+      [...connection.envKeys, ...Object.keys(args.input.env)].filter(
+        (key) => !args.input.removeEnvKeys?.includes(key),
+      ),
+    ),
+  ];
+  if (executionChanged) {
+    connection.capabilityIds = [];
+    connection.discoveredTools = [];
+    connection.health = {
+      status: "not_tested",
+      lastVerifiedAt: null,
+      detail: null,
+    };
+  }
+  connection.updatedAt = new Date().toISOString();
+  return cloneProjectConnection(connection);
+}
+
+function handleTestProjectConnection(args: {
+  projectScope: ProjectConnection["projectScope"];
+  connectionId: string;
+}) {
+  const connection = mockProjectConnections.find(
+    (candidate) =>
+      candidate.id === args.connectionId &&
+      projectConnectionScopesEqual(candidate.projectScope, args.projectScope),
+  );
+  if (!connection) throw new Error("Connection not found.");
+  connection.capabilityIds = ["mcp.tool.analytics.weekly_summary"];
+  connection.discoveredTools = ["analytics.weekly_summary"];
+  connection.health = {
+    status: "ready",
+    lastVerifiedAt: new Date().toISOString(),
+    detail: null,
+  };
+  connection.updatedAt = new Date().toISOString();
+  return cloneProjectConnection(connection);
+}
+
+function handleDeleteProjectConnection(args: {
+  projectScope: ProjectConnection["projectScope"];
+  connectionId: string;
+}) {
+  mockProjectConnections = mockProjectConnections.filter(
+    (connection) =>
+      connection.id !== args.connectionId ||
+      !projectConnectionScopesEqual(connection.projectScope, args.projectScope),
+  );
+  return undefined;
+}
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -9953,6 +10120,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
+  resetMockProjectConnections(config);
   resetMockPersonas(config);
   resetMockTeams(config);
   seedMockSearchProfiles(config);
@@ -11721,6 +11889,26 @@ export function maybeInstallE2eTauriMocks() {
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
           activeConfig,
+        );
+      case "list_project_connections":
+        return handleListProjectConnections(
+          payload as Parameters<typeof handleListProjectConnections>[0],
+        );
+      case "create_project_connection":
+        return handleCreateProjectConnection(
+          payload as Parameters<typeof handleCreateProjectConnection>[0],
+        );
+      case "update_project_connection":
+        return handleUpdateProjectConnection(
+          payload as Parameters<typeof handleUpdateProjectConnection>[0],
+        );
+      case "test_project_connection":
+        return handleTestProjectConnection(
+          payload as Parameters<typeof handleTestProjectConnection>[0],
+        );
+      case "delete_project_connection":
+        return handleDeleteProjectConnection(
+          payload as Parameters<typeof handleDeleteProjectConnection>[0],
         );
       case "get_channels": {
         // Claim the one-shot before starting the read, then hold only that

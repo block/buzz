@@ -141,28 +141,23 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
-
                     // Linux/WebKitGTK needs media-stream settings and a
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
                     linux_media::enable_media_capture(&webview);
-
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
                     // commit the startup surface before revealing it.
                     let window = webview.window();
-
                     #[cfg(target_os = "macos")]
                     {
                         set_initial_window_backing(&window);
-
                         let (initial_render_tx, initial_render_rx) = tokio::sync::oneshot::channel();
                         window
                             .app_handle()
                             .once(INITIAL_RENDER_READY_EVENT, move |_| {
                                 let _ = initial_render_tx.send(());
                             });
-
                         tauri::async_runtime::spawn(async move {
                             wait_for_stable_initial_window_geometry(&window).await;
 
@@ -650,6 +645,11 @@ pub fn run() {
             get_project_local_repo_diff,
             get_project_local_repo_snapshot,
             get_project_repo_sync_status,
+            list_project_connections,
+            create_project_connection,
+            update_project_connection,
+            test_project_connection,
+            delete_project_connection,
             list_project_local_repositories,
             clone_project_repository,
             create_project_remote_branch,
