@@ -479,6 +479,20 @@ List<List<String>> buildCreateChannelTags({
   ];
 }
 
+/// Builds the relay tags for setting the archived state of [channelId].
+List<List<String>> buildSetChannelArchivedTags(
+  String channelId, {
+  required bool archived,
+}) => [
+  ['h', channelId],
+  ['archived', archived.toString()],
+];
+
+/// Builds the relay tags for deleting [channelId].
+List<List<String>> buildDeleteChannelTags(String channelId) => [
+  ['h', channelId],
+];
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -580,6 +594,36 @@ class ChannelActions {
       tags: [
         ['h', channelId],
       ],
+    );
+    await _refreshChannelState(channelId);
+  }
+
+  /// Archives the channel and refreshes its cached state.
+  Future<void> archiveChannel(String channelId) =>
+      _setChannelArchived(channelId, archived: true);
+
+  /// Unarchives the channel and refreshes its cached state.
+  Future<void> unarchiveChannel(String channelId) =>
+      _setChannelArchived(channelId, archived: false);
+
+  Future<void> _setChannelArchived(
+    String channelId, {
+    required bool archived,
+  }) async {
+    await _signedEventRelay.submit(
+      kind: 9002,
+      content: '',
+      tags: buildSetChannelArchivedTags(channelId, archived: archived),
+    );
+    await _refreshChannelState(channelId);
+  }
+
+  /// Deletes the channel and refreshes its cached state.
+  Future<void> deleteChannel(String channelId) async {
+    await _signedEventRelay.submit(
+      kind: 9008,
+      content: '',
+      tags: buildDeleteChannelTags(channelId),
     );
     await _refreshChannelState(channelId);
   }

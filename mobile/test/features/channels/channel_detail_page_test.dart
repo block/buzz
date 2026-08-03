@@ -830,7 +830,14 @@ void main() {
       );
       expect(find.text('Message…'), findsNothing);
 
-      await tester.tap(find.byTooltip('Manage channel'));
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byType(SingleChildScrollView).last,
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Join channel'));
       await tester.pumpAndSettle();
@@ -841,6 +848,27 @@ void main() {
         findsNothing,
       );
       expect(find.text('Message #general'), findsOneWidget);
+    });
+
+    testWidgets('detail-header manage leave closes the detail page', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Leave channel').last);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Channel actions'), findsNothing);
     });
 
     testWidgets('keeps manage sheet dismissible with a long canvas', (
@@ -862,11 +890,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byTooltip('Manage channel'));
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byType(SingleChildScrollView).last,
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
       await tester.pumpAndSettle();
 
-      final sheet = find.byType(BottomSheet);
-      expect(sheet, findsOneWidget);
+      final sheet = find.byType(BottomSheet).last;
+      expect(find.byType(BottomSheet), findsNWidgets(2));
       expect(tester.getSize(sheet).height, lessThanOrEqualTo(720));
 
       final sheetTop = tester.getTopLeft(sheet).dy;
@@ -876,7 +911,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(sheet, findsNothing);
+      expect(find.text('Manage channel'), findsOneWidget);
     });
 
     testWidgets('shows empty state when no messages', (tester) async {
@@ -1870,7 +1905,20 @@ void main() {
         ]);
         await tester.pumpAndSettle();
 
-        expect(findRichText('Newest live update'), findsNothing);
+        // Cache-extent mounting varies by platform, so assert the reversed
+        // list's semantic boundary rather than whether item 0 is mounted.
+        final positions = tester
+            .widget<ScrollablePositionedList>(messageList)
+            .itemPositionsNotifier!
+            .itemPositions
+            .value;
+        expect(
+          positions.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+          ),
+          isFalse,
+        );
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
           findsOneWidget,

@@ -189,7 +189,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "channel-templates",
-    label: "Templates",
+    label: "Channel templates",
     icon: LayoutTemplate,
     featureGate: "channel-templates",
   },
