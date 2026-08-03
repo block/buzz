@@ -80,6 +80,7 @@ import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
+import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
@@ -99,7 +100,7 @@ export function ChannelScreen({
   const { goHome } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const {
-    markChannelRead,
+    clearChannelUnreadSource,
     markChannelUnread,
     getChannelReadAt,
     getMessageReadAt,
@@ -112,6 +113,7 @@ export function ChannelScreen({
     unfollowThread,
     isFollowingThread,
     isNotifiedForThread,
+    recordThreadInteraction,
     isThreadMuted,
     readStateVersion,
   } = useAppShell();
@@ -207,12 +209,11 @@ export function ChannelScreen({
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;
-  React.useEffect(() => {
-    if (!activeChannelId || activeChannel?.isMember === false) {
-      return;
-    }
-    markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
-  }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
+  useChannelOpenReadState(
+    activeChannelId,
+    activeChannel?.isMember,
+    activeReadAt,
+  );
   React.useEffect(() => {
     if (!activeChannelId) {
       setContextParentResolver(null);
@@ -262,7 +263,6 @@ export function ChannelScreen({
     resolvedMessages,
     threadReplyEvents,
   );
-
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -472,6 +472,7 @@ export function ChannelScreen({
     threadReplyTargetId,
     expandedThreadReplyIds,
     openThreadMessages: threadPanelData.visibleReplies,
+    clearChannelUnreadSource,
     getChannelReadAt,
     getMessageReadAt,
     markChannelUnread,
@@ -484,8 +485,7 @@ export function ChannelScreen({
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
     [editTargetId, timelineMessages],
   );
-  // Event id awaiting the empty-edit "Delete message?" confirmation (non-null
-  // while the dialog is open); see handleEditSave.
+  // Event id awaiting the empty-edit deletion confirmation.
   const [emptyDeleteId, setEmptyDeleteId] = React.useState<string | null>(null);
   const {
     handleCancelEdit,
@@ -508,6 +508,7 @@ export function ChannelScreen({
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
     markRevealedRepliesRead,
+    recordThreadInteraction,
     openThreadHeadId: effectiveOpenThreadHeadId,
     onOptimisticOpenThreadHeadIdChange: setOptimisticOpenThreadHeadId,
     onRequestEmptyEditDelete: setEmptyDeleteId,
@@ -688,7 +689,6 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
