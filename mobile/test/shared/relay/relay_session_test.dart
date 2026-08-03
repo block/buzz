@@ -435,114 +435,45 @@ void main() {
   test(
     'resume reconnects a stale connected session after a long pause',
     () async {
-      final sockets = <_ControlledRelaySocket>[];
-      final keychain = nostr.Keys.generate();
-      var now = DateTime(2026, 8, 2, 12);
-      final session = RelaySessionNotifier(
-        now: () => now,
-        socketFactory:
-            ({
-              required wsUrl,
-              required nsec,
-              required onMessage,
-              required onConnected,
-              required onDisconnected,
-            }) {
-              final socket = _ControlledRelaySocket(
-                wsUrl: wsUrl,
-                nsec: nsec,
-                onMessage: onMessage,
-                onConnected: onConnected,
-                onDisconnected: onDisconnected,
-              );
-              sockets.add(socket);
-              return socket;
-            },
-      );
-      final container = ProviderContainer(
-        overrides: [
-          relaySessionProvider.overrideWith(() => session),
-          relayConfigProvider.overrideWith(
-            () => _FakeRelayConfigNotifier(
-              baseUrl: 'https://relay.example',
-              nsec: keychain.nsec,
-            ),
-          ),
-          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
-        ],
-      );
-      addTearDown(container.dispose);
-      await container.read(authProvider.future);
-      final subscription = container.listen(relaySessionProvider, (_, _) {});
-      addTearDown(subscription.close);
-      await Future<void>.delayed(Duration.zero);
-      sockets.single.connectSuccessfully();
+      final harness = await _resumeHarness();
+      addTearDown(harness.dispose);
 
-      session.onAppPaused();
-      now = now.add(const Duration(minutes: 5));
-      session.onAppResumed();
+      harness.resumeAfter(const Duration(minutes: 5));
       await Future<void>.delayed(Duration.zero);
 
-      expect(sockets, hasLength(2));
-      expect(sockets.first.disposeCalls, 1);
-      expect(session.state.status, SessionStatus.reconnecting);
+      expect(harness.sockets, hasLength(2));
+      expect(harness.sockets.first.disposeCalls, 1);
+      expect(harness.session.state.status, SessionStatus.reconnecting);
     },
   );
 
   test(
     'resume keeps a connected session within the background grace period',
     () async {
-      final sockets = <_ControlledRelaySocket>[];
-      final keychain = nostr.Keys.generate();
-      var now = DateTime(2026, 8, 2, 12);
-      final session = RelaySessionNotifier(
-        now: () => now,
-        socketFactory:
-            ({
-              required wsUrl,
-              required nsec,
-              required onMessage,
-              required onConnected,
-              required onDisconnected,
-            }) {
-              final socket = _ControlledRelaySocket(
-                wsUrl: wsUrl,
-                nsec: nsec,
-                onMessage: onMessage,
-                onConnected: onConnected,
-                onDisconnected: onDisconnected,
-              );
-              sockets.add(socket);
-              return socket;
-            },
-      );
-      final container = ProviderContainer(
-        overrides: [
-          relaySessionProvider.overrideWith(() => session),
-          relayConfigProvider.overrideWith(
-            () => _FakeRelayConfigNotifier(
-              baseUrl: 'https://relay.example',
-              nsec: keychain.nsec,
-            ),
-          ),
-          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
-        ],
-      );
-      addTearDown(container.dispose);
-      await container.read(authProvider.future);
-      final subscription = container.listen(relaySessionProvider, (_, _) {});
-      addTearDown(subscription.close);
-      await Future<void>.delayed(Duration.zero);
-      sockets.single.connectSuccessfully();
+      final harness = await _resumeHarness();
+      addTearDown(harness.dispose);
 
-      session.onAppPaused();
-      now = now.add(const Duration(seconds: 4));
-      session.onAppResumed();
+      harness.resumeAfter(const Duration(seconds: 4));
       await Future<void>.delayed(Duration.zero);
 
-      expect(sockets, hasLength(1));
-      expect(sockets.single.disposeCalls, 0);
-      expect(session.state.status, SessionStatus.connected);
+      expect(harness.sockets, hasLength(1));
+      expect(harness.sockets.single.disposeCalls, 0);
+      expect(harness.session.state.status, SessionStatus.connected);
+    },
+  );
+
+  test(
+    'resume reconnects a stale connected session after a backward clock jump',
+    () async {
+      final harness = await _resumeHarness();
+      addTearDown(harness.dispose);
+
+      harness.resumeAfter(const Duration(minutes: -5));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(harness.sockets, hasLength(2));
+      expect(harness.sockets.first.disposeCalls, 1);
+      expect(harness.session.state.status, SessionStatus.reconnecting);
     },
   );
 
@@ -1206,6 +1137,90 @@ void main() {
     expect(closedMessages, ['restricted: no longer valid']);
     unsubscribe();
   });
+}
+
+class _MutableClock {
+  DateTime now;
+
+  _MutableClock(this.now);
+}
+
+class _ResumeHarness {
+  final ProviderContainer container;
+  final RelaySessionNotifier session;
+  final List<_ControlledRelaySocket> sockets;
+  final ProviderSubscription<SessionState> subscription;
+  final _MutableClock clock;
+
+  _ResumeHarness({
+    required this.container,
+    required this.session,
+    required this.sockets,
+    required this.subscription,
+    required this.clock,
+  });
+
+  void resumeAfter(Duration elapsed) {
+    session.onAppPaused();
+    clock.now = clock.now.add(elapsed);
+    session.onAppResumed();
+  }
+
+  void dispose() {
+    subscription.close();
+    container.dispose();
+  }
+}
+
+Future<_ResumeHarness> _resumeHarness() async {
+  final sockets = <_ControlledRelaySocket>[];
+  final keychain = nostr.Keys.generate();
+  final clock = _MutableClock(DateTime(2026, 8, 2, 12));
+  final session = RelaySessionNotifier(
+    now: () => clock.now,
+    socketFactory:
+        ({
+          required wsUrl,
+          required nsec,
+          required onMessage,
+          required onConnected,
+          required onDisconnected,
+        }) {
+          final socket = _ControlledRelaySocket(
+            wsUrl: wsUrl,
+            nsec: nsec,
+            onMessage: onMessage,
+            onConnected: onConnected,
+            onDisconnected: onDisconnected,
+          );
+          sockets.add(socket);
+          return socket;
+        },
+  );
+  final container = ProviderContainer(
+    overrides: [
+      relaySessionProvider.overrideWith(() => session),
+      relayConfigProvider.overrideWith(
+        () => _FakeRelayConfigNotifier(
+          baseUrl: 'https://relay.example',
+          nsec: keychain.nsec,
+        ),
+      ),
+      authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+    ],
+  );
+  await container.read(authProvider.future);
+  final subscription = container.listen(relaySessionProvider, (_, _) {});
+  final harness = _ResumeHarness(
+    container: container,
+    session: session,
+    sockets: sockets,
+    subscription: subscription,
+    clock: clock,
+  );
+  await Future<void>.delayed(Duration.zero);
+  sockets.single.connectSuccessfully();
+  return harness;
 }
 
 class _QueryHarness {

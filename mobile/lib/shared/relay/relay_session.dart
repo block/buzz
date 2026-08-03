@@ -422,9 +422,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
 
+    final backgroundedDuration = backgroundedAt == null
+        ? null
+        : _now().difference(backgroundedAt);
     final backgroundedLongEnoughToRequireReconnect =
-        backgroundedAt != null &&
-        _now().difference(backgroundedAt) >= _backgroundGraceDuration;
+        backgroundedDuration != null &&
+        (backgroundedDuration.isNegative ||
+            backgroundedDuration >= _backgroundGraceDuration);
     if (!backgroundedLongEnoughToRequireReconnect &&
         state.status == SessionStatus.connected) {
       return;
