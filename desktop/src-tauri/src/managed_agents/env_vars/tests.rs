@@ -159,6 +159,16 @@ fn reserved_keys_include_respond_to_gate() {
 }
 
 #[test]
+fn reply_placement_is_reserved_and_cannot_be_user_overridden() {
+    assert!(is_reserved_env_key("BUZZ_ACP_REPLY_PLACEMENT"));
+    let agent = map(&[("BUZZ_ACP_REPLY_PLACEMENT", "top-level")]);
+    let merged = merged_user_env(&BTreeMap::new(), &agent);
+    assert!(merged.is_empty());
+    let err = validate_user_env_keys(&agent).expect_err("reply placement is desktop-owned");
+    assert!(err.contains("BUZZ_ACP_REPLY_PLACEMENT"), "got: {err}");
+}
+
+#[test]
 fn reserved_keys_include_code_execution_surface() {
     // The agent/MCP command + args are what Buzz actually exec's.
     // Overriding lets the user run arbitrary code as the agent.

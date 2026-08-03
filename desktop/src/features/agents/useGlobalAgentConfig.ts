@@ -19,6 +19,7 @@ const EMPTY_CONFIG: GlobalAgentConfig = {
   provider: null,
   model: null,
   preferred_runtime: null,
+  reply_placement: null,
 };
 
 export const globalAgentConfigQueryKey = ["globalAgentConfig"] as const;

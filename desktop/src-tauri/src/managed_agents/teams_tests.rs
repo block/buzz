@@ -202,6 +202,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: crate::managed_agents::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -216,6 +217,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        definition_reply_placement: None,
     }
 }
 

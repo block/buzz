@@ -44,6 +44,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         last_error_code: None,
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: display_name.map(str::to_string),
         slug: None,
         runtime: None,
@@ -57,6 +58,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }

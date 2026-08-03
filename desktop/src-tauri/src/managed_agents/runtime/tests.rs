@@ -167,6 +167,7 @@ fn fixture(
         last_error_code: None,
         respond_to,
         respond_to_allowlist: allowlist,
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -180,10 +181,10 @@ fn fixture(
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }
-
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
     let rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
@@ -198,7 +199,6 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     // auth_tag is present → no AGENT_OWNER fallback fires.
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
-
 // select_untracked_bundle_harnesses tests live in runtime/sweep.rs (mod tests).
 
 #[test]
@@ -302,11 +302,11 @@ fn persona_with_provider(
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
     }
 }
-
 // ── persona env refresh acceptance ──────────────────────────────────────
 //
 // The refresh lifecycle Wes decided: `record.env_vars` holds agent-level

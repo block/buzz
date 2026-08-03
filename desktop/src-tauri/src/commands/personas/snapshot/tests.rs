@@ -61,6 +61,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: RespondTo::default(),
         respond_to_allowlist: vec![],
+        reply_placement: None,
         runtime: None,
         name_pool: vec![],
         is_builtin: false,
@@ -72,6 +73,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }
@@ -105,6 +107,7 @@ fn make_snapshot(
             parallelism: None,
             respond_to: None,
             respond_to_allowlist: vec![],
+            reply_placement: None,
             name_pool: vec![],
             idle_timeout_seconds: None,
             max_turn_duration_seconds: None,

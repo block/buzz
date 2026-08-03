@@ -48,6 +48,9 @@ pub struct PersonaEventContent {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Definition-level reply-placement default in harness wire form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_placement: Option<String>,
 }
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
@@ -200,6 +203,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
         parallelism: content.parallelism,
+        reply_placement: content.reply_placement,
         created_at: created_at.clone(),
         updated_at: created_at,
     })
@@ -396,6 +400,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         respond_to: record.respond_to.clone(),
         respond_to_allowlist: record.respond_to_allowlist.clone(),
         parallelism: record.parallelism,
+        reply_placement: record.reply_placement.clone(),
     }
 }
 

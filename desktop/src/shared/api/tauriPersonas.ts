@@ -2,6 +2,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import type {
   AgentPersona,
   CreatePersonaInput,
+  ReplyPlacementMode,
   RespondToMode,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -29,6 +30,7 @@ export type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  reply_placement?: ReplyPlacementMode | null;
   created_at: string;
   updated_at: string;
   /** Non-null when the pack `.persona.md` write-back failed (non-fatal). */
@@ -59,6 +61,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
     parallelism: persona.parallelism ?? null,
+    replyPlacement: persona.reply_placement ?? null,
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
   };

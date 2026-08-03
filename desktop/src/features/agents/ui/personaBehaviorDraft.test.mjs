@@ -49,6 +49,32 @@ test("parallelism submits only when parseInt > 0", () => {
   assert.equal(group.parallelism, 4);
 });
 
+test("reply placement submits the selected wire value", () => {
+  const group = behaviorForSubmit(
+    { ...emptyPersonaBehaviorDraft, replyPlacement: "follow-scope" },
+    emptyPersonaBehaviorDraft,
+    false,
+  );
+  assert.equal(group.replyPlacement, "follow-scope");
+});
+
+test("clearing an explicit reply placement submits an inherited replacement", () => {
+  const seed = {
+    ...emptyPersonaBehaviorDraft,
+    replyPlacement: "follow-scope",
+  };
+  const group = behaviorForSubmit(
+    { ...seed, replyPlacement: null },
+    seed,
+    true,
+  );
+  assert.deepEqual(
+    group,
+    {},
+    "clearing the only persona override must replace the behavior group with an empty group",
+  );
+});
+
 test("flipping allowlist back to owner-only drops the list from the submit", () => {
   const group = behaviorForSubmit(
     allowlistDraft({ respondTo: "owner-only" }),
@@ -92,6 +118,7 @@ test("edit with a changed quad submits the full group", () => {
     respondTo: "allowlist",
     respondToAllowlist: [HEX, "b".repeat(64)],
     parallelism: undefined,
+    replyPlacement: undefined,
   });
 });
 
@@ -115,6 +142,7 @@ test("draftFromBehavior round-trips a full quad and copies the list", () => {
     respondTo: "allowlist",
     respondToAllowlist: [HEX],
     parallelism: "3",
+    replyPlacement: null,
   });
   draft.respondToAllowlist.push("mutated");
   assert.deepEqual(behavior.respondToAllowlist, [HEX], "list must be copied");

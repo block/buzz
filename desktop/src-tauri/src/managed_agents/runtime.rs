@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use tauri::AppHandle;
 
@@ -194,15 +194,11 @@ pub fn build_managed_agent_summary(
             )
         }
     };
-
     let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
-
-    let global_for_summary =
-        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
         record,
         personas,
-        &global_for_summary,
+        global_config,
     );
     let (effective_model, effective_provider, effective_prompt, model_source) = match effective_cfg
     {
@@ -243,7 +239,6 @@ pub fn build_managed_agent_summary(
     // Global config drives both the restart-drift hash and descriptor env
     // layering below — the caller loads it once and passes it in, so
     // list-style callers pay one disk read per call rather than one per record.
-
     let needs_restart = pair_key
         .as_ref()
         .and_then(|key| runtimes.get(key).map(|runtime| (key, runtime)))
@@ -338,6 +333,12 @@ pub fn build_managed_agent_summary(
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        reply_placement: super::types::resolve_effective_reply_placement(
+            record,
+            personas,
+            global_config.reply_placement,
+        )?,
+        reply_placement_override: record.reply_placement,
     })
 }
 
@@ -353,7 +354,6 @@ pub fn build_managed_agent_summary(
 fn restart_eligible(persona_orphaned: bool, hash_drift: bool, availability_drift: bool) -> bool {
     !persona_orphaned && (hash_drift || availability_drift)
 }
-
 pub fn find_managed_agent_mut<'a>(
     records: &'a mut [ManagedAgentRecord],
     pubkey: &str,
@@ -363,7 +363,6 @@ pub fn find_managed_agent_mut<'a>(
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))
 }
-
 /// Pure decision function for the inbound author gate env vars.
 ///
 /// Returns the env vars to **set** and the env vars to **remove**. Removal is
@@ -421,6 +420,85 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
+/// Resolve the policy environment that a provider must apply before the
+/// descriptor's layered user environment.
+///
+/// Local spawn writes these values at several points because it also has to
+/// account for the desktop process environment and local process ownership.
+/// A remote provider has neither of those surfaces, so this helper produces a
+/// pure, record-derived policy map. The provider then applies `launch.env`
+/// over this map, preserving the local "user env wins" behavior; reply
+/// placement is re-applied last by `deploy_payload_json` because it is the
+/// one reserved policy key.
+///
+/// `lazy` is deliberately an argument: local manual starts use the eager arm,
+/// while provider-backed launches always pass `true` to avoid warming idle LLM
+/// pools in a remote environment.
+pub(crate) fn resolve_effective_launch_policy_env(
+    record: &ManagedAgentRecord,
+    effective_command: &str,
+    teams: &[super::types::TeamRecord],
+    effective_prompt: Option<&str>,
+    effective_model: Option<&str>,
+    reply_placement: super::types::ReplyPlacement,
+    lazy: bool,
+) -> BTreeMap<String, String> {
+    let mut policy = BTreeMap::new();
+
+    // Runtime defaults are resolved from the static runtime catalog rather
+    // than copied from the desktop's ambient process environment. A remote
+    // pod must not inherit a host-specific accident such as GOOSE_MODE.
+    if let Some(runtime) = known_acp_runtime(effective_command) {
+        for (key, value) in runtime.default_env {
+            policy.insert((*key).to_string(), (*value).to_string());
+        }
+        if runtime.mcp_hooks {
+            policy.insert("MCP_HOOK_SERVERS".to_string(), "*".to_string());
+        }
+    }
+
+    policy.insert(
+        "BUZZ_ACP_LAZY_POOL".to_string(),
+        if lazy { "true" } else { "false" }.to_string(),
+    );
+    policy.insert("BUZZ_ACP_RELAY_OBSERVER".to_string(), "true".to_string());
+
+    if let Some(prompt) = effective_prompt {
+        policy.insert("BUZZ_ACP_SYSTEM_PROMPT".to_string(), prompt.to_string());
+    }
+    if let Some(model) = effective_model {
+        policy.insert("BUZZ_ACP_MODEL".to_string(), model.to_string());
+    }
+    if let Some(idle) = record.idle_timeout_seconds {
+        policy.insert("BUZZ_ACP_IDLE_TIMEOUT".to_string(), idle.to_string());
+    }
+    if let Some(max_duration) = record.max_turn_duration_seconds {
+        policy.insert(
+            "BUZZ_ACP_MAX_TURN_DURATION".to_string(),
+            max_duration.to_string(),
+        );
+    }
+    policy.insert(
+        "BUZZ_ACP_AGENTS".to_string(),
+        record.parallelism.to_string(),
+    );
+
+    if let Some(title) = resolve_session_title(record.display_name.as_deref(), &record.name) {
+        policy.insert(SESSION_TITLE_ENV_VAR.to_string(), title);
+    }
+    if let Some(instructions) = super::spawn_hash::effective_team_instructions(record, teams) {
+        policy.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".to_string(), instructions);
+    }
+
+    // The serializer also enforces this key so callers cannot accidentally
+    // construct a provider payload with a stale or user-supplied mode.
+    policy.insert(
+        "BUZZ_ACP_REPLY_PLACEMENT".to_string(),
+        reply_placement.as_str().to_string(),
+    );
+    policy
+}
+
 pub(crate) fn configure_runtime_cli(
     command: &mut std::process::Command,
     runtime: Option<&KnownAcpRuntime>,
@@ -444,7 +522,6 @@ pub(crate) fn configure_runtime_cli(
         command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
     }
 }
-
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -471,8 +548,9 @@ pub fn spawn_agent_child(
     let teams = super::load_teams(app).unwrap_or_default();
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
     // and for the env-var merge at spawn time.
-    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
-
+    // A malformed persisted reply-placement value must stop the spawn rather
+    // than silently reverting to the historical thread behavior.
+    let global = crate::managed_agents::load_global_agent_config(app)?;
     // Resolve model/provider/prompt ONCE, here, at the shared spawn boundary —
     // the single source both the env writes below and `spawn_config_hash`
     // read from. Previously prompt was read from the record's own (possibly
@@ -488,7 +566,6 @@ pub fn spawn_agent_child(
         record, &personas, &global,
     )
     .require_resolved()?;
-
     // Single typed resolver: validates runtime id (dangling harness → Err), resolves
     // command, args (instance wins over definition default), and the full env layer stack.
     // This is the sole path for harness-definition lookup — spawn, hash, summary, and
@@ -506,7 +583,6 @@ pub fn spawn_agent_child(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
-
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -517,7 +593,6 @@ pub fn spawn_agent_child(
             now_iso()
         ),
     )?;
-
     let stdout = open_log_file(&log_path)?;
     let stderr = stdout
         .try_clone()
@@ -799,7 +874,6 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("BUZZ_AUTH_TAG");
     }
-
     // Inbound author gate: who is this agent allowed to respond to?
     // Validation is strict here — a malformed allowlist on disk fails before
     // we spawn anything (the harness would also reject it, but we'd rather
@@ -812,6 +886,14 @@ pub fn spawn_agent_child(
         command.env_remove(key);
     }
 
+    let reply_placement =
+        super::types::resolve_effective_reply_placement(record, &personas, global.reply_placement)?;
+    // This is a desktop-owned routing/security setting. It is set before the
+    // user-env layer below, and the descriptor's reserved-key filter keeps
+    // persona/agent env maps from overriding it. Provider serialization applies
+    // the same value again after launch.env, so the remote child receives the
+    // UI-visible value under both execution paths.
+    command.env("BUZZ_ACP_REPLY_PLACEMENT", reply_placement.as_str());
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
     // ── Git credential helper for Buzz relay ──────────────────────────

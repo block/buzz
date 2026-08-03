@@ -25,6 +25,12 @@ use crate::{
     util::now_iso,
 };
 
+#[path = "behavior.rs"]
+mod behavior;
+#[cfg(test)]
+pub(crate) use behavior::resolve_snapshot_import_behavior;
+pub(crate) use behavior::resolve_snapshot_import_behavior_with_reply;
+
 /// Maximum snapshot file size accepted before decode (5 MiB for JSON,
 /// 10 MiB for PNG). Mirrors the established persona-import limits.
 pub(crate) const MAX_SNAPSHOT_JSON_BYTES: usize = 5 * 1024 * 1024;
@@ -121,94 +127,6 @@ pub struct AgentSnapshotImportResult {
 }
 
 // ── Import helpers ─────────────────────────────────────────────────────────
-
-/// Resolve the behavioral defaults for an incoming agent snapshot.
-///
-/// This is the single authoritative selection path for all import-time
-/// allowlist and behavioral decisions. It is extracted as a pure, testable
-/// function so that unit tests exercise the exact production logic rather
-/// than a reconstruction of it.
-///
-/// # UI contract
-///
-/// The Keep/Clear toggle is shown whenever `has_source_allowlist` is true
-/// (i.e. the raw allowlist is non-empty), regardless of the source mode.
-/// The mode (`respond_to` wire string) and the list are independent axes.
-///
-/// # Decision table
-///
-/// | Source mode  | Non-empty list | keep=true            | keep=false              |
-/// |--------------|----------------|----------------------|-------------------------|
-/// | allowlist    | yes            | preserve mode + list | owner-only + empty      |
-/// | allowlist    | no             | **Err** (reject)     | **Err** (reject)        |
-/// | non-allowlist| yes            | preserve mode + list | preserve mode + empty   |
-/// | non-allowlist| no             | preserve mode        | preserve mode           |
-///
-/// Allowlist-mode + empty list is always rejected: the UI showed no choice
-/// and there is no coherent value to write.
-///
-/// Non-allowlist + non-empty + Clear: preserve the source mode but empty the
-/// list.  Only allowlist-mode requires a mode downgrade on Clear, because
-/// `allowlist` without entries is an invalid state.  Non-allowlist modes
-/// remain valid with an empty list.
-pub(crate) fn resolve_snapshot_import_behavior(
-    raw_respond_to: Option<&str>,
-    raw_allowlist: &[String],
-    parallelism: Option<u32>,
-    keep_allowlist: bool,
-) -> Result<crate::managed_agents::MintBehavioralDefaults, String> {
-    use crate::managed_agents::{
-        resolve_mint_behavioral_defaults, validate_respond_to_allowlist, RespondTo,
-    };
-
-    // Step 1: normalize allowlist; reject malformed pubkeys immediately.
-    let normalized_allowlist = validate_respond_to_allowlist(raw_allowlist)?;
-
-    // Step 2: detect source mode and whether a list was present.
-    let source_mode: Option<RespondTo> = match raw_respond_to {
-        Some(wire) => Some(RespondTo::parse_wire(wire)?),
-        None => None,
-    };
-    let is_source_allowlist_mode = source_mode == Some(RespondTo::Allowlist);
-    let has_source_allowlist = !normalized_allowlist.is_empty();
-
-    // Step 3: hard-reject allowlist-mode + empty list before any key
-    // generation — no coherent value can be written either way.
-    if is_source_allowlist_mode && !has_source_allowlist {
-        return Err(
-            "snapshot respond-to mode is 'allowlist' but the allowlist is empty — \
-             cannot import: no pubkeys to grant access to"
-                .to_string(),
-        );
-    }
-
-    // Step 4: apply Keep/Clear when the toggle was visible (list non-empty),
-    // or preserve the source mode when it was not.
-    let (resolved_mode, resolved_allowlist) = if has_source_allowlist {
-        if keep_allowlist {
-            // Keep: preserve source mode and validated list.
-            (source_mode, normalized_allowlist)
-        } else if is_source_allowlist_mode {
-            // Clear on allowlist-mode: must downgrade mode to owner-only because
-            // allowlist mode without entries is an invalid state.
-            (Some(RespondTo::OwnerOnly), Vec::new())
-        } else {
-            // Clear on non-allowlist mode: preserve source mode, empty the list.
-            // Non-allowlist modes are valid without entries.
-            (source_mode, Vec::new())
-        }
-    } else {
-        // No list present → toggle was never shown; preserve source mode as-is.
-        (source_mode, normalized_allowlist)
-    };
-
-    resolve_mint_behavioral_defaults(
-        resolved_mode,
-        resolved_allowlist,
-        parallelism,
-        None, // no definition record; all inputs are explicit from the snapshot
-    )
-}
 
 const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 
@@ -479,10 +397,11 @@ pub async fn confirm_agent_snapshot_import(
     }
 
     // ── Resolve behavioral defaults ──────────────────────────────────────────
-    let minted = resolve_snapshot_import_behavior(
+    let minted = resolve_snapshot_import_behavior_with_reply(
         snapshot.definition.respond_to.as_deref(),
         &snapshot.definition.respond_to_allowlist,
         snapshot.definition.parallelism,
+        snapshot.definition.reply_placement.as_deref(),
         input.keep_allowlist,
     )?;
     let minted_parallelism = minted.parallelism;
@@ -582,6 +501,7 @@ pub async fn confirm_agent_snapshot_import(
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             parallelism: minted_parallelism,
+            reply_placement: snapshot.definition.reply_placement.clone(),
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -642,6 +562,9 @@ pub async fn confirm_agent_snapshot_import(
             // are always consistent at mint time.
             respond_to: minted.respond_to,
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
+            // The imported persona owns the portable default. Leave the
+            // instance override empty so the definition remains authoritative.
+            reply_placement: None,
             is_builtin: false,
             is_active: true,
             shared: false,
@@ -651,6 +574,7 @@ pub async fn confirm_agent_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
+            definition_reply_placement: snapshot.definition.reply_placement.clone(),
             relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),

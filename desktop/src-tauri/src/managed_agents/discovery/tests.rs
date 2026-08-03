@@ -207,11 +207,11 @@ fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agent
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
     }
 }
-
 #[test]
 fn effective_agent_command_explicit_override_wins() {
     // An explicit pin beats the persona's runtime.
@@ -221,7 +221,6 @@ fn effective_agent_command_explicit_override_wins() {
         "codex-acp"
     );
 }
-
 /// Minimal record for `record_agent_command` tests. Only the resolution
 /// inputs (runtime / persona_id / agent_command_override) vary.
 fn record_with(
@@ -269,6 +268,7 @@ fn record_with(
         last_error_code: None,
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: runtime.map(str::to_string),
@@ -282,10 +282,10 @@ fn record_with(
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }
-
 #[test]
 fn record_agent_command_own_runtime_wins_over_persona() {
     // A record with its own materialized runtime never consults the

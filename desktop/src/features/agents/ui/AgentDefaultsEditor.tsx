@@ -37,6 +37,7 @@ import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
+import { ReplyPlacementField } from "@/features/agents/ui/ReplyPlacementField";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
@@ -294,6 +295,16 @@ export function AgentDefaultsEditor({
               value={selectedRuntime?.id ?? ""}
             />
           </div>
+          <ReplyPlacementField
+            disabled={isLoading || saveState === "saving"}
+            onChange={(replyPlacement) =>
+              handleConfigChange({
+                ...config,
+                reply_placement: replyPlacement,
+              })
+            }
+            value={config.reply_placement ?? "thread"}
+          />
           {flatLayout ? (
             <AnimatePresence initial={false}>
               {configFields ? (

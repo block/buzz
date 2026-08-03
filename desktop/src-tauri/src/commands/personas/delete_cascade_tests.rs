@@ -55,6 +55,7 @@ fn make_agent(
         last_error_code: None,
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -70,6 +71,7 @@ fn make_agent(
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        definition_reply_placement: None,
     }
 }
 

@@ -111,6 +111,9 @@ pub struct AgentSnapshotDefinition {
     /// source environment and are meaningless on the importer's relay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
+    /// Definition-level reply-placement default in harness wire form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_placement: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +210,10 @@ pub fn build_snapshot(
         parallelism: record.definition_parallelism.or(Some(record.parallelism)),
         respond_to: record.definition_respond_to.clone(),
         respond_to_allowlist: record.definition_respond_to_allowlist.clone(),
+        reply_placement: record
+            .definition_reply_placement
+            .clone()
+            .or_else(|| record.reply_placement.map(|mode| mode.as_str().to_string())),
         name_pool: record.name_pool.clone(),
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,

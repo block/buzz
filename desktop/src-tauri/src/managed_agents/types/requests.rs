@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    CatalogSource, RelayMeshConfig, RespondTo,
+    CatalogSource, RelayMeshConfig, ReplyPlacement, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -26,6 +26,8 @@ pub struct PersonaBehaviorRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub parallelism: Option<u32>,
+    #[serde(default)]
+    pub reply_placement: Option<ReplyPlacement>,
 }
 
 /// Validate a behavior group and apply it onto a persona record.
@@ -68,6 +70,9 @@ pub fn apply_persona_behavior(
         Vec::new()
     };
     record.parallelism = behavior.parallelism;
+    record.reply_placement = behavior
+        .reply_placement
+        .map(|mode| mode.as_str().to_string());
     Ok(())
 }
 
@@ -186,6 +191,10 @@ pub struct CreateManagedAgentRequest {
     /// before being written to the record.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Optional instance-level reply placement. Omitted means the linked
+    /// persona default applies; definition-less instances use `thread`.
+    #[serde(default)]
+    pub reply_placement: Option<ReplyPlacement>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
 }
@@ -253,6 +262,10 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. `null` clears the instance override so the agent
+    /// follows its persona/global fallback; a concrete value pins the mode.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub reply_placement: Option<Option<ReplyPlacement>>,
 }
 
 #[cfg(test)]
@@ -287,6 +300,7 @@ mod tests {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            reply_placement: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
@@ -313,12 +327,28 @@ mod tests {
                 respond_to: Some(RespondTo::Anyone),
                 respond_to_allowlist: Vec::new(),
                 parallelism: None,
+                reply_placement: None,
             }),
         )
         .unwrap();
         assert_eq!(record.respond_to.as_deref(), Some("anyone"));
         assert!(record.respond_to_allowlist.is_empty());
         assert_eq!(record.parallelism, None);
+    }
+
+    #[test]
+    fn update_reply_placement_supports_absent_null_and_value() {
+        let absent: UpdateManagedAgentRequest =
+            serde_json::from_str(r#"{"pubkey":"agent"}"#).unwrap();
+        assert_eq!(absent.reply_placement, None);
+
+        let clear: UpdateManagedAgentRequest =
+            serde_json::from_str(r#"{"pubkey":"agent","replyPlacement":null}"#).unwrap();
+        assert_eq!(clear.reply_placement, Some(None));
+
+        let set: UpdateManagedAgentRequest =
+            serde_json::from_str(r#"{"pubkey":"agent","replyPlacement":"follow-scope"}"#).unwrap();
+        assert_eq!(set.reply_placement, Some(Some(ReplyPlacement::FollowScope)));
     }
 
     #[test]
@@ -400,6 +430,7 @@ mod tests {
                 respond_to: Some(RespondTo::Allowlist),
                 respond_to_allowlist: vec!["c".repeat(64)],
                 parallelism: Some(3),
+                reply_placement: Some(ReplyPlacement::FollowScope),
             }),
         )
         .unwrap();
@@ -407,6 +438,7 @@ mod tests {
         assert_eq!(content.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(content.respond_to_allowlist, vec!["c".repeat(64)]);
         assert_eq!(content.parallelism, Some(3));
+        assert_eq!(content.reply_placement.as_deref(), Some("follow-scope"));
     }
 
     #[test]

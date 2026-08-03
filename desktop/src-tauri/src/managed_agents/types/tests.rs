@@ -93,7 +93,9 @@ fn managed_agent_record_with_auth_tag_round_trips() {
 
 // ── Inbound author gate tests ────────────────────────────────────────
 
-use super::{validate_respond_to_allowlist, RespondTo};
+use super::{
+    resolve_effective_reply_placement, validate_respond_to_allowlist, ReplyPlacement, RespondTo,
+};
 
 #[test]
 fn respond_to_default_is_owner_only() {
@@ -128,6 +130,82 @@ fn respond_to_rejects_unknown_modes() {
     // through the desktop request types.
     assert!(serde_json::from_str::<RespondTo>("\"nobody\"").is_err());
     assert!(serde_json::from_str::<RespondTo>("\"OwnerOnly\"").is_err());
+}
+
+#[test]
+fn reply_placement_serde_is_kebab_case_and_closed() {
+    assert_eq!(
+        serde_json::to_string(&ReplyPlacement::Thread).unwrap(),
+        "\"thread\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ReplyPlacement::TopLevel).unwrap(),
+        "\"top-level\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ReplyPlacement::FollowScope).unwrap(),
+        "\"follow-scope\""
+    );
+    assert_eq!(
+        serde_json::from_str::<ReplyPlacement>("\"follow-scope\"").unwrap(),
+        ReplyPlacement::FollowScope
+    );
+    assert!(serde_json::from_str::<ReplyPlacement>("\"invalid\"").is_err());
+}
+
+#[test]
+fn effective_reply_placement_uses_instance_persona_global_thread_precedence() {
+    let mut record = sample_persona().into_agent_record();
+    record.persona_id = Some("custom:helper".to_string());
+    let mut persona = sample_persona();
+    persona.reply_placement = Some("top-level".to_string());
+
+    assert_eq!(
+        resolve_effective_reply_placement(
+            &record,
+            std::slice::from_ref(&persona),
+            Some(ReplyPlacement::FollowScope),
+        )
+        .unwrap(),
+        ReplyPlacement::TopLevel
+    );
+
+    record.reply_placement = Some(ReplyPlacement::FollowScope);
+    assert_eq!(
+        resolve_effective_reply_placement(
+            &record,
+            std::slice::from_ref(&persona),
+            Some(ReplyPlacement::Thread),
+        )
+        .unwrap(),
+        ReplyPlacement::FollowScope
+    );
+
+    record.reply_placement = None;
+    persona.reply_placement = None;
+    assert_eq!(
+        resolve_effective_reply_placement(
+            &record,
+            std::slice::from_ref(&persona),
+            Some(ReplyPlacement::TopLevel),
+        )
+        .unwrap(),
+        ReplyPlacement::TopLevel
+    );
+    assert_eq!(
+        resolve_effective_reply_placement(&record, &[], None).unwrap(),
+        ReplyPlacement::Thread
+    );
+}
+
+#[test]
+fn effective_reply_placement_rejects_invalid_persona_wire_value() {
+    let mut record = sample_persona().into_agent_record();
+    record.persona_id = Some("custom:helper".to_string());
+    let mut persona = sample_persona();
+    persona.reply_placement = Some("follow_scope".to_string());
+    let error = resolve_effective_reply_placement(&record, &[persona], None).unwrap_err();
+    assert!(error.contains("follow_scope"), "{error}");
 }
 
 /// Records persisted before this feature must continue to load,
@@ -490,6 +568,7 @@ fn sample_persona() -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-02T00:00:00Z".to_string(),
     }
@@ -602,11 +681,14 @@ fn mint_explicit_input_wins_over_definition() {
         Some(RespondTo::OwnerOnly),
         Vec::new(),
         Some(2),
+        None,
         Some(&definition),
+        None,
     )
     .unwrap();
     assert_eq!(minted.respond_to, RespondTo::OwnerOnly);
     assert_eq!(minted.parallelism, Some(2));
+    assert_eq!(minted.reply_placement, ReplyPlacement::Thread);
 }
 
 #[test]
@@ -614,7 +696,8 @@ fn mint_copies_definition_quad_when_input_silent() {
     let allow = "a".repeat(64);
     let definition = quad_definition("allowlist", vec![&allow]);
     let minted =
-        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap();
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition), None)
+            .unwrap();
     assert_eq!(minted.respond_to, RespondTo::Allowlist);
     assert_eq!(minted.respond_to_allowlist, vec![allow]);
     assert_eq!(minted.parallelism, Some(8));
@@ -622,7 +705,8 @@ fn mint_copies_definition_quad_when_input_silent() {
 
 #[test]
 fn mint_without_definition_or_input_uses_client_defaults() {
-    let minted = resolve_mint_behavioral_defaults(None, Vec::new(), None, None).unwrap();
+    let minted =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, None, None).unwrap();
     assert_eq!(minted.respond_to, RespondTo::default());
     assert!(minted.respond_to_allowlist.is_empty());
     assert_eq!(minted.parallelism, None);
@@ -635,7 +719,8 @@ fn mint_fails_loudly_on_unknown_definition_respond_to() {
     // move. The error must carry the offending string.
     let definition = quad_definition("allowlst", vec![]);
     let err =
-        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap_err();
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition), None)
+            .unwrap_err();
     assert!(
         err.contains("allowlst"),
         "error must name the bad mode: {err}"
@@ -648,7 +733,8 @@ fn mint_fails_loudly_on_empty_definition_allowlist() {
     // boundary is the backstop against a crash-looping instance.
     let definition = quad_definition("allowlist", vec![]);
     let err =
-        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap_err();
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition), None)
+            .unwrap_err();
     assert!(
         err.contains("at least one pubkey"),
         "unexpected error: {err}"
@@ -660,7 +746,8 @@ fn mint_fails_loudly_on_out_of_range_definition_parallelism() {
     let mut definition = quad_definition("anyone", vec![]);
     definition.parallelism = Some(64);
     let err =
-        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap_err();
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition), None)
+            .unwrap_err();
     assert!(err.contains("64"), "error must name the bad value: {err}");
 }
 
@@ -669,7 +756,8 @@ fn mint_normalizes_definition_allowlist_from_wire() {
     let upper = "A".repeat(64);
     let definition = quad_definition("allowlist", vec![&upper]);
     let minted =
-        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap();
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition), None)
+            .unwrap();
     assert_eq!(minted.respond_to_allowlist, vec!["a".repeat(64)]);
 }
 
@@ -678,7 +766,8 @@ fn mint_resolves_each_behavioral_field_independently() {
     // PR #1667 review (convergent): the input-wins rule is per-FIELD, not
     let definition = quad_definition("anyone", vec![]);
     let minted =
-        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap();
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition), None)
+            .unwrap();
     assert_eq!(minted.respond_to, RespondTo::Anyone, "inherited");
     assert_eq!(minted.parallelism, Some(8), "inherited");
 }
@@ -687,10 +776,65 @@ fn mint_resolves_each_behavioral_field_independently() {
 fn mint_rejects_out_of_range_input_parallelism() {
     // The "validated when present" contract on MintBehavioralDefaults holds
     // for the INPUT branch too, not just definition values.
-    let err = resolve_mint_behavioral_defaults(None, Vec::new(), Some(64), None).unwrap_err();
+    let err =
+        resolve_mint_behavioral_defaults(None, Vec::new(), Some(64), None, None, None).unwrap_err();
     assert!(err.contains("64"), "error must name the bad value: {err}");
     assert!(
         !err.contains("definition"),
         "input-branch error must not blame the definition: {err}"
     );
+}
+
+#[test]
+fn mint_reply_placement_uses_input_then_definition_then_global_then_thread() {
+    let mut definition = quad_definition("anyone", vec![]);
+    definition.reply_placement = Some("follow-scope".to_string());
+
+    let explicit = resolve_mint_behavioral_defaults(
+        None,
+        Vec::new(),
+        None,
+        Some(ReplyPlacement::TopLevel),
+        Some(&definition),
+        Some(ReplyPlacement::Thread),
+    )
+    .unwrap();
+    assert_eq!(explicit.reply_placement, ReplyPlacement::TopLevel);
+
+    let inherited = resolve_mint_behavioral_defaults(
+        None,
+        Vec::new(),
+        None,
+        None,
+        Some(&definition),
+        Some(ReplyPlacement::Thread),
+    )
+    .unwrap();
+    assert_eq!(inherited.reply_placement, ReplyPlacement::FollowScope);
+
+    definition.reply_placement = None;
+    let global = resolve_mint_behavioral_defaults(
+        None,
+        Vec::new(),
+        None,
+        None,
+        Some(&definition),
+        Some(ReplyPlacement::TopLevel),
+    )
+    .unwrap();
+    assert_eq!(global.reply_placement, ReplyPlacement::TopLevel);
+
+    let fallback =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, None, None).unwrap();
+    assert_eq!(fallback.reply_placement, ReplyPlacement::Thread);
+}
+
+#[test]
+fn mint_rejects_invalid_definition_reply_placement() {
+    let mut definition = quad_definition("anyone", vec![]);
+    definition.reply_placement = Some("top_level".to_string());
+    let error =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition), None)
+            .unwrap_err();
+    assert!(error.contains("top_level"), "{error}");
 }

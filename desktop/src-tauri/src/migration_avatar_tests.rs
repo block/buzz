@@ -43,6 +43,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: "before".to_string(),
         updated_at: "before".to_string(),
     };

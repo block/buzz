@@ -1559,6 +1559,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        reply_placement: config.reply_placement,
     });
 
     if !config.memory_enabled {
@@ -5026,6 +5027,7 @@ mod build_mcp_servers_tests {
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
+            reply_placement: config::ReplyPlacement::Thread,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
@@ -5247,6 +5249,7 @@ mod error_outcome_emission_tests {
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
+            reply_placement: config::ReplyPlacement::Thread,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],

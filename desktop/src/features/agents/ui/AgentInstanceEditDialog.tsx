@@ -2,7 +2,6 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
-
 import {
   useAcpRuntimesQuery,
   useAgentConfigSurface,
@@ -65,6 +64,7 @@ import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
+import { ReplyPlacementField } from "./ReplyPlacementField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -89,12 +89,10 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
-
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-
 export function AgentInstanceEditDialog({
   agent,
   initialFocus,
@@ -117,7 +115,6 @@ export function AgentInstanceEditDialog({
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
-
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -159,13 +156,15 @@ export function AgentInstanceEditDialog({
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     agent.respondToAllowlist,
   );
+  const [replyPlacement, setReplyPlacement] = React.useState(
+    agent.replyPlacementOverride,
+  );
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
-
   // Runtime selector: defaults to "custom" until the dialog opens and the
   // catalog loads. The open-effect re-derives the correct id from the catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
@@ -195,6 +194,7 @@ export function AgentInstanceEditDialog({
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
+      setReplyPlacement(agent.replyPlacementOverride);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
@@ -207,7 +207,6 @@ export function AgentInstanceEditDialog({
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
-
   // Re-derive the runtime id when the catalog loads.
   React.useEffect(() => {
     if (!open || runtimeTouched.current || runtimes.length === 0) {
@@ -233,7 +232,6 @@ export function AgentInstanceEditDialog({
   );
 
   const runtimeDropdownValue = selectedRuntimeId || NO_RUNTIME_DROPDOWN_VALUE;
-
   const runtimeDropdownOptions: PersonaDropdownOption[] = React.useMemo(() => {
     const options: PersonaDropdownOption[] = [
       ...sortedRuntimes.map((candidate) => ({
@@ -255,7 +253,6 @@ export function AgentInstanceEditDialog({
     options.push(ADD_CUSTOM_HARNESS_OPTION);
     return options;
   }, [sortedRuntimes, selectedRuntimeId]);
-
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
   const originalRuntimeSupportsProvider = React.useMemo(() => {
@@ -306,7 +303,6 @@ export function AgentInstanceEditDialog({
 
   const llmProviderFieldVisible =
     runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
-
   // One-shot focus: when the dialog opens from a card deep-link, scroll and
   // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
   // changes so a provider-field focus request fires once the field materializes.
@@ -375,7 +371,6 @@ export function AgentInstanceEditDialog({
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ inheritedEnvVars, open });
-
   // Runtime/provider-required credential state, derived from the PROSPECTIVE
   // post-submit runtime — see the hook for the inherit-transition rationale.
   // Pass globalProvider so the hook uses it as a fallback when the per-agent
@@ -394,7 +389,6 @@ export function AgentInstanceEditDialog({
     });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
-
   // Merge global env as the base layer so credential keys satisfied via global
   // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
   // `inheritedSubmission.envVars` (the same snapshot the credential gate
@@ -422,7 +416,6 @@ export function AgentInstanceEditDialog({
     provider: providerForDiscovery,
     selectedRuntime,
   });
-
   // D2: derive advancedRequiredEnvKeys for EnvVarsEditor display.
   // The full requiredEnvKeys/requiredEnvKeyMissing continue driving Save gating.
   // D2/D3: the top-level API key owns display, while the readiness gate keeps
@@ -554,7 +547,6 @@ export function AgentInstanceEditDialog({
     handleRuntimeDropdownChange,
     open,
   );
-
   function handleProviderDropdownChange(nextValue: string) {
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
@@ -574,7 +566,6 @@ export function AgentInstanceEditDialog({
       model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
     });
   }
-
   function handleModelDropdownChange(nextValue: string) {
     applySelection(
       selectionOnModelDropdownChange(selection, {
@@ -584,11 +575,9 @@ export function AgentInstanceEditDialog({
       }),
     );
   }
-
   function handleOpenChange(next: boolean) {
     onOpenChange(next);
   }
-
   const providerValid = isEditAgentProviderSaveValid({
     llmProviderFieldVisible,
     currentProvider: provider,
@@ -596,7 +585,6 @@ export function AgentInstanceEditDialog({
     globalProvider: inheritedProviderDefault.value,
     originalRuntimeSupportsProvider,
   });
-
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -723,6 +711,10 @@ export function AgentInstanceEditDialog({
           respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
             ? respondToAllowlist
             : undefined,
+        replyPlacement:
+          replyPlacement === agent.replyPlacementOverride
+            ? undefined
+            : replyPlacement,
       };
 
       const result = await updateMutation.mutateAsync(input);
@@ -944,6 +936,14 @@ export function AgentInstanceEditDialog({
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
               variant="persona"
+            />
+
+            <ReplyPlacementField
+              allowInherit
+              disabled={updateMutation.isPending}
+              effectiveValue={agent.replyPlacement}
+              onChange={setReplyPlacement}
+              value={replyPlacement}
             />
 
             {/* Provider (runtime) */}

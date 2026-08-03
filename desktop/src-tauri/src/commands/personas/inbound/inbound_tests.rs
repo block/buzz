@@ -28,6 +28,7 @@ fn local_in_app() -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
     }
@@ -55,6 +56,7 @@ fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: "2025-06-01T00:00:00Z".to_string(),
         updated_at: "2025-06-01T00:00:00Z".to_string(),
     }
@@ -201,6 +203,7 @@ fn local_agent() -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: crate::managed_agents::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -214,6 +217,7 @@ fn local_agent() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }

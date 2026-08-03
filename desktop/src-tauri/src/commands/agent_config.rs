@@ -383,7 +383,7 @@ pub async fn get_agent_config_surface(
         ),
     )?;
     let session_cache = state.get_session_cache(&runtime_key);
-    let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+    let global = crate::managed_agents::load_global_agent_config(&app)?;
 
     Ok(resolve_config_surface(
         record,
@@ -678,6 +678,7 @@ mod tests {
             last_error_code: None,
             respond_to: RespondTo::OwnerOnly,
             respond_to_allowlist: vec![],
+            reply_placement: None,
             display_name: None,
             slug: None,
             runtime: None,
@@ -691,13 +692,13 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_reply_placement: None,
             relay_mesh: None,
             agent_command_override: None,
             persona_source_version: None,
             provider: None,
         }
     }
-
     fn persona_with_model(model: &str) -> AgentDefinition {
         AgentDefinition {
             id: "persona-1".to_string(),
@@ -718,11 +719,11 @@ mod tests {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            reply_placement: None,
             created_at: "".to_string(),
             updated_at: "".to_string(),
         }
     }
-
     /// A post-spawn session cache whose live model is `current_model` and whose
     /// `model_overridden` flag records whether a `SwitchModel` control signal set
     /// it (the live-switch signal).
@@ -737,7 +738,6 @@ mod tests {
             captured_at: "".to_string(),
         }
     }
-
     /// Definition-authoritative: a stale materialized `record.model` on a
     /// linked instance must never outrank (or even be consulted against) the
     /// linked persona's model. `update_managed_agent` already blocks writing

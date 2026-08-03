@@ -31,7 +31,7 @@ use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
-use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
+use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord, ReplyPlacement};
 
 /// The global agent configuration record.
 ///
@@ -70,6 +70,12 @@ pub struct GlobalAgentConfig {
     /// Preferred ACP runtime for definitions without an explicit runtime.
     #[serde(default)]
     pub preferred_runtime: Option<String>,
+
+    /// Global fallback for ordinary human-facing reply placement. A managed
+    /// agent or persona may override this value; `None` preserves the
+    /// historical `thread` behavior.
+    #[serde(default)]
+    pub reply_placement: Option<ReplyPlacement>,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.

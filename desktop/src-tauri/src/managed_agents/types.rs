@@ -88,6 +88,10 @@ pub struct AgentDefinition {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// NIP-AP reply placement default in wire form. Parsed at instance mint
+    /// so invalid values fail closed instead of silently changing routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_placement: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -138,6 +142,9 @@ impl AgentDefinition {
             last_error_code: None,
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
+            // A definition-backed record inherits the definition/global default
+            // until minting or an explicit instance override chooses a mode.
+            reply_placement: None,
             display_name: Some(self.display_name),
             slug: Some(self.id),
             runtime: self.runtime,
@@ -152,6 +159,7 @@ impl AgentDefinition {
             definition_respond_to: self.respond_to,
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
+            definition_reply_placement: self.reply_placement,
             relay_mesh: None,
         }
     }
@@ -187,6 +195,7 @@ impl ManagedAgentRecord {
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
             parallelism: self.definition_parallelism,
+            reply_placement: self.definition_reply_placement.clone(),
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         })
@@ -207,6 +216,8 @@ pub struct RelayAgentInfo {
     pub respond_to: Option<RespondTo>,
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    #[serde(default)]
+    pub reply_placement: Option<ReplyPlacement>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
@@ -352,6 +363,11 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Explicit per-instance reply-placement override. `None` means the
+    /// effective value is inherited from the linked definition/global config,
+    /// with the harness's historical `thread` behavior as the final fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_placement: Option<ReplyPlacement>,
     /// Optional display name distinct from the unique `name` handle. Absorbed
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -423,6 +439,10 @@ pub struct ManagedAgentRecord {
     pub definition_respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_parallelism: Option<u32>,
+    /// NIP-AP definition-level reply placement default, kept in wire form
+    /// until the instance mint boundary validates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_reply_placement: Option<String>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
@@ -566,6 +586,11 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    /// Effective mode after resolving the instance override, persona default,
+    /// global default, and the backward-compatible `thread` fallback.
+    pub reply_placement: ReplyPlacement,
+    /// Explicit per-agent override, if one is stored.
+    pub reply_placement_override: Option<ReplyPlacement>,
 }
 
 #[derive(Debug, Serialize)]
@@ -907,89 +932,11 @@ pub fn validate_respond_to_allowlist(input: &[String]) -> Result<Vec<String>, St
     Ok(out)
 }
 
-/// The behavioral fields resolved for a new instance at mint time.
-#[derive(Debug, PartialEq, Eq)]
-pub struct MintBehavioralDefaults {
-    pub respond_to: RespondTo,
-    pub respond_to_allowlist: Vec<String>,
-    /// Validated (1..=32) when present; caller applies its own default.
-    pub parallelism: Option<u32>,
-}
-
-/// Resolve the NIP-AP behavioral quad for a new instance: explicit input
-/// wins, then the linked definition's defaults, then client defaults.
-///
-/// This is the ONLY place definition behavioral strings are parsed — an
-/// unrecognized `respond_to` mode or out-of-range `parallelism` on a
-/// definition fails the mint loudly instead of silently substituting a
-/// default the definition author did not choose. The empty-allowlist guard
-/// fires here too, because inbound definitions bypass the dialog entirely.
-///
-/// `input_allowlist` must already be normalized via
-/// [`validate_respond_to_allowlist`]; the definition's allowlist is
-/// validated here since it arrives from the wire.
-pub fn resolve_mint_behavioral_defaults(
-    input_respond_to: Option<RespondTo>,
-    input_allowlist: Vec<String>,
-    input_parallelism: Option<u32>,
-    definition: Option<&AgentDefinition>,
-) -> Result<MintBehavioralDefaults, String> {
-    let (respond_to, respond_to_allowlist) = match input_respond_to {
-        // Explicit instance-level choice: the definition default is ignored
-        // wholesale (mode AND list travel together).
-        Some(mode) => (mode, input_allowlist),
-        None => match definition.and_then(|d| d.respond_to.as_deref()) {
-            Some(wire) => {
-                let mode = RespondTo::parse_wire(wire)?;
-                let list = if input_allowlist.is_empty() {
-                    validate_respond_to_allowlist(
-                        definition
-                            .map(|d| d.respond_to_allowlist.as_slice())
-                            .unwrap_or(&[]),
-                    )
-                    .map_err(|e| format!("definition respond-to allowlist is invalid: {e}"))?
-                } else {
-                    input_allowlist
-                };
-                (mode, list)
-            }
-            None => (RespondTo::default(), input_allowlist),
-        },
-    };
-    if respond_to == RespondTo::Allowlist && respond_to_allowlist.is_empty() {
-        return Err(
-            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
-        );
-    }
-
-    let parallelism = match input_parallelism {
-        // Explicit input is validated here too (not just at the command
-        // call sites) so the "validated when present" contract on
-        // `MintBehavioralDefaults.parallelism` is unskippable.
-        Some(count) if (1..=32).contains(&count) => Some(count),
-        Some(count) => {
-            return Err(format!(
-                "parallelism {count} is out of range (must be between 1 and 32)"
-            ))
-        }
-        None => match definition.and_then(|d| d.parallelism) {
-            Some(count) if (1..=32).contains(&count) => Some(count),
-            Some(count) => {
-                return Err(format!(
-                    "parallelism {count} on the linked agent definition is out of range (must be between 1 and 32)"
-                ))
-            }
-            None => None,
-        },
-    };
-
-    Ok(MintBehavioralDefaults {
-        respond_to,
-        respond_to_allowlist,
-        parallelism,
-    })
-}
-
+mod reply_placement;
+pub use reply_placement::{
+    resolve_effective_reply_placement, resolve_mint_behavioral_defaults, MintBehavioralDefaults,
+    ReplyPlacement,
+};
 mod catalog_source;
 pub use catalog_source::CatalogSource;
 mod requests;

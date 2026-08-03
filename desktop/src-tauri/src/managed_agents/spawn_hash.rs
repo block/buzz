@@ -149,6 +149,14 @@ pub(crate) fn spawn_config_hash(
             .unwrap_or_else(|_| record.respond_to_allowlist.clone())
             .hash(&mut hasher);
     }
+    // Hash the same effective reply placement the spawn path writes. Invalid
+    // imported persona values remain visible as drift instead of being
+    // silently treated as the historical default.
+    match super::types::resolve_effective_reply_placement(record, personas, global.reply_placement)
+    {
+        Ok(mode) => mode.as_str().hash(&mut hasher),
+        Err(error) => error.hash(&mut hasher),
+    }
     record.idle_timeout_seconds.hash(&mut hasher);
     record.max_turn_duration_seconds.hash(&mut hasher);
     record.parallelism.hash(&mut hasher);

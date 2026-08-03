@@ -1,7 +1,8 @@
+import type * as ReplyPlacement from "./replyPlacement";
+export type { ReplyPlacementMode } from "./replyPlacement";
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
-
 export type Channel = {
   id: string;
   name: string;
@@ -33,7 +34,6 @@ export type ChannelDetail = Channel & {
   maxMembers: number | null;
   nip29GroupId: string | null;
 };
-
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;
@@ -41,7 +41,6 @@ export type ChannelMember = {
   joinedAt: string;
   displayName: string | null;
 };
-
 export type CreateChannelInput = {
   name: string;
   channelType: Exclude<ChannelType, "dm">;
@@ -380,7 +379,7 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
-};
+} & ReplyPlacement.ManagedAgentReplyPlacement;
 
 /**
  * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
@@ -443,7 +442,7 @@ export type CreateManagedAgentInput = {
    */
   respondToAllowlist?: string[];
   relayMesh?: RelayMeshConfig;
-};
+} & ReplyPlacement.CreateManagedAgentReplyPlacement;
 
 export type CreateManagedAgentResponse = {
   agent: ManagedAgent;
@@ -708,7 +707,7 @@ export type UpdateManagedAgentInput = {
    * (validated & normalized server-side).
    */
   respondToAllowlist?: string[];
-};
+} & ReplyPlacement.UpdateManagedAgentReplyPlacement;
 export type AgentPersona = {
   id: string;
   displayName: string;
@@ -741,7 +740,7 @@ export type AgentPersona = {
   parallelism: number | null;
   createdAt: string;
   updatedAt: string;
-};
+} & ReplyPlacement.AgentPersonaReplyPlacement;
 
 /**
  * A catalog publication's coordinate: the owner who published it and the
@@ -761,7 +760,7 @@ export type PersonaBehaviorInput = {
   respondTo?: RespondToMode;
   respondToAllowlist?: string[];
   parallelism?: number;
-};
+} & ReplyPlacement.PersonaBehaviorReplyPlacement;
 
 export type CreatePersonaInput = {
   displayName: string;
@@ -1014,7 +1013,7 @@ export type GlobalAgentConfig = {
   model: string | null;
   /** Preferred ACP runtime for agents without a persona-specific runtime. */
   preferred_runtime: string | null;
-};
+} & ReplyPlacement.GlobalAgentReplyPlacement;
 
 /**
  * Result returned by `set_global_agent_config`.

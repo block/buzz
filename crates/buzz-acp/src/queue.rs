@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crate::config::DedupMode;
+use crate::config::{DedupMode, ReplyPlacement};
 
 /// Maximum events queued per channel before oldest events are dropped.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
@@ -1156,19 +1156,18 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
-/// Append a new-thread reply instruction for a human-facing top-level mention.
+/// Append a channel-root reply instruction for a human-facing turn.
 ///
-/// The triggering mention has no thread tags, so the agent's reply becomes the
-/// thread root. Anchoring to the triggering event (rather than leaving the
-/// choice open) prevents replying into a stale/unrelated prior thread.
-fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
-         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
-         (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
-    ));
+/// The caller has already established that this is a human-facing turn. The
+/// instruction is intentionally explicit so a stale supplied thread root
+/// cannot win over the selected placement policy.
+fn append_channel_root_reply_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: Keep this human-facing response at the channel root. Send \
+         it with `buzz messages send` without `--reply-to`. Do NOT reply into \
+         the triggering event or any older thread. If the human explicitly \
+         asks for a threaded reply, follow that explicit request.",
+    );
 }
 
 /// Decide whether a turn is human-facing for reply-anchor purposes.
@@ -1200,9 +1199,11 @@ fn turn_is_human_facing(
 
 /// Resolve the `--reply-to` anchor for a non-DM turn.
 ///
-/// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
-///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
-///   - top-level   → the triggering event id, which becomes the new thread root
+/// Returns an anchor only for human-facing turns (see
+/// [`turn_is_human_facing`]) and only when the selected policy requires one:
+///   - `thread`: thread root, or the triggering event for a top-level turn
+///   - `top-level`: no anchor
+///   - `follow-scope`: thread root only
 ///
 /// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
 /// (intentional for agent coordination).
@@ -1211,25 +1212,46 @@ fn resolve_reply_anchor(
     thread_tags: &ThreadTags,
     triggering_event_id: &str,
     profile_lookup: Option<&PromptProfileLookup>,
+    reply_placement: ReplyPlacement,
 ) -> Option<String> {
     if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
         return None;
     }
-    Some(
-        thread_tags
-            .root_event_id
-            .clone()
-            .unwrap_or_else(|| triggering_event_id.to_string()),
-    )
+    match reply_placement {
+        ReplyPlacement::Thread => Some(
+            thread_tags
+                .root_event_id
+                .clone()
+                .unwrap_or_else(|| triggering_event_id.to_string()),
+        ),
+        ReplyPlacement::TopLevel => None,
+        ReplyPlacement::FollowScope => thread_tags.root_event_id.clone(),
+    }
+}
+
+/// Whether a non-DM turn needs an explicit no-anchor instruction.
+fn force_channel_root(
+    sender_pubkey: &str,
+    thread_tags: &ThreadTags,
+    profile_lookup: Option<&PromptProfileLookup>,
+    reply_placement: ReplyPlacement,
+) -> bool {
+    if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
+        return false;
+    }
+    match reply_placement {
+        ReplyPlacement::Thread => false,
+        ReplyPlacement::TopLevel => true,
+        ReplyPlacement::FollowScope => thread_tags.root_event_id.is_none(),
+    }
 }
 
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
-/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
-/// replies; in the channel branch a `Some` anchor means a human-facing
-/// top-level mention whose reply should open a new thread rooted at the
-/// triggering event.
+/// [`resolve_reply_anchor`]). A `Some` anchor threads ordinary replies;
+/// `force_channel_root` adds the explicit no-anchor instruction when the
+/// selected policy requires a channel-root response.
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -1237,6 +1259,7 @@ fn format_context_hints(
     is_dm: bool,
     has_conversation_context: bool,
     reply_anchor: Option<&str>,
+    force_channel_root: bool,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
@@ -1297,6 +1320,8 @@ fn format_context_hints(
         s.push_str(&format!("\n{ctx_hint}"));
         if let Some(event_id) = reply_anchor {
             append_reply_instruction(&mut s, event_id);
+        } else if force_channel_root {
+            append_channel_root_reply_instruction(&mut s);
         }
         s
     } else {
@@ -1307,7 +1332,9 @@ fn format_context_hints(
              Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
         );
         if let Some(event_id) = reply_anchor {
-            append_new_thread_reply_instruction(&mut s, event_id);
+            append_reply_instruction(&mut s, event_id);
+        } else if force_channel_root {
+            append_channel_root_reply_instruction(&mut s);
         }
         s
     }
@@ -1372,6 +1399,8 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Reply placement policy for human-facing channel turns.
+    pub reply_placement: ReplyPlacement,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1461,7 +1490,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //
     // Human-facing turns are anchored so replies stay readable at layer 1:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
-    //   - top-level     → anchor to the triggering event (it becomes the root)
+    //   - top-level     → policy decides whether to anchor or stay channel-root
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
@@ -1476,6 +1505,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             &thread_tags,
             &last_event.event.id.to_hex(),
             args.profile_lookup,
+            args.reply_placement,
+        )
+    };
+    let force_channel_root = if is_dm {
+        false
+    } else {
+        force_channel_root(
+            &sender_pubkey,
+            &thread_tags,
+            args.profile_lookup,
+            args.reply_placement,
         )
     };
     sections.push(format_context_hints(
@@ -1485,6 +1525,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         is_dm,
         args.conversation_context.is_some(),
         reply_anchor.as_deref(),
+        force_channel_root,
     ));
 
     // 3. Conversation context (thread or DM).
@@ -3278,7 +3319,13 @@ mod tests {
     fn test_anchor_human_in_thread_uses_root() {
         // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            HUMAN_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ReplyPlacement::Thread,
+        );
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3286,7 +3333,13 @@ mod tests {
     fn test_anchor_human_top_level_uses_triggering_event() {
         // Human top-level mention (no thread tags) → triggering event is root.
         let tags = thread_tags(None, &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            HUMAN_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ReplyPlacement::Thread,
+        );
         assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
@@ -3294,14 +3347,26 @@ mod tests {
     fn test_anchor_agent_to_agent_in_thread_is_none() {
         // Agent pings agent inside a thread → no forced anchor (deep nesting ok).
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ReplyPlacement::Thread,
+        );
         assert_eq!(anchor, None);
     }
 
     #[test]
     fn test_anchor_agent_to_agent_top_level_is_none() {
         let tags = thread_tags(None, &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ReplyPlacement::Thread,
+        );
         assert_eq!(anchor, None);
     }
 
@@ -3309,7 +3374,13 @@ mod tests {
     fn test_anchor_agent_sender_but_human_tagged_flattens() {
         // Agent-authored, but a human is tagged → human-facing → anchor to root.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK, HUMAN_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ReplyPlacement::Thread,
+        );
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3317,7 +3388,8 @@ mod tests {
     fn test_anchor_unknown_identity_treated_as_human() {
         // No profile lookup → fail open (treat as human so visibility is kept).
         let tags = thread_tags(Some(ROOT_ID), &[]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None);
+        let anchor =
+            resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None, ReplyPlacement::Thread);
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3326,8 +3398,162 @@ mod tests {
         // Raw p-tag presence must NOT flatten when every tagged pubkey is an
         // agent — this is the regression Pinky flagged.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(
+            AGENT_A_PK,
+            &tags,
+            TRIGGER_ID,
+            Some(&id_lookup()),
+            ReplyPlacement::Thread,
+        );
         assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_reply_placement_matrix_covers_top_level_and_threaded_human_inputs() {
+        let root_id = "a".repeat(64);
+        let top_level = make_event("top-level human message");
+        let top_level_id = top_level.id.to_hex();
+        let threaded = make_event_with_tags(
+            "threaded human message",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
+        );
+
+        let cases = [
+            (
+                ReplyPlacement::Thread,
+                Some(top_level_id.as_str()),
+                Some(root_id.as_str()),
+            ),
+            (ReplyPlacement::TopLevel, None, None),
+            (ReplyPlacement::FollowScope, None, Some(root_id.as_str())),
+        ];
+
+        for (mode, expected_top_level_anchor, expected_thread_anchor) in cases {
+            let top_batch = FlushBatch {
+                channel_id: Uuid::new_v4(),
+                events: vec![BatchEvent {
+                    event: top_level.clone(),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                }],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            let top_prompt = format_prompt(
+                &top_batch,
+                &FormatPromptArgs {
+                    reply_placement: mode,
+                    ..Default::default()
+                },
+            )
+            .join("\n\n");
+            match expected_top_level_anchor {
+                Some(anchor) => assert!(
+                    top_prompt.contains(&format!("--reply-to {anchor}")),
+                    "mode={mode}, prompt={top_prompt}"
+                ),
+                None => assert!(
+                    !top_prompt.contains(&format!("--reply-to {top_level_id}")),
+                    "mode={mode}, prompt={top_prompt}"
+                ),
+            }
+
+            let thread_batch = FlushBatch {
+                channel_id: Uuid::new_v4(),
+                events: vec![BatchEvent {
+                    event: threaded.clone(),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                }],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            let thread_prompt = format_prompt(
+                &thread_batch,
+                &FormatPromptArgs {
+                    reply_placement: mode,
+                    ..Default::default()
+                },
+            )
+            .join("\n\n");
+            match expected_thread_anchor {
+                Some(anchor) => assert!(
+                    thread_prompt.contains(&format!("--reply-to {anchor}")),
+                    "mode={mode}, prompt={thread_prompt}"
+                ),
+                None => assert!(
+                    !thread_prompt.contains(&format!("--reply-to {root_id}")),
+                    "mode={mode}, prompt={thread_prompt}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_follow_scope_agent_only_coordination_is_not_forced_to_root() {
+        let root_id = "b".repeat(64);
+        let event = make_event_with_tags(
+            "agent coordination",
+            vec![vec!["p".into(), AGENT_B_PK.into()]],
+        );
+        let sender_id = event.pubkey.to_hex();
+        let profiles = HashMap::from([
+            (sender_id, profile(true)),
+            (AGENT_B_PK.to_string(), profile(true)),
+        ]);
+        let top_batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let top_prompt = format_prompt(
+            &top_batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&profiles),
+                reply_placement: ReplyPlacement::FollowScope,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(!top_prompt.contains("--reply-to"), "{top_prompt}");
+
+        let threaded_event = make_event_with_tags(
+            "agent coordination in thread",
+            vec![
+                vec!["e".into(), root_id, "".into(), "reply".into()],
+                vec!["p".into(), AGENT_B_PK.into()],
+            ],
+        );
+        let threaded_sender_id = threaded_event.pubkey.to_hex();
+        let threaded_profiles = HashMap::from([
+            (threaded_sender_id, profile(true)),
+            (AGENT_B_PK.to_string(), profile(true)),
+        ]);
+        let threaded_batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event: threaded_event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let threaded_prompt = format_prompt(
+            &threaded_batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&threaded_profiles),
+                reply_placement: ReplyPlacement::FollowScope,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(!threaded_prompt.contains("--reply-to"), "{threaded_prompt}");
     }
 
     #[test]
@@ -3942,6 +4168,50 @@ mod tests {
     }
 
     #[test]
+    fn test_reply_placement_does_not_change_dm_thread_semantics() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "DM reply",
+            vec![vec!["e".into(), "a".repeat(64), "".into(), "reply".into()]],
+        );
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let channel_info = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        for mode in [
+            ReplyPlacement::Thread,
+            ReplyPlacement::TopLevel,
+            ReplyPlacement::FollowScope,
+        ] {
+            let prompt = format_prompt(
+                &batch,
+                &FormatPromptArgs {
+                    channel_info: Some(&channel_info),
+                    reply_placement: mode,
+                    ..Default::default()
+                },
+            )
+            .join("\n\n");
+            assert!(
+                prompt.contains(&format!("--reply-to {event_id}")),
+                "DM mode={mode} should preserve the reply anchor: {prompt}"
+            );
+        }
+    }
+
+    #[test]
     fn test_reply_instruction_present_for_top_level_human_message() {
         let ch = Uuid::new_v4();
         let event = make_event("hello world");
@@ -3957,17 +4227,212 @@ mod tests {
             cancel_reason: None,
         };
 
-        // Top-level human message (no lookup → human): the reply opens a new
-        // thread anchored to the triggering event, preventing replies into a
-        // stale older thread.
+        // Default mode preserves the historical behavior: a top-level human
+        // message opens a new thread anchored to the triggering event.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains(&format!("--reply-to {event_id}")),
             "top-level human message should anchor a new thread at the triggering event"
         );
         assert!(
-            prompt.contains("new top-level message"),
-            "top-level human message should use the new-thread instruction"
+            prompt.contains("For ordinary replies in this turn"),
+            "top-level human message should use the thread instruction"
+        );
+    }
+
+    #[test]
+    fn test_follow_scope_top_level_stays_at_channel_root() {
+        let batch = make_single_batch("hello from the channel");
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                reply_placement: ReplyPlacement::FollowScope,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        let event_id = batch.events.last().unwrap().event.id.to_hex();
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "{prompt}"
+        );
+        assert!(prompt.contains("without `--reply-to`"), "{prompt}");
+        assert!(prompt.contains("older thread"), "{prompt}");
+        assert!(
+            prompt.contains("explicitly asks for a threaded reply"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn test_follow_scope_thread_uses_only_thread_root() {
+        let root_id = "f".repeat(64);
+        let parent_id = "e".repeat(64);
+        let event = make_event_with_tags(
+            "reply in the existing thread",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent_id.clone(), "".into(), "reply".into()],
+            ],
+        );
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                reply_placement: ReplyPlacement::FollowScope,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {parent_id}")),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn test_follow_scope_uses_latest_batched_event_scope() {
+        let root_id = "c".repeat(64);
+        let top_level = make_event("older top-level event");
+        let top_level_id = top_level.id.to_hex();
+        let threaded = make_event_with_tags(
+            "newer threaded event",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
+        );
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![
+                BatchEvent {
+                    event: top_level,
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+                BatchEvent {
+                    event: threaded,
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+            ],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                reply_placement: ReplyPlacement::FollowScope,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {top_level_id}")),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn test_follow_scope_latest_batched_top_level_does_not_reuse_stale_root() {
+        let root_id = "d".repeat(64);
+        let threaded = make_event_with_tags(
+            "older threaded event",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
+        );
+        let top_level = make_event("newer top-level event");
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![
+                BatchEvent {
+                    event: threaded,
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+                BatchEvent {
+                    event: top_level,
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+            ],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                reply_placement: ReplyPlacement::FollowScope,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains(&format!("--reply-to {root_id}")),
+            "{prompt}"
+        );
+        assert!(prompt.contains("older thread"), "{prompt}");
+        let top_level_id = batch.events.last().unwrap().event.id.to_hex();
+        assert!(
+            !prompt.contains(&format!("--reply-to {top_level_id}")),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(&root_id),
+            "thread context should remain visible"
+        );
+    }
+
+    #[test]
+    fn test_top_level_mode_flattens_threaded_human_reply() {
+        let root_id = "a".repeat(64);
+        let event = make_event_with_tags(
+            "flatten this response",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
+        );
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                reply_placement: ReplyPlacement::TopLevel,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains(&format!("--reply-to {root_id}")),
+            "{prompt}"
+        );
+        assert!(prompt.contains("channel root"), "{prompt}");
+        assert!(
+            prompt.contains(&root_id),
+            "thread context should remain visible"
+        );
+        assert!(
+            prompt.contains("explicitly asks for a threaded reply"),
+            "{prompt}"
         );
     }
 
@@ -4143,16 +4608,17 @@ mod tests {
             cancel_reason: None,
         };
 
-        // Last event is top-level and human-facing → opens a new thread
-        // anchored to that top-level event (NOT the earlier thread's root).
+        // Last event is top-level and human-facing → preserves the historical
+        // thread mode, anchored to that top-level event (NOT the earlier
+        // thread's root).
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains(&format!("--reply-to {plain_id}")),
             "batched top-level-last prompt should anchor to the last (top-level) event"
         );
         assert!(
-            prompt.contains("new top-level message"),
-            "batched top-level-last prompt should use the new-thread instruction"
+            prompt.contains("For ordinary replies in this turn"),
+            "batched top-level-last prompt should use the thread instruction"
         );
     }
 

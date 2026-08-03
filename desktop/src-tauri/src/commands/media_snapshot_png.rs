@@ -166,6 +166,7 @@ mod tests {
                 parallelism: Some(1),
                 respond_to: None,
                 respond_to_allowlist: vec![],
+                reply_placement: None,
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
                 name_pool: vec![],

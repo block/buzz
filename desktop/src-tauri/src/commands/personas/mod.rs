@@ -312,8 +312,8 @@ pub use card::*;
 #[cfg(test)]
 pub(crate) use snapshot::import::decode_snapshot_from_bytes;
 pub(crate) use snapshot::import::{
-    parse_snapshot_payload_from_bytes, resolve_snapshot_import_behavior, MAX_SNAPSHOT_JSON_BYTES,
-    MAX_SNAPSHOT_PNG_BYTES,
+    parse_snapshot_payload_from_bytes, resolve_snapshot_import_behavior_with_reply,
+    MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
 };
 pub use snapshot::{confirm_agent_snapshot_import, preview_agent_snapshot_import};
 pub use snapshot::{encode_agent_snapshot_for_send, export_agent_snapshot};

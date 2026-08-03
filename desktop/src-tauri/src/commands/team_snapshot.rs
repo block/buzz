@@ -10,7 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
-    commands::{export_util::save_bytes_with_dialog, personas::resolve_snapshot_import_behavior},
+    commands::{
+        export_util::save_bytes_with_dialog, personas::resolve_snapshot_import_behavior_with_reply,
+    },
     managed_agents::team_snapshot::{
         build_team_snapshot, decode_team_snapshot_json, decode_team_snapshot_png,
         encode_team_snapshot_json, encode_team_snapshot_png, TeamSnapshot,
@@ -109,10 +111,11 @@ fn definition_from_snapshot(
     keep_allowlist: bool,
     now: &str,
 ) -> Result<AgentDefinition, String> {
-    let behavior = resolve_snapshot_import_behavior(
+    let behavior = resolve_snapshot_import_behavior_with_reply(
         member.definition.respond_to.as_deref(),
         &member.definition.respond_to_allowlist,
         member.definition.parallelism,
+        member.definition.reply_placement.as_deref(),
         keep_allowlist,
     )?;
     let respond_to = (behavior.respond_to != crate::managed_agents::RespondTo::default())
@@ -137,6 +140,9 @@ fn definition_from_snapshot(
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
         parallelism: behavior.parallelism,
+        reply_placement: (behavior.reply_placement
+            != crate::managed_agents::ReplyPlacement::default())
+        .then(|| behavior.reply_placement.as_str().to_string()),
         created_at: now.to_string(),
         updated_at: now.to_string(),
     })
@@ -599,6 +605,7 @@ pub async fn confirm_team_snapshot_import(
                     .unwrap_or_default()
             },
             respond_to_allowlist: definition.respond_to_allowlist.clone(),
+            reply_placement: None,
             is_builtin: false,
             is_active: true,
             shared: false,
@@ -608,6 +615,7 @@ pub async fn confirm_team_snapshot_import(
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: definition.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
+            definition_reply_placement: definition.reply_placement.clone(),
             relay_mesh: None,
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),

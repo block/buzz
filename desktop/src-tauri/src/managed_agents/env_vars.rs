@@ -51,10 +51,11 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 ///    shows owner-only while the running agent answers anyone, for
 ///    example), or redirect the agent to an attacker-controlled relay.
 ///
-/// This list is deliberately narrow — it only covers keys with security
-/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
-/// overridable; those have dedicated UI fields but power users may want
-/// to bypass them.
+/// This list is deliberately narrow — it covers keys with identity, code
+/// execution, or security-gate implications. Ordinary behavior knobs
+/// (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
+/// overridable; reply placement is reserved because it controls the
+/// protocol-level destination of human-facing replies.
 pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Identity / secrets.
     "BUZZ_PRIVATE_KEY",
@@ -77,6 +78,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
     "BUZZ_ACP_AGENT_OWNER",
+    "BUZZ_ACP_REPLY_PLACEMENT",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.

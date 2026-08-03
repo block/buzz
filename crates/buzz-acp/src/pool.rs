@@ -551,6 +551,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Reply placement policy for human-facing channel turns.
+    pub reply_placement: crate::config::ReplyPlacement,
 }
 
 impl AgentPool {
@@ -1861,6 +1863,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                reply_placement: ctx.reply_placement,
             },
         )
     } else {
@@ -6413,6 +6416,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            reply_placement: crate::config::ReplyPlacement::Thread,
         }
     }
 

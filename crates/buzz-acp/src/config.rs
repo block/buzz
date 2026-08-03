@@ -111,6 +111,37 @@ impl std::fmt::Display for RespondTo {
     }
 }
 
+/// Where the harness should place an ordinary response to an inbound event.
+///
+/// `Thread` preserves the historical Buzz behavior. `TopLevel` keeps
+/// human-facing responses at the channel root. `FollowScope` keeps top-level
+/// channel events at the channel root while preserving the root of an
+/// existing thread. Agent-to-agent turns remain unforced so coordination can
+/// still nest intentionally.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ReplyPlacement {
+    /// Historical behavior: human-facing top-level events open a thread.
+    #[default]
+    #[value(name = "thread")]
+    Thread,
+    /// Always keep human-facing responses at the channel root.
+    #[value(name = "top-level")]
+    TopLevel,
+    /// Match the scope of the human-facing inbound event.
+    #[value(name = "follow-scope")]
+    FollowScope,
+}
+
+impl std::fmt::Display for ReplyPlacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Thread => "thread",
+            Self::TopLevel => "top-level",
+            Self::FollowScope => "follow-scope",
+        })
+    }
+}
+
 /// Permission mode for agents that support `session/set_config_option` with
 /// `configId: "mode"` (e.g. `claude-agent-acp`).
 ///
@@ -453,6 +484,15 @@ pub struct CliArgs {
     )]
     pub respond_to: RespondTo,
 
+    /// Reply placement policy for human-facing turns.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_REPLY_PLACEMENT",
+        default_value = "thread",
+        value_enum
+    )]
+    pub reply_placement: ReplyPlacement,
+
     /// Comma-separated 64-char hex pubkeys for allowlist mode.
     /// Owner pubkey is always implicitly included.
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
@@ -535,6 +575,8 @@ pub struct Config {
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
+    /// Reply placement policy for human-facing turns.
+    pub reply_placement: ReplyPlacement,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
@@ -1093,6 +1135,7 @@ impl Config {
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
+            reply_placement: args.reply_placement,
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
@@ -1123,7 +1166,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} reply_placement={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1144,6 +1187,7 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.reply_placement,
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1463,6 +1507,7 @@ mod tests {
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
+            reply_placement: ReplyPlacement::Thread,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
@@ -2430,6 +2475,30 @@ channels = "ALL"
             RespondTo::from_str("nobody", true).unwrap(),
             RespondTo::Nobody
         );
+    }
+
+    #[test]
+    fn test_reply_placement_defaults_to_thread() {
+        assert_eq!(ReplyPlacement::default(), ReplyPlacement::Thread);
+    }
+
+    #[test]
+    fn test_reply_placement_display_and_value_enum_parsing() {
+        assert_eq!(ReplyPlacement::Thread.to_string(), "thread");
+        assert_eq!(ReplyPlacement::TopLevel.to_string(), "top-level");
+        assert_eq!(ReplyPlacement::FollowScope.to_string(), "follow-scope");
+        assert_eq!(
+            ReplyPlacement::from_str("follow-scope", true).unwrap(),
+            ReplyPlacement::FollowScope
+        );
+        assert!(ReplyPlacement::from_str("invalid", true).is_err());
+    }
+
+    #[test]
+    fn test_summary_includes_reply_placement() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.reply_placement = ReplyPlacement::FollowScope;
+        assert!(config.summary().contains("reply_placement=follow-scope"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::managed_agents::types::RespondTo;
+use crate::managed_agents::types::{ReplyPlacement, RespondTo};
 use std::collections::BTreeMap;
 
 fn record() -> ManagedAgentRecord {
@@ -43,6 +43,7 @@ fn record() -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -56,6 +57,7 @@ fn record() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }
@@ -80,6 +82,7 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: "now".into(),
         updated_at: "now".into(),
     }
@@ -503,6 +506,25 @@ fn global_model_change_trips_hash_without_model_env_var() {
     assert_ne!(
         hash_a, hash_b,
         "global model change must trip hash even without a model_env_var runtime"
+    );
+}
+
+#[test]
+fn global_reply_placement_change_trips_hash() {
+    let rec = record();
+    let global_thread = GlobalAgentConfig {
+        reply_placement: Some(ReplyPlacement::Thread),
+        ..Default::default()
+    };
+    let global_follow_scope = GlobalAgentConfig {
+        reply_placement: Some(ReplyPlacement::FollowScope),
+        ..Default::default()
+    };
+
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &global_thread,),
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &global_follow_scope,),
+        "changing the global reply-placement default must trip the hash"
     );
 }
 

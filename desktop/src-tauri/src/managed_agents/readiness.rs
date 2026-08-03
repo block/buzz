@@ -1518,6 +1518,7 @@ mod tests {
             last_error_code: None,
             respond_to: Default::default(),
             respond_to_allowlist: vec![],
+            reply_placement: None,
             display_name: None,
             slug: None,
             runtime: None,
@@ -1531,9 +1532,9 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_reply_placement: None,
             relay_mesh: None,
         };
-
         let runtime = known_acp_runtime_exact("buzz-agent");
         let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
 
@@ -1547,7 +1548,6 @@ mod tests {
             Some("claude-opus-4-5")
         );
     }
-
     // ── provider-specific model fallback tests ────────────────────────────
 
     #[test]

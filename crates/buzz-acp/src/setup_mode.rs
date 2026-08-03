@@ -72,7 +72,7 @@ pub(crate) enum AcpAvailabilityStatus {
 
 use crate::{
     author_allowed,
-    config::Config,
+    config::{Config, ReplyPlacement},
     event_mentions_agent, filter,
     relay::{HarnessRelay, RelayEventPublisher},
 };
@@ -467,6 +467,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             buzz_event.channel_id,
             &buzz_event.event,
             &payload,
+            config.reply_placement,
         )
         .await
         {
@@ -590,35 +591,18 @@ async fn handle_setup_membership(
 
 /// Build and publish a setup nudge reply to the triggering event.
 ///
-/// Threading: flat reply to the thread root if one exists; otherwise reply
-/// to the triggering event itself. P-tags the asker.
+/// Threading follows the configured reply-placement policy. P-tags the asker.
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
     channel_id: Uuid,
     triggering_event: &nostr::Event,
     payload: &SetupPayload,
+    reply_placement: ReplyPlacement,
 ) -> Result<()> {
-    use buzz_sdk::ThreadRef;
-
     // Parse NIP-10 thread tags to determine reply target.
     let thread_tags = crate::queue::parse_thread_tags(triggering_event);
-
-    let thread_ref = if let Some(root_str) = &thread_tags.root_event_id {
-        // Threaded event: reply flat to the root.
-        let root_id = nostr::EventId::from_hex(root_str)
-            .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?;
-        Some(ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: root_id,
-        })
-    } else {
-        // Top-level event: reply to the triggering event.
-        Some(ThreadRef {
-            root_event_id: triggering_event.id,
-            parent_event_id: triggering_event.id,
-        })
-    };
+    let thread_ref = resolve_setup_thread_ref(reply_placement, triggering_event.id, &thread_tags)?;
 
     let body = payload.nudge_body();
     let author_hex = triggering_event.pubkey.to_hex();
@@ -643,6 +627,35 @@ async fn publish_setup_nudge(
         .map_err(|e| anyhow::anyhow!("failed to publish setup nudge: {e}"))?;
 
     Ok(())
+}
+
+/// Resolve the thread reference for a setup nudge without publishing it.
+///
+/// This mirrors the normal prompt routing policy: `thread` preserves the
+/// historical behavior, `top-level` removes the anchor, and `follow-scope`
+/// anchors only when the inbound event is already threaded.
+fn resolve_setup_thread_ref(
+    reply_placement: ReplyPlacement,
+    triggering_event_id: nostr::EventId,
+    thread_tags: &crate::queue::ThreadTags,
+) -> Result<Option<buzz_sdk::ThreadRef>> {
+    let root_id = thread_tags
+        .root_event_id
+        .as_deref()
+        .map(nostr::EventId::from_hex)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?;
+
+    let event_id = match reply_placement {
+        ReplyPlacement::Thread => root_id.or(Some(triggering_event_id)),
+        ReplyPlacement::TopLevel => None,
+        ReplyPlacement::FollowScope => root_id,
+    };
+
+    Ok(event_id.map(|id| buzz_sdk::ThreadRef {
+        root_event_id: id,
+        parent_event_id: id,
+    }))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -984,6 +997,44 @@ mod tests {
             body.contains("```buzz:config-nudge"),
             "sentinel must follow"
         );
+    }
+
+    #[test]
+    fn setup_nudge_reply_placement_matrix_matches_inbound_scope() {
+        let triggering_event_id = EventId::from_byte_array([0x11; 32]);
+        let root_hex = "a".repeat(64);
+        let threaded_tags = crate::queue::ThreadTags {
+            root_event_id: Some(root_hex.clone()),
+            parent_event_id: Some("b".repeat(64)),
+            mentioned_pubkeys: vec![],
+        };
+        let top_level_tags = crate::queue::ThreadTags {
+            root_event_id: None,
+            parent_event_id: None,
+            mentioned_pubkeys: vec![],
+        };
+        let root_id = EventId::from_hex(&root_hex).unwrap();
+
+        let cases = [
+            (
+                ReplyPlacement::Thread,
+                Some(triggering_event_id),
+                Some(root_id),
+            ),
+            (ReplyPlacement::TopLevel, None, None),
+            (ReplyPlacement::FollowScope, None, Some(root_id)),
+        ];
+        for (mode, expected_top_level, expected_thread) in cases {
+            let top_level = resolve_setup_thread_ref(mode, triggering_event_id, &top_level_tags)
+                .unwrap()
+                .map(|thread| thread.root_event_id);
+            assert_eq!(top_level, expected_top_level, "mode={mode:?}");
+
+            let threaded = resolve_setup_thread_ref(mode, triggering_event_id, &threaded_tags)
+                .unwrap()
+                .map(|thread| thread.root_event_id);
+            assert_eq!(threaded, expected_thread, "mode={mode:?}");
+        }
     }
 
     // ── should_nudge_for_event gate tests ─────────────────────────────────────

@@ -123,6 +123,25 @@ test("duplicatePersonaDialogState carries envVars and namePool into the duplicat
   assert.deepEqual(state.initialValues.namePool, ["alice", "bob"]);
 });
 
+test("persona dialog carries a reply-placement-only behavior setting", () => {
+  const state = editPersonaDialogState({
+    id: "persona-routing",
+    displayName: "Routing agent",
+    avatarUrl: null,
+    systemPrompt: "Route replies.",
+    runtime: null,
+    model: null,
+    provider: null,
+    isBuiltIn: false,
+    isActive: true,
+    replyPlacement: "follow-scope",
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  });
+
+  assert.equal(state.initialValues.behavior?.replyPlacement, "follow-scope");
+});
+
 test("editPersonaDialogState preserves the persona id for updates", () => {
   const state = editPersonaDialogState({
     id: "persona-2",
@@ -258,6 +277,7 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
     parallelism: 4,
+    replyPlacement: undefined,
   };
   assert.deepEqual(
     editPersonaDialogState(persona).initialValues.behavior,

@@ -3,6 +3,7 @@ import type {
   AgentPersona,
   CatalogSourceCoordinate,
   RelayEvent,
+  ReplyPlacementMode,
   RespondToMode,
 } from "@/shared/api/types";
 import { KIND_PERSONA } from "@/shared/constants/kinds";
@@ -19,6 +20,7 @@ type CatalogAgentProjection = {
   namePool: string[];
   respondTo: RespondToMode | null;
   parallelism: number | null;
+  replyPlacement: ReplyPlacementMode | null;
 };
 
 export type PersonaCatalogPublication = {
@@ -165,6 +167,15 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
     parsed.parallelism <= 32
       ? parsed.parallelism
       : null;
+  const rawReplyPlacement = parsed.reply_placement;
+  const replyPlacement =
+    rawReplyPlacement === undefined || rawReplyPlacement === null
+      ? null
+      : rawReplyPlacement === "thread" ||
+          rawReplyPlacement === "top-level" ||
+          rawReplyPlacement === "follow-scope"
+        ? rawReplyPlacement
+        : null;
 
   return {
     displayName: parsed.display_name,
@@ -177,6 +188,7 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
     namePool,
     respondTo,
     parallelism,
+    replyPlacement,
   };
 }
 
@@ -306,6 +318,7 @@ function publicationToPersona(
     respondTo: publication.agent.respondTo,
     respondToAllowlist: [],
     parallelism: publication.agent.parallelism,
+    replyPlacement: publication.agent.replyPlacement,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

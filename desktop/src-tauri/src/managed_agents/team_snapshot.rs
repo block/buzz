@@ -296,6 +296,7 @@ mod tests {
             last_error_code: None,
             respond_to: RespondTo::default(),
             respond_to_allowlist: vec![],
+            reply_placement: None,
             slug: Some(name.to_string()),
             runtime: Some("goose".to_string()),
             name_pool: vec![],
@@ -308,6 +309,7 @@ mod tests {
             catalog_source: None,
             definition_respond_to_allowlist: vec![],
             definition_parallelism: None,
+            definition_reply_placement: None,
             relay_mesh: None,
         }
     }

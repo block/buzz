@@ -148,6 +148,13 @@ with a TypeScript lookup table or an id comparison in a component.
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
 
+12. **Reply placement is a typed, inherited managed-agent setting.** The
+    Desktop surfaces expose `thread`, `top-level`, and `follow-scope`; the
+    effective precedence is instance override → persona → global → historical
+    `thread` fallback. Persisted persona wire values must remain fail-closed at
+    the spawn/mint boundary, and the launcher must pass the resolved mode via
+    `BUZZ_ACP_REPLY_PLACEMENT` rather than allowing user env vars to override it.
+
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
@@ -173,6 +180,8 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- Rust/UI: reply-placement routing, inheritance, persistence, and launcher
+  propagation tests cover all three modes and legacy records without the field.
 
 ## Keep this file true
 

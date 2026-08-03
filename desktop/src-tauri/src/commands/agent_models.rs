@@ -905,7 +905,6 @@ pub async fn update_managed_agent(
             record.model = Some(model_ref.clone());
             record.relay_mesh = Some(crate::managed_agents::RelayMeshConfig { model_ref });
         }
-
         // Inbound author gate: merge patch onto current values, then validate
         // the merged state. This lets a single update switch to Allowlist AND
         // supply pubkeys atomically.
@@ -928,11 +927,11 @@ pub async fn update_managed_agent(
         if input.respond_to_allowlist.is_some() {
             record.respond_to_allowlist = prospective_allowlist;
         }
-
+        if let Some(reply_placement) = input.reply_placement {
+            record.reply_placement = reply_placement;
+        }
         record.updated_at = now_iso();
-
         save_managed_agents(&app, &records)?;
-
         let record = records
             .iter()
             .find(|r| r.pubkey == input.pubkey)
@@ -970,13 +969,8 @@ pub async fn update_managed_agent(
 
         let summary = {
             let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )?
+            let global = crate::managed_agents::load_global_agent_config(&app)?;
+            build_managed_agent_summary(&app, record, &runtimes, &personas, &global)?
         };
         let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
         (summary, sync_params, rollback)

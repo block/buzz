@@ -5,6 +5,8 @@ import { CreateAgentRespondToField } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
+import { ReplyPlacementField } from "./ReplyPlacementField";
+import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
@@ -47,6 +49,9 @@ export function PersonaAdvancedFields({
   fileSatisfiedEnvKeys?: readonly string[];
   hiddenEnvKeys?: readonly string[];
 }) {
+  const { globalConfig } = useGlobalAgentConfig();
+  const effectiveReplyPlacement = globalConfig.reply_placement ?? "thread";
+
   return (
     <div className="space-y-5 pt-2">
       <CreateAgentRespondToField
@@ -63,6 +68,17 @@ export function PersonaAdvancedFields({
           onBehaviorDraftChange({ ...behaviorDraft, respondTo: mode })
         }
         variant="persona"
+      />
+
+      <ReplyPlacementField
+        allowInherit
+        disabled={disabled}
+        effectiveValue={effectiveReplyPlacement}
+        inheritLabel="Use global default"
+        onChange={(replyPlacement) =>
+          onBehaviorDraftChange({ ...behaviorDraft, replyPlacement })
+        }
+        value={behaviorDraft.replyPlacement}
       />
 
       <div className="grid gap-5 sm:grid-cols-2">

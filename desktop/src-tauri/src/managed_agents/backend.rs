@@ -333,23 +333,36 @@ pub(crate) fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
     result
 }
 
-/// Collect string values from `request["agent"]["env_vars"]` (if present)
-/// to feed into [`redact_secrets_with`]. Returns an empty Vec if the
-/// request shape doesn't match, which is fine — falls back to the default
-/// prefix-based scrubbing.
+/// Collect non-empty string values from every provider-request environment
+/// map that can carry a user or desktop-resolved value. Providers may echo
+/// any of these maps in stderr or a structured error response, so all three
+/// must feed the literal-value redactor:
+/// `agent.env_vars`, `agent.launch.env`, and `agent.launch.policy_env`.
+/// Missing, null, malformed, or non-object maps are ignored safely.
+fn append_env_string_values(value: Option<&serde_json::Value>, secrets: &mut Vec<String>) {
+    let Some(obj) = value.and_then(|value| value.as_object()) else {
+        return;
+    };
+    secrets.extend(
+        obj.values()
+            .filter_map(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(String::from),
+    );
+}
+
 fn env_secrets_from_request(request: &serde_json::Value) -> Vec<String> {
-    request
-        .get("agent")
-        .and_then(|a| a.get("env_vars"))
-        .and_then(|e| e.as_object())
-        .map(|obj| {
-            obj.values()
-                .filter_map(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(agent) = request.get("agent").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut secrets = Vec::new();
+    append_env_string_values(agent.get("env_vars"), &mut secrets);
+    if let Some(launch) = agent.get("launch").and_then(|value| value.as_object()) {
+        append_env_string_values(launch.get("env"), &mut secrets);
+        append_env_string_values(launch.get("policy_env"), &mut secrets);
+    }
+    secrets
 }
 
 /// Public-in-crate helper: redact every non-empty value from `env` (plus
@@ -632,12 +645,22 @@ mod tests {
                     "EMPTY": "",
                     "NUMERIC": 42,
                 },
+                "launch": {
+                    "env": {
+                        "LAUNCH_SECRET": "launch-secret-value"
+                    },
+                    "policy_env": {
+                        "POLICY_SECRET": "policy-secret-value"
+                    }
+                }
             },
         });
         let secrets = env_secrets_from_request(&req);
         assert!(secrets.iter().any(|v| v == "sk-ant-test"));
-        // Empty and non-string values are filtered out.
-        assert_eq!(secrets.len(), 1);
+        assert!(secrets.iter().any(|v| v == "launch-secret-value"));
+        assert!(secrets.iter().any(|v| v == "policy-secret-value"));
+        // Empty and non-string values are filtered out across all three maps.
+        assert_eq!(secrets.len(), 3);
     }
 
     #[test]
@@ -647,6 +670,76 @@ mod tests {
         assert!(
             env_secrets_from_request(&serde_json::json!({"agent": {"env_vars": null}})).is_empty()
         );
+        assert!(env_secrets_from_request(&serde_json::json!({
+            "agent": {"launch": {"env": [], "policy_env": "not-an-object"}}
+        }))
+        .is_empty());
+    }
+
+    #[cfg(unix)]
+    fn write_provider_script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("provider temp directory");
+        let path = dir.path().join("fake-provider");
+        std::fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n"))
+            .expect("provider script");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("provider executable");
+        (dir, path)
+    }
+
+    #[cfg(unix)]
+    fn request_with_launch_secrets() -> serde_json::Value {
+        serde_json::json!({
+            "op": "deploy",
+            "agent": {
+                "env_vars": {"LEGACY_SECRET": "legacy-secret-value"},
+                "launch": {
+                    "env": {"LAUNCH_SECRET": "launch-secret-value"},
+                    "policy_env": {"POLICY_SECRET": "policy-secret-value"}
+                }
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_provider_redacts_launch_only_secret_from_stderr() {
+        let secret = "launch-secret-value";
+        let (_dir, provider) = write_provider_script(&format!(
+            "printf 'provider failure: {secret}\\n' >&2\nexit 1"
+        ));
+        let error = invoke_provider(
+            &provider,
+            &request_with_launch_secrets(),
+            Duration::from_secs(5),
+        )
+        .expect_err("provider stderr failure must surface as an error");
+
+        assert!(!error.contains(secret), "launch secret leaked: {error}");
+        assert!(error.contains("[REDACTED]"), "missing redaction: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invoke_provider_redacts_launch_only_secret_from_structured_error() {
+        let secret = "policy-secret-value";
+        let (_dir, provider) = write_provider_script(&format!(
+            "printf '%s\\n' '{{\"ok\":false,\"error\":\"provider echoed {secret}\"}}'"
+        ));
+        let error = invoke_provider(
+            &provider,
+            &request_with_launch_secrets(),
+            Duration::from_secs(5),
+        )
+        .expect_err("structured provider error must surface as an error");
+
+        assert!(!error.contains(secret), "policy secret leaked: {error}");
+        assert!(error.contains("[REDACTED]"), "missing redaction: {error}");
     }
 
     #[test]

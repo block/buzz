@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import * as replyPlacement from "@/shared/api/replyPlacement";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -41,9 +42,7 @@ import type {
   GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
-
 export * from "@/shared/api/tauriChannels";
-
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
 type RawAddChannelMembersResult = {
@@ -162,20 +161,17 @@ export type RawManagedAgent = {
   // `"owner-only"` / `[]` in `fromRawManagedAgent`.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
-};
-
+} & replyPlacement.RawManagedAgentReplyPlacement;
 type RawCreateManagedAgentResponse = {
   agent: RawManagedAgent;
   private_key_nsec: string;
   profile_sync_error: string | null;
   spawn_error: string | null;
 };
-
 type RawManagedAgentLog = {
   content: string;
   log_path: string;
 };
-
 export type RawAcpRuntimeCatalogEntry = {
   id: string;
   label: string;
@@ -731,6 +727,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     // Real agent records always include them (defaulted server-side).
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
+    ...replyPlacement.normalizeRawManagedAgentReplyPlacement(agent),
   };
 }
 
@@ -866,6 +863,9 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         backend: input.backend,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
+        ...replyPlacement.createManagedAgentReplyPlacement(
+          input.replyPlacement,
+        ),
         relayMesh: input.relayMesh,
       },
     },

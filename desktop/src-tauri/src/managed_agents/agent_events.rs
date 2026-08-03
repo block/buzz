@@ -26,7 +26,7 @@ use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::{ManagedAgentRecord, RespondTo};
+use super::{ManagedAgentRecord, ReplyPlacement, RespondTo};
 
 /// The JSON body stored in a managed-agent event's content field.
 ///
@@ -57,6 +57,10 @@ pub struct ManagedAgentEventContent {
     /// public keys, not secrets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
+    /// Explicit instance override. Omitted means the linked definition or
+    /// global default supplies the effective mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_placement: Option<ReplyPlacement>,
 }
 
 /// Project a `ManagedAgentRecord` onto the content fields published in
@@ -103,6 +107,7 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         parallelism: record.parallelism,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        reply_placement: record.reply_placement,
     }
 }
 
@@ -200,6 +205,7 @@ mod tests {
             last_error_code: None,
             respond_to: RespondTo::Allowlist,
             respond_to_allowlist: vec!["79be667e".to_string()],
+            reply_placement: None,
             // Unified-model fields carry real values so the exclusion test
             // proves they are absent from the wire, not vacuously empty.
             display_name: Some("Display Name Secretish".to_string()),
@@ -215,6 +221,7 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_reply_placement: None,
             relay_mesh: None,
         }
     }
@@ -336,6 +343,16 @@ mod tests {
         let a = serde_json::to_string(&agent_event_content(&agent)).unwrap();
         let b = serde_json::to_string(&agent_event_content(&agent)).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn projection_persists_explicit_reply_placement_override() {
+        let mut agent = sample_agent();
+        agent.reply_placement = Some(ReplyPlacement::TopLevel);
+        let content = agent_event_content(&agent);
+        assert_eq!(content.reply_placement, Some(ReplyPlacement::TopLevel));
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"reply_placement\":\"top-level\""));
     }
 
     /// Mutating only runtime fields must NOT change the projection — the

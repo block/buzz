@@ -1,4 +1,8 @@
-import type { PersonaBehaviorInput, RespondToMode } from "@/shared/api/types";
+import type {
+  PersonaBehaviorInput,
+  ReplyPlacementMode,
+  RespondToMode,
+} from "@/shared/api/types";
 
 /**
  * Dialog-side draft of a definition's NIP-AP behavioral group.
@@ -15,12 +19,14 @@ export type PersonaBehaviorDraft = {
   respondToAllowlist: string[];
   /** Raw text; only `parseInt > 0` submits (legacy dialog parity). */
   parallelism: string;
+  replyPlacement: ReplyPlacementMode | null;
 };
 
 export const emptyPersonaBehaviorDraft: PersonaBehaviorDraft = {
   respondTo: null,
   respondToAllowlist: [],
   parallelism: "",
+  replyPlacement: null,
 };
 
 /** Seed the draft from a dialog-state behavior group (edit/duplicate). */
@@ -32,6 +38,7 @@ export function draftFromBehavior(
     respondToAllowlist: [...(behavior?.respondToAllowlist ?? [])],
     parallelism:
       behavior?.parallelism != null ? String(behavior.parallelism) : "",
+    replyPlacement: behavior?.replyPlacement ?? null,
   };
 }
 
@@ -56,9 +63,12 @@ function behaviorFromDraft(
     respondToAllowlist:
       draft.respondTo === "allowlist" ? draft.respondToAllowlist : undefined,
     parallelism: parallelism > 0 ? parallelism : undefined,
+    replyPlacement: draft.replyPlacement ?? undefined,
   };
   const isEmpty =
-    group.respondTo === undefined && group.parallelism === undefined;
+    group.respondTo === undefined &&
+    group.parallelism === undefined &&
+    group.replyPlacement === undefined;
   return isEmpty ? undefined : group;
 }
 

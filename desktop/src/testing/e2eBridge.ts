@@ -90,6 +90,8 @@ type MockManagedAgentSeed = {
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
+  replyPlacement?: RawManagedAgent["reply_placement"];
+  replyPlacementOverride?: RawManagedAgent["reply_placement_override"];
 };
 
 type MockManagedAgentRuntimeSeed = {
@@ -126,6 +128,7 @@ type MockPersonaSeed = {
   namePool?: string[];
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
+  replyPlacement?: "thread" | "top-level" | "follow-scope" | null;
 };
 
 type MockTeamSeed = {
@@ -435,6 +438,7 @@ type E2eConfig = {
       provider: string | null;
       model: string | null;
       preferred_runtime?: string | null;
+      reply_placement?: "thread" | "top-level" | "follow-scope" | null;
     };
     /** File-layer config returned by runtime id. */
     runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
@@ -811,6 +815,8 @@ type RawManagedAgent = {
   backend_agent_id: string | null;
   respond_to: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist: string[];
+  reply_placement?: "thread" | "top-level" | "follow-scope";
+  reply_placement_override?: "thread" | "top-level" | "follow-scope" | null;
 };
 
 type RawCreateManagedAgentResponse = {
@@ -869,6 +875,7 @@ type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  reply_placement?: "thread" | "top-level" | "follow-scope" | null;
   created_at: string;
   updated_at: string;
 };
@@ -1582,6 +1589,8 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     respond_to_allowlist: agent.respond_to_allowlist
       ? [...agent.respond_to_allowlist]
       : [],
+    reply_placement: agent.reply_placement ?? "thread",
+    reply_placement_override: agent.reply_placement_override ?? null,
   };
 }
 
@@ -2115,6 +2124,8 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
     respond_to_allowlist: seed.respondToAllowlist ?? [],
+    reply_placement: seed.replyPlacement ?? "thread",
+    reply_placement_override: seed.replyPlacementOverride ?? null,
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
@@ -2262,6 +2273,7 @@ function resetMockPersonas(config?: E2eConfig) {
         persona.respondTo === "allowlist"
           ? [...(persona.respondToAllowlist ?? [])]
           : [],
+      reply_placement: persona.replyPlacement ?? null,
       is_builtin: false,
       is_active: persona.isActive ?? true,
       shared: persona.shared ?? false,
@@ -7333,6 +7345,7 @@ let mockGlobalAgentConfig: {
   provider: string | null;
   model: string | null;
   preferred_runtime?: string | null;
+  reply_placement?: "thread" | "top-level" | "follow-scope" | null;
 } | null = null;
 
 // Per-page get_nsec call counter for sequenced error testing.
@@ -7576,6 +7589,7 @@ type PersonaBehaviorInput = {
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
   parallelism?: number;
+  replyPlacement?: "thread" | "top-level" | "follow-scope";
 };
 
 /** Mirrors `apply_persona_behavior`: replace all four as a unit. */
@@ -7592,6 +7606,7 @@ function applyMockPersonaBehavior(
       ? [...(behavior.respondToAllowlist ?? [])]
       : [];
   persona.parallelism = behavior.parallelism ?? null;
+  persona.reply_placement = behavior.replyPlacement ?? null;
 }
 
 async function handleCreatePersona(args: {
@@ -7788,6 +7803,7 @@ function upsertMockPersonaEvent(persona: RawPersona): void {
       respond_to: persona.respond_to ?? null,
       respond_to_allowlist: persona.respond_to_allowlist ?? [],
       parallelism: persona.parallelism ?? null,
+      reply_placement: persona.reply_placement ?? null,
     }),
     sig: "0".repeat(128),
   };
@@ -8040,6 +8056,7 @@ async function handleCreateManagedAgent(
         | { type: "provider"; id: string; config: Record<string, unknown> };
       respondTo?: "owner-only" | "allowlist" | "anyone";
       respondToAllowlist?: string[];
+      replyPlacement?: "thread" | "top-level" | "follow-scope";
     };
   },
   config: E2eConfig | undefined,
@@ -8069,6 +8086,11 @@ async function handleCreateManagedAgent(
       : (linkedPersona?.respond_to_allowlist ?? []);
   const mintParallelism =
     args.input.parallelism ?? linkedPersona?.parallelism ?? 1;
+  const mintReplyPlacement =
+    args.input.replyPlacement ??
+    linkedPersona?.reply_placement ??
+    mockGlobalAgentConfig?.reply_placement ??
+    "thread";
   const personaAvatarUrl =
     args.input.personaId === undefined
       ? null
@@ -8125,6 +8147,8 @@ async function handleCreateManagedAgent(
     backend_agent_id: null,
     respond_to: mintRespondTo,
     respond_to_allowlist: [...mintRespondToAllowlist],
+    reply_placement: mintReplyPlacement,
+    reply_placement_override: args.input.replyPlacement ?? null,
     private_key_nsec: `nsec1mock${pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${mintParallelism}`,
@@ -8371,6 +8395,7 @@ async function handleUpdateManagedAgent(args: {
     envVars?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
+    replyPlacement?: "thread" | "top-level" | "follow-scope" | null;
   };
 }): Promise<{ agent: RawManagedAgent; profile_sync_error: string | null }> {
   const agent = getMockManagedAgent(args.input.pubkey);
@@ -8391,6 +8416,20 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.respondToAllowlist !== undefined) {
     agent.respond_to_allowlist = args.input.respondToAllowlist;
+  }
+  if (args.input.replyPlacement !== undefined) {
+    agent.reply_placement_override = args.input.replyPlacement;
+    if (args.input.replyPlacement !== null) {
+      agent.reply_placement = args.input.replyPlacement;
+    } else {
+      const persona = agent.persona_id
+        ? mockPersonas.find((candidate) => candidate.id === agent.persona_id)
+        : undefined;
+      agent.reply_placement =
+        persona?.reply_placement ??
+        mockGlobalAgentConfig?.reply_placement ??
+        "thread";
+    }
   }
   agent.updated_at = new Date().toISOString();
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };
@@ -11578,6 +11617,7 @@ export function maybeInstallE2eTauriMocks() {
             provider: null,
             model: null,
             preferred_runtime: null,
+            reply_placement: null,
           }
         );
       }
@@ -11592,6 +11632,7 @@ export function maybeInstallE2eTauriMocks() {
               provider: string | null;
               model: string | null;
               preferred_runtime: string | null;
+              reply_placement: "thread" | "top-level" | "follow-scope" | null;
             };
           }
         ).config;

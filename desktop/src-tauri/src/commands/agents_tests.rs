@@ -47,6 +47,7 @@ fn bare_agent_record(
         last_error_code: None,
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -62,6 +63,7 @@ fn bare_agent_record(
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        definition_reply_placement: None,
     }
 }
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
@@ -85,6 +87,7 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        reply_placement: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
@@ -429,13 +432,28 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     ))
     .expect("sample record");
 
+    let launch = crate::managed_agents::EffectiveHarnessDescriptor {
+        command: "goose".to_string(),
+        args: vec!["--proof".to_string()],
+        env: std::collections::BTreeMap::from([(
+            "FAKE_LAUNCH_MARKER".to_string(),
+            "from-descriptor".to_string(),
+        )]),
+    };
     let payload = deploy_payload_json(
         &record,
         "wss://relay.example".to_string(),
         Some("gpt-x".to_string()),
         Some("openai".to_string()),
         None,
+        crate::managed_agents::ReplyPlacement::Thread,
         std::collections::BTreeMap::new(),
+        launch,
+        std::collections::BTreeMap::from([(
+            "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
+            "policy-prompt".to_string(),
+        )]),
+        Some("owner-proof".to_string()),
     );
 
     assert_eq!(payload["parallelism"], 4);
@@ -444,4 +462,312 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     assert_eq!(payload["model"], "gpt-x");
     assert_eq!(payload["provider"], "openai");
     assert_eq!(payload["relay_url"], "wss://relay.example");
+    assert_eq!(payload["launch"]["command"], "goose");
+    assert_eq!(payload["launch"]["args"][0], "--proof");
+    assert_eq!(
+        payload["launch"]["env"]["FAKE_LAUNCH_MARKER"],
+        "from-descriptor"
+    );
+    assert_eq!(payload["launch"]["owner_pubkey"], "owner-proof");
+    assert_eq!(
+        payload["launch"]["policy_env"]["BUZZ_ACP_SYSTEM_PROMPT"],
+        "policy-prompt"
+    );
+}
+
+#[test]
+fn deploy_payload_carries_each_reply_placement_to_provider_launch_env() {
+    use crate::managed_agents::ReplyPlacement;
+
+    for (mode, wire) in [
+        (ReplyPlacement::Thread, "thread"),
+        (ReplyPlacement::TopLevel, "top-level"),
+        (ReplyPlacement::FollowScope, "follow-scope"),
+    ] {
+        let record = bare_agent_record(None, None, None);
+        let global = crate::managed_agents::GlobalAgentConfig {
+            reply_placement: Some(mode),
+            ..Default::default()
+        };
+        let (_, resolved_mode) = resolve_deploy_config(&record, &[], Ok(global))
+            .expect("provider deploy mode should resolve through the shared helper");
+        let payload = deploy_payload_json(
+            &record,
+            "wss://relay.example".to_string(),
+            None,
+            None,
+            None,
+            resolved_mode,
+            std::collections::BTreeMap::new(),
+            crate::managed_agents::EffectiveHarnessDescriptor {
+                command: "goose".to_string(),
+                args: vec![],
+                env: std::collections::BTreeMap::new(),
+            },
+            std::collections::BTreeMap::new(),
+            Some("owner-proof".to_string()),
+        );
+
+        assert_eq!(payload["reply_placement"], wire);
+        assert_eq!(
+            payload["launch"]["policy_env"]["BUZZ_ACP_REPLY_PLACEMENT"],
+            wire
+        );
+    }
+}
+
+#[test]
+fn provider_deploy_refuses_malformed_global_config() {
+    let record = bare_agent_record(None, None, None);
+    let err = resolve_deploy_config(
+        &record,
+        &[],
+        Err("failed to parse global agent config: invalid json".to_string()),
+    )
+    .expect_err("provider deploy must not substitute the thread default");
+
+    assert!(err.contains("failed to parse global agent config"));
+}
+
+#[test]
+fn provider_policy_env_contains_all_desktop_resolved_launch_defaults() {
+    use crate::managed_agents::{ReplyPlacement, TeamRecord};
+
+    let mut record = bare_agent_record(None, None, None);
+    record.display_name = Some("Policy Display".to_string());
+    record.team_id = Some("team-1".to_string());
+    record.idle_timeout_seconds = Some(11);
+    record.max_turn_duration_seconds = Some(22);
+    record.parallelism = 4;
+
+    let teams = vec![TeamRecord {
+        id: "team-1".to_string(),
+        name: "Team".to_string(),
+        description: None,
+        instructions: Some("shared team instructions".to_string()),
+        persona_ids: vec![],
+        is_builtin: false,
+        source_dir: None,
+        is_symlink: false,
+        symlink_target: None,
+        version: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    }];
+
+    let policy = crate::managed_agents::resolve_effective_launch_policy_env(
+        &record,
+        "goose",
+        &teams,
+        Some("desktop prompt"),
+        Some("desktop model"),
+        ReplyPlacement::FollowScope,
+        true,
+    );
+
+    for (key, expected) in [
+        ("GOOSE_MODE", "auto"),
+        ("BUZZ_ACP_LAZY_POOL", "true"),
+        ("BUZZ_ACP_RELAY_OBSERVER", "true"),
+        ("BUZZ_ACP_SYSTEM_PROMPT", "desktop prompt"),
+        ("BUZZ_ACP_MODEL", "desktop model"),
+        ("BUZZ_ACP_IDLE_TIMEOUT", "11"),
+        ("BUZZ_ACP_MAX_TURN_DURATION", "22"),
+        ("BUZZ_ACP_AGENTS", "4"),
+        ("BUZZ_ACP_SESSION_TITLE", "Policy Display"),
+        ("BUZZ_ACP_TEAM_INSTRUCTIONS", "shared team instructions"),
+        ("BUZZ_ACP_REPLY_PLACEMENT", "follow-scope"),
+    ] {
+        assert_eq!(policy.get(key).map(String::as_str), Some(expected), "{key}");
+    }
+
+    let hooks = crate::managed_agents::resolve_effective_launch_policy_env(
+        &record,
+        "buzz-agent",
+        &teams,
+        None,
+        None,
+        ReplyPlacement::Thread,
+        true,
+    );
+    assert_eq!(hooks.get("MCP_HOOK_SERVERS").map(String::as_str), Some("*"));
+}
+
+/// The provider boundary must be executable, not just JSON-shaped: a fake
+/// provider applies the launch contract to a fake harness and the harness
+/// records the environment it received. The reserved reply-placement key is
+/// deliberately poisoned in the user env to prove the policy value wins.
+#[cfg(unix)]
+#[test]
+fn provider_deploy_executes_launch_contract_and_preserves_reply_placement() {
+    use crate::managed_agents::provider_deploy;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    fn shell_quote(path: &Path) -> String {
+        let value = path.to_string_lossy().replace('\'', "'\\\"'\\\"'");
+        format!("'{value}'")
+    }
+
+    fn make_executable(path: &Path) {
+        let mut permissions = fs::metadata(path).expect("script metadata").permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).expect("make script executable");
+    }
+
+    let dir = tempfile::tempdir().expect("temporary provider directory");
+    let harness_path = dir.path().join("fake-harness");
+    let observed_path = dir.path().join("observed-env");
+    let provider_path = dir.path().join("fake-provider");
+
+    fs::write(
+        &harness_path,
+        format!(
+            "#!/bin/sh\nset -eu\nprintf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \\
+\"$FAKE_LAUNCH_MARKER\" \\
+\"$BUZZ_ACP_REPLY_PLACEMENT\" \\
+\"$BUZZ_ACP_SYSTEM_PROMPT\" \\
+\"$BUZZ_ACP_IDLE_TIMEOUT\" \\
+\"$BUZZ_ACP_MAX_TURN_DURATION\" \\
+\"$BUZZ_ACP_AGENTS\" \\
+\"$GOOSE_MODE\" \\
+\"$BUZZ_ACP_LAZY_POOL\" \\
+\"$BUZZ_ACP_RELAY_OBSERVER\" \\
+\"$BUZZ_ACP_SESSION_TITLE\" \\
+\"$BUZZ_ACP_TEAM_INSTRUCTIONS\" \\
+\"$1:$2\" > {}\n",
+            shell_quote(&observed_path)
+        ),
+    )
+    .expect("write fake harness");
+    make_executable(&harness_path);
+
+    fs::write(
+        &provider_path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+request = json.load(sys.stdin)
+agent = request["agent"]
+launch = agent["launch"]
+assert isinstance(launch["command"], str) and launch["command"]
+assert isinstance(launch["args"], list)
+assert isinstance(launch["env"], dict)
+assert isinstance(launch["policy_env"], dict)
+assert launch["owner_pubkey"]
+policy_env = launch["policy_env"]
+launch_env = launch["env"]
+env = os.environ.copy()
+env["BUZZ_RELAY_URL"] = agent["relay_url"]
+env["BUZZ_PRIVATE_KEY"] = agent["private_key_nsec"]
+if agent.get("auth_tag"):
+    env["BUZZ_AUTH_TAG"] = agent["auth_tag"]
+else:
+    env["BUZZ_ACP_AGENT_OWNER"] = launch["owner_pubkey"]
+env.update(policy_env)
+env.update(launch_env)
+# The policy key is reserved: it wins even if launch.env contained a stale value.
+env["BUZZ_ACP_REPLY_PLACEMENT"] = policy_env["BUZZ_ACP_REPLY_PLACEMENT"]
+subprocess.run(
+    [launch["command"], *launch["args"]],
+    check=True,
+    env=env,
+)
+print(json.dumps({"ok": True, "agent_id": "fake-provider"}))
+"#,
+    )
+    .expect("write fake provider");
+    make_executable(&provider_path);
+
+    let _path_guard = crate::managed_agents::lock_path_mutex();
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let provider_path_value = format!(
+        "{}:{}",
+        dir.path().display(),
+        original_path.to_string_lossy()
+    );
+    std::env::set_var("PATH", provider_path_value);
+
+    for mode in [
+        crate::managed_agents::ReplyPlacement::Thread,
+        crate::managed_agents::ReplyPlacement::TopLevel,
+        crate::managed_agents::ReplyPlacement::FollowScope,
+    ] {
+        let launch = crate::managed_agents::EffectiveHarnessDescriptor {
+            command: "fake-harness".to_string(),
+            args: vec!["--contract".to_string(), "v1".to_string()],
+            env: std::collections::BTreeMap::from([
+                ("BUZZ_ACP_REPLY_PLACEMENT".to_string(), "thread".to_string()),
+                (
+                    "FAKE_LAUNCH_MARKER".to_string(),
+                    "from-descriptor".to_string(),
+                ),
+                (
+                    "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
+                    "user-prompt".to_string(),
+                ),
+                ("BUZZ_ACP_IDLE_TIMEOUT".to_string(), "99".to_string()),
+            ]),
+        };
+        let policy_env = std::collections::BTreeMap::from([
+            (
+                "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
+                "desktop-prompt".to_string(),
+            ),
+            ("BUZZ_ACP_IDLE_TIMEOUT".to_string(), "11".to_string()),
+            ("BUZZ_ACP_MAX_TURN_DURATION".to_string(), "22".to_string()),
+            ("BUZZ_ACP_AGENTS".to_string(), "4".to_string()),
+            ("GOOSE_MODE".to_string(), "auto".to_string()),
+            ("BUZZ_ACP_LAZY_POOL".to_string(), "true".to_string()),
+            ("BUZZ_ACP_RELAY_OBSERVER".to_string(), "true".to_string()),
+            (
+                "BUZZ_ACP_SESSION_TITLE".to_string(),
+                "Policy Display".to_string(),
+            ),
+            (
+                "BUZZ_ACP_TEAM_INSTRUCTIONS".to_string(),
+                "shared team instructions".to_string(),
+            ),
+            (
+                "BUZZ_ACP_REPLY_PLACEMENT".to_string(),
+                mode.as_str().to_string(),
+            ),
+        ]);
+        let payload = deploy_payload_json(
+            &bare_agent_record(None, None, None),
+            "wss://relay.example".to_string(),
+            None,
+            None,
+            None,
+            mode,
+            std::collections::BTreeMap::from([(
+                "BUZZ_ACP_REPLY_PLACEMENT".to_string(),
+                "thread".to_string(),
+            )]),
+            launch,
+            policy_env,
+            Some("owner-proof".to_string()),
+        );
+
+        let agent_id = provider_deploy(&provider_path, &payload, &serde_json::json!({}))
+            .expect("fake provider deploy");
+        assert_eq!(agent_id, "fake-provider");
+        assert!(payload["launch"]["env"]
+            .get("BUZZ_ACP_REPLY_PLACEMENT")
+            .is_none());
+        let observed = fs::read_to_string(&observed_path).expect("fake harness output");
+        assert_eq!(
+            observed,
+            format!(
+                "from-descriptor|{}|user-prompt|99|22|4|auto|true|true|Policy Display|shared team instructions|--contract:v1",
+                mode.as_str()
+            )
+        );
+    }
+
+    std::env::set_var("PATH", original_path);
 }

@@ -64,7 +64,7 @@ pub use personas::*;
 pub use process_lifecycle::*;
 pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, resolve_effective_harness_descriptor,
-    AgentReadiness, Requirement,
+    AgentReadiness, EffectiveHarnessDescriptor, Requirement,
 };
 pub use relay_mesh::*;
 pub use repos::{

@@ -26,6 +26,7 @@ fn definition(
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        reply_placement: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
@@ -77,6 +78,7 @@ fn record(
         last_error_code: None,
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -92,6 +94,7 @@ fn record(
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        definition_reply_placement: None,
     }
 }
 

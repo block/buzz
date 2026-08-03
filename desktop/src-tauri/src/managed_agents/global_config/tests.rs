@@ -4,7 +4,9 @@ use super::{
     normalize_global_config_fields, resolve_effective_model_provider, strip_empty_env_vars,
     validate_global_config, GlobalAgentConfig,
 };
-use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord, RespondTo};
+use crate::managed_agents::{
+    AgentDefinition, BackendKind, ManagedAgentRecord, ReplyPlacement, RespondTo,
+};
 
 fn config_with_env(pairs: &[(&str, &str)]) -> GlobalAgentConfig {
     GlobalAgentConfig {
@@ -267,6 +269,7 @@ fn roundtrip_serialization() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
         preferred_runtime: Some("claude".to_string()),
+        reply_placement: Some(ReplyPlacement::FollowScope),
     };
     let json = serde_json::to_string(&config).expect("serialize");
     let back: GlobalAgentConfig = serde_json::from_str(&json).expect("deserialize");
@@ -292,6 +295,10 @@ fn default_global_config_serializes_all_fields() {
     assert!(
         json.contains("\"model\""),
         "serialized JSON must always include model; got: {json}"
+    );
+    assert!(
+        json.contains("\"reply_placement\""),
+        "serialized JSON must always include reply_placement; got: {json}"
     );
 }
 
@@ -337,6 +344,7 @@ fn bare_record() -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        reply_placement: None,
         display_name: None,
         slug: None,
         runtime: None,
@@ -352,6 +360,7 @@ fn bare_record() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        definition_reply_placement: None,
     }
 }
 
@@ -375,6 +384,7 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        reply_placement: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
@@ -592,6 +602,7 @@ fn populated_global_config_round_trips() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         preferred_runtime: None,
+        reply_placement: Some(ReplyPlacement::TopLevel),
     };
     let json = serde_json::to_string(&original).expect("serialization must not fail");
     let decoded: GlobalAgentConfig =
@@ -636,6 +647,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
         respond_to: None,
         respond_to_allowlist: vec![],
         parallelism: None,
+        reply_placement: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     };

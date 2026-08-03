@@ -21,6 +21,7 @@ function personaEvent({
   shared = true,
   avatarUrl = null,
   respondTo = null,
+  replyPlacement = null,
   sharedTag,
 }) {
   return {
@@ -47,6 +48,7 @@ function personaEvent({
       respond_to: respondTo,
       respond_to_allowlist: respondTo === "allowlist" ? [BOB] : undefined,
       parallelism: 4,
+      reply_placement: replyPlacement,
     }),
     sig: "sig",
   };
@@ -64,6 +66,34 @@ test("a shared kind 30175 persona from Alice is discoverable by Bob", () => {
   assert.equal(personas[0].shared, true);
   assert.equal(personas[0].catalogSource.ownerPubkey, ALICE);
   assert.equal(personas[0].catalogSource.isOwn, false);
+});
+
+test("catalog preserves a valid reply-placement setting", () => {
+  const publications = catalogPublicationsFromEvents([
+    personaEvent({
+      createdAt: 1,
+      id: "follow-scope",
+      replyPlacement: "follow-scope",
+    }),
+  ]);
+  const personas = catalogPersonasFromPublications(publications, [], BOB);
+
+  assert.equal(personas[0].replyPlacement, "follow-scope");
+});
+
+test("catalog drops an invalid reply-placement value to the safe fallback", () => {
+  const event = personaEvent({
+    createdAt: 1,
+    id: "invalid-reply-placement",
+  });
+  const content = JSON.parse(event.content);
+  content.reply_placement = "follow_scope";
+  event.content = JSON.stringify(content);
+
+  const publications = catalogPublicationsFromEvents([event]);
+  const personas = catalogPersonasFromPublications(publications, [], BOB);
+
+  assert.equal(personas[0].replyPlacement, null);
 });
 
 test("a newer unshared head hides the older shared head", () => {
@@ -356,7 +386,7 @@ test("test_foreign_entry_with_no_local_copy_stays_unselected", () => {
     BOB,
   );
 
-  assert.equal(personas[0].id, "catalog:" + ALICE + ":reviewer");
+  assert.equal(personas[0].id, `catalog:${ALICE}:reviewer`);
   assert.equal(personas[0].isActive, false);
 });
 
@@ -377,7 +407,7 @@ test("test_catalog_source_match_is_scoped_to_the_publishing_owner", () => {
     ALICE,
   );
 
-  assert.equal(personas[0].id, "catalog:" + BOB + ":reviewer");
+  assert.equal(personas[0].id, `catalog:${BOB}:reviewer`);
   assert.equal(personas[0].isActive, false);
 });
 

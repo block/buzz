@@ -442,6 +442,7 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        reply_placement: None,
         created_at: String::new(),
         updated_at: String::new(),
     }
@@ -487,6 +488,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         last_error_code: None,
         respond_to: RespondTo::default(),
         respond_to_allowlist: vec![],
+        reply_placement: None,
         env_vars: std::collections::BTreeMap::new(),
         display_name: None,
         slug: None,
@@ -501,6 +503,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }

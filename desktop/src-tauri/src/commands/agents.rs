@@ -254,7 +254,6 @@ async fn ensure_relay_mesh_for_record(
 ) -> Result<(), String> {
     crate::commands::ensure_relay_mesh_for_record(app, model_id, allow_fresh_create_start).await
 }
-
 #[cfg(not(feature = "mesh-llm"))]
 async fn ensure_relay_mesh_for_record(
     _app: &AppHandle,
@@ -263,7 +262,6 @@ async fn ensure_relay_mesh_for_record(
 ) -> Result<(), String> {
     Ok(())
 }
-
 pub(super) async fn start_local_agent_pairs_with_preflight(
     app: &AppHandle,
     state: &AppState,
@@ -284,8 +282,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         return Err(format!("agent {pubkey} is not a local agent"));
     }
     let personas_for_preflight = load_personas(app).unwrap_or_default();
-    let global_for_preflight =
-        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let global_for_preflight = crate::managed_agents::load_global_agent_config(app)?;
     let mesh_model_id =
         crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
             &record_snapshot,
@@ -293,7 +290,6 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             &global_for_preflight,
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false).await?;
-
     {
         let _store_guard = state
             .managed_agents_store_lock
@@ -313,7 +309,6 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             retain_managed_agent_pending(app, state, saved_record);
         }
     }
-
     let mut errors = Vec::new();
     for relay_url in relay_urls {
         if let Err(error) = crate::managed_agents::start_managed_agent_runtime_pair_lazy(
@@ -330,7 +325,6 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             errors.join("; ")
         ));
     }
-
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -345,13 +339,8 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    build_managed_agent_summary(
-        app,
-        record,
-        &runtimes,
-        &personas,
-        &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
-    )
+    let global = crate::managed_agents::load_global_agent_config(app)?;
+    build_managed_agent_summary(app, record, &runtimes, &personas, &global)
 }
 
 pub(super) async fn start_local_agent_with_preflight(
@@ -386,7 +375,7 @@ pub(super) async fn start_local_agent_with_preflight(
     // for a global-inherited blank definition, it also folds in the global
     // default, which record-byte sniffing could never see.
     let personas = load_personas(app).unwrap_or_default();
-    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let global = crate::managed_agents::load_global_agent_config(app)?;
     let mesh_model_id =
         crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
             &record_snapshot,
@@ -394,7 +383,6 @@ pub(super) async fn start_local_agent_with_preflight(
             &global,
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
-
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -438,13 +426,8 @@ pub(super) async fn start_local_agent_with_preflight(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    build_managed_agent_summary(
-        app,
-        record,
-        &runtimes,
-        &personas,
-        &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
-    )
+    let global = crate::managed_agents::load_global_agent_config(app)?;
+    build_managed_agent_summary(app, record, &runtimes, &personas, &global)
 }
 
 /// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
@@ -543,13 +526,11 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
-
         let personas = load_personas(&app).unwrap_or_default();
         // One disk read for the whole list — build_managed_agent_summary takes
         // the config as a parameter precisely so this poll-every-5s call does
         // not re-read it per record.
-        let global_config =
-            crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        let global_config = crate::managed_agents::load_global_agent_config(&app)?;
         records
             .iter()
             .map(|record| {
@@ -583,7 +564,6 @@ pub async fn create_managed_agent(
         }
     }
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
     // to catch malformed input at the boundary so the agent never tries to
@@ -604,7 +584,6 @@ pub async fn create_managed_agent(
     // Snapshot the workspace owner pubkey for the legacy-record auth_tag
     // fallback. Computed outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
-
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
         let _store_guard = state
@@ -660,7 +639,6 @@ pub async fn create_managed_agent(
     }
 
     let relay_mesh = normalize_relay_mesh(input.relay_mesh.as_ref(), &input.backend)?;
-
     // ── Phase 2: compute NIP-OA auth tag (sync) ──────────────────────────────
     // Agents authenticate via the auth tag in their kind:0 profile event.
     // No tokens are minted. Fail closed: bad auth tag → don't create agent.
@@ -817,18 +795,19 @@ pub async fn create_managed_agent(
         {
             effective_model = Some(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID.to_string());
         }
-
         // Mint-time behavioral quad: explicit input wins, then the linked
         // definition's NIP-AP defaults, then client defaults. The ONLY parse
         // point for definition behavioral strings — fails loudly on a bad
         // mode/range instead of minting an agent the author didn't describe.
+        let global_agent_config = crate::managed_agents::load_global_agent_config(&app)?;
         let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
             input.respond_to,
             respond_to_allowlist.clone(),
             input.parallelism,
+            input.reply_placement,
             linked_persona.as_ref(),
+            global_agent_config.reply_placement,
         )?;
-
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: name.clone(),
@@ -891,6 +870,9 @@ pub async fn create_managed_agent(
             last_error_code: None,
             respond_to: minted.respond_to,
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
+            // Store only an explicit instance choice. Omitted input inherits
+            // the linked persona/global fallback at spawn time.
+            reply_placement: input.reply_placement,
             display_name: None,
             slug: None,
             runtime: None,
@@ -904,6 +886,7 @@ pub async fn create_managed_agent(
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            definition_reply_placement: None,
             relay_mesh: if effective_provider.as_deref()
                 == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
             {
@@ -928,14 +911,9 @@ pub async fn create_managed_agent(
         // is_builtin/persona-membership gate).
         retain_managed_agent_pending(&app, &state, record);
         let personas = load_personas(&app).unwrap_or_default();
+        let global = crate::managed_agents::load_global_agent_config(&app)?;
         (
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )?,
+            build_managed_agent_summary(&app, record, &runtimes, &personas, &global)?,
             resolved_avatar_url,
         )
     };
@@ -965,13 +943,8 @@ pub async fn create_managed_agent(
                     .find(|record| record.pubkey == pubkey)
                     .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
                 let personas = load_personas(&app).unwrap_or_default();
-                build_managed_agent_summary(
-                    &app,
-                    record,
-                    &runtimes,
-                    &personas,
-                    &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-                )?
+                let global = crate::managed_agents::load_global_agent_config(&app)?;
+                build_managed_agent_summary(&app, record, &runtimes, &personas, &global)?
             }
         }
     } else {
@@ -1042,13 +1015,8 @@ pub async fn create_managed_agent(
             .find(|r| r.pubkey == pubkey)
             .ok_or_else(|| "agent disappeared".to_string())?;
         let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(
-            &app,
-            record,
-            &runtimes,
-            &personas,
-            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-        )?
+        let global = crate::managed_agents::load_global_agent_config(&app)?;
+        build_managed_agent_summary(&app, record, &runtimes, &personas, &global)?
     } else {
         agent
     };
@@ -1170,13 +1138,8 @@ pub async fn start_managed_agent(
                 .find(|r| r.pubkey == pubkey)
                 .ok_or_else(|| format!("agent {pubkey} not found"))?;
             let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )
+            let global = crate::managed_agents::load_global_agent_config(&app)?;
+            build_managed_agent_summary(&app, record, &runtimes, &personas, &global)
         }
         StartTarget::Provider { backend, .. } => Err(format!(
             "agent {pubkey} has unsupported backend kind: {backend:?}"
@@ -1258,13 +1221,8 @@ pub async fn stop_managed_agent(
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
         let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(
-            &app,
-            record,
-            &runtimes,
-            &personas,
-            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-        )
+        let global = crate::managed_agents::load_global_agent_config(&app)?;
+        build_managed_agent_summary(&app, record, &runtimes, &personas, &global)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -1361,6 +1319,8 @@ mod deploy;
 use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::deploy_payload_json;
+#[cfg(test)]
+pub(crate) use deploy::resolve_deploy_config;
 #[cfg(test)]
 pub(crate) use deploy::resolve_deploy_model_provider;
 

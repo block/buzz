@@ -59,6 +59,7 @@ fn minimal_record() -> ManagedAgentRecord {
         last_error_code: Some(42), // MUST NOT appear
         respond_to: RespondTo::default(),
         respond_to_allowlist: vec!["pubkey1hex".to_string()],
+        reply_placement: None,
         slug: Some("test-agent".to_string()),
         runtime: Some("goose".to_string()),
         name_pool: vec!["Alice".to_string(), "Bob".to_string()],
@@ -71,6 +72,7 @@ fn minimal_record() -> ManagedAgentRecord {
         catalog_source: None,
         definition_respond_to_allowlist: vec!["abc123def".to_string()],
         definition_parallelism: Some(4),
+        definition_reply_placement: None,
         relay_mesh: None,
     }
 }

@@ -161,6 +161,7 @@ mod tests {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            reply_placement: None,
             created_at: "2026-07-27T00:00:00Z".to_string(),
             updated_at: "2026-07-27T00:00:00Z".to_string(),
         }

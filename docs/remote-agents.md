@@ -320,7 +320,8 @@ path, any shadowed candidates for the same id (later-PATH duplicates), and
 candidates rejected for malformed names. A deploy error that names which
 binary ran answers the first question a user with two copies of
 `buzz-backend-kubernetes` will ask. (At `c1bca1b56` discovery records only
-the winning path — a desktop change alongside Known Defect 3's.)
+the winning path; shadowed-candidate reporting remains a separate discovery
+hardening item.)
 
 **Resolution rule.** Every subsequent operation resolves the provider id
 against the *current* discovery set. A stored binary path on an agent record
@@ -420,8 +421,8 @@ timeout:  600s
 ```
 
 The agent payload (field list per
-`commands/agents_deploy.rs: deploy_payload_json` at `c1bca1b56`; the
-`launch` block is a normative addition not yet emitted — Known Defect 3):
+`commands/agents_deploy.rs: deploy_payload_json`; the `launch` block is
+emitted by the desktop and is the execution-authoritative contract):
 
 | field | meaning |
 |---|---|
@@ -429,13 +430,14 @@ The agent payload (field list per
 | `relay_url` | concrete WS URL (workspace fallback materialized — the remote side has no workspace notion) |
 | `private_key_nsec` | **the identity** (I1: never empty) |
 | `auth_tag` | NIP-OA owner attestation |
-| `agent_command`, `agent_args` | the ACP agent under the harness (configurable-harness support). At `c1bca1b56` these are raw record bytes — see Known Defect 3: the normative source is the resolved descriptor in `launch` |
+| `agent_command`, `agent_args` | legacy compatibility fields for the ACP agent under the harness. Providers MUST use the resolved descriptor in `launch` for execution. |
 | `system_prompt`, `model`, `provider` | effective values, live-persona-first resolution |
 | `turn_timeout_seconds`, `idle_timeout_seconds`, `max_turn_duration_seconds` | harness timeout knobs |
 | `parallelism` | concurrent-turn bound |
 | `respond_to`, `respond_to_allowlist` | inbound author gate |
+| `reply_placement` | effective human-facing reply mode (`thread`, `top-level`, or `follow-scope`); retained as a typed compatibility field. Providers apply the authoritative `launch.policy_env.BUZZ_ACP_REPLY_PLACEMENT` value. |
 | `env_vars` | merged user env: global < persona < agent |
-| `launch` | **normative addition** (§Launch data): the desktop-resolved launch contract — `command` (name, not path), normalized `args`, layered `env`, overridable `policy_env`, and `owner_pubkey` |
+| `launch` | **normative execution contract** (§Launch data): the desktop-resolved `command` (name, not path), normalized `args`, layered `env`, `policy_env`, and `owner_pubkey` |
 
 **Reserved-key rule (normative for providers).** `D` strips
 `BUZZ_PRIVATE_KEY`, `NOSTR_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, `BUZZ_RELAY_URL`,
@@ -449,7 +451,9 @@ POSIX-shaped names before merge, because a key like `BUZZ_AUTH_TAG=x`
 smuggled through `Command::env` would bypass the reserved-key strip
 entirely. A provider materializing `env_vars` into a substrate object
 (e.g. a Kubernetes Secret) MUST likewise never let a user-supplied key
-collide with or reconstruct a reserved key.
+collide with or reconstruct a reserved key. The same rule applies to
+`launch.env`; providers MUST NOT re-merge the legacy `env_vars` field over
+the resolved launch descriptor.
 
 `agent_id` is `P`'s stable handle for the deployment (the Kubernetes binding
 returns the pod name). `D` stores it as `backend_agent_id`; its presence is
@@ -481,11 +485,15 @@ spawn**, and the provider applies it mechanically.
   "env":          {str: str},   // layered env: baked → runtime metadata →
                                 // definition → global → persona → agent
                                 // (resolve_effective_harness_descriptor)
-  "policy_env":   {str: str},   // overridable behavior defaults (tier 1, below):
+  "policy_env":   {str: str},   // behavior defaults (tier 1, below), except
+                                // reserved authoritative keys:
                                 // runtime default_env (e.g. GOOSE_MODE=auto),
                                 // BUZZ_ACP_RELAY_OBSERVER, BUZZ_ACP_LAZY_POOL=true,
                                 // BUZZ_ACP_SESSION_TITLE (resolved),
                                 // BUZZ_ACP_TEAM_INSTRUCTIONS, BUZZ_ACP_MODEL,
+                                // BUZZ_ACP_REPLY_PLACEMENT (reserved and
+                                // authoritative; resolved from the typed
+                                // `reply_placement` field),
                                 // MCP_HOOK_SERVERS=* (mcp_hooks runtimes only)
   "owner_pubkey": str | null    // resolved workspace owner (hex) — legacy
                                 // BUZZ_ACP_AGENT_OWNER fallback, non-secret
@@ -559,20 +567,25 @@ desktop's orphan sweep and instance reaper can prove ownership by scanning
 process env (`orphan_sweep.rs`, `instance_reaper.rs`) — there is no local
 process to sweep.
 
-**Environment precedence (normative) — three tiers, later wins:**
+**Environment precedence (normative) — three tiers, later wins, with one
+reserved policy exception:**
 
-1. **Overridable behavior defaults** — `launch.policy_env`. These keys are
-   deliberately non-reserved (`env_vars.rs:54-57` says so outright: power
-   users may bypass the dedicated UI fields), and locally the user env is
-   written after them (`runtime.rs:860` and its comment). A policy-wins
-   order here would make remote agents ignore overrides local agents honor.
+1. **Overridable behavior defaults** — ordinary keys in `launch.policy_env`.
+   These keys are deliberately non-reserved; power users may bypass the
+   dedicated UI fields, and locally the user env is written after them
+   (`runtime.rs:860` and its comment). A policy-wins order here would make
+   remote agents ignore overrides local agents honor.
 2. **User/layered env** — `launch.env`. User `env_vars` need no separate
    slot: the descriptor's layering already merged them (global < persona <
    agent), so a provider applies `launch.env` and MUST NOT re-merge the
    legacy `env_vars` field on top.
 3. **Authoritative** — unoverridable at every layer, written last and
-   backed by the reserved-key strip: the identity variables from top-level
-   payload fields (§Reserved-key rule), the respond-to gate values,
+   backed by the reserved-key strip. `BUZZ_ACP_REPLY_PLACEMENT` is carried
+   inside `launch.policy_env` for ABI compatibility, but is the explicit
+   exception to tier 1: providers MUST apply the desktop-resolved value after
+   `launch.env` and ignore any user-supplied value for that key. The remaining
+   authoritative values are the identity variables from top-level payload
+   fields (§Reserved-key rule), the respond-to gate values,
    `BUZZ_ACP_AGENT_OWNER`, the inactivity bound, `BUZZ_ACP_MCP_COMMAND`,
    and `BUZZ_MANAGED_AGENT_START_NONCE`. For the nonce, the provider MUST
    set it to the attempt's **generation token** (§K8s Secrets): the harness
@@ -1560,35 +1573,25 @@ Desktop- and harness-side, discovered during this design:
    environment through unmodified; combined with launchd's minimal PATH this
    breaks kubeconfig exec plugins. Mitigated provider-side (§K8s Auth);
    a desktop-side PATH augmentation would fix the class.
-3. **Deploy payload bypasses the launch resolver** (the prerequisite this
-   spec names for §Launch data — a desktop code change, not spec text).
-   At `c1bca1b56`, `deploy_payload_json` serializes raw record bytes and a
-   three-layer `merged_user_env` where the local spawn uses
-   `resolve_effective_harness_descriptor`'s six-layer resolution. Concrete
-   consequences, each verified in review: (a) no per-runtime model/provider
-   env — a remote goose agent silently ignores the user's model choice, and
-   `provider_locked` runtimes would receive vars the desktop deliberately
-   withholds; (b) persona-derived `agent_command` and definition-provided
-   `agent_args` serialize as blank/empty — a different command line than the
-   identical local agent; (c) no `owner_pubkey` — a null-`auth_tag` agent
-   cannot match `!shutdown` (it *answers* it), stranding §Stop; (d) spawn
-   policy (`BUZZ_ACP_RELAY_OBSERVER`, runtime `default_env` such as
-   `GOOSE_MODE=auto`, team instructions, session title, lazy-pool selection)
-   is absent — remote pods run different observer/approval semantics
-   (`BUZZ_ACP_DEDUP`/`BUZZ_ACP_MULTIPLE_EVENT_HANDLING` are *not* on this
-   list: the local writes match the harness defaults, §Launch data); (e) a
-   mesh-provider agent deploys pointed at a loopback URL that cannot exist
-   in the pod instead of being refused. Until `deploy_payload_json` emits
-   the `launch` block, no provider can conform to §Launch data, and the
-   current payload MUST be treated as insufficient for a
-   semantics-preserving remote launch. **Security follow-through:** once
-   secrets can arrive via `launch.env`, desktop redaction MUST collect
-   candidate values from `launch.env` (and `launch.policy_env`) as well as
-   legacy `agent.env_vars` — at `c1bca1b56`, `env_secrets_from_request`
-   reads only `agent.env_vars` (`backend.rs`), leaving a
-   definition/persona-layer secret outside the literal-value scrub.
-   Conformance: a provider that echoes a launch-only secret into an error
-   must come back redacted.
+3. **Deploy payload launch resolution and provider redaction** (the
+   prerequisite this spec names for §Launch data — a desktop code change, not
+   spec text). At `c1bca1b56`, `deploy_payload_json` serialized raw record
+   bytes and a three-layer `merged_user_env` where local spawn used
+   `resolve_effective_harness_descriptor`'s six-layer resolution. The current
+   desktop correction now emits the resolved `launch` block, including the
+   command, args, layered env, policy env, and owner key needed for a
+   semantics-preserving remote launch. The historical consequences were: (a)
+   no per-runtime model/provider env; (b) persona-derived command and
+   definition-provided args serialized incorrectly; (c) no owner key for
+   null-auth-tag shutdown; (d) missing spawn policy; and (e) mesh-provider
+   loopback deployment not refused.
+
+   **Remaining security gate:** because launch maps can contain credentials,
+   provider redaction must collect non-empty string values from
+   `agent.env_vars`, `agent.launch.env`, and `agent.launch.policy_env` before
+   formatting provider stderr or structured errors. The current correction
+   must be independently tested against both error surfaces. A provider that
+   echoes a launch-only secret into an error must come back redacted.
 4. **The I5 reaper does not exist, and its natural home is a trap**
    (harness code prerequisite). `BUZZ_ACP_EXIT_AFTER_INACTIVITY` appears
    nowhere in the harness at `c1bca1b56`; §Auto-Stop is a design, not a
@@ -1660,7 +1663,7 @@ Desktop- and harness-side, discovered during this design:
 | Redaction | `backend.rs` (`redact_secrets_with`) |
 | I2 validation | `backend.rs` (`validate_provider_config`) |
 | I1 refusal, payload | `desktop/src-tauri/src/commands/agents_deploy.rs` |
-| Launch resolver (shared with local spawn) | `desktop/src-tauri/src/managed_agents/readiness.rs` (`resolve_effective_harness_descriptor`); `launch` block emission *to be added* to `agents_deploy.rs` (Known Defect 3) |
+| Launch resolver and provider payload | `desktop/src-tauri/src/managed_agents/readiness.rs` (`resolve_effective_harness_descriptor`); `desktop/src-tauri/src/commands/agents_deploy.rs` (`deploy_payload_json`) |
 | Mesh rewrite (why relay-mesh is non-deployable) | `desktop/src-tauri/src/managed_agents/relay_mesh.rs`; create-time rejection in `commands/agents.rs` (`normalize_relay_mesh`) |
 | Reserved-key strip | `desktop/src-tauri/src/managed_agents/env_vars.rs` (`RESERVED_ENV_KEYS`) |
 | Unconditional deploy on Start | `desktop/src-tauri/src/commands/agents.rs` (`start_managed_agent`) |
