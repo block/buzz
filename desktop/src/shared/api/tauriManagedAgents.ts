@@ -8,6 +8,14 @@ import type {
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
 
+export type ManagedAgentDefaults = {
+  parallelism: number;
+};
+
+export async function getManagedAgentDefaults(): Promise<ManagedAgentDefaults> {
+  return invokeTauri<ManagedAgentDefaults>("get_managed_agent_defaults");
+}
+
 export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
   const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
     pubkey,

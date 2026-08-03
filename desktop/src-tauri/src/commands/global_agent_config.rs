@@ -20,9 +20,18 @@ use crate::{
         load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
         resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
         stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        AgentReadiness, BackendKind, GlobalAgentConfig, DEFAULT_AGENT_PARALLELISM,
     },
 };
+
+/// Desktop defaults applied when a managed-agent definition leaves an
+/// instance-level setting unset.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentDefaults {
+    /// Number of worker subprocesses allocated to a new instance by default.
+    pub parallelism: u32,
+}
 
 /// Result returned by `set_global_agent_config`.
 ///
@@ -46,6 +55,14 @@ pub struct GlobalAgentConfigSaveResult {
 #[tauri::command]
 pub fn get_global_agent_config(app: AppHandle) -> Result<GlobalAgentConfig, String> {
     load_global_agent_config(&app)
+}
+
+/// Return the canonical Desktop defaults used when minting managed agents.
+#[tauri::command]
+pub fn get_managed_agent_defaults() -> ManagedAgentDefaults {
+    ManagedAgentDefaults {
+        parallelism: DEFAULT_AGENT_PARALLELISM,
+    }
 }
 
 /// Validate and persist a new global agent configuration, then auto-restart
@@ -417,7 +434,16 @@ fn should_restart_on_config_change(old_ready: bool, new_ready: bool, env_changed
 
 #[cfg(test)]
 mod tests {
-    use super::should_restart_on_config_change;
+    use super::{get_managed_agent_defaults, should_restart_on_config_change};
+    use crate::managed_agents::DEFAULT_AGENT_PARALLELISM;
+
+    #[test]
+    fn managed_agent_defaults_expose_the_minting_default() {
+        assert_eq!(
+            get_managed_agent_defaults().parallelism,
+            DEFAULT_AGENT_PARALLELISM
+        );
+    }
 
     /// Running agent (Ready) whose effective env changed → restart candidate.
     #[test]

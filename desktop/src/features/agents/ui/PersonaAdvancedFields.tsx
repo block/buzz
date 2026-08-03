@@ -10,6 +10,7 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./agentConfigOptions";
+import { useManagedAgentDefaultsQuery } from "../hooks";
 
 export function PersonaAdvancedFields({
   behaviorDraft,
@@ -47,6 +48,10 @@ export function PersonaAdvancedFields({
   fileSatisfiedEnvKeys?: readonly string[];
   hiddenEnvKeys?: readonly string[];
 }) {
+  const managedAgentDefaultsQuery = useManagedAgentDefaultsQuery();
+  const defaultParallelism =
+    managedAgentDefaultsQuery.data?.parallelism ?? null;
+
   return (
     <div className="space-y-5 pt-2">
       <CreateAgentRespondToField
@@ -96,13 +101,20 @@ export function PersonaAdvancedFields({
                   parallelism: event.target.value,
                 })
               }
-              placeholder="1"
+              placeholder={
+                defaultParallelism == null
+                  ? "Desktop default"
+                  : String(defaultParallelism)
+              }
               type="number"
               value={behaviorDraft.parallelism}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            How many conversations each running instance handles at once (1–32).
+            Leave blank to use the Desktop default
+            {defaultParallelism == null ? "" : ` (${defaultParallelism})`}.
+            Higher values allow more simultaneous conversations and use more
+            worker processes (1–32).
           </p>
         </div>
       </div>
