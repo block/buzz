@@ -13,7 +13,11 @@ let ThemeProvider;
 let TerminalSubstrate;
 let reducedMotion = false;
 
+// `pretendToBeVisual` is what gives jsdom requestAnimationFrame. The banner's
+// animation loop needs it; without it the loop silently never runs and every
+// paint assertion below reads as a rendering failure.
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  pretendToBeVisual: true,
   url: "http://localhost",
 });
 

@@ -29,7 +29,7 @@ import type {
 // sRGB -> CIELAB -> CIEDE2000. Instrument for "are two stops visibly distinct".
 export const hex2rgb = (h: string) =>
   [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-export const rgb2hex = (r: number[]) =>
+export const rgb2hex = (r: readonly number[]) =>
   "#" +
   r
     .map((v) =>
@@ -213,8 +213,14 @@ function lab2hex(L: number, A: number, B: number) {
  *  not a target: `atRatio` also pins DOWN, which dimmed every vivid theme to
  *  exactly 4.5 and cost chroma (tokyo-night's #f7768e sits at 6.46 natively).
  *  Use this wherever the requirement is "at least", and `atRatio` only where a
- *  specific ratio is the design (the field decay and the bevel gap). */
-const lift = (c: string, bg: string, floor: number) =>
+ *  specific ratio is the design (the field decay and the bevel gap).
+ *
+ *  Exported because the animation's colour table interpolates BETWEEN solved
+ *  samples, and a straight-line blend under a convex contrast curve lands
+ *  slightly below both endpoints — measured at 4.4766 against the 4.5 floor on
+ *  solarized-light. The blend has to be re-lifted with the same operator that
+ *  put the endpoints on the floor in the first place. */
+export const lift = (c: string, bg: string, floor: number) =>
   ratio(c, bg) >= floor ? c : away(c, bg, floor);
 
 /**
@@ -356,24 +362,41 @@ function ramp(
   return pin ? atRatio(c, bg, target) : lift(c, bg, target);
 }
 
+/**
+ * `t` and `hue` are TWO AXES, and on the field they are not the same axis.
+ *
+ * A cell's `t` from the geometry is radial: `ray * ray`, a cast outward from
+ * the chassis. It sets the field's CONTRAST decay (2.60 at the box to 1.04 at
+ * the rim) and it also used to set the hue position, because a static banner
+ * has no reason to tell them apart. An animated wave does: driving hue from
+ * the radial axis makes the colour travel outward from the box like a ripple,
+ * and driving the contrast target from a moving axis makes the rim pulse
+ * bright and breaks the monotonic fade the field is specced on.
+ *
+ * So `hue` selects the position along the three-stop ramp and `t` keeps the
+ * contrast decay. `hue` DEFAULTS TO `t`, which is exactly the coupled
+ * behaviour the static banner shipped with — callers that omit it get the
+ * shipped pixels, byte for byte.
+ */
 export function bannerColor(
   p: TerminalPalette,
   stops: [string, string, string],
   layer: Layer,
   t: number,
+  hue: number = t,
 ): string {
   const bg = p.background;
   switch (layer) {
     case "head":
       // Tyler: "fill the box with buzz term in a three color fade".
-      return ramp(stops, t, bg, WORDMARK_FLOOR, false);
+      return ramp(stops, hue, bg, WORDMARK_FLOOR, false);
     case "field":
       // Tyler: "flow to the edges, fading out" + "colour shift centre to edge".
       // Same three hues, so the field and the mark are one palette; the fade is
       // in CONTRAST, from 2.60 at the box to 1.04 at the rim.
       return ramp(
         stops,
-        t,
+        hue,
         bg,
         FIELD_CORE + (FIELD_EDGE - FIELD_CORE) * Math.max(0, Math.min(1, t)),
       );

@@ -15,6 +15,7 @@ import {
 } from "./terminalState";
 import { buildTerminalBanner } from "./terminalBanner";
 import { paintTerminalBanner } from "./terminalBannerPainter";
+import { buildBannerColorTable, phaseAt } from "./terminalBannerWave";
 import {
   TERMINAL_CELL_METRICS,
   type TerminalFrame,
@@ -342,20 +343,44 @@ export function TerminalSubstrate({
     };
   }, [enabled, getAppSurface]);
 
+  // The banner's animation loop. It exists only while the splash is visible:
+  // once the terminal is in use `welcomeVisible` is false, the overlay canvas
+  // is unmounted, and this effect's teardown cancels the frame — so there is no
+  // rAF running during normal PTY work.
+  //
+  // `prefers-reduced-motion` takes the STATIC path (no motion argument), which
+  // is the shipped painter call, not a paused animation. Those are different:
+  // a stopped loop still parks on whatever phase it halted at.
   React.useEffect(() => {
     const canvas = bannerCanvasRef.current;
     if (!canvas || !banner || !terminalPalette || !welcomeVisible) return;
-    if (
-      !paintTerminalBanner(
-        canvas,
-        banner,
-        terminalPalette,
-        window.devicePixelRatio || 1,
-      )
-    ) {
-      setWelcomeVisible(false);
+
+    const dpr = window.devicePixelRatio || 1;
+    if (reducedMotion) {
+      if (!paintTerminalBanner(canvas, banner, terminalPalette, dpr))
+        setWelcomeVisible(false);
+      return;
     }
-  }, [banner, terminalPalette, welcomeVisible]);
+
+    // Built once per palette, not per frame: the table is phase-independent.
+    const table = buildBannerColorTable(terminalPalette);
+    const start = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      if (
+        !paintTerminalBanner(canvas, banner, terminalPalette, dpr, {
+          phase: phaseAt((now - start) / 1000),
+          table,
+        })
+      ) {
+        setWelcomeVisible(false);
+        return;
+      }
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [banner, reducedMotion, terminalPalette, welcomeVisible]);
 
   React.useEffect(() => {
     for (const delivered of frames) {
