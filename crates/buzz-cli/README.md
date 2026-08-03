@@ -45,12 +45,14 @@ buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/
 # Invites
 buzz invites mint                                  # owner/admin; default 72h TTL
 buzz invites mint --ttl-secs 3600 --max-uses 1     # single-use, one hour
-buzz invites claim --code v2.AbC...                # any identity, even a non-member
+printf %s "$CODE" | buzz invites claim --code -    # any identity, even a non-member
+buzz invites claim --code v2.AbC...                # same, with the code in argv
 
 # Invites on a relay with a join policy
 buzz invites policy                                # read the terms before agreeing
-buzz invites accept-policy --code v2.AbC... --policy-version <ver> --age-confirmed
-buzz invites claim --code v2.AbC... --policy-receipt <receipt>
+printf %s "$CODE" | buzz invites accept-policy --code - --policy-version <ver> --age-confirmed
+buzz invites accept-policy --code v2.AbC... --policy-version <ver> | jq -r .receipt \
+  | buzz invites claim --code v2.AbC... --policy-receipt -
 
 # Channels
 buzz channels list
@@ -132,6 +134,17 @@ terms changed since they were read, and the CLI refuses rather than accepting
 terms nobody saw. `--age-confirmed` is likewise never implied: on a relay with
 `age_attestation_required`, omitting it is an exit-1 usage error, because the
 attestation is a claim about a human and the CLI has no standing to make it.
+
+**Prefer `-` for invite codes and receipts.** Both are bearer credentials —
+holding one is the whole authorization — and an argv value is written to shell
+history and readable from `ps` by any process on the host. `--code -` and
+`--policy-receipt -` read the credential from stdin instead, using the same
+sentinel as `messages send --content -`. The read is bounded to 8 KiB and one
+trailing newline is stripped, so `echo "$CODE" |` and `printf %s "$CODE" |`
+both work; everything else is left alone, so a token with interior whitespace
+is still rejected. stdin is a single stream, so passing `-` to both `--code`
+and `--policy-receipt` in one command is an exit-1 usage error rather than a
+hang.
 
 ## Commands
 

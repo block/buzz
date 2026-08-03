@@ -197,6 +197,67 @@ pub fn read_file_or_stdin(value: &str) -> Result<String, CliError> {
     }
 }
 
+/// Maximum bytes accepted from stdin for a bearer-credential argument.
+///
+/// Invite codes and policy receipts are short opaque tokens — a few hundred
+/// bytes at most. The bound exists so that a misdirected pipe
+/// (`buzz invites claim --code - < some.tar`) fails fast with a usage error
+/// instead of buffering an unbounded stream into the process and then
+/// shipping it to the relay.
+pub const MAX_STDIN_CREDENTIAL_BYTES: usize = 8 * 1024;
+
+/// Read a bearer credential from `value`, or from stdin when `value` is `-`.
+///
+/// `-` is the same stdin sentinel the rest of the CLI uses
+/// (`messages send --content -`), and it is the *preferred* form for
+/// credentials: a literal argv value is written to shell history and is
+/// readable from `ps` by any process on the host, whereas a pipe is not.
+///
+/// Two things differ from [`read_or_stdin`], both because the value is a
+/// credential rather than message content:
+///
+/// - the read is bounded to [`MAX_STDIN_CREDENTIAL_BYTES`]; and
+/// - one trailing newline (`\n`, or `\r\n`) is removed, so both
+///   `echo "$CODE" | …` and `printf %s "$CODE" | …` work.
+///
+/// Nothing else is stripped. Interior whitespace survives and is rejected by
+/// the caller's own validator, exactly as it is for an argv value.
+///
+/// `flag` names the argument being read and appears in error messages.
+pub fn read_secret_or_stdin(value: &str, flag: &str) -> Result<String, CliError> {
+    if value == "-" {
+        read_bounded_credential(std::io::stdin().lock(), flag)
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+/// Bounded credential read, split out from [`read_secret_or_stdin`] so the
+/// size limit and newline handling are testable without a real stdin.
+fn read_bounded_credential(reader: impl std::io::Read, flag: &str) -> Result<String, CliError> {
+    use std::io::Read;
+    let mut buf = String::new();
+    // Read one byte past the limit so an over-long input is detected rather
+    // than silently truncated into a credential that looks well-formed.
+    let read = reader
+        .take(MAX_STDIN_CREDENTIAL_BYTES as u64 + 1)
+        .read_to_string(&mut buf)
+        .map_err(|e| CliError::Other(format!("failed to read {flag} from stdin: {e}")))?;
+    if read > MAX_STDIN_CREDENTIAL_BYTES {
+        return Err(CliError::Usage(format!(
+            "{flag} read from stdin exceeds {MAX_STDIN_CREDENTIAL_BYTES} bytes — \
+             pipe the bare token, not a file"
+        )));
+    }
+    if buf.ends_with('\n') {
+        buf.pop();
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
+    }
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +563,77 @@ mod tests {
         // verbatim as if it were the patch content.
         let err = super::read_file_or_stdin("0001-does-not-exist.patch").unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    // --- read_secret_or_stdin / read_bounded_credential ---
+
+    #[test]
+    fn read_secret_returns_a_literal_value_verbatim() {
+        // Only the exact sentinel reads stdin; a token that merely starts
+        // with a dash is a token.
+        for value in ["v2.AbC123", "-not-the-sentinel", ""] {
+            assert_eq!(
+                super::read_secret_or_stdin(value, "--code").unwrap(),
+                value,
+                "{value:?} is not the stdin sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn read_secret_strips_exactly_one_trailing_newline() {
+        for (piped, want) in [
+            ("v2.AbC123\n", "v2.AbC123"),     // echo
+            ("v2.AbC123\r\n", "v2.AbC123"),   // echo on a CRLF pipe
+            ("v2.AbC123", "v2.AbC123"),       // printf %s
+            ("v2.AbC123\n\n", "v2.AbC123\n"), // a second newline is preserved…
+        ] {
+            let got = super::read_bounded_credential(piped.as_bytes(), "--code").unwrap();
+            assert_eq!(got, want, "input {piped:?}");
+        }
+        // …and then rejected by the caller's validator rather than silently
+        // repaired, which is the same treatment an argv value gets.
+        assert!(matches!(
+            super::read_bounded_credential("v2.AbC\n\n".as_bytes(), "--code"),
+            Ok(ref s) if s.contains('\n')
+        ));
+    }
+
+    #[test]
+    fn read_secret_preserves_leading_and_interior_whitespace_for_the_validator() {
+        let got = super::read_bounded_credential("  v2.AbC 123  \n".as_bytes(), "--code").unwrap();
+        assert_eq!(
+            got, "  v2.AbC 123  ",
+            "only the trailing newline is stdin's doing; everything else is the caller's input"
+        );
+    }
+
+    #[test]
+    fn read_secret_accepts_input_at_the_size_limit() {
+        let token = "a".repeat(super::MAX_STDIN_CREDENTIAL_BYTES);
+        let got = super::read_bounded_credential(token.as_bytes(), "--code").unwrap();
+        assert_eq!(got.len(), super::MAX_STDIN_CREDENTIAL_BYTES);
+    }
+
+    #[test]
+    fn read_secret_rejects_input_past_the_size_limit_instead_of_truncating() {
+        let oversized = "a".repeat(super::MAX_STDIN_CREDENTIAL_BYTES + 1);
+        let err = super::read_bounded_credential(oversized.as_bytes(), "--policy-receipt")
+            .expect_err("a misdirected pipe must not become a silently truncated credential");
+        let CliError::Usage(message) = err else {
+            panic!("an over-long pipe is a usage error (exit 1), got {err:?}");
+        };
+        assert!(
+            message.contains("--policy-receipt"),
+            "the error must name the argument that was piped: {message}"
+        );
+    }
+
+    #[test]
+    fn read_secret_reports_unreadable_stdin_rather_than_guessing() {
+        // Invalid UTF-8 — a binary pipe, not a credential.
+        let err = super::read_bounded_credential(&[0xff, 0xfe][..], "--code")
+            .expect_err("a credential must be text");
+        assert!(matches!(err, CliError::Other(_)), "got {err:?}");
     }
 }

@@ -34,6 +34,13 @@
 //! the same documents as browser pages at `/api/join-policy/terms` and
 //! `/api/join-policy/privacy`.
 //!
+//! Invite codes and policy receipts are bearer credentials — holding one is
+//! the whole authorization. As argv they are written to shell history and are
+//! readable from `ps` by any process on the host, so every credential argument
+//! accepts the CLI's standard `-` stdin sentinel (`--code -`,
+//! `--policy-receipt -`) and that is the documented, preferred form. stdin is
+//! one stream, so at most one argument per command may use it.
+//!
 //! The community (tenant) is selected by the relay host in `--relay` /
 //! `BUZZ_RELAY_URL`; a code minted for one community is rejected on another.
 
@@ -41,6 +48,7 @@ use buzz_core::invite::{MAX_INVITE_TTL_SECS, MAX_INVITE_USES, MIN_INVITE_TTL_SEC
 
 use crate::client::BuzzClient;
 use crate::error::CliError;
+use crate::validate::read_secret_or_stdin;
 use crate::InvitesCmd;
 
 /// Relay path for minting an invite code.
@@ -191,7 +199,7 @@ fn accept_policy_request_body(
     let Some(policy) = policy else {
         return Err(CliError::Usage(
             "this relay has no join policy configured — there is nothing to accept; \
-             run `buzz invites claim --code <TOKEN>` without a receipt"
+             run `buzz invites claim --code -` without a receipt"
                 .to_string(),
         ));
     };
@@ -244,18 +252,40 @@ fn explain_claim_error(err: CliError, receipt_passed: bool) -> CliError {
     let guidance = if receipt_passed {
         "this policy receipt was rejected — it is bound to a different invite code, or to a \
          policy version the relay has since replaced. Re-read `buzz invites policy`, then \
-         `buzz invites accept-policy --code <TOKEN> --policy-version <VERSION>` for the version \
-         it reports"
+         `buzz invites accept-policy --code - --policy-version <VERSION>` for the version it \
+         reports"
     } else {
         "this relay requires accepting its join policy before an invite can be claimed. \
          Read it with `buzz invites policy`, mint a receipt with \
-         `buzz invites accept-policy --code <TOKEN> --policy-version <VERSION>`, then re-run \
-         `buzz invites claim` with `--policy-receipt <RECEIPT>`"
+         `buzz invites accept-policy --code - --policy-version <VERSION>`, then re-run \
+         `buzz invites claim` with `--policy-receipt -`"
     };
     CliError::Relay {
         status: 403,
         body: format!("{body}: {guidance}"),
     }
+}
+
+/// Reject a command that asks stdin for more than one credential.
+///
+/// `--code -` and `--policy-receipt -` both read the same single stream, so
+/// the second would either block or read the tail of the first. Catching it
+/// here turns a hang or a mangled token into an exit-1 usage error naming both
+/// flags.
+fn check_single_stdin_arg(args: &[(&str, &str)]) -> Result<(), CliError> {
+    let piped: Vec<&str> = args
+        .iter()
+        .filter(|(_, value)| *value == "-")
+        .map(|(flag, _)| *flag)
+        .collect();
+    if piped.len() > 1 {
+        return Err(CliError::Usage(format!(
+            "only one argument may read stdin, but {} both did — \
+             pipe one and pass the other as a value",
+            piped.join(" and ")
+        )));
+    }
+    Ok(())
 }
 
 /// Build the `POST /api/invites/claim` body.
@@ -334,21 +364,37 @@ pub async fn dispatch(cmd: InvitesCmd, client: &BuzzClient) -> Result<(), CliErr
         InvitesCmd::Claim {
             code,
             policy_receipt,
-        } => cmd_claim(client, &code, policy_receipt.as_deref()).await,
+        } => {
+            // Resolve the bearer credentials before anything else: `-` reads
+            // stdin, which is the form callers should prefer over argv.
+            check_single_stdin_arg(&[
+                ("--code", &code),
+                ("--policy-receipt", policy_receipt.as_deref().unwrap_or("")),
+            ])?;
+            let code = read_secret_or_stdin(&code, "--code")?;
+            let policy_receipt = policy_receipt
+                .as_deref()
+                .map(|receipt| read_secret_or_stdin(receipt, "--policy-receipt"))
+                .transpose()?;
+            cmd_claim(client, &code, policy_receipt.as_deref()).await
+        }
         InvitesCmd::Policy => cmd_policy(client).await,
         InvitesCmd::AcceptPolicy {
             code,
             policy_version,
             age_confirmed,
-        } => cmd_accept_policy(client, &code, &policy_version, age_confirmed).await,
+        } => {
+            let code = read_secret_or_stdin(&code, "--code")?;
+            cmd_accept_policy(client, &code, &policy_version, age_confirmed).await
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        accept_policy_request_body, claim_request_body, explain_claim_error, mint_request_body,
-        parse_join_policy, policy_output, JoinPolicy,
+        accept_policy_request_body, check_single_stdin_arg, claim_request_body,
+        explain_claim_error, mint_request_body, parse_join_policy, policy_output, JoinPolicy,
     };
     use crate::error::CliError;
     use buzz_core::invite::{
@@ -672,6 +718,36 @@ mod tests {
         assert!(
             body.contains("rejected"),
             "a caller who already passed a receipt needs a different next step: {body}"
+        );
+    }
+
+    // --- stdin credentials ---
+
+    #[test]
+    fn one_argument_may_read_stdin() {
+        for args in [
+            vec![("--code", "-"), ("--policy-receipt", "receipt.mac")],
+            vec![("--code", "v2.abc"), ("--policy-receipt", "-")],
+            vec![("--code", "v2.abc"), ("--policy-receipt", "")],
+            vec![("--code", "-")],
+        ] {
+            assert!(
+                check_single_stdin_arg(&args).is_ok(),
+                "{args:?} uses stdin at most once"
+            );
+        }
+    }
+
+    #[test]
+    fn two_arguments_may_not_both_read_stdin() {
+        let err = check_single_stdin_arg(&[("--code", "-"), ("--policy-receipt", "-")])
+            .expect_err("stdin is one stream — the second read would block or steal the first");
+        let CliError::Usage(message) = err else {
+            panic!("expected a usage error, got {err:?}");
+        };
+        assert!(
+            message.contains("--code") && message.contains("--policy-receipt"),
+            "name both flags so the caller knows which to change: {message}"
         );
     }
 

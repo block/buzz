@@ -239,7 +239,7 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
-    /// Mint and claim relay invite codes
+    /// Mint and claim relay invite codes, and accept the join policy
     #[command(subcommand)]
     Invites(InvitesCmd),
 }
@@ -1913,14 +1913,16 @@ pub enum InvitesCmd {
     },
     /// Claim an invite code and join the relay
     #[command(
-        after_help = "Examples:\n  buzz invites claim --code v2.AbC...\n  buzz invites claim --code v2.AbC... --policy-receipt <RECEIPT>\n\nPrints {status, community_id, host, role}; status is joined | already_member."
+        after_help = "Examples:\n  printf %s \"$CODE\" | buzz invites claim --code -\n  buzz invites claim --code v2.AbC...\n  buzz invites claim --code v2.AbC... --policy-receipt -\n\nPrints {status, community_id, host, role}; status is joined | already_member.\nPrefer '-' over a literal token: argv is recorded in shell history and is\nreadable from `ps`. stdin is one stream, so only one argument may use '-'."
     )]
     Claim {
         /// The invite code to redeem — the bare token, not the invite URL
+        /// (use '-' to read it from stdin; preferred)
         #[arg(long)]
         code: String,
         /// Join-policy acceptance receipt, required only on relays that
-        /// configure terms of service (from `buzz invites accept-policy`)
+        /// configure terms of service (from `buzz invites accept-policy`;
+        /// use '-' to read it from stdin)
         #[arg(long)]
         policy_receipt: Option<String>,
     },
@@ -1931,10 +1933,11 @@ pub enum InvitesCmd {
     Policy,
     /// Accept the relay's join policy and print an invite-bound receipt
     #[command(
-        after_help = "Examples:\n  buzz invites policy                      # read the terms first\n  buzz invites accept-policy --code v2.AbC... --policy-version <VERSION>\n  buzz invites accept-policy --code v2.AbC... --policy-version <VERSION> --age-confirmed\n\nPrints {receipt}; pass it to `buzz invites claim --policy-receipt <RECEIPT>`.\n--policy-version is never inferred and --age-confirmed is never implied:\nacceptance is an assertion about a human, so the CLI will not make it for you."
+        after_help = "Examples:\n  buzz invites policy                      # read the terms first\n  printf %s \"$CODE\" | buzz invites accept-policy --code - --policy-version <VERSION>\n  buzz invites accept-policy --code v2.AbC... --policy-version <VERSION> --age-confirmed\n\nPrints {receipt}; pass it to `buzz invites claim --policy-receipt -`.\n--policy-version is never inferred and --age-confirmed is never implied:\nacceptance is an assertion about a human, so the CLI will not make it for you."
     )]
     AcceptPolicy {
-        /// The invite code the receipt will be bound to
+        /// The invite code the receipt will be bound to (use '-' to read it
+        /// from stdin; preferred)
         #[arg(long)]
         code: String,
         /// The exact policy version being accepted, from `buzz invites policy`
