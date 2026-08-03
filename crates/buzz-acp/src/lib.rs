@@ -1475,7 +1475,17 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters: HashMap<Uuid, config::ChannelFilter> =
+        config::resolve_channel_filters(&config, &channel_ids, &rules)
+            .into_iter()
+            .map(|(channel_id, filter)| {
+                let implicit_mention = config.subscribe_mode == SubscribeMode::Mentions
+                    && channel_info_map
+                        .get(&channel_id)
+                        .is_some_and(|info| info.channel_type == "dm");
+                (channel_id, filter.with_implicit_mention(implicit_mention))
+            })
+            .collect();
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -1971,6 +1981,9 @@ async fn tokio_main() -> Result<()> {
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
                                     } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        let implicit_mention = config.subscribe_mode == SubscribeMode::Mentions
+                                            && is_dm_channel(ch, &ctx.channel_info).await;
+                                        let filter = filter.with_implicit_mention(implicit_mention);
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -2146,13 +2159,13 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            let is_dm =
+                                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 // Resolve channel type fail-closed for the author gate.
                                 // Allowlist remains owner/sibling-only in DMs, while
                                 // Anyone deliberately admits relay-delivered authors.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -2174,7 +2187,16 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let implicit_mention =
+                                config.subscribe_mode == SubscribeMode::Mentions && is_dm;
+                            let matched = filter::match_event_with_implicit_mention(
+                                &buzz_event.event,
+                                buzz_event.channel_id,
+                                &rules,
+                                &pubkey_hex,
+                                implicit_mention,
+                            )
+                            .await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
