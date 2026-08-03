@@ -2,6 +2,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -17,6 +18,7 @@ use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{HttpMakeClassifier, TraceLayer};
 
 use crate::api;
@@ -25,6 +27,40 @@ use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
 use crate::state::AppState;
+
+/// Deadline for one API request's service future — from routing until
+/// response headers are produced, including request-body collection inside
+/// extractors and handlers. Streaming response bodies are *not* bounded once
+/// headers are sent, and the two WebSocket routes are handshake-bounded
+/// only: after the 101 upgrade the established session escapes this future.
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Deadline for one media request's service future. Large uploads over slow
+/// links are legitimate, so this matches the git pack budget rather than the
+/// API budget. Same semantics as [`API_REQUEST_TIMEOUT`]: bounds the future
+/// until response headers, not a streaming response body.
+const MEDIA_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Apply a sub-router's request-body limit with a request deadline **outside**
+/// it, so a stalled body is cancelled by the timeout instead of sitting inside
+/// the body-limit middleware indefinitely. On expiry the client receives an
+/// empty `408 Request Timeout` response ([`TimeoutLayer::with_status_code`]).
+///
+/// This covers the core unauthenticated request-body surfaces (API + media);
+/// the admin router, git policy router, SPA fallback, and health listener are
+/// not routed through it, and header-read deadlines before routing are out of
+/// scope here (tracked in #4424).
+fn with_request_deadline<S>(router: Router<S>, body_limit: usize, timeout: Duration) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router
+        .layer(RequestBodyLimitLayer::new(body_limit))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            timeout,
+        ))
+}
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
 ///
@@ -42,8 +78,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/media/{sha256_ext}",
             get(api::media::get_blob).head(api::media::head_blob),
-        )
-        .layer(RequestBodyLimitLayer::new(media_body_limit))
+        );
+    let media_router = with_request_deadline(media_router, media_body_limit, MEDIA_REQUEST_TIMEOUT)
         .with_state(state.clone());
 
     let git_router = api::git::git_router(state.clone());
@@ -137,9 +173,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/huddle/{channel_id}/audio",
             get(audio::handler::ws_audio_handler),
-        )
-        // Reject request bodies larger than 1 MB to prevent resource exhaustion.
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        );
+    // Reject request bodies larger than 1 MB to prevent resource exhaustion,
+    // and bound the request future so a withheld body cannot park a task
+    // (WebSocket routes: handshake bounded, established session unaffected).
+    let api_router = with_request_deadline(api_router, 1024 * 1024, API_REQUEST_TIMEOUT)
         .with_state(state.clone());
 
     // Merge — each sub-router carries its own body limit.
@@ -643,5 +681,137 @@ mod tests {
             !handler_receives_message_with_limit(limit, limit + 1).await,
             "oversized messages must be rejected by the WebSocket parser before the handler sees them"
         );
+    }
+
+    /// A request body that never produces its bytes — the wire shape of a
+    /// client that sends headers and then withholds the body forever.
+    fn stalled_body() -> Body {
+        Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >())
+    }
+
+    /// A test router shaped like the production sub-routers: a handler that
+    /// collects its request body, wrapped by [`with_request_deadline`] with a
+    /// millisecond deadline so tests do not sleep for production constants.
+    /// `completed` is set only if the handler finishes collecting the body.
+    fn deadline_test_router(
+        timeout: Duration,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Router {
+        let router = Router::new().route(
+            "/collect",
+            axum::routing::post(move |request: axum::extract::Request| {
+                let completed = completed.clone();
+                async move {
+                    let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+                    completed.store(true, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        with_request_deadline(router, 1024, timeout)
+    }
+
+    #[tokio::test]
+    async fn stalled_request_body_times_out_with_408_and_cancels_handler() {
+        // Layer-order regression: the deadline must sit *outside* the body
+        // limit, so a withheld body is cancelled by the timeout instead of
+        // sitting inside the body-limit middleware indefinitely.
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let router = deadline_test_router(Duration::from_millis(50), completed.clone());
+
+        let request = Request::post("/collect").body(stalled_body()).unwrap();
+        let started = std::time::Instant::now();
+        let response = router.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout must fire at the configured bound, not hang"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty(), "tower-http timeout responses are empty");
+        // The handler future was dropped mid-body-collection.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "cancelled handler must never complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_stalled_request_never_completes_handler() {
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let router = deadline_test_router(Duration::from_secs(60), completed.clone());
+
+        let request = Request::post("/collect").body(stalled_body()).unwrap();
+        let response_future = router.oneshot(request);
+        tokio::select! {
+            _ = response_future => panic!("stalled request must not produce a response yet"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        // `response_future` was dropped by the select; the handler must not
+        // complete afterwards.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "dropped request future must not complete the handler"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_session_survives_request_timeout() {
+        // The deadline bounds only the handshake response future. Once the
+        // 101 upgrade is returned, the established session escapes it.
+        let timeout = Duration::from_millis(200);
+        let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+        let router = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let received_tx = received_tx.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        let _ = received_tx.send(matches!(socket.recv().await, Some(Ok(_))));
+                    })
+                }
+            }),
+        );
+        let app = with_request_deadline(router, 1024, timeout);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test WebSocket listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test WebSocket server");
+        });
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("connect test WebSocket client");
+        // Outlive the request deadline several times over, then prove the
+        // established session still works.
+        tokio::time::sleep(timeout * 4).await;
+        client
+            .send(Message::Text("still alive".into()))
+            .await
+            .expect("send on established session after the deadline");
+
+        let received = tokio::time::timeout(Duration::from_secs(2), received_rx.recv())
+            .await
+            .expect("server should process the message")
+            .expect("server should report receipt");
+        assert!(
+            received,
+            "established WebSocket session must survive the request deadline"
+        );
+
+        server.abort();
+        let _ = server.await;
     }
 }
