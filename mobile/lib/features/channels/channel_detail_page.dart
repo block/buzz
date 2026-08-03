@@ -136,6 +136,7 @@ class ChannelDetailPage extends HookConsumerWidget {
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
     final channelsNotifier = ref.read(channelsProvider.notifier);
+    final initialOrdinaryUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final initialOldestOrdinaryUnreadMessageIdRef = useRef<String?>(null);
     final initialForcedUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final didCaptureInitialReadAt = useRef(false);
@@ -162,6 +163,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                       0))
             event,
       ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      initialOrdinaryUnreadMessageIdsRef.value = {
+        for (final event in ordinaryUnreadEvents) event.id,
+      };
       initialOldestOrdinaryUnreadMessageIdRef.value =
           ordinaryUnreadEvents.firstOrNull?.id;
       initialForcedUnreadMessageIdsRef.value = {
@@ -171,6 +175,8 @@ class ChannelDetailPage extends HookConsumerWidget {
       };
       didCaptureInitialReadAt.value = true;
     }
+    final initialOrdinaryUnreadMessageIds =
+        initialOrdinaryUnreadMessageIdsRef.value;
     final initialOldestOrdinaryUnreadMessageId =
         initialOldestOrdinaryUnreadMessageIdRef.value;
     final initialForcedUnreadMessageIds =
@@ -435,6 +441,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                               allMessages: messages,
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
+                              initialOrdinaryUnreadMessageIds:
+                                  initialOrdinaryUnreadMessageIds,
                               initialOldestOrdinaryUnreadMessageId:
                                   initialOldestOrdinaryUnreadMessageId,
                               initialForcedUnreadMessageIds:

@@ -5,6 +5,7 @@ class _MessageList extends HookConsumerWidget {
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final Set<String> initialOrdinaryUnreadMessageIds;
   final String? initialOldestOrdinaryUnreadMessageId;
   final Set<String> initialForcedUnreadMessageIds;
   final bool hasInitialUnread;
@@ -20,6 +21,7 @@ class _MessageList extends HookConsumerWidget {
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
+    required this.initialOrdinaryUnreadMessageIds,
     required this.initialOldestOrdinaryUnreadMessageId,
     required this.initialForcedUnreadMessageIds,
     required this.hasInitialUnread,
@@ -79,15 +81,16 @@ class _MessageList extends HookConsumerWidget {
         final hasKnownTarget =
             initialOldestOrdinaryUnreadMessageId != null ||
             initialForcedUnreadMessageIds.isNotEmpty;
-        final hasLoadedKnownTarget =
-            hasLoadedOrdinaryTarget || hasLoadedForcedTarget;
-        if (hasKnownTarget &&
-            !hasLoadedKnownTarget &&
-            !notifier.reachedOldest) {
-          if (unreadBoundaryFetchCount.value >= 4) {
-            unreadBoundaryLoadFailed.value = true;
-            return null;
-          }
+        final hasLoadedFetchTarget =
+            initialOldestOrdinaryUnreadMessageId != null
+            ? hasLoadedOrdinaryTarget
+            : hasLoadedForcedTarget;
+        final canFetchTarget =
+            hasKnownTarget &&
+            !hasLoadedFetchTarget &&
+            !notifier.reachedOldest &&
+            unreadBoundaryFetchCount.value < 4;
+        if (canFetchTarget) {
           unreadBoundaryFetchCount.value += 1;
           var cancelled = false;
           unawaited(
@@ -101,10 +104,16 @@ class _MessageList extends HookConsumerWidget {
           return () => cancelled = true;
         }
 
+        if (hasKnownTarget &&
+            !hasLoadedFetchTarget &&
+            !notifier.reachedOldest) {
+          unreadBoundaryLoadFailed.value = true;
+        }
+
         final ordinaryUnread = entries
             .where(
               (entry) =>
-                  entry.message.id == initialOldestOrdinaryUnreadMessageId,
+                  initialOrdinaryUnreadMessageIds.contains(entry.message.id),
             )
             .map((entry) => entry.message)
             .firstOrNull;
@@ -123,6 +132,7 @@ class _MessageList extends HookConsumerWidget {
       [
         hasInitialUnread,
         hasUnreadDeepLink,
+        initialOrdinaryUnreadMessageIds,
         initialOldestOrdinaryUnreadMessageId,
         initialForcedUnreadMessageIds,
         entries.length,

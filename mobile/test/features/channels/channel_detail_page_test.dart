@@ -1400,6 +1400,14 @@ void main() {
               channelType: 'stream',
               isThreadedReply: false,
             ),
+            makeObservedUnreadEvent(
+              id: 'msg275',
+              createdAt: 1275,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
           ],
         },
       );
@@ -1423,10 +1431,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(messagesNotifier.fetchOlderCalls, 4);
-      expect(
-        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
-        findsNothing,
+      final unreadButton = find.byKey(
+        const ValueKey('channel-jump-to-oldest-unread'),
       );
+      expect(unreadButton, findsOneWidget);
+      await tester.tap(unreadButton);
+      await tester.pumpAndSettle();
+      expect(findRichText('Message 275'), findsOneWidget);
     });
 
     testWidgets('stops loading the unread boundary after a failed page', (
@@ -1469,6 +1480,154 @@ void main() {
         findsNothing,
       );
       expect(find.bySemanticsLabel('Loading older messages'), findsNothing);
+    });
+
+    testWidgets('falls back when the oldest unread row is deleted', (
+      tester,
+    ) async {
+      final messagesNotifier = _FakeMessagesNotifier([
+        _textMsg(
+          id: 'deleted-oldest',
+          pubkey: 'alice',
+          content: 'Deleted oldest',
+          createdAt: 1021,
+        ),
+        _textMsg(
+          id: 'reachable-unread',
+          pubkey: 'alice',
+          content: 'Reachable unread',
+          createdAt: 1022,
+        ),
+        _deletion(
+          id: 'delete-oldest',
+          targetIds: ['deleted-oldest'],
+          createdAt: 1023,
+        ),
+      ]);
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'deleted-oldest',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+            makeObservedUnreadEvent(
+              id: 'reachable-unread',
+              createdAt: 1022,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final unreadButton = find.byKey(
+        const ValueKey('channel-jump-to-oldest-unread'),
+      );
+      expect(unreadButton, findsOneWidget);
+      await tester.tap(unreadButton);
+      await tester.pumpAndSettle();
+      expect(findRichText('Reachable unread'), findsOneWidget);
+    });
+
+    testWidgets('pages past a loaded forced unread for an older target', (
+      tester,
+    ) async {
+      final newestPage = [
+        for (var i = 50; i < 100; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final olderPage = [
+        for (var i = 0; i < 50; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        newestPage,
+        olderPages: [olderPage],
+      );
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+          forcedUnreadContexts: {'msg:msg75': _channelId},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 1);
+      await tester.tap(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Message 21'), findsOneWidget);
+      expect(findRichText('Message 75'), findsNothing);
     });
 
     testWidgets('targets the oldest message-level forced unread', (
@@ -1766,6 +1925,67 @@ void main() {
       expect(findRichText('Message 5'), findsOneWidget);
       expect(findRichText('Newest live update'), findsNothing);
     });
+
+    testWidgets(
+      'gives an initial deep link precedence over unread navigation',
+      (tester) async {
+        final initialMessages = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+            ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+        final channelsNotifier = _FakeChannelsNotifier(
+          [_testChannel],
+          observedUnread: {
+            _channelId: [
+              makeObservedUnreadEvent(
+                id: 'msg5',
+                createdAt: 1005,
+                rootId: null,
+                highPriority: false,
+                channelType: 'stream',
+                isThreadedReply: false,
+              ),
+            ],
+          },
+        );
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {_channelId: 1004},
+            version: 0,
+          ),
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            channelsNotifier: channelsNotifier,
+            readStateNotifier: readState,
+            initialMessageId: 'msg20',
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Message 20'), findsOneWidget);
+        expect(findRichText('Message 5'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+          findsNothing,
+        );
+        expect(messagesNotifier.fetchOlderCalls, 0);
+      },
+    );
 
     testWidgets(
       'keeps a deep-linked message in view when its page arrives after a '
