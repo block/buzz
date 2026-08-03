@@ -375,6 +375,35 @@ impl UsageTracker {
         // committed baseline; doing so would undercount X's next published delta.
     }
 
+    /// Seed a zero baseline for a session that buzz-acp just spawned.
+    ///
+    /// When buzz-acp creates a session itself via `session/new`, the session's
+    /// prior token usage is zero by definition — no provider calls have been
+    /// made yet.  Seeding a zero baseline here means the first usage
+    /// notification for this session will see `current − 0 == cumulative` and
+    /// can emit `delta_reliable: true` with `turn.* == cumulative.*`.
+    ///
+    /// This must be called **only** from the code path that issues `session/new`
+    /// (i.e. `create_session_and_apply_model` in `pool.rs`).  It must **not** be
+    /// called when attaching to a pre-existing session whose prior usage is
+    /// genuinely unknown — that case correctly stays fail-closed with the
+    /// existing no-baseline behavior.
+    ///
+    /// No-op if a baseline for this session already exists (guards against
+    /// accidental double-seeding across session rotation).
+    pub(crate) fn seed_zero_baseline(&mut self, session_id: &str) {
+        self.sessions
+            .entry(session_id.to_string())
+            .or_insert(SessionState {
+                published_seq: 0,
+                last_input: 0,
+                last_output: 0,
+                last_cost: Some(0.0),
+                last_total: None,
+                last_cached_input: None,
+            });
+    }
+
     /// Consume and return the most recently computed turn usage record, then
     /// clear the in-flight marker and advance the committed baseline.
     ///
@@ -1510,5 +1539,177 @@ mod tests {
             Some(600),
             "nonzero cumulative cache: must appear in kind:44200 cumulative counts"
         );
+    }
+
+    // ── seed_zero_baseline / first-turn fix ─────────────────────────────────
+
+    /// (a) Self-spawned session: first notification must be delta_reliable=true,
+    /// turn deltas equal to the cumulative values (baseline was zero).
+    #[test]
+    fn spawned_session_first_turn_is_reliable_with_zero_baseline() {
+        let mut tracker = UsageTracker::default();
+        // Simulate what pool.rs does immediately after create_session_and_apply_model.
+        tracker.seed_zero_baseline("sess-spawned");
+
+        tracker.begin_turn("sess-spawned");
+        tracker.record("sess-spawned", &payload(1000, 200, Some(0.01)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(
+            usage.delta_reliable,
+            "spawned session first turn must be reliable"
+        );
+        assert_eq!(usage.turn_seq, 1);
+        // Turn deltas == cumulative (baseline was zero).
+        assert_eq!(usage.turn_input_tokens, Some(1000));
+        assert_eq!(usage.turn_output_tokens, Some(200));
+        let dc = usage.turn_cost_usd.expect("cost delta present");
+        assert!((dc - 0.01).abs() < 1e-9, "cost delta: {dc}");
+        assert_eq!(usage.cumulative_input_tokens, 1000);
+        assert_eq!(usage.cumulative_output_tokens, 200);
+    }
+
+    /// (b) Re-attach session (no seed): first notification must remain
+    /// fail-closed (delta_reliable=false, turn.*=None).
+    #[test]
+    fn reattach_session_first_turn_stays_fail_closed() {
+        let mut tracker = UsageTracker::default();
+        // No seed_zero_baseline call — simulates re-attach to pre-existing session.
+
+        tracker.begin_turn("sess-reattach");
+        tracker.record("sess-reattach", &payload(5000, 1000, Some(0.05)));
+        let usage = tracker.take().expect("pending");
+
+        assert!(
+            !usage.delta_reliable,
+            "re-attach first turn must remain fail-closed (delta_reliable=false)"
+        );
+        assert_eq!(usage.turn_seq, 1);
+        assert!(
+            usage.turn_input_tokens.is_none(),
+            "no turn delta on re-attach"
+        );
+        assert!(usage.turn_output_tokens.is_none());
+        assert!(usage.turn_cost_usd.is_none());
+        // Cumulative still passes through.
+        assert_eq!(usage.cumulative_input_tokens, 5000);
+        assert_eq!(usage.cumulative_output_tokens, 1000);
+    }
+
+    /// (c) Second turn and beyond are unaffected in both modes.
+    #[test]
+    fn second_turn_reliable_in_both_spawned_and_reattach_paths() {
+        // Spawned path: turn 2 must be reliable (baseline from turn 1's take()).
+        let mut spawned = UsageTracker::default();
+        spawned.seed_zero_baseline("sess-s");
+        spawned.begin_turn("sess-s");
+        spawned.record("sess-s", &payload(1000, 100, None));
+        let _ = spawned.take();
+
+        spawned.begin_turn("sess-s");
+        spawned.record("sess-s", &payload(1800, 250, None));
+        let t2_s = spawned.take().expect("spawned turn 2");
+        assert!(t2_s.delta_reliable, "spawned path: turn 2 reliable");
+        assert_eq!(t2_s.turn_seq, 2);
+        assert_eq!(t2_s.turn_input_tokens, Some(800));
+        assert_eq!(t2_s.turn_output_tokens, Some(150));
+
+        // Re-attach path: turn 2 must also be reliable.
+        let mut reattach = UsageTracker::default();
+        reattach.begin_turn("sess-r");
+        reattach.record("sess-r", &payload(5000, 1000, None));
+        let _ = reattach.take(); // turn 1: unreliable (no baseline), but take() seeds it
+
+        reattach.begin_turn("sess-r");
+        reattach.record("sess-r", &payload(6000, 1200, None));
+        let t2_r = reattach.take().expect("reattach turn 2");
+        assert!(t2_r.delta_reliable, "re-attach path: turn 2 reliable");
+        assert_eq!(t2_r.turn_seq, 2);
+        assert_eq!(t2_r.turn_input_tokens, Some(1000));
+        assert_eq!(t2_r.turn_output_tokens, Some(200));
+    }
+
+    /// (d) Wire-frame assertions on the emitted TurnUsage payload fields for
+    /// the spawned-session first turn (not just internal delta_reliable).
+    #[test]
+    fn spawned_session_first_turn_payload_fields_are_correct() {
+        let mut tracker = UsageTracker::default();
+        tracker.seed_zero_baseline("sess-wire");
+
+        tracker.begin_turn("sess-wire");
+        tracker.record(
+            "sess-wire",
+            &UsageUpdatePayload {
+                used: 12345,
+                context_limit: 200_000,
+                accumulated_input_tokens: 10000,
+                accumulated_output_tokens: 2345,
+                accumulated_cached_input_tokens: Some(500),
+                accumulated_cost: Some(0.042),
+                accumulated_total_tokens: Some(12345),
+                model: Some("claude-opus-4-5".to_string()),
+            },
+        );
+        let usage = tracker.take().expect("pending");
+
+        // Wire payload fields — every field checked.
+        assert_eq!(usage.session_id, "sess-wire");
+        assert_eq!(usage.turn_seq, 1);
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(10000));
+        assert_eq!(usage.turn_output_tokens, Some(2345));
+        // turn_total: cumulative_total(12345) - baseline_total(None) → None
+        // (zero baseline does not seed a total — consistent with NIP-AM: never
+        // derive total from in+out).
+        assert!(
+            usage.turn_total_tokens.is_none(),
+            "turn_total_tokens must be None when total baseline was not seeded"
+        );
+        let dc = usage.turn_cost_usd.expect("cost delta present");
+        assert!((dc - 0.042).abs() < 1e-9, "cost delta: {dc}");
+        assert_eq!(usage.cumulative_input_tokens, 10000);
+        assert_eq!(usage.cumulative_output_tokens, 2345);
+        assert_eq!(usage.cumulative_total_tokens, Some(12345));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.042));
+        assert_eq!(usage.model.as_deref(), Some("claude-opus-4-5"));
+        // Cache: baseline seeded with last_cached_input=None, so no turn delta.
+        // Cumulative passes through from the payload.
+        assert!(
+            usage.turn_cache_read_tokens.is_none(),
+            "turn_cache_read_tokens: no baseline for cache → None"
+        );
+        assert_eq!(
+            usage.cumulative_cache_read_tokens,
+            Some(500),
+            "cumulative_cache_read_tokens passes through from payload"
+        );
+    }
+
+    /// seed_zero_baseline is a no-op when a baseline already exists — guards
+    /// against accidental double-seeding across session rotation.
+    #[test]
+    fn seed_zero_baseline_is_noop_when_baseline_already_exists() {
+        let mut tracker = UsageTracker::default();
+        // Establish a real baseline via turn 1.
+        tracker.seed_zero_baseline("sess-noop");
+        tracker.begin_turn("sess-noop");
+        tracker.record("sess-noop", &payload(1000, 200, None));
+        let _ = tracker.take();
+
+        // A second seed call (e.g. a bug in pool.rs) must not reset the baseline.
+        tracker.seed_zero_baseline("sess-noop");
+
+        // Turn 2 delta must still measure from the real baseline (1000/200), not zero.
+        tracker.begin_turn("sess-noop");
+        tracker.record("sess-noop", &payload(1500, 300, None));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable);
+        assert_eq!(
+            usage.turn_input_tokens,
+            Some(500),
+            "baseline must not have been reset to zero by the second seed call"
+        );
+        assert_eq!(usage.turn_output_tokens, Some(100));
     }
 }
