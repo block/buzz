@@ -84,9 +84,30 @@ const STRANGER_API_PORT: u16 = 19_539;
 const STRANGER_CONSOLE_PORT: u16 = 13_333;
 
 /// The trusted client sees the model within seconds on one box; this bounds
-/// the stranger's chance to (fail to) see it.
+/// the stranger's chance to (fail to) see it. Both windows are overridable
+/// via env (`MESH_CLIENT_WINDOW_SECS` / `MESH_STRANGER_WINDOW_SECS`) so CI
+/// can pin longer windows on slow shared runners instead of re-running the
+/// whole job.
 const CLIENT_WINDOW_SECS: u64 = 180;
 const STRANGER_WINDOW_SECS: u64 = 60;
+
+fn window_secs(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn client_window() -> Duration {
+    Duration::from_secs(window_secs("MESH_CLIENT_WINDOW_SECS", CLIENT_WINDOW_SECS))
+}
+
+fn stranger_window() -> Duration {
+    Duration::from_secs(window_secs(
+        "MESH_STRANGER_WINDOW_SECS",
+        STRANGER_WINDOW_SECS,
+    ))
+}
 
 /// Marker the orchestrator writes to the client child's stdin to request the
 /// post-attack inference re-verification.
@@ -543,8 +564,7 @@ async fn role_client() -> anyhow::Result<()> {
 
     let http = reqwest::Client::new();
     let base = node.api_base_url().to_string();
-    let Some(model) = wait_for_model(&http, &base, Duration::from_secs(CLIENT_WINDOW_SECS)).await?
-    else {
+    let Some(model) = wait_for_model(&http, &base, client_window()).await? else {
         println!("NONE");
         let _ = node.stop().await;
         std::process::exit(0);
@@ -637,7 +657,7 @@ async fn role_stranger() -> anyhow::Result<()> {
 
     let http = reqwest::Client::new();
     let base = node.api_base_url().to_string();
-    match wait_for_model(&http, &base, Duration::from_secs(STRANGER_WINDOW_SECS)).await? {
+    match wait_for_model(&http, &base, stranger_window()).await? {
         Some(model) => {
             println!("SEEN:{model}");
             match try_completion(&http, &base, &model).await {
@@ -840,7 +860,7 @@ fn orchestrate() -> anyhow::Result<()> {
     let (which, detail) = expect_one_of(
         &stranger_lines,
         &["SEEN:", "NONE"],
-        Duration::from_secs(STRANGER_WINDOW_SECS + 300),
+        stranger_window() + Duration::from_secs(300),
     )?;
     let stranger_infer = if which == "SEEN:" {
         let model = detail;
