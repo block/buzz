@@ -340,6 +340,17 @@ fn build_eval_context(ctx: &FilterContext) -> Result<evalexpr::HashMapContext, S
 /// a pathological expression from silently widening the subscription.
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 
+/// Match an event against subscription rules with normal explicit-mention
+/// semantics.
+pub async fn match_event(
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+    rules: &[SubscriptionRule],
+    agent_pubkey_hex: &str,
+) -> Option<MatchedRule> {
+    match_event_with_implicit_mention(event, channel_id, rules, agent_pubkey_hex, false).await
+}
+
 /// Match a Nostr event against an ordered list of subscription rules.
 ///
 /// Rules are evaluated in order; the first rule whose conditions all pass
@@ -350,8 +361,8 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// 1. **channels** — if not `"all"`, the event's channel UUID must be in the list.
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
 /// 3. **require_mention** — if `true`, a `p` tag matching `agent_pubkey_hex` must
-///    exist. Tag kind is checked via `tag.as_slice()` for stable, library-independent
-///    access.
+///    exist unless `mention_is_implicit` is true (for example, in a DM). Tag
+///    kind is checked via `tag.as_slice()` for stable, library-independent access.
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
 ///
 /// # Fail-closed filter error handling
@@ -365,11 +376,12 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// After [`MAX_CONSECUTIVE_TIMEOUTS`] consecutive timeouts on a single rule,
 /// that rule is logged at ERROR and the call returns `None` immediately to
 /// avoid blocking the event loop indefinitely.
-pub async fn match_event(
+pub async fn match_event_with_implicit_mention(
     event: &nostr::Event,
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
+    mention_is_implicit: bool,
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
@@ -387,7 +399,7 @@ pub async fn match_event(
         // 3. Mention check — look for a `p` tag whose first element equals
         //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
         //    access — avoids relying on the Display impl of tag kind.
-        if rule.require_mention {
+        if rule.require_mention && !mention_is_implicit {
             let mentioned = event.tags.iter().any(|tag| {
                 let s = tag.as_slice();
                 s.first().map(|k| k.as_str()) == Some("p")
@@ -660,6 +672,19 @@ mod tests {
         let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey)
             .await
             .unwrap();
+        assert_eq!(matched.prompt_tag, "mentioned");
+
+        // A private DM is already addressed to its recipient, so callers can
+        // satisfy the mention requirement without a redundant p-tag.
+        let matched = match_event_with_implicit_mention(
+            &event_no_mention,
+            channel_id,
+            &rules,
+            agent_pubkey,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
     }
 
