@@ -87,8 +87,11 @@ test("editing a kubernetes agent shows its saved run-on settings", async ({
     runOn.getByTestId("edit-agent-run-on-service_account"),
   ).toHaveCount(0);
 
-  // The section explains immutability instead of pretending to be a form.
-  await expect(runOn).toContainText("can't be changed afterwards");
+  // The section shows saved creation settings; the interactive picker above
+  // it owns changing where the agent runs.
+  await expect(runOn).toContainText(
+    "settings saved when the agent was created",
+  );
 
   await runOn.scrollIntoViewIfNeeded();
   await waitForAnimations(page);
@@ -97,7 +100,7 @@ test("editing a kubernetes agent shows its saved run-on settings", async ({
     .screenshot({ path: `${SHOTS}/kubernetes-run-on.png` });
 });
 
-test("editing a local agent names this computer, with no config rows", async ({
+test("editing a local agent shows no saved-settings section", async ({
   page,
 }) => {
   const agent = TEST_IDENTITIES.tyler;
@@ -115,13 +118,12 @@ test("editing a local agent names this computer, with no config rows", async ({
   });
   await openEditDialog(page, "Local Helper");
 
-  const runOn = page.getByTestId("edit-agent-run-on");
-  await expect(runOn.getByTestId("edit-agent-run-on-location")).toHaveText(
-    "This computer",
-  );
-  await expect(runOn.getByTestId("edit-agent-run-on-namespace")).toHaveCount(0);
+  // Local agents have no saved provider config: the read-only summary stays
+  // out of the dialog entirely (the interactive picker owns the location,
+  // and hides itself too when local is the only possible target).
+  await expect(page.getByTestId("edit-agent-dialog")).toBeVisible();
+  await expect(page.getByTestId("edit-agent-run-on")).toHaveCount(0);
 
-  await runOn.scrollIntoViewIfNeeded();
   await waitForAnimations(page);
   await page
     .getByTestId("edit-agent-dialog")

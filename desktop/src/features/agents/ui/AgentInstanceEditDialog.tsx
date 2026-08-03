@@ -64,7 +64,6 @@ import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
-import { RunOnSummarySection } from "./RunOnSummarySection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -94,6 +93,7 @@ import {
 } from "./addCustomHarness";
 import { AgentRunLocationProvider } from "./AgentRunLocationContext";
 import { EditAgentTextField } from "./EditAgentTextField";
+import { RunOnSummarySection } from "./RunOnSummarySection";
 import { useEditAgentBackendSwap } from "./useEditAgentBackendSwap";
 import { WhereToRunSection } from "./WhereToRunSection";
 
@@ -1135,6 +1135,7 @@ export function AgentInstanceEditDialog({
                 isPending={isSaving}
                 onDraftChange={backendSwap.setRunDraft}
               />
+              <RunOnSummarySection backend={agent.backend} />
 
               {/* Advanced settings */}
               <div className="space-y-3">

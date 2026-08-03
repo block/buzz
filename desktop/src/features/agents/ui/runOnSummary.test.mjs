@@ -7,6 +7,13 @@ test("local backend summarizes to the local location with no rows", () => {
   assert.deepEqual(summarizeRunOn({ type: "local" }), { location: "local" });
 });
 
+test("execution-node backend carries the node id with no config rows", () => {
+  assert.deepEqual(
+    summarizeRunOn({ type: "execution_node", nodeId: "a".repeat(64) }),
+    { location: "execution-node", nodeId: "a".repeat(64) },
+  );
+});
+
 test("provider backend carries the provider id", () => {
   const summary = summarizeRunOn({
     type: "provider",

@@ -284,4 +284,3 @@ test("probe resolution preserves unrelated draft fields", () => {
     "kubernetes",
   );
 });
-
