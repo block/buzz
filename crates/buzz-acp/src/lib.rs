@@ -217,35 +217,20 @@ async fn is_owner_or_sibling(
 
 /// Inbound author gate decision: does this author's event fire a turn?
 ///
-/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
-/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
-/// additionally accepts the explicit external pubkey list.
-///
-/// # DM hardening (`is_dm`)
-///
-/// Clients auto-p-tag every DM participant, so in a DM *any* participant's
-/// message looks like a mention and would fire a turn. Combined with
-/// agent-initiated DMs (the agent can be asked to DM a third party), that
-/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
-/// lands in a DM with the agent can prompt it. To close that hole, when
-/// `is_dm` is true only the owner and cryptographically verified same-owner
-/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
-/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
-/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// Coarse security policy applied before subscription rules. The configured
+/// mode has the same meaning in channels and DMs: `OwnerOnly` admits the owner
+/// and same-owner siblings, `Allowlist` additionally admits explicit external
+/// pubkeys, and `Anyone` admits every author. DM replies still require the
+/// agent to be a participant in that DM, so this does not grant relay-wide
+/// access.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
-    is_dm: bool,
+    _is_dm: bool,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
-    if is_dm {
-        return match respond_to {
-            RespondTo::Nobody => false,
-            _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
-        };
-    }
     match respond_to {
         RespondTo::Anyone => true,
         RespondTo::Nobody => false,
@@ -4659,19 +4644,18 @@ mod author_gate_tests {
         }
     }
 
-    // ── DM hardening ──────────────────────────────────────────────────────
+    // ── DM response policy ─────────────────────────────────────────────────
     //
-    // In a DM, clients auto-p-tag every participant, and an agent can be
-    // asked to open a DM with a third party. The gate must therefore ignore
-    // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // The configured response mode applies consistently in channels and DMs.
+    // A DM is still scoped to its participants, so `anyone` means any person
+    // who is already in a DM with the agent, not any relay user.
 
     #[tokio::test]
-    async fn test_dm_rejects_allowlisted_external_pubkey() {
+    async fn test_dm_accepts_allowlisted_external_pubkey() {
         let cache = cache_with_sibling();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
-            !author_allowed(
+            author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
@@ -4680,15 +4664,15 @@ mod author_gate_tests {
                 &dummy_rest_client()
             )
             .await,
-            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+            "an allowlisted external pubkey must fire a turn inside a DM"
         );
     }
 
     #[tokio::test]
-    async fn test_dm_rejects_stranger_under_anyone() {
+    async fn test_dm_accepts_stranger_under_anyone() {
         let cache = cache_with_sibling();
         assert!(
-            !author_allowed(
+            author_allowed(
                 &RespondTo::Anyone,
                 &HashSet::new(),
                 STRANGER,
@@ -4697,7 +4681,7 @@ mod author_gate_tests {
                 &dummy_rest_client()
             )
             .await,
-            "respond_to=anyone must still drop non-owner authors inside a DM"
+            "respond_to=anyone must admit an existing DM participant"
         );
     }
 
@@ -4857,7 +4841,7 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_without_metadata_stays_fail_closed_at_author_gate() {
+    async fn test_discovery_without_metadata_preserves_explicit_author_policy() {
         let id = Uuid::new_v4();
         let discovered = relay::merge_discovered_channels(vec![id], &serde_json::json!([]));
         let channel_info = resolver(discovered);
@@ -4867,7 +4851,7 @@ mod author_gate_tests {
         let is_dm = is_dm_channel(id, &channel_info).await;
         assert!(is_dm, "unknown startup metadata must fail closed as DM");
         assert!(
-            !author_allowed(
+            author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
@@ -4876,7 +4860,7 @@ mod author_gate_tests {
                 &dummy_rest_client(),
             )
             .await,
-            "an external author must not pass when startup discovery omitted metadata"
+            "an explicitly allowlisted author must pass even when channel metadata is unavailable"
         );
     }
 

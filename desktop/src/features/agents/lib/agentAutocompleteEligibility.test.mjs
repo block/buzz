@@ -136,7 +136,7 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
-test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
+test("isAgentIdentityInManagedList: keeps people, channel-member agents, and current managed agents", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
 
   assert.equal(
@@ -159,6 +159,13 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
       managedAgentPubkeys,
     ),
     false,
+  );
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    true,
   );
 });
 
