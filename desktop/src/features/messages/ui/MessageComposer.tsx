@@ -41,6 +41,7 @@ import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposer
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
+import { readClipboardImage } from "@/shared/api/tauriMedia";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -753,6 +754,37 @@ function MessageComposerImpl({
             }
             return true;
           }
+          // WebKitGTK can dispatch a paste event without turning a Wayland
+          // image offer into a `DataTransferItem`. Fall back to the native
+          // clipboard only when the webview did not expose normal text, so
+          // ordinary text and code-block paste keep their existing behavior.
+          const hasTextItem = items.some((item) =>
+            item.type.startsWith("text/"),
+          );
+          const hasImageMime = items.some((item) =>
+            item.type.startsWith("image/"),
+          );
+          if ((items.length === 0 && !hasTextItem) || hasImageMime) {
+            event.preventDefault();
+            void readClipboardImage()
+              .then((bytes) => {
+                if (!bytes) return;
+                // Copy into a browser-owned ArrayBuffer: Tauri's Uint8Array
+                // is typed as ArrayBufferLike, while File accepts ArrayBuffer.
+                const imageBytes = new Uint8Array(bytes.byteLength);
+                imageBytes.set(bytes);
+                return uploadFileRef.current(
+                  new File([imageBytes.buffer], "clipboard-image.png", {
+                    type: "image/png",
+                  }),
+                );
+              })
+              // A non-image clipboard is normal; leave it to the existing
+              // webview paste path rather than surfacing an upload error.
+              .catch(() => undefined);
+            return true;
+          }
+
           // --- Buzz code-block paste ---
           // The code block copy button writes a small Buzz marker alongside
           // plain text. Use it to paste back as a literal code block so Markdown

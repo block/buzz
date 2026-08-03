@@ -89,6 +89,15 @@ export async function readTextFromSystemClipboard(): Promise<string> {
   return clipboard.readText();
 }
 
+/**
+ * Read a system clipboard image through the native shell. WebKitGTK does not
+ * always expose a Wayland image offer through `ClipboardEvent.clipboardData`.
+ */
+export async function readClipboardImage(): Promise<Uint8Array | null> {
+  const bytes = await invokeTauri<number[] | null>("read_clipboard_image", {});
+  return bytes === null ? null : new Uint8Array(bytes);
+}
+
 /** Write text through the native clipboard after an asynchronous workflow. */
 export async function copyTextToSystemClipboard(
   text: string,
