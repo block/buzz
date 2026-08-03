@@ -4,7 +4,8 @@
  * The error classification seam flows like this:
  *   buzz-agent — classifies LLM failures into `AgentError` variants with
  *                  JSON-RPC codes (`-32001` auth, `-32002` model-not-found,
- *                  `-32000` generic), defined in `crates/buzz-agent/src/types.rs`.
+ *                  `-32003` provider-unavailable, `-32000` generic), defined in
+ *                  `crates/buzz-agent/src/types.rs`.
  *   buzz-acp   — preserves the code structurally in
  *                  `AcpError::AgentError { code, message }`, whose Display is
  *                  `"Agent reported error (code N): message"`, and includes
@@ -41,6 +42,9 @@ export const RELAY_MESH_DENIED_COPY =
 
 export const MODEL_NOT_FOUND_COPY =
   "The configured model is not available — open agent settings and select a different one from the dropdown.";
+
+export const PROVIDER_UNAVAILABLE_COPY =
+  "The model provider is unavailable — out of quota, rate-limited, or down — and no fallback provider recovered the turn. Add another provider to the fallback chain (Ollama Cloud or OpenRouter via BUZZ_AGENT_FALLBACK_PROVIDERS) or wait for the quota to reset.";
 
 export const CLI_ACP_INTERNAL_ERROR_COPY =
   "The agent's harness reported an internal error. For Codex agents this can mean the configured model isn't supported by your installed codex-acp — check the model in `~/.codex/config.toml` or upgrade the adapter (`brew upgrade codex-acp`).";
@@ -81,6 +85,12 @@ export function friendlyAgentLastError(
         return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
       case -32002:
         return { severity: "denied", copy: MODEL_NOT_FOUND_COPY };
+      case -32003:
+        // Provider unavailable (quota, credentials, upstream 5xx, transport).
+        // buzz-agent's failover chain walked every configured provider and
+        // none recovered the turn — this surfaces ONLY when the whole chain is
+        // down. A turn a fallback rescued returns Ok and never lands here.
+        return { severity: "generic", copy: PROVIDER_UNAVAILABLE_COPY };
       case -32603: {
         // Standard JSON-RPC "Internal error" — emitted by external harnesses
         // (e.g. codex-acp) when the configured model is unsupported. Only
