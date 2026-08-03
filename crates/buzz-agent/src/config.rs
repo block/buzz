@@ -244,7 +244,6 @@ pub fn normalize_effort_for_databricks_v2(
 /// - `OmitFields` / `None` / `NotApplicable` → omit both fields
 ///
 /// This is the single production authority for all providers' Anthropic thinking.
-/// The old `anthropic_thinking_config_for_databricks_v2` is a test-only shim.
 pub fn anthropic_thinking_config_generated(
     provider: &str,
     raw_model: &str,
@@ -1194,5 +1193,113 @@ mod tests {
     fn resolve_provider_openrouter_missing_key() {
         let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    // ---- Config::validate() — Anthropic effort gate ----
+    // Pinned behavioral coverage for the pure-Anthropic none|minimal rejection
+    // at config.rs:672-681. This gate is reached from Config::from_env() at :558.
+    // A regression (e.g. predicate accidentally inverted) makes these tests fail
+    // while the cargo-test suite remains otherwise green.
+
+    /// Minimal Config that passes all validate() invariants (Anthropic provider).
+    /// Tests set only the fields under scrutiny before calling validate().
+    fn cfg_anthropic_for_validate() -> Config {
+        Config {
+            provider: Provider::Anthropic,
+            system_prompt: String::new(),
+            api_key: "sk-ant-key".into(),
+            model: "claude-opus-4-8".into(),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_api_version: "2023-06-01".into(),
+            openai_api: OpenAiApi::Auto,
+            prefer_mesh_for_auto: false,
+            max_rounds: 10,
+            max_output_tokens: 32_768,
+            llm_timeout: Duration::from_secs(10),
+            tool_timeout: Duration::from_secs(10),
+            mcp_init_timeout: Duration::from_secs(10),
+            mcp_max_restart_attempts: 1,
+            mcp_restart_base_ms: 100,
+            mcp_restart_max_ms: 1_000,
+            max_sessions: 1,
+            max_line_bytes: 4 * 1024 * 1024,
+            max_history_bytes: 16 * 1024 * 1024,
+            max_tool_result_text_bytes: 50 * 1024,
+            max_context_tokens: 200_000,
+            max_handoffs: 1,
+            max_parallel_tools: 1,
+            hook_timeout: Duration::from_secs(1),
+            stop_max_rejections: 0,
+            require_reply: false,
+            hook_servers: HookServers::None,
+            hints_enabled: false,
+            thinking_effort: None,
+            prompt_caching: false,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_none_and_minimal_for_pure_anthropic() {
+        for effort in [ThinkingEffort::None, ThinkingEffort::Minimal] {
+            let mut cfg = cfg_anthropic_for_validate();
+            cfg.thinking_effort = Some(effort);
+            let err = cfg.validate().unwrap_err();
+            assert!(
+                err.contains("not valid for Anthropic providers"),
+                "effort={effort:?}: expected rejection, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_efforts_for_pure_anthropic() {
+        for effort in [
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let mut cfg = cfg_anthropic_for_validate();
+            cfg.thinking_effort = Some(effort);
+            assert!(
+                cfg.validate().is_ok(),
+                "effort={effort:?}: expected Ok, got error"
+            );
+        }
+    }
+
+    // ---- normalize_effort_for_anthropic_route() matrix ----
+    // Pinned coverage for the none|minimal → None mapping at config.rs:151-164.
+    // Used by the DBv2 Anthropic arm (llm.rs:216). A regression that lets
+    // none/minimal reach the wire as an Anthropic effort level fails these tests.
+
+    #[test]
+    fn normalize_effort_for_anthropic_route_omits_none_and_minimal() {
+        assert_eq!(
+            normalize_effort_for_anthropic_route(ThinkingEffort::None),
+            None
+        );
+        assert_eq!(
+            normalize_effort_for_anthropic_route(ThinkingEffort::Minimal),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_effort_for_anthropic_route_passes_through_valid_levels() {
+        for effort in [
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            assert_eq!(
+                normalize_effort_for_anthropic_route(effort),
+                Some(effort),
+                "effort={effort:?}: expected Some({effort:?}), got None"
+            );
+        }
     }
 }

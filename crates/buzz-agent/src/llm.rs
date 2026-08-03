@@ -3852,6 +3852,30 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_body_opus_4_6_xhigh_clamps_to_high() {
+        // Production-seam clamp: Opus 4.6 supported_efforts=[low,medium,high,max] — xhigh is
+        // absent. The adaptive clamp (config.rs:284-296) must find the highest supported ≤ xhigh,
+        // which is high (max > xhigh in the ThinkingEffort ordering). A regression that removes
+        // the clamp or breaks the ordering would emit "xhigh" or omit the field entirely.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-opus-4-6",
+            Some(ThinkingEffort::XHigh),
+            "anthropic",
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(
+            body["output_config"]["effort"], "high",
+            "XHigh on Opus 4.6 must clamp to high (xhigh not in supported_efforts)"
+        );
+    }
+
+    #[test]
     fn openai_body_emits_xhigh_effort() {
         // xhigh is a valid OpenAI effort value — must pass through.
         let body = openai_body(

@@ -1336,7 +1336,6 @@ pub const DATABRICKS_MODEL_NAMES: &[(&str, &str)] = &[
 
 /// Returns true if `model` contains `token` at a word boundary (end-of-string or "-").
 /// Does not match if followed immediately by a digit or letter.
-/// Mirrors gpt5_token_matches in config.rs.
 fn gpt5_token_matches_rs(model: &str, token: &str) -> bool {
     let lower = model;
     let tok_lower = token;
