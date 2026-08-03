@@ -127,6 +127,46 @@ export function shouldAutoConnectDefaultRelay(relayUrl: string): boolean {
   }
 }
 
+/**
+ * Canonical ws(s) relay URL for community matching and deduplication.
+ * Deep links, stored communities, and relay probes may spell the same relay
+ * differently (case, trailing slash); compare via this form.
+ */
+export function canonicalCommunityRelayUrl(rawRelayUrl: string): string {
+  const trimmed = rawRelayUrl.trim();
+  const withScheme = /^(ws|wss):\/\//i.test(trimmed)
+    ? trimmed
+    : normalizeRelayUrl(trimmed);
+  const parsed = new URL(withScheme);
+  const protocol = parsed.protocol.toLowerCase();
+  let host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host === "[::1]" || host.startsWith("127.")) {
+    host = "127.0.0.1";
+  }
+  const defaultPort = protocol === "ws:" ? "80" : "443";
+  const port =
+    parsed.port && parsed.port !== defaultPort ? `:${parsed.port}` : "";
+  const path =
+    parsed.pathname.replace(/\/+$/, "") === "" ||
+    parsed.pathname.replace(/\/+$/, "") === "/"
+      ? ""
+      : parsed.pathname.replace(/\/+$/, "");
+  return `${protocol}//${host}${port}${path}${parsed.search}`.replace(
+    /\/+$/,
+    "",
+  );
+}
+
+export function findCommunityByRelayUrl(
+  communities: readonly Community[],
+  relayUrl: string,
+): Community | undefined {
+  const canonical = canonicalCommunityRelayUrl(relayUrl);
+  return communities.find(
+    (community) => canonicalCommunityRelayUrl(community.relayUrl) === canonical,
+  );
+}
+
 export function deriveCommunityName(relayUrl: string): string {
   try {
     const url = new URL(

@@ -9,6 +9,7 @@ export type AddCommunityDeepLinkPayload = {
 
 export interface DeepLinkDeps {
   startCommunityOnboarding: (input: StartCommunityOnboardingInput) => boolean;
+  switchToCommunityRelay: (relayUrl: string) => boolean;
   openAddCommunity: (
     payload: AddCommunityDeepLinkPayload & { requestId: string },
   ) => boolean;
@@ -62,6 +63,15 @@ function acceptPendingCommunityDeepLink(
   pending: PendingCommunityDeepLink,
   deps: DeepLinkDeps,
 ) {
+  if (
+    pending.kind === "connect" &&
+    deps.switchToCommunityRelay(pending.relayUrl)
+  ) {
+    return invoke<boolean>("acknowledge_pending_community_deep_link", {
+      id: pending.id,
+    });
+  }
+
   const accepted =
     pending.kind === "add-community"
       ? deps.openAddCommunity({
@@ -98,8 +108,9 @@ async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
  * Register listeners for deep-link events emitted by the Rust backend.
  *
  * When a `buzz://connect?relay=<url>` link is opened, the handler
- * adds a community for the relay (deduplicating by URL) and switches
- * to it. Returns an unlisten function to tear down all listeners.
+ * switches to an existing community for that relay (matching canonically)
+ * or starts community onboarding to add and connect a new one. Returns an
+ * unlisten function to tear down all listeners.
  *
  * When a `buzz://join?relay=<url>&code=<invite>` link is opened (relay
  * invite landing page), the handler first claims the invite against the
