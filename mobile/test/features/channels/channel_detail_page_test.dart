@@ -2830,6 +2830,81 @@ void main() {
       },
     );
 
+    testWidgets(
+      'deep-linking an older reply does not resume tail following on keyboard resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        final provisionalTarget = formatTimeline([replies[5]]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead, provisionalTarget],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+              initialMessageId: 'reply-5',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        completer.complete(replies);
+        await tester.pumpAndSettle();
+
+        final target = find.byKey(
+          const ValueKey('thread-message-group-reply-5'),
+        );
+        expect(target, findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(target, findsOneWidget);
+      },
+    );
+
     testWidgets('a reaction landing while the thread is open shows up there', (
       tester,
     ) async {

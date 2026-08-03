@@ -160,6 +160,11 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (targetIndex == null || didJumpToInitialMessage.value) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
+        // The provisional route snapshot can make the linked reply look like
+        // the tail. This authoritative deep-link jump intentionally leaves
+        // the user at an older item, so it must opt out of follow-tail first.
+        followsThreadTail.value = false;
+        pendingTailAlignment.value = null;
         itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
         didJumpToInitialMessage.value = true;
       });
@@ -297,7 +302,11 @@ class ThreadDetailPage extends HookConsumerWidget {
       tailRealignmentQueued.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         tailRealignmentQueued.value = false;
-        if (!context.mounted || !itemScrollController.isAttached) return;
+        if (!context.mounted ||
+            !itemScrollController.isAttached ||
+            !followsThreadTail.value) {
+          return;
+        }
         final lastIndex = replies.isEmpty
             ? headIndex
             : indexForReply(replies.length - 1);
