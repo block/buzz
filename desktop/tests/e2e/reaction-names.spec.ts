@@ -1,7 +1,6 @@
 import { expect, test } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -13,26 +12,9 @@ const BOB_PUBKEY =
 const MAX_REACTION_NAME =
   "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl";
 const MAX_REACTION_AVATAR_URL =
-  "https://cdn.example.test/avatars/teammate-alice.jpg";
+  'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%23e5484d"/%3E%3C/svg%3E';
 const SHORT_REACTION_AVATAR_URL =
-  "https://cdn.example.test/avatars/bob-avatar.jpg";
-const AVATAR_FIXTURES = new Map([
-  [
-    MAX_REACTION_AVATAR_URL,
-    fileURLToPath(
-      new URL(
-        "./fixtures/reaction-popover/teammate-alice.jpg",
-        import.meta.url,
-      ),
-    ),
-  ],
-  [
-    SHORT_REACTION_AVATAR_URL,
-    fileURLToPath(
-      new URL("./fixtures/reaction-popover/bob-avatar.jpg", import.meta.url),
-    ),
-  ],
-]);
+  'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%2300a36c"/%3E%3C/svg%3E';
 const SCREENSHOT_DIR =
   process.env.REACTION_POPOVER_SCREENSHOT_DIR ??
   "test-results/reaction-popover-screenshots";
@@ -74,17 +56,6 @@ async function capturePopover(
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.route("https://cdn.example.test/avatars/**", async (route) => {
-    const fixturePath = AVATAR_FIXTURES.get(route.request().url());
-    if (!fixturePath) {
-      await route.abort("blockedbyclient");
-      return;
-    }
-    await route.fulfill({
-      body: fs.readFileSync(fixturePath),
-      contentType: "image/jpeg",
-    });
-  });
   await installMockBridge(page, {
     searchProfiles: [
       {
@@ -138,7 +109,8 @@ test("reaction popover resolves a reactor with no authored message in the window
   const popover = page
     .locator("[data-radix-popper-content-wrapper]")
     .filter({ hasText: "bob reacted with" });
-  const avatar = popover.locator(`img[src="${SHORT_REACTION_AVATAR_URL}"]`);
+  const avatar = popover.locator("img");
+  await expect(avatar).toHaveAttribute("src", SHORT_REACTION_AVATAR_URL);
   await waitForImage(avatar);
   await capturePopover(page, popover, "short-name-after.png");
 });
@@ -191,7 +163,8 @@ test("maximum-length reaction name wraps inside a fixed-width popover", async ({
   const reactionName = popover.getByTestId("reaction-popover-name");
   await expect(reactionName).toHaveCSS("word-break", "break-all");
   await expect(reactionName).toHaveText(reaction);
-  const avatar = popover.locator(`img[src="${MAX_REACTION_AVATAR_URL}"]`);
+  const avatar = popover.locator("img");
+  await expect(avatar).toHaveAttribute("src", MAX_REACTION_AVATAR_URL);
   await waitForImage(avatar);
   await capturePopover(page, popover, "max-length-after.png");
 });
