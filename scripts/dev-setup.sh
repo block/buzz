@@ -82,6 +82,32 @@ cleanup_legacy_sprout_containers() {
   success "Legacy sprout-* containers removed (volumes preserved)"
 }
 
+fail_if_local_postgres_blocks_compose() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return
+  fi
+
+  local postgres_host_port="${PGPORT:-5432}"
+  local postgres_listeners
+
+  postgres_listeners=$(
+    lsof -nP -iTCP:"${postgres_host_port}" -sTCP:LISTEN 2>/dev/null \
+      | awk 'NR > 1 &&
+       ($1 == "postgres" || $1 == "postmaster") &&
+       !seen[$2]++ {
+         printf "%s(pid=%s) ", $1, $2
+       }' \
+      || true
+  )
+
+  if [[ -n "${postgres_listeners}" ]]; then
+    error "A local PostgreSQL server is already listening on port ${postgres_host_port}: ${postgres_listeners}"
+    error "Buzz migrations may connect to that server instead of the Docker-managed buzz-postgres container."
+    error "Stop the local PostgreSQL service, or configure Buzz to use a different Postgres host port."
+    exit 1
+  fi
+}
+
 fail_if_local_redis_blocks_compose() {
   if ! command -v lsof >/dev/null 2>&1; then
     return
@@ -106,6 +132,7 @@ postgres_accepting_connections() {
 
 load_env
 cleanup_legacy_sprout_containers
+fail_if_local_postgres_blocks_compose
 fail_if_local_redis_blocks_compose
 
 # ---- Start services ---------------------------------------------------------
