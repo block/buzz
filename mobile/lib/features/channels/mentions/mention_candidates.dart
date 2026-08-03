@@ -50,14 +50,22 @@ List<MentionCandidate> buildMentionCandidates({
   required Set<String> sharedChannelIds,
   required Map<String, UserProfile> userCache,
   required Map<String, String> ownerByAgentPubkey,
+  Set<String> archivedPubkeys = const {},
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
+  final currentLower = currentPubkey?.toLowerCase();
+  final archived = archivedPubkeys
+      .map((pubkey) => pubkey.toLowerCase())
+      .toSet();
+  bool isArchived(String pubkey) =>
+      pubkey != currentLower && archived.contains(pubkey);
 
   for (final member in members) {
     final pk = member.pubkey.toLowerCase();
+    if (isArchived(pk)) continue;
     if (!seen.add(pk)) continue;
     final profile = userCache[pk];
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
@@ -81,14 +89,17 @@ List<MentionCandidate> buildMentionCandidates({
   final directoryPubkeys = <String>{};
   final sharedAgentPubkeys = <String>{};
   for (final agent in relayAgents) {
-    directoryPubkeys.add(agent.pubkey);
+    final pk = agent.pubkey.toLowerCase();
+    directoryPubkeys.add(pk);
+    if (isArchived(pk)) continue;
     if (agentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)) {
-      sharedAgentPubkeys.add(agent.pubkey);
+      sharedAgentPubkeys.add(pk);
     }
   }
 
   for (final agent in relayAgents) {
-    final pk = agent.pubkey;
+    final pk = agent.pubkey.toLowerCase();
+    if (isArchived(pk)) continue;
     if (seen.contains(pk)) continue;
     if (!sharedAgentPubkeys.contains(pk)) continue;
     seen.add(pk);
@@ -108,9 +119,9 @@ List<MentionCandidate> buildMentionCandidates({
     );
   }
 
-  final currentLower = currentPubkey?.toLowerCase();
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
+    if (isArchived(pk)) continue;
     if (seen.contains(pk)) continue;
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile.ownerPubkey;
     final isAgent = ownerPubkey != null || directoryPubkeys.contains(pk);
