@@ -50,7 +50,7 @@ pub(crate) use environment::{
 };
 
 mod process;
-#[cfg(test)]
+#[cfg(any(test, feature = "mesh-llm"))]
 pub(crate) use process::process_is_running;
 pub(crate) use process::{
     adopt_schema_v2_runtime, current_instance_id, legacy_migration_gate, pair_lock_is_held,
