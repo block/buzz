@@ -274,9 +274,6 @@ fn validate_project_scope_for_app(
     scope: &ProjectConnectionScope,
 ) -> Result<ProjectConnectionScope, String> {
     let canonical = canonical_project_scope(scope)?;
-    if canonical != *scope {
-        return Err("Buzz could not verify this Project's canonical identity.".to_string());
-    }
     let state = app.state::<crate::app_state::AppState>();
     let active_relay = buzz_core_pkg::relay::normalize_relay_url(
         &crate::relay::relay_ws_url_with_override(&state),
@@ -905,9 +902,6 @@ pub fn delete_project_connection(
             connection.id == connection_id && connection.project_scope == project_scope
         })
         .ok_or_else(|| "This connection no longer exists in this Project.".to_string())?;
-    if !store.connections[index].env_keys.is_empty() {
-        load_secrets(app, &store.connections[index])?;
-    }
     commit_delete(
         &mut store,
         index,
