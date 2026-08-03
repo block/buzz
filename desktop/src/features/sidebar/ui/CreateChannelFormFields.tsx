@@ -138,13 +138,24 @@ export function CreateChannelFormFields({
         ttlSeconds={form.ttlSeconds}
       />
 
+      <ChannelPermissionsSettings
+        disabled={isCreating}
+        onVisibilityChange={form.setVisibility}
+        testIdPrefix="create-channel"
+        visibility={form.visibility}
+      />
+
       <div
         className={cn(
           "flex min-h-12 items-center justify-between gap-4 rounded-xl border border-input bg-background px-3 py-3",
           isCreating && "opacity-50",
         )}
+        data-testid="create-channel-template-container"
       >
-        <span className="text-sm font-medium text-foreground">Template</span>
+        <span className="text-sm font-medium text-foreground">
+          Template
+          <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
+        </span>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
@@ -208,13 +219,6 @@ export function CreateChannelFormFields({
           {selectedTemplateSummary}
         </p>
       ) : null}
-
-      <ChannelPermissionsSettings
-        disabled={isCreating}
-        onVisibilityChange={form.setVisibility}
-        testIdPrefix="create-channel"
-        visibility={form.visibility}
-      />
 
       {form.errorMessage ? (
         <p className="text-sm text-destructive">{form.errorMessage}</p>

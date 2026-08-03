@@ -1399,6 +1399,25 @@ test("create channel exposes templates when the library is empty", async ({
   await page.goto("/");
   await openCreateChannelDialog(page);
 
+  const typeContainer = page.getByTestId(
+    "create-channel-channel-type-container",
+  );
+  const visibilityContainer = page.getByTestId(
+    "create-channel-permissions-container",
+  );
+  const templateContainer = page.getByTestId(
+    "create-channel-template-container",
+  );
+  await expect(templateContainer).toContainText("TemplateOptional");
+  const typeBox = await typeContainer.boundingBox();
+  const visibilityBox = await visibilityContainer.boundingBox();
+  const templateBox = await templateContainer.boundingBox();
+  expect(typeBox).not.toBeNull();
+  expect(visibilityBox).not.toBeNull();
+  expect(templateBox).not.toBeNull();
+  expect(typeBox?.y ?? 0).toBeLessThan(visibilityBox?.y ?? 0);
+  expect(visibilityBox?.y ?? 0).toBeLessThan(templateBox?.y ?? 0);
+
   const templateControl = page.getByTestId("create-channel-template");
   await expect(templateControl).toHaveText("None");
   await templateControl.click();
