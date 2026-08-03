@@ -74,7 +74,7 @@ type MockCommandAvailability = {
   resolvedPath?: string | null;
 };
 
-type MockManagedAgentSeed = {
+export type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   avatarUrl?: string | null;
@@ -91,6 +91,8 @@ type MockManagedAgentSeed = {
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
+  /** Per-agent env vars seeded into the mock store. */
+  envVars?: Record<string, string>;
 };
 
 type MockManagedAgentRuntimeSeed = {
@@ -214,6 +216,8 @@ type E2eConfig = {
     /** Catalog responses for successive discovery calls. The final response repeats. */
     acpRuntimesCatalogSequence?: RawAcpRuntimeCatalogEntry[][];
     acpRuntimesDelayMs?: number;
+    /** When true, the catalog discovery call throws — simulates a failed query. */
+    acpRuntimesError?: boolean;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
@@ -2086,6 +2090,24 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
   const now = new Date().toISOString();
   const status = seed.status ?? "stopped";
 
+  // Resolve agent_command and agent_args from the well-known default catalog
+  // so the fixture mirrors real wire shape. Hardcoding ["acp"] for all runtimes
+  // is incorrect: buzz-agent ships with no default args.
+  const DEFAULT_RUNTIME_COMMAND: Record<
+    string,
+    { command: string; args: string[] }
+  > = {
+    goose: { command: "goose", args: ["acp"] },
+    "buzz-agent": { command: "buzz-agent", args: [] },
+    claude: { command: "claude", args: [] },
+    codex: { command: "codex", args: [] },
+  };
+  const catalogEntry = seed.runtime
+    ? DEFAULT_RUNTIME_COMMAND[seed.runtime]
+    : undefined;
+  const agentCommand = catalogEntry?.command ?? seed.runtime ?? "goose";
+  const agentArgs = catalogEntry?.args ?? ["acp"];
+
   return {
     pubkey: seed.pubkey,
     name: seed.name,
@@ -2095,8 +2117,8 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     runtime: seed.runtime ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
-    agent_command: "goose",
-    agent_args: ["acp"],
+    agent_command: agentCommand,
+    agent_args: agentArgs,
     mcp_command: "",
     turn_timeout_seconds: 320,
     idle_timeout_seconds: null,
@@ -2105,7 +2127,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
     model: null,
-    env_vars: {},
+    env_vars: { ...(seed.envVars ?? {}) },
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
     created_at: now,
@@ -7165,6 +7187,28 @@ function withMockRuntimeConfigMetadata(
           : runtime.id === "goose"
             ? "GOOSE_THINKING_EFFORT"
             : null,
+    max_tokens_env_var:
+      "max_tokens_env_var" in runtime
+        ? runtime.max_tokens_env_var
+        : runtime.id === "buzz-agent"
+          ? "BUZZ_AGENT_MAX_OUTPUT_TOKENS"
+          : runtime.id === "goose"
+            ? "GOOSE_MAX_TOKENS"
+            : null,
+    context_limit_env_var:
+      "context_limit_env_var" in runtime
+        ? runtime.context_limit_env_var
+        : runtime.id === "buzz-agent"
+          ? "BUZZ_AGENT_MAX_CONTEXT_TOKENS"
+          : runtime.id === "goose"
+            ? "GOOSE_CONTEXT_LIMIT"
+            : null,
+    max_rounds_env_var:
+      "max_rounds_env_var" in runtime
+        ? runtime.max_rounds_env_var
+        : runtime.id === "buzz-agent"
+          ? "BUZZ_AGENT_MAX_ROUNDS"
+          : null,
   };
 }
 
@@ -7180,6 +7224,10 @@ async function handleDiscoverAcpRuntimes(
     await new Promise<void>((resolve) => {
       window.setTimeout(resolve, delayMs);
     });
+  }
+
+  if (config?.mock?.acpRuntimesError) {
+    throw new Error("Mocked catalog discovery failure");
   }
 
   const afterInstallSequence =

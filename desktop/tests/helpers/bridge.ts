@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
+import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -41,24 +42,6 @@ type MockCommandAvailability = {
   available?: boolean;
   command?: string;
   resolvedPath?: string | null;
-};
-
-type MockManagedAgentSeed = {
-  pubkey: string;
-  name: string;
-  personaId?: string | null;
-  status?: "running" | "stopped" | "deployed" | "not_deployed";
-  channelNames?: string[];
-  channelIds?: string[];
-  backend?:
-    | { type: "local" }
-    | { type: "provider"; id: string; config: Record<string, unknown> };
-  lastError?: string | null;
-  lastErrorCode?: number | null;
-  needsRestart?: boolean;
-  autoRestartOnConfigChange?: boolean;
-  respondTo?: "owner-only" | "allowlist" | "anyone";
-  respondToAllowlist?: string[];
 };
 
 type MockSearchProfileSeed = {
@@ -199,6 +182,8 @@ type MockBridgeOptions = {
   /** Catalog responses for successive discovery calls. The final response repeats. */
   acpRuntimesCatalogSequence?: Record<string, unknown>[][];
   acpRuntimesDelayMs?: number;
+  /** When true, the mock catalog discovery command throws an error. */
+  acpRuntimesError?: boolean;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;
   /** When set, the `delete_custom_harness` mock command throws with this message. */
