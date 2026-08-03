@@ -106,7 +106,7 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
   );
 });
 
-test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents", () => {
+test("getMentionableAgentPubkeys: keeps managed agents and shared anyone agents", () => {
   const result = getMentionableAgentPubkeys({
     managedAgentPubkeys: [PUB_A],
     currentPubkey: CURRENT_PUBKEY,
