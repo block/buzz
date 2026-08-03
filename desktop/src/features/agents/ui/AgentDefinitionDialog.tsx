@@ -32,6 +32,7 @@ import {
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
 import {
+  ADVANCED_FIELDS_MOTION_TRANSITION,
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
@@ -117,11 +118,6 @@ type AgentDefinitionDialogProps = {
 export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
 };
-
-const ADVANCED_FIELDS_MOTION_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
 
 export function AgentDefinitionDialog({
   open,
