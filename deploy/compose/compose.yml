@@ -20,6 +20,7 @@ services:
       BUZZ_GIT_REPO_PATH: /data/git
       BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-false}
       BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
+      # BUZZ_PAIRING_RELAY_URL comes from env_file (.env) and is advertised in NIP-11.
     ports:
       - "${BUZZ_HTTP_PORT:-3000}:3000"
     volumes:
@@ -44,6 +45,29 @@ services:
       timeout: 3s
       retries: 12
       start_period: 30s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+  # Ephemeral NIP-AB pairing sidecar (same image). Closed/NIP-43 relays need this
+  # so unpaired phones can complete identity transfer before joining membership.
+  pair-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      - "${BUZZ_PAIR_HTTP_PORT:-3848}:5000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
     networks:
       - buzz-net
