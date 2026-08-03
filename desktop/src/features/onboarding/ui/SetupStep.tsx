@@ -8,6 +8,7 @@ import {
   useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
+import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -483,6 +484,7 @@ function RuntimeCard({
   const installMutation = useInstallAcpRuntimeMutation();
   const installError = installResults[runtime.id]?.error ?? null;
   const isInstalling = installMutation.isPending;
+  const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
   const isAvailable = runtime.availability === "available";
   const isReady = runtimeIsReadyForOnboarding(runtime);
 
@@ -499,7 +501,7 @@ function RuntimeCard({
           [runtime.id]: result.success
             ? { error: null, success: true }
             : {
-                error: getInstallErrorMessage(result.steps),
+                error: getInstallErrorMessage(result),
                 success: false,
               },
         }));
@@ -542,7 +544,18 @@ function RuntimeCard({
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {!isAvailable && runtimeDetailText(runtime) ? (
+        {isInstalling && installOutputLine ? (
+          // Takes the detail text's slot rather than adding a row: the card is
+          // fixed-height, and during an install the live line is the more
+          // useful of the two.
+          <p
+            aria-live="polite"
+            className="max-w-[13rem] truncate font-mono text-2xs leading-4 text-muted-foreground"
+            data-testid={`onboarding-runtime-install-output-${runtime.id}`}
+          >
+            {installOutputLine}
+          </p>
+        ) : !isAvailable && runtimeDetailText(runtime) ? (
           <p
             aria-hidden={installError ? "true" : undefined}
             className={cn(
@@ -685,25 +698,28 @@ function SetupStepContent({
       />
 
       <OnboardingFooter>
-        <Button
-          className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
-          data-testid="onboarding-setup-next"
-          disabled={readyRuntimeIds.length === 0}
-          onClick={() => actions.next(readyRuntimeIds)}
-          type="button"
-        >
-          Next
-        </Button>
-
-        <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
-          data-testid="onboarding-setup-skip"
-          onClick={() => actions.next([])}
-          type="button"
-          variant="ghost"
-        >
-          Skip for now
-        </Button>
+        {/* Relative row keeps the primary CTA truly centered while Skip
+            hangs off its right edge without shifting the center. */}
+        <div className="relative flex items-center justify-center">
+          <Button
+            className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
+            data-testid="onboarding-setup-next"
+            disabled={readyRuntimeIds.length === 0}
+            onClick={() => actions.next(readyRuntimeIds)}
+            type="button"
+          >
+            Next
+          </Button>
+          <Button
+            className="absolute left-full ml-3 h-9 animate-in whitespace-nowrap rounded-full px-6 text-sm fade-in fill-mode-backwards [animation-delay:1000ms] animation-duration-[500ms] hover:bg-foreground/10 motion-reduce:animate-none"
+            data-testid="onboarding-setup-skip"
+            onClick={() => actions.next([])}
+            type="button"
+            variant="ghost"
+          >
+            Skip for now
+          </Button>
+        </div>
 
         <Button
           className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"

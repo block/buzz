@@ -64,6 +64,7 @@ import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
+import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
@@ -278,9 +279,18 @@ function AppReady({
   }
 
   return (
-    <KnownAgentPubkeysProvider>
-      <RouterProvider router={router} />
-    </KnownAgentPubkeysProvider>
+    <EncryptedBackupProvider
+      onOpenSettings={() =>
+        void router.navigate({
+          to: "/settings",
+          search: { section: "profile" },
+        })
+      }
+    >
+      <KnownAgentPubkeysProvider>
+        <RouterProvider router={router} />
+      </KnownAgentPubkeysProvider>
+    </EncryptedBackupProvider>
   );
 }
 

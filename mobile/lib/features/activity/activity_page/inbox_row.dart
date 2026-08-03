@@ -61,6 +61,28 @@ class _InboxRow extends ConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final profile = userCache[item.item.pubkey.toLowerCase()];
     final senderLabel = profile?.displayName ?? shortPubkey(item.item.pubkey);
+    final profileMentionNames = {
+      for (final pubkey in mentionedPubkeysFromTags(item.item.tags))
+        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
+          pubkey: userCache[pubkey]!.displayName!.trim(),
+    };
+    final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
+    final knownAgentPubkeys = channel == null
+        ? ref.watch(knownAgentPubkeysProvider)
+        : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: knownAgentPubkeys,
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: mentionPubkeys,
+      profileMentionNames: profileMentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     final isDm = channel?.isDm ?? false;
     final channelName = channel != null && !isDm
@@ -172,6 +194,8 @@ class _InboxRow extends ConsumerWidget {
                   // Message preview.
                   MessageContent(
                     content: item.item.displayContent,
+                    mentionNames: mentionNames,
+                    agentMentionPubkeys: agentMentionPubkeys,
                     tags: item.item.tags,
                     maxLines: 2,
                     baseStyle: activityPreviewTextStyle.copyWith(

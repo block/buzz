@@ -450,6 +450,7 @@ pub async fn sync_managed_agent_profile(
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
 
     let url = format!("{}/events", relay_http_base_url(relay_url));
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
@@ -566,6 +567,7 @@ pub async fn submit_signed_event_with_keys(
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state

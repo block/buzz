@@ -140,6 +140,7 @@ class _SystemMessageRow extends ConsumerWidget {
                             : Grid.xxs),
                   ),
                   child: ReactionRow(
+                    messageId: message.id,
                     reactions: reactions,
                     onToggle: groupedMessages == null
                         ? (emoji) => toggleReaction(ref, message, emoji)
@@ -278,7 +279,12 @@ class _MembershipSystemMessageContent extends StatelessWidget {
       TextSpan(
         text: event.isSelfJoin
             ? 'joined the channel'
-            : 'was added by ${resolveLabel(event.actorPubkey)}',
+            // No "was": the name renders on the line above via
+            // MessageAuthorMeta, so this reads as a status line rather than a
+            // sentence continuing across the metadata row. Matches desktop's
+            // SystemMessageRow. `SystemEvent.describe` keeps "was added by"
+            // because it builds subject and predicate into one string.
+            : 'added by ${resolveLabel(event.actorPubkey)}',
       ),
       if (additionalTargets.isNotEmpty)
         TextSpan(text: event.isSelfJoin ? ' along with ' : ', along with '),

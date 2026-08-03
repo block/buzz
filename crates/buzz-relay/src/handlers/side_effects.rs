@@ -2167,9 +2167,18 @@ async fn handle_a_tag_deletion(
             };
             // Safe cast: NIP-33 kinds are 30000–39999, well within i32.
             let kind_i32 = k as i32;
+            // NIP-09 scopes an a-tag deletion to versions at or before the
+            // deletion's own created_at, so a stale/replayed tombstone can never
+            // erase a newer replacement head.
             let deleted = state
                 .db
-                .soft_delete_by_coordinate(tenant.community(), kind_i32, &pubkey_bytes, d_tag)
+                .soft_delete_by_coordinate(
+                    tenant.community(),
+                    kind_i32,
+                    &pubkey_bytes,
+                    d_tag,
+                    event.created_at.as_secs() as i64,
+                )
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(

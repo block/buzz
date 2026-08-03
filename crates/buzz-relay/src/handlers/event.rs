@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, is_unshared_persona_event, AUTHOR_ONLY_KINDS,
+    event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
     KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
@@ -151,10 +151,10 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
-    // Persona shared-read gate (fan-out): kind 30175 events fan out to all
-    // connections only when carrying ["shared","true"]. Unshared personas
-    // are delivered only to the author's own connections, matching REQ semantics.
-    let matches = if buzz_core::kind::is_persona_shared_kind(event_kind_u32(&stored_event.event)) {
+    // Shared-read gate (fan-out): SHARED_GATED_KINDS events fan out to all
+    // connections only when carrying ["shared","true"]. Unshared ones are
+    // delivered only to the author's own connections, matching REQ semantics.
+    let matches = if buzz_core::kind::is_shared_gated_kind(event_kind_u32(&stored_event.event)) {
         let author = stored_event.event.pubkey.to_bytes();
         matches
             .into_iter()
@@ -167,7 +167,7 @@ pub async fn filter_fanout_by_access(
                     return true;
                 }
                 // Foreign connection: allowed only if the event is shared.
-                !is_unshared_persona_event(&stored_event.event, &pk)
+                !is_unshared_gated_event(&stored_event.event, &pk)
             })
             .collect()
     } else {

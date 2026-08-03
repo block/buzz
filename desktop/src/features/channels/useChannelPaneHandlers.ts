@@ -25,6 +25,7 @@ export function useChannelPaneHandlers({
   getReplyDescendantIdsForMessage,
   markRevealedRepliesRead,
   onOptimisticOpenThreadHeadIdChange,
+  onRequestEmptyEditDelete,
   openThreadHeadId,
   sendMessageMutation,
   setExpandedThreadReplyIds,
@@ -45,6 +46,7 @@ export function useChannelPaneHandlers({
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
     React.SetStateAction<string | null | undefined>
   >;
+  onRequestEmptyEditDelete: (eventId: string) => void;
   openThreadHeadId: string | null;
   sendMessageMutation: ReturnType<typeof useSendMessageMutation>;
   setExpandedThreadReplyIds: React.Dispatch<React.SetStateAction<Set<string>>>;
@@ -154,6 +156,22 @@ export function useChannelPaneHandlers({
         return;
       }
 
+      // Clearing an edit to empty (no text, no attachments) is the keyboard
+      // shorthand for "Delete message". Rather than publish an empty edit,
+      // route it through the same "Delete message?" confirmation the Delete
+      // button shows. Keep edit mode active while the dialog is open so Cancel
+      // returns the user to the editor; edit mode is exited only once the
+      // deletion is confirmed (see ChannelScreen's onConfirm). Single decision
+      // point for both the main timeline and thread panel — both route
+      // edit-save through here.
+      const isEmptyDeletion =
+        content.trim().length === 0 &&
+        (mediaTags === undefined || mediaTags.length === 0);
+      if (isEmptyDeletion) {
+        onRequestEmptyEditDelete(eventId);
+        return;
+      }
+
       await editMutateRef.current({
         eventId,
         content,
@@ -162,7 +180,7 @@ export function useChannelPaneHandlers({
       });
       setEditTargetId(null);
     },
-    [setEditTargetId],
+    [onRequestEmptyEditDelete, setEditTargetId],
   );
 
   const handleOpenThread = React.useCallback(

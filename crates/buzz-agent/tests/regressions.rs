@@ -1819,3 +1819,465 @@ async fn cancel_sends_notifications_cancelled_to_any_mcp_server() {
     let _ = std::fs::remove_file(&call_received_marker);
     h.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Reply guard (`BUZZ_AGENT_REQUIRE_REPLY`)
+//
+// The guard reminds the model to publish when a turn is about to end without
+// any recognized attempt to post to Buzz. It rides the existing `_Stop` gate
+// and shares its rejection budget, so most of these tests count LLM calls:
+// each reminder costs exactly one extra round.
+// ---------------------------------------------------------------------------
+
+/// Number of reply-guard reminders present in one captured LLM request.
+///
+/// A reminder is a tool-role message whose JSON body is attributed to the
+/// in-process guard (`server: "buzz-agent"`) at the `_Stop` hook point — the
+/// same lower-trust shape as real hook output.
+fn reply_nag_count(request: &Value) -> usize {
+    request["messages"]
+        .as_array()
+        .map(|msgs| {
+            msgs.iter()
+                .filter(|m| {
+                    m["role"] == "tool"
+                        && serde_json::from_str::<Value>(m["content"].as_str().unwrap_or(""))
+                            .map(|p| p["hook"] == "_Stop" && p["server"] == "buzz-agent")
+                            .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// A publish-shaped call to a real registered shell tool.
+fn openai_shell_send(id: &str) -> Value {
+    openai_tool_call(
+        id,
+        "fake__shell",
+        json!({ "command": "buzz messages send --channel c --content hi" }),
+    )
+}
+
+/// Run one prompt to completion, answering any permission requests, and
+/// return the final response.
+async fn prompt_to_completion(h: &mut Harness, sid: &str) -> Value {
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    loop {
+        let v = h.recv().await;
+        if v.get("method") == Some(&json!("session/request_permission")) {
+            let id = v["id"].clone();
+            h.write(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
+            }))
+            .await;
+            continue;
+        }
+        if v["id"] == json!(p) {
+            return v;
+        }
+    }
+}
+
+/// Default off: a silent turn ends on the first end_turn with no extra round.
+/// This is the invariant that keeps the feature free for everyone who hasn't
+/// opted in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_off_by_default() {
+    let llm = spawn_capturing_llm(vec![openai_text("done"), openai_text("unexpected")]).await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "guard must be inert when unset, got {} LLM calls",
+        captured.len()
+    );
+    h.shutdown().await;
+}
+
+/// `BUZZ_AGENT_REQUIRE_REPLY=0` is off too — the toggle is numeric, so a
+/// literal `0` must not read as "set, therefore on".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_explicit_zero_is_off() {
+    let llm = spawn_capturing_llm(vec![openai_text("done"), openai_text("unexpected")]).await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_REQUIRE_REPLY", "0")]).await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "REQUIRE_REPLY=0 must behave as off, got {} LLM calls",
+        captured.len()
+    );
+    h.shutdown().await;
+}
+
+/// Opted in and silent: exactly two reminders, then the turn is allowed to
+/// end. The guard is advisory — it must never trap a turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_nags_twice_then_lets_the_turn_end() {
+    // Budget defaults to 3, so the cap that stops the loop here is
+    // MAX_REPLY_NAGS = 2, not the rejection budget.
+    let llm = spawn_capturing_llm(vec![
+        openai_text("silent-1"),
+        openai_text("silent-2"),
+        openai_text("silent-3"),
+        openai_text("must-not-be-requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_REQUIRE_REPLY", "1")]).await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        3,
+        "expected 2 reminders then end_turn (3 LLM calls), got {}",
+        captured.len()
+    );
+    assert_eq!(
+        reply_nag_count(&captured[0]),
+        0,
+        "reminder before any end_turn"
+    );
+    assert_eq!(reply_nag_count(&captured[1]), 1);
+    assert_eq!(reply_nag_count(&captured[2]), 2);
+
+    // The reminder must name the command it wants and license silence, so it
+    // cannot fight the base prompt's "silence is usually correct".
+    let msgs = captured[2]["messages"].as_array().unwrap();
+    let nag = msgs
+        .iter()
+        .filter_map(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap_or("")).ok())
+        .find(|p| p["server"] == "buzz-agent")
+        .expect("reminder body");
+    let text = nag["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("buzz messages send"),
+        "reminder should name the command: {text}"
+    );
+    assert!(
+        text.contains("silence is genuinely correct"),
+        "reminder must license silence: {text}"
+    );
+    h.shutdown().await;
+}
+
+/// A real publish attempt through a registered shell tool satisfies the guard:
+/// no reminder, no extra round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_satisfied_by_registered_shell_send() {
+    let llm = spawn_capturing_llm(vec![
+        openai_shell_send("tc1"),
+        openai_text("posted"),
+        openai_text("must-not-be-requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_REQUIRE_REPLY", "1")]).await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[("FAKE_MCP_TOOL_COUNT", "1"), ("FAKE_MCP_SHELL_TOOL", "1")],
+    )
+    .await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        2,
+        "a recognized send must not be nagged, got {} LLM calls",
+        captured.len()
+    );
+    assert_eq!(reply_nag_count(&captured[1]), 0);
+    h.shutdown().await;
+}
+
+/// A publish-shaped call to a shell tool that is *not registered* never runs —
+/// preflight rejects it — so it must not disarm the guard. This is what the
+/// `has`/`is_hook` checks in the predicate buy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_ignores_unregistered_shell_tool() {
+    // FAKE_MCP_SHELL_TOOL is absent, so `fake__shell` is a hallucination.
+    let llm = spawn_capturing_llm(vec![
+        openai_shell_send("tc1"),
+        openai_text("silent-1"),
+        openai_text("silent-2"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(&mut h, &[("FAKE_MCP_TOOL_COUNT", "1")]).await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        3,
+        "expected the hallucinated call to still be nagged, got {} LLM calls",
+        captured.len()
+    );
+    let msgs = captured[1]["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter()
+            .any(|m| m["role"] == "tool"
+                && m["content"].as_str().unwrap_or("").contains("unknown tool")),
+        "expected preflight to reject the call: {msgs:?}"
+    );
+    assert_eq!(reply_nag_count(&captured[2]), 1);
+    h.shutdown().await;
+}
+
+/// A publish-shaped call discarded by the per-turn tool-call cap never runs,
+/// so it must not suppress the reminder either. Pins the check's placement
+/// after `calls.truncate(MAX_TOOL_CALLS_PER_TURN)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_ignores_calls_lost_to_the_turn_cap() {
+    // 64 filler calls (the cap) followed by the publish attempt, which is
+    // therefore truncated away. The shell tool *is* registered here, so only
+    // the placement — not tool identity — can explain the reminder.
+    let mut calls: Vec<Value> = (0..64)
+        .map(|i| {
+            json!({
+                "id": format!("c{i}"),
+                "type": "function",
+                "function": { "name": "fake__tool_0", "arguments": "{}" },
+            })
+        })
+        .collect();
+    calls.push(json!({
+        "id": "c-send",
+        "type": "function",
+        "function": {
+            "name": "fake__shell",
+            "arguments": json!({ "command": "buzz messages send --channel c --content hi" })
+                .to_string(),
+        },
+    }));
+    let truncated_send = json!({
+        "id": "cc-trunc", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": null, "tool_calls": calls },
+            "finish_reason": "tool_calls",
+        }],
+    });
+    let llm = spawn_capturing_llm(vec![
+        truncated_send,
+        openai_text("silent-1"),
+        openai_text("silent-2"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[("FAKE_MCP_TOOL_COUNT", "1"), ("FAKE_MCP_SHELL_TOOL", "1")],
+    )
+    .await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        3,
+        "a truncated send must still be nagged, got {} LLM calls",
+        captured.len()
+    );
+    assert_eq!(reply_nag_count(&captured[2]), 1);
+    h.shutdown().await;
+}
+
+/// The shared `_Stop` rejection budget is the outer cap: at 1 the guard gets
+/// one reminder instead of two. Documented degradation, not a bug.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_bounded_by_stop_rejection_budget() {
+    let llm = spawn_capturing_llm(vec![
+        openai_text("silent-1"),
+        openai_text("silent-2"),
+        openai_text("must-not-be-requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        2,
+        "budget 1 must allow exactly one reminder, got {} LLM calls",
+        captured.len()
+    );
+    assert_eq!(reply_nag_count(&captured[1]), 1);
+    h.shutdown().await;
+}
+
+/// Budget 0 disables every objection at the gate, including this one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_off_when_stop_budget_is_zero() {
+    let llm = spawn_capturing_llm(vec![openai_text("done"), openai_text("unexpected")]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "budget 0 must disable the guard, got {} LLM calls",
+        captured.len()
+    );
+    h.shutdown().await;
+}
+
+/// The two axes are independent inside one shared budget: a round carrying
+/// both a `_Stop` hook objection and a reminder costs one rejection and
+/// delivers both texts, and once the reminders are spent the hook objection
+/// continues alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_combines_with_stop_hook_objection() {
+    // The hook objects on its first 3 calls, then clears. Reminders stop
+    // after 2, so round 3 must carry the hook text and no new reminder.
+    let llm = spawn_capturing_llm(vec![
+        openai_text("silent-1"),
+        openai_text("silent-2"),
+        openai_text("silent-3"),
+        openai_text("silent-4"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("MCP_HOOK_SERVERS", "fake"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "10"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_STOP_HOOK", "1"),
+            ("FAKE_MCP_STOP_TEXT", "you have open todos"),
+            ("FAKE_MCP_STOP_COUNT", "3"),
+        ],
+    )
+    .await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        4,
+        "expected 3 objecting rounds then a clear end, got {}",
+        captured.len()
+    );
+
+    let hook_objections = |req: &Value| -> usize {
+        req["messages"]
+            .as_array()
+            .map(|msgs| {
+                msgs.iter()
+                    .filter(|m| {
+                        m["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .contains("you have open todos")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+
+    // Round 2 carries one of each — a single rejection bought both texts.
+    assert_eq!(reply_nag_count(&captured[1]), 1);
+    assert_eq!(hook_objections(&captured[1]), 1);
+    // Round 4: the hook objected three times, the guard only twice.
+    assert_eq!(reply_nag_count(&captured[3]), 2);
+    assert_eq!(hook_objections(&captured[3]), 3);
+    h.shutdown().await;
+}
+
+/// An unparseable toggle is a startup error, not a silent default. `parse_env`
+/// is generic over `FromStr`, so this also pins the numeric type: a `bool`
+/// field would have rejected the documented `1`.
+#[test]
+fn reply_guard_rejects_unparseable_toggle() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_buzz-agent"))
+        .env("BUZZ_AGENT_PROVIDER", "openai")
+        .env("OPENAI_COMPAT_API_KEY", "test")
+        .env("OPENAI_COMPAT_MODEL", "fake-model")
+        .env("BUZZ_AGENT_REQUIRE_REPLY", "true")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run buzz-agent");
+    assert!(
+        !out.status.success(),
+        "expected a config error exit, got {:?}",
+        out.status
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("BUZZ_AGENT_REQUIRE_REPLY"),
+        "expected the offending key in the error, got: {stderr}"
+    );
+}

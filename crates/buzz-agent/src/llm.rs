@@ -2355,6 +2355,7 @@ mod tests {
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),
             stop_max_rejections: 0,
+            require_reply: false,
             hook_servers: HookServers::None,
             api_key: "key".into(),
             model: "model".into(),
