@@ -65,7 +65,7 @@ function relayHost(url: string | null | undefined) {
 
 export function HostedCommunitiesSettingsCard() {
   const onboarding = useCommunityOnboarding();
-  const { activeCommunity } = useCommunities();
+  const { activeCommunity, relayConnectionPolicy } = useCommunities();
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
@@ -413,6 +413,8 @@ export function HostedCommunitiesSettingsCard() {
 
   const busy = action != null;
   const atCommunityLimit = communities.length >= MAX_COMMUNITIES;
+
+  if (relayConnectionPolicy.lockedToDefaultRelay) return null;
 
   return (
     <section className="space-y-6" data-testid="hosted-communities-settings">

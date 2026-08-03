@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
 import { createAuthEvent } from "@/shared/api/tauri";
+import { assertRelayUrlAllowed } from "@/shared/api/tauriRelayPolicy";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   getTextPayload,
@@ -131,6 +132,7 @@ export class ReadOnlyRelayClient {
   }
 
   private async openConnection(): Promise<void> {
+    await assertRelayUrlAllowed(this.relayUrl);
     const generation = ++this.generation;
     this.onMessageChannel = new Channel<unknown>((message) => {
       void this.handleWsMessage(message, generation);

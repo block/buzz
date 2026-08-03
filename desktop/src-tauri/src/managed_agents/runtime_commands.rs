@@ -243,6 +243,7 @@ fn start_pair(
     expected_updated_at: Option<&str>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    crate::relay::ensure_relay_url_allowed(&relay_url)?;
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -400,6 +401,7 @@ async fn probe_agent_relay_access(
     record: super::ManagedAgentRecord,
     requested_relay_url: String,
 ) -> Result<(super::ManagedAgentRecord, ManagedAgentRuntimeKey, String), String> {
+    crate::relay::ensure_relay_url_allowed(&requested_relay_url)?;
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;

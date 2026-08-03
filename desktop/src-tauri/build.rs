@@ -3,6 +3,22 @@
 include!("src/commands/reconnect_hook_config.rs");
 
 use base64::Engine as _;
+use url::Url;
+
+fn validate_relay_origin(raw: &str) {
+    let parsed = Url::parse(raw)
+        .unwrap_or_else(|error| panic!("BUZZ_RELAY_URL must be a valid URL: {error}"));
+    if !matches!(parsed.scheme(), "ws" | "wss")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        panic!("BUZZ_RELAY_URL must be a ws:// or wss:// origin without credentials, path, query, or fragment");
+    }
+}
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_URL");
@@ -16,9 +32,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_LOCK_TO_DEFAULT_RELAY");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
 
-    if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {
+    let build_relay_url = std::env::var("BUZZ_RELAY_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(relay_url) = build_relay_url.as_deref() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_RELAY_URL={relay_url}");
     }
 
@@ -95,6 +116,17 @@ fn main() {
     // leave this unset and retain explicit community selection.
     if std::env::var("BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY").is_ok() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1");
+    }
+
+    // Presence-only release policy. Locked builds may connect only to their
+    // immutable compiled default relay. OSS builds leave this unset and retain
+    // multi-community relay selection.
+    if std::env::var("BUZZ_BUILD_LOCK_TO_DEFAULT_RELAY").is_ok() {
+        let relay_url = build_relay_url.as_deref().unwrap_or_else(|| {
+            panic!("BUZZ_BUILD_LOCK_TO_DEFAULT_RELAY requires a non-empty BUZZ_RELAY_URL")
+        });
+        validate_relay_origin(relay_url);
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_LOCK_TO_DEFAULT_RELAY=1");
     }
 
     let updater_public_key = std::env::var("BUZZ_UPDATER_PUBLIC_KEY")

@@ -60,9 +60,19 @@ pub fn auto_connect_default_relay_enabled() -> bool {
     option_env!("BUZZ_DESKTOP_BUILD_AUTO_CONNECT_DEFAULT_RELAY").is_some()
 }
 
+#[tauri::command]
+pub fn get_relay_connection_policy() -> Result<relay::RelayConnectionPolicy, String> {
+    relay::relay_connection_policy()
+}
+
+#[tauri::command]
+pub fn assert_relay_url_allowed(relay_url: String) -> Result<(), String> {
+    relay::ensure_relay_url_allowed(&relay_url)
+}
+
 #[cfg(test)]
 mod auto_connect_default_relay_tests {
-    use super::auto_connect_default_relay_enabled;
+    use super::{auto_connect_default_relay_enabled, relay};
 
     #[test]
     #[ignore]
@@ -71,6 +81,17 @@ mod auto_connect_default_relay_tests {
             .expect("compiled-flag test requires an expected value");
         assert_eq!(
             auto_connect_default_relay_enabled(),
+            expected == "true" || expected == "1"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn relay_lock_matches_expected() {
+        let expected = std::env::var("BUZZ_TEST_EXPECTED_LOCK_TO_DEFAULT_RELAY")
+            .expect("compiled-flag test requires an expected value");
+        assert_eq!(
+            relay::lock_to_default_relay_enabled(),
             expected == "true" || expected == "1"
         );
     }

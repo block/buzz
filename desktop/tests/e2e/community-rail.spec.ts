@@ -33,6 +33,48 @@ async function seedCommunities(
 }
 
 test.describe("community rail", () => {
+  test("locked builds remove saved external communities and relay controls", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, {
+      lockToDefaultRelay: true,
+      relayWsUrl: RELAY_URL,
+      skipCommunitySeed: true,
+    });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_B.id);
+    await page.goto("/");
+
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          JSON.parse(
+            window.localStorage.getItem("buzz-communities") ?? "[]",
+          ).map((community: { id: string }) => community.id),
+        ),
+      )
+      .toEqual([COMMUNITY_A.id]);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_A.id);
+    await expect(page.getByTestId("community-rail-add")).toHaveCount(0);
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await expect(
+      menu.getByRole("menuitem", { name: "Add a community" }),
+    ).toHaveCount(0);
+    await menu.getByRole("menuitem", { name: "Community settings" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
+    await expect(page.locator("#edit-ws-relay-url")).toHaveCount(0);
+  });
+
   test("shows the rail with multiple communities despite a stale opt-out", async ({
     page,
   }) => {

@@ -52,6 +52,7 @@ pub async fn fetch_workspace_icon(
     relay_url: String,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
+    relay::ensure_relay_url_allowed(&relay_url)?;
     let http_url = relay::relay_http_base_url(&relay_url);
     let Ok(response) = state
         .http_client
@@ -136,6 +137,7 @@ pub async fn apply_workspace(
         let state = app.state::<AppState>();
 
         // ── Validate before mutating ──────────────────────────────────────────
+        relay::ensure_relay_url_allowed(&relay_url)?;
         let parsed_keys = match nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(nsec_trimmed) => {
                 Some(Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?)

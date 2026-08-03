@@ -12,7 +12,8 @@ export function CommunityChangeOverlay({
   onClose,
   onUpdated,
 }: CommunityChangeOverlayProps) {
-  const { activeCommunity, updateCommunity } = useCommunities();
+  const { activeCommunity, relayConnectionPolicy, updateCommunity } =
+    useCommunities();
   const [error, setError] = React.useState<string | null>(null);
   const overlayRef = React.useRef<HTMLDivElement>(null);
 
@@ -79,7 +80,9 @@ export function CommunityChangeOverlay({
           Change community
         </h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          Update your community name or relay URL.
+          {relayConnectionPolicy.lockedToDefaultRelay
+            ? "Update your community name. The relay is managed by this Buzz build."
+            : "Update your community name or relay URL."}
         </p>
         <div className="mt-6">
           <CommunityEditForm
@@ -87,6 +90,7 @@ export function CommunityChangeOverlay({
             initialRelayUrl={activeCommunity.relayUrl}
             onCancel={onClose}
             onSubmit={handleSubmit}
+            relayReadOnly={relayConnectionPolicy.lockedToDefaultRelay}
             submitLabel="Save changes"
           />
         </div>

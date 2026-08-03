@@ -43,6 +43,7 @@ import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { isRelayUrlAllowed } from "@/features/communities/relayPolicy";
 import {
   loadCommunityDestination,
   markPendingCommunityRestore,
@@ -304,6 +305,7 @@ function CommunityApp({
     removeCommunity,
     switchCommunity,
     reconnectCommunity,
+    relayConnectionPolicy,
   } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const connectingTransactionRef = useRef<string | null>(null);
@@ -342,6 +344,7 @@ function CommunityApp({
     activeCommunity,
     communityKey,
     sharedIdentity,
+    relayConnectionPolicy,
   );
 
   const transitionCommunity = useCallback(
@@ -593,7 +596,7 @@ function CommunityApp({
 }
 
 function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
-  const { activeCommunity } = useCommunities();
+  const { activeCommunity, relayConnectionPolicy } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const machine = useMachineOnboardingState({
     activeCommunityPubkey: activeCommunity
@@ -641,15 +644,19 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   }, [machine.stage, postOnboardingNav]);
 
   const openAddCommunity = useCallback(
-    (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
-      activeCommunity
+    (payload: AddCommunityDeepLinkPayload & { requestId: string }) => {
+      if (!isRelayUrlAllowed(relayConnectionPolicy, payload.relayUrl)) {
+        return false;
+      }
+      return activeCommunity
         ? requestAddCommunityPrefill(payload)
         : communityOnboarding.start({
             source: "add-community",
             relayUrl: payload.relayUrl,
             communityName: payload.name,
-          }),
-    [activeCommunity, communityOnboarding.start],
+          });
+    },
+    [activeCommunity, communityOnboarding.start, relayConnectionPolicy],
   );
 
   // Deep links are captured here — above the machine-onboarding gate — not in
@@ -659,6 +666,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   // still pending, and survives a relaunch in between.
   useEffect(() => {
     const unlisten = listenForDeepLinks({
+      isRelayAllowed: (relayUrl) =>
+        isRelayUrlAllowed(relayConnectionPolicy, relayUrl),
       startCommunityOnboarding: communityOnboarding.start,
       openAddCommunity,
       onAddCommunityAvailable: onAddCommunityPrefillAvailable,
@@ -666,7 +675,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [communityOnboarding.start, openAddCommunity]);
+  }, [communityOnboarding.start, openAddCommunity, relayConnectionPolicy]);
 
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;

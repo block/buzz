@@ -23,6 +23,7 @@ export type CommunityEditFormProps = {
   joinPolicyRequired?: boolean;
   onCancel: () => void;
   onSubmit: (name: string, relayUrl: string) => void;
+  relayReadOnly?: boolean;
   submitLabel: string;
 };
 
@@ -34,6 +35,7 @@ export function CommunityEditForm({
   joinPolicyRequired = false,
   onCancel,
   onSubmit,
+  relayReadOnly = false,
   submitLabel,
 }: CommunityEditFormProps) {
   const [name, setName] = React.useState(initialName);
@@ -59,7 +61,7 @@ export function CommunityEditForm({
   }, []);
 
   React.useEffect(() => {
-    if (!joinPolicyRequired) return;
+    if (!joinPolicyRequired || relayReadOnly) return;
 
     const normalizedUrl = normalizeRelayUrl(relayUrl);
     if (!normalizedUrl || !isJoinPolicyDiscoveryCandidate(normalizedUrl)) {
@@ -87,7 +89,7 @@ export function CommunityEditForm({
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [joinPolicyRequired, relayUrl]);
+  }, [joinPolicyRequired, relayReadOnly, relayUrl]);
 
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -95,6 +97,10 @@ export function CommunityEditForm({
       const trimmedName = name.trim();
       if (!trimmedName) {
         setError("Please enter a community name.");
+        return;
+      }
+      if (relayReadOnly) {
+        onSubmit(trimmedName, initialRelayUrl);
         return;
       }
       const normalizedUrl = normalizeRelayUrl(relayUrl);
@@ -170,9 +176,11 @@ export function CommunityEditForm({
       agreementConfirmed,
       joinPolicy,
       joinPolicyRequired,
+      initialRelayUrl,
       name,
       onSubmit,
       policyRelayUrl,
+      relayReadOnly,
       relayUrl,
       useAnywayOverride,
     ],
@@ -219,35 +227,37 @@ export function CommunityEditForm({
         />
       </div>
 
-      <div className="space-y-1.5 text-left">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="community-edit-url"
-        >
-          Community URL
-        </label>
-        <Input
-          className="h-10 bg-background"
-          disabled={isProbing}
-          id="community-edit-url"
-          onChange={(event) => {
-            setRelayUrl(event.target.value);
-            setError(null);
-            setProbeWarning(null);
-            setUseAnywayOverride(false);
-            setJoinPolicy(null);
-            setPolicyRelayUrl(null);
-            setAgeConfirmed(false);
-            setAgreementConfirmed(false);
-          }}
-          placeholder="wss://relay.example.com"
-          type="text"
-          value={relayUrl}
-        />
-      </div>
+      {!relayReadOnly ? (
+        <div className="space-y-1.5 text-left">
+          <label
+            className="text-sm font-medium text-foreground"
+            htmlFor="community-edit-url"
+          >
+            Community URL
+          </label>
+          <Input
+            className="h-10 bg-background"
+            disabled={isProbing}
+            id="community-edit-url"
+            onChange={(event) => {
+              setRelayUrl(event.target.value);
+              setError(null);
+              setProbeWarning(null);
+              setUseAnywayOverride(false);
+              setJoinPolicy(null);
+              setPolicyRelayUrl(null);
+              setAgeConfirmed(false);
+              setAgreementConfirmed(false);
+            }}
+            placeholder="wss://relay.example.com"
+            type="text"
+            value={relayUrl}
+          />
+        </div>
+      ) : null}
 
       <AnimatePresence initial={false}>
-        {joinPolicy && policyRelayUrl ? (
+        {!relayReadOnly && joinPolicy && policyRelayUrl ? (
           <motion.div
             animate={{
               height: "auto",
@@ -307,7 +317,7 @@ export function CommunityEditForm({
           disabled={
             isBusy ||
             !name.trim() ||
-            !relayUrl.trim() ||
+            (!relayReadOnly && !relayUrl.trim()) ||
             Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed) ||
             Boolean(
               joinPolicy &&
@@ -340,7 +350,7 @@ export function CommunityEditForm({
           <p className="text-center text-sm text-destructive">{error}</p>
         ) : null}
 
-        {probeWarning ? (
+        {!relayReadOnly && probeWarning ? (
           <div className="flex flex-col items-center gap-2">
             <p className="text-center text-sm text-destructive">
               {probeWarning}

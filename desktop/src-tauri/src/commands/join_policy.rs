@@ -32,6 +32,7 @@ fn join_policy_url(relay_url: &str) -> Result<Url, String> {
 /// Fetch an arbitrary relay's optional join policy through native networking.
 #[tauri::command]
 pub async fn fetch_join_policy(relay_url: String) -> Result<Option<Value>, String> {
+    crate::relay::ensure_relay_url_allowed(&relay_url)?;
     let url = join_policy_url(&relay_url)?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())

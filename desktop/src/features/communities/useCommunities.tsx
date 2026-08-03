@@ -2,20 +2,32 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import type { ReactNode } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 
 import type { Community } from "./types";
 import {
   clearCommunityStorage,
+  clearActiveCommunityId,
   loadActiveCommunityId,
   loadCommunities,
   saveActiveCommunityId,
   saveCommunities,
 } from "./communityStorage";
+import {
+  applyRelayConnectionPolicy,
+  isRelayUrlAllowed,
+  UNRESTRICTED_RELAY_CONNECTION_POLICY,
+} from "./relayPolicy";
+import {
+  getRelayConnectionPolicy,
+  type RelayConnectionPolicy,
+} from "@/shared/api/tauriRelayPolicy";
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
 import { removeMessageSnapshotsForRelay } from "@/features/messages/lib/messageSnapshot";
@@ -115,6 +127,7 @@ export function applyCommunitiesOrder(
 export type UseCommunitiesReturn = {
   communities: Community[];
   activeCommunity: Community | null;
+  relayConnectionPolicy: RelayConnectionPolicy;
   /** Counter bumped when the active community's config changes (relayUrl/token). */
   reinitKey: number;
   /** Add a community, deduplicating by relayUrl. Returns the final ID in the list. */
@@ -138,6 +151,7 @@ const CommunitiesContext = createContext<UseCommunitiesReturn | null>(null);
 
 export function CommunitiesProvider({ children }: { children: ReactNode }) {
   const value = useCommunitiesInternal();
+  if (!value) return null;
   return (
     <CommunitiesContext.Provider value={value}>
       {children}
@@ -153,15 +167,58 @@ export function useCommunities(): UseCommunitiesReturn {
   return ctx;
 }
 
-function useCommunitiesInternal(): UseCommunitiesReturn {
+function useCommunitiesInternal(): UseCommunitiesReturn | null {
   const [communities, setCommunitiesState] =
     useState<Community[]>(loadCommunities);
   const [activeId, setActiveId] = useState<string | null>(
     loadActiveCommunityId,
   );
   const [reinitKey, setReinitKey] = useState(0);
+  const [relayConnectionPolicy, setRelayConnectionPolicy] =
+    useState<RelayConnectionPolicy | null>(null);
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
+  const relayConnectionPolicyRef = useRef(relayConnectionPolicy);
+  relayConnectionPolicyRef.current = relayConnectionPolicy;
+
+  useEffect(() => {
+    let cancelled = false;
+    const policyPromise =
+      isTauri() || import.meta.env.MODE === "e2e"
+        ? getRelayConnectionPolicy()
+        : Promise.resolve(UNRESTRICTED_RELAY_CONNECTION_POLICY);
+    void policyPromise
+      .then((policy) => {
+        if (cancelled) return;
+        const currentCommunities = communitiesRef.current;
+        const currentActiveId = loadActiveCommunityId();
+        const next = applyRelayConnectionPolicy(
+          currentCommunities,
+          currentActiveId,
+          policy,
+        );
+        if (next.changed) {
+          saveCommunities(next.communities);
+          if (next.activeId) {
+            saveActiveCommunityId(next.activeId);
+          } else {
+            clearActiveCommunityId();
+          }
+          communitiesRef.current = next.communities;
+          setCommunitiesState(next.communities);
+          setActiveId(next.activeId);
+        }
+        setRelayConnectionPolicy(policy);
+      })
+      .catch((error) => {
+        // A signed Tauri build that cannot load its compiled relay policy must
+        // not render any surface that could initiate a relay connection.
+        console.error("Failed to load relay connection policy:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeCommunity = useMemo(
     () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
@@ -169,6 +226,10 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   );
 
   const addCommunity = useCallback((community: Community): string => {
+    const policy = relayConnectionPolicyRef.current;
+    if (!policy || !isRelayUrlAllowed(policy, community.relayUrl)) {
+      throw new Error("This Buzz build only allows its configured relay.");
+    }
     const existing = communitiesRef.current.find(
       (w) => w.relayUrl === community.relayUrl,
     );
@@ -260,6 +321,14 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
         Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
       >,
     ): UpdateCommunityResult => {
+      const policy = relayConnectionPolicyRef.current;
+      if (
+        !policy ||
+        (updates.relayUrl !== undefined &&
+          !isRelayUrlAllowed(policy, updates.relayUrl))
+      ) {
+        throw new Error("This Buzz build only allows its configured relay.");
+      }
       const result = resolveCommunityUpdateResult(
         communitiesRef.current,
         activeId,
@@ -294,9 +363,12 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     });
   }, []);
 
+  if (!relayConnectionPolicy) return null;
+
   return {
     communities,
     activeCommunity,
+    relayConnectionPolicy,
     reinitKey,
     addCommunity,
     clearCommunities,

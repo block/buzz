@@ -179,6 +179,7 @@ async fn connect(
     on_message: Channel<serde_json::Value>,
     _config: Option<serde_json::Value>,
 ) -> Result<Id, String> {
+    crate::relay::ensure_relay_url_allowed(&url)?;
     open_connection(manager.inner(), &url, on_message).await
 }
 

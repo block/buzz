@@ -518,6 +518,7 @@ type E2eConfig = {
   relayHttpUrl?: string;
   relayWsUrl?: string;
   autoConnectDefaultRelay?: boolean;
+  lockToDefaultRelay?: boolean;
   identity?: TestIdentity;
 };
 
@@ -11021,6 +11022,21 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "auto_connect_default_relay_enabled":
         return activeConfig?.autoConnectDefaultRelay ?? false;
+      case "get_relay_connection_policy":
+        return {
+          lockedToDefaultRelay: activeConfig?.lockToDefaultRelay ?? false,
+          defaultRelayUrl: getRelayWsUrl(activeConfig),
+        };
+      case "assert_relay_url_allowed": {
+        if (!activeConfig?.lockToDefaultRelay) return null;
+        const { relayUrl } = payload as { relayUrl: string };
+        const candidate = new URL(relayUrl).origin;
+        const allowed = new URL(getRelayWsUrl(activeConfig)).origin;
+        if (candidate !== allowed) {
+          throw new Error("This Buzz build only allows its configured relay.");
+        }
+        return null;
+      }
       case "get_legacy_workspace_storage":
         return {
           workspaces: null,

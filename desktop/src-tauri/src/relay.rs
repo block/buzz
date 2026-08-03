@@ -8,8 +8,11 @@ use sha2::{Digest, Sha256};
 // nostr 0.36 alias — required for cross-version bridging with buzz-sdk.
 
 use crate::app_state::AppState;
-
-const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
+use crate::relay_policy::{compiled_relay_ws_url, DEFAULT_RELAY_WS_URL};
+pub use crate::relay_policy::{
+    ensure_relay_url_allowed, lock_to_default_relay_enabled, relay_connection_policy,
+    RelayConnectionPolicy,
+};
 
 // A reached-but-malformed 2xx body is NOT a connectivity failure, so this
 // message must never carry the "relay unreachable:" prefix the frontend
@@ -24,8 +27,13 @@ fn configured_env_var(name: &str) -> Option<String> {
 }
 
 pub fn relay_ws_url() -> String {
+    if lock_to_default_relay_enabled() {
+        return compiled_relay_ws_url()
+            .unwrap_or(DEFAULT_RELAY_WS_URL)
+            .to_string();
+    }
     configured_env_var("BUZZ_RELAY_URL")
-        .or_else(|| option_env!("BUZZ_DESKTOP_BUILD_RELAY_URL").map(str::to_string))
+        .or_else(|| compiled_relay_ws_url().map(str::to_string))
         .unwrap_or_else(|| DEFAULT_RELAY_WS_URL.to_string())
 }
 
@@ -42,12 +50,18 @@ fn workspace_relay_override(state: &AppState) -> Option<String> {
 /// Returns the relay WebSocket URL, checking the workspace override first.
 /// Precedence: workspace override > env vars > build-time vars > default.
 pub fn relay_ws_url_with_override(state: &AppState) -> String {
+    if lock_to_default_relay_enabled() {
+        return relay_ws_url();
+    }
     workspace_relay_override(state).unwrap_or_else(relay_ws_url)
 }
 
 /// Returns the relay HTTP API base URL, checking the workspace override first.
 /// Precedence: workspace override > env vars > build-time vars > default.
 pub fn relay_api_base_url_with_override(state: &AppState) -> String {
+    if lock_to_default_relay_enabled() {
+        return relay_api_base_url();
+    }
     match workspace_relay_override(state) {
         Some(url) => relay_http_base_url(&url),
         None => relay_api_base_url(),

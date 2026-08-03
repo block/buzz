@@ -34,6 +34,7 @@ import {
 } from "@/shared/api/useRelayConnection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { EditCommunityDialog } from "./EditCommunityDialog";
 
 const CONNECTION_STATE_LABEL: Record<ConnectionState, string> = {
@@ -100,6 +101,8 @@ export function CommunitySwitcher({
   onUpdateCommunity,
   onRemoveCommunity,
 }: CommunitySwitcherProps) {
+  const { relayConnectionPolicy } = useCommunities();
+  const relayLocked = relayConnectionPolicy.lockedToDefaultRelay;
   const [editingCommunity, setEditingCommunity] =
     React.useState<Community | null>(null);
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
@@ -281,18 +284,20 @@ export function CommunitySwitcher({
                 <hr className="-mx-1 my-1 h-px border-0 bg-muted" />
               </>
             ) : null}
-            <button
-              className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
-              onClick={() => {
-                setDropdownOpen(false);
-                onAddCommunity();
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <Plus className="h-4 w-4" />
-              <span>Add a community</span>
-            </button>
+            {!relayLocked ? (
+              <button
+                className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
+                onClick={() => {
+                  setDropdownOpen(false);
+                  onAddCommunity();
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <Plus className="h-4 w-4" />
+                <span>Add a community</span>
+              </button>
+            ) : null}
           </div>
         </PopoverContent>
       </Popover>
@@ -369,11 +374,15 @@ export function CommunitySwitcher({
             </button>
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onAddCommunity}>
-          <Plus className="h-4 w-4" />
-          <span>Add a community</span>
-        </DropdownMenuItem>
+        {!relayLocked ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onAddCommunity}>
+              <Plus className="h-4 w-4" />
+              <span>Add a community</span>
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

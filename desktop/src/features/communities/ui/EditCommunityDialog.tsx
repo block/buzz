@@ -3,6 +3,7 @@ import * as React from "react";
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import type { Community } from "@/features/communities/types";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   expandTilde,
   normalizeRelayUrl,
@@ -42,6 +43,8 @@ export function EditCommunityDialog({
   canRemove,
   showIconEditor = false,
 }: EditCommunityDialogProps) {
+  const { relayConnectionPolicy } = useCommunities();
+  const relayLocked = relayConnectionPolicy.lockedToDefaultRelay;
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
@@ -73,7 +76,7 @@ export function EditCommunityDialog({
   const handleSubmit = React.useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (!community || !relayUrl.trim()) {
+      if (!community || (!relayLocked && !relayUrl.trim())) {
         return;
       }
 
@@ -86,9 +89,11 @@ export function EditCommunityDialog({
         updates.name = trimmedName;
       }
 
-      const normalizedUrl = normalizeRelayUrl(relayUrl.trim());
-      if (normalizedUrl !== community.relayUrl) {
-        updates.relayUrl = normalizedUrl;
+      if (!relayLocked) {
+        const normalizedUrl = normalizeRelayUrl(relayUrl.trim());
+        if (normalizedUrl !== community.relayUrl) {
+          updates.relayUrl = normalizedUrl;
+        }
       }
 
       const trimmedToken = token.trim() || undefined;
@@ -119,7 +124,16 @@ export function EditCommunityDialog({
 
       handleClose();
     },
-    [community, name, relayUrl, token, reposDir, onSave, handleClose],
+    [
+      community,
+      name,
+      relayUrl,
+      token,
+      reposDir,
+      relayLocked,
+      onSave,
+      handleClose,
+    ],
   );
 
   const handleRemove = React.useCallback(() => {
@@ -139,7 +153,9 @@ export function EditCommunityDialog({
         <DialogHeader>
           <DialogTitle>Edit Community</DialogTitle>
           <DialogDescription>
-            Update this community's name or relay URL.
+            {relayLocked
+              ? "Update this community's local settings."
+              : "Update this community's name or relay URL."}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -173,21 +189,23 @@ export function EditCommunityDialog({
               value={name}
             />
           </div>
-          <div className="flex flex-col gap-1.5">
-            <label
-              className="text-sm font-medium text-foreground"
-              htmlFor="edit-ws-relay-url"
-            >
-              Relay URL
-            </label>
-            <Input
-              id="edit-ws-relay-url"
-              onChange={(e) => setRelayUrl(e.target.value)}
-              placeholder="wss://relay.example.com"
-              type="text"
-              value={relayUrl}
-            />
-          </div>
+          {!relayLocked ? (
+            <div className="flex flex-col gap-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="edit-ws-relay-url"
+              >
+                Relay URL
+              </label>
+              <Input
+                id="edit-ws-relay-url"
+                onChange={(e) => setRelayUrl(e.target.value)}
+                placeholder="wss://relay.example.com"
+                type="text"
+                value={relayUrl}
+              />
+            </div>
+          ) : null}
           <div className="flex flex-col gap-1.5">
             <label
               className="text-sm font-medium text-foreground"

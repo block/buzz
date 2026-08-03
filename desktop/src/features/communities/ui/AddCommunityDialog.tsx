@@ -3,6 +3,7 @@ import { ArrowLeft, ChevronRight, Link2, Plus } from "lucide-react";
 
 import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
 import { HostedCommunityCreateFlow } from "@/features/communities/ui/HostedCommunityCreateFlow";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
 import {
@@ -32,6 +33,7 @@ export function AddCommunityDialog({
   open,
   onOpenChange,
 }: AddCommunityDialogProps) {
+  const { relayConnectionPolicy } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const [mode, setMode] = React.useState<AddCommunityMode>("choose");
   const [joinError, setJoinError] = React.useState<string | null>(null);
@@ -80,6 +82,8 @@ export function AddCommunityDialog({
     },
     [communityOnboarding, handleClose, prefill?.name],
   );
+
+  if (relayConnectionPolicy.lockedToDefaultRelay) return null;
 
   const title =
     mode === "create"

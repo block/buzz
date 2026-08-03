@@ -5,12 +5,23 @@ import { getJoinPolicy, mintInvite } from "./invites.ts";
 
 function withFetch(response, run) {
   const originalFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command, args) {
+        assert.equal(command, "assert_relay_url_allowed");
+        assert.deepEqual(args, { relayUrl: "wss://relay.example" });
+        return Promise.resolve();
+      },
+    },
+  };
   globalThis.fetch = async (url) => {
     assert.equal(url, "https://relay.example/api/join-policy");
     return response;
   };
   return Promise.resolve(run()).finally(() => {
     globalThis.fetch = originalFetch;
+    globalThis.window = previousWindow;
   });
 }
 
@@ -58,6 +69,10 @@ test("getJoinPolicy maps the native command response", async () => {
   globalThis.window = {
     __TAURI_INTERNALS__: {
       invoke(command, args) {
+        if (command === "assert_relay_url_allowed") {
+          assert.deepEqual(args, { relayUrl: "wss://relay.example" });
+          return Promise.resolve();
+        }
         assert.equal(command, "fetch_join_policy");
         assert.deepEqual(args, { relayUrl: "wss://relay.example" });
         return Promise.resolve({
@@ -104,6 +119,7 @@ function setupTauriStubs(
   globalThis.window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
       calls.invokeArgs.push({ command, args });
+      if (command === "assert_relay_url_allowed") return undefined;
       if (command === "get_relay_http_url") return httpBase;
       if (command === "sign_event") return JSON.stringify(authEvent);
       throw new Error(`Unexpected Tauri command: ${command}`);

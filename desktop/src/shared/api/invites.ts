@@ -4,6 +4,7 @@ import {
   invokeTauri,
   signRelayEvent,
 } from "@/shared/api/tauri";
+import { assertRelayUrlAllowed } from "@/shared/api/tauriRelayPolicy";
 
 // Relay invite data layer. Both endpoints are NIP-98-authed HTTP POSTs
 // (mirrors the read path in moderation.ts, plus the payload tag the relay
@@ -132,6 +133,7 @@ export async function getJoinPolicy(
   relayWsUrl: string,
   transport: "native" | "webview",
 ): Promise<JoinPolicy | null> {
+  await assertRelayUrlAllowed(relayWsUrl);
   type RawJoinPolicy = {
     terms_markdown?: string;
     privacy_markdown?: string;
@@ -173,6 +175,7 @@ export async function acceptJoinPolicy(
   policyVersion: string,
   ageConfirmed: boolean,
 ): Promise<string> {
+  await assertRelayUrlAllowed(relayWsUrl);
   const base = relayHttpFromWs(relayWsUrl);
   const response = await fetch(
     `${base.replace(/\/+$/, "")}/api/invites/accept-policy`,
@@ -225,6 +228,7 @@ export async function claimInvite(
   code: string,
   policyReceipt?: string,
 ): Promise<ClaimResult> {
+  await assertRelayUrlAllowed(relayWsUrl);
   const base = relayHttpFromWs(relayWsUrl);
   const body = JSON.stringify({ code, policy_receipt: policyReceipt });
   const raw = await invitePost<{

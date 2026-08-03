@@ -8,6 +8,7 @@ export type AddCommunityDeepLinkPayload = {
 };
 
 export interface DeepLinkDeps {
+  isRelayAllowed: (relayUrl: string) => boolean;
   startCommunityOnboarding: (input: StartCommunityOnboardingInput) => boolean;
   openAddCommunity: (
     payload: AddCommunityDeepLinkPayload & { requestId: string },
@@ -58,10 +59,18 @@ type PendingCommunityDeepLink = {
   policyReceipt: string | null;
 };
 
-function acceptPendingCommunityDeepLink(
+async function acceptPendingCommunityDeepLink(
   pending: PendingCommunityDeepLink,
   deps: DeepLinkDeps,
 ) {
+  if (!deps.isRelayAllowed(pending.relayUrl)) {
+    console.warn(
+      "Ignored a community deep link blocked by build relay policy.",
+    );
+    return invoke<boolean>("acknowledge_pending_community_deep_link", {
+      id: pending.id,
+    });
+  }
   const accepted =
     pending.kind === "add-community"
       ? deps.openAddCommunity({
@@ -77,10 +86,10 @@ function acceptPendingCommunityDeepLink(
           policyReceipt: pending.policyReceipt ?? undefined,
         });
   return accepted
-    ? invoke<boolean>("acknowledge_pending_community_deep_link", {
+    ? await invoke<boolean>("acknowledge_pending_community_deep_link", {
         id: pending.id,
       })
-    : Promise.resolve(false);
+    : false;
 }
 
 async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {

@@ -21,6 +21,7 @@ import * as React from "react";
 import type { Community } from "@/features/communities/types";
 import { EditCommunityDialog } from "@/features/communities/ui/EditCommunityDialog";
 import { useCommunityIcons } from "@/features/communities/useCommunityIcons";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import {
   useCommunityUnread,
@@ -308,6 +309,7 @@ export function CommunityRail({
   onRemoveCommunity,
   onReorderCommunities,
 }: CommunityRailProps) {
+  const { relayConnectionPolicy } = useCommunities();
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
     communities,
     activeCommunityId,
@@ -408,20 +410,22 @@ export function CommunityRail({
           ) : null}
         </DragOverlay>
       </DndContext>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            aria-label="Add community"
-            className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
-            data-testid="community-rail-add"
-            onClick={onAddCommunity}
-            type="button"
-          >
-            <Plus className="h-4 w-4" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="right">Add community</TooltipContent>
-      </Tooltip>
+      {!relayConnectionPolicy.lockedToDefaultRelay ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              aria-label="Add community"
+              className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
+              data-testid="community-rail-add"
+              onClick={onAddCommunity}
+              type="button"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Add community</TooltipContent>
+        </Tooltip>
+      ) : null}
       <EditCommunityDialog
         canRemove={communities.length > 1}
         onOpenChange={(open) => {

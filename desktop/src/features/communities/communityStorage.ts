@@ -104,6 +104,10 @@ export function saveActiveCommunityId(id: string): boolean {
   return setLocalStorageItemWithRecovery(ACTIVE_COMMUNITY_KEY, id);
 }
 
+export function clearActiveCommunityId(): void {
+  localStorage.removeItem(ACTIVE_COMMUNITY_KEY);
+}
+
 export function normalizeRelayUrl(url: string): string {
   if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
     return `wss://${url}`;

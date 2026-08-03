@@ -2,6 +2,8 @@
  * Normalize a relay URL to ws(s):// form and probe reachability.
  */
 
+import { assertRelayUrlAllowed } from "@/shared/api/tauriRelayPolicy";
+
 /** Normalize a user-entered relay URL to ws(s):// form. Returns null if invalid. */
 export function normalizeRelayUrl(input: string): string | null {
   const trimmed = input.trim().replace(/\/+$/, "");
@@ -61,6 +63,7 @@ export function normalizeRelayUrl(input: string): string | null {
 export function probeRelayReachable(
   wsUrl: string,
   timeoutMs = 4000,
+  assertAllowed: (relayUrl: string) => Promise<void> = assertRelayUrlAllowed,
 ): { promise: Promise<boolean>; cancel: () => void } {
   let socket: WebSocket | null = null;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -80,15 +83,20 @@ export function probeRelayReachable(
       resolve(result);
     }
 
-    try {
-      socket = new WebSocket(wsUrl);
-      socket.onopen = () => settle(true);
-      socket.onerror = () => settle(false);
-      socket.onclose = () => settle(false);
-      timeoutId = setTimeout(() => settle(false), timeoutMs);
-    } catch {
-      settle(false);
-    }
+    void assertAllowed(wsUrl)
+      .then(() => {
+        if (settled) return;
+        try {
+          socket = new WebSocket(wsUrl);
+          socket.onopen = () => settle(true);
+          socket.onerror = () => settle(false);
+          socket.onclose = () => settle(false);
+          timeoutId = setTimeout(() => settle(false), timeoutMs);
+        } catch {
+          settle(false);
+        }
+      })
+      .catch(() => settle(false));
   });
 
   return {
