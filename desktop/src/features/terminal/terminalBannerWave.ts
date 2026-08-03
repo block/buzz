@@ -6,12 +6,16 @@
  * the `hue` axis as a function of time and screen position, plus the lookup
  * table that makes it affordable.
  *
- * Tyler: "slow waves of the buzz theme colors moving across the honeycomb
- * lattice right to left, with a separate slow color wave on the `buzz term`
- * going left to right".
+ * Tyler, amendment (msg 25bf80a2) — AUTHORITATIVE: the field wave
+ * "originates bottom right and travels top left", not plain right-to-left.
+ * This SUPERSEDES the original directive: "slow waves of the buzz theme colors
+ * moving across the honeycomb lattice right to left, with a separate slow
+ * color wave on the `buzz term` going left to right". The wordmark half is
+ * unchanged by the amendment; only the field's axis moved.
  *
- * Two independent waves, opposite directions, different periods:
- *   - field    -> right-to-left across the whole viewport
+ * Two independent waves, different axes, different periods:
+ *   - field    -> originates bottom-right, travels top-left across the whole
+ *                 viewport (see FIELD_WAVE.direction = {x:-1, y:-1})
  *   - wordmark -> left-to-right across the wordmark's own ink span
  * The bevels do not animate. They are the chassis; a moving highlight would
  * read as the box itself deforming.
