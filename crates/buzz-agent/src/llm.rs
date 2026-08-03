@@ -87,6 +87,59 @@ enum DatabricksV2Route {
     MlflowChatCompletions,
 }
 
+/// One endpoint to try, fully resolved: the config aimed at it, the model to
+/// ask it for, and the circuit key its outcome is recorded against.
+struct Attempt {
+    key: String,
+    provider: Provider,
+    cfg: Config,
+    model: String,
+}
+
+impl Attempt {
+    /// Record that a fallback rescued a call the primary could not serve.
+    /// `index` is the position in the chain, so 0 (the primary) says nothing —
+    /// the ordinary case should not produce log noise.
+    fn note_rescue(&self, index: usize, what: &str) {
+        if index > 0 {
+            tracing::info!(
+                provider = ?self.provider,
+                model = %self.model,
+                "llm: {what} served by a fallback provider"
+            );
+        }
+    }
+
+    fn note_failure(&self, kind: CutoverKind, error: &AgentError) {
+        tracing::warn!(
+            provider = ?self.provider,
+            model = %self.model,
+            kind = kind.as_str(),
+            error = %error,
+            "llm: endpoint failed"
+        );
+    }
+}
+
+/// The error to surface once every endpoint in the chain has failed.
+///
+/// Reworded only when more than one endpoint was in play, so a
+/// single-provider deployment's errors read exactly as they did before
+/// failover existed.
+fn chain_exhausted(last_error: Option<AgentError>, tried: usize) -> AgentError {
+    match last_error {
+        Some(AgentError::LlmUnavailable { kind, detail }) if tried > 1 => {
+            AgentError::LlmUnavailable {
+                kind,
+                detail: format!("all {tried} providers failed; last: {detail}"),
+            }
+        }
+        Some(error) => error,
+        // Unreachable — the chain always holds at least the primary.
+        None => AgentError::Llm("no provider endpoint configured".into()),
+    }
+}
+
 pub struct Llm {
     http: Client,
     /// One-shot sticky flag: set when a Chat Completions request comes
@@ -185,49 +238,17 @@ impl Llm {
         tools: &[ToolDef],
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
-        let primary = cfg.primary_endpoint();
-        // The primary honors the caller's effective model — a
-        // `session/set_model` override arrives that way. Each fallback uses its
-        // own slot's model instead: the primary's model id means nothing to a
-        // different provider.
-        let mut chain: Vec<(&Endpoint, &str)> = Vec::with_capacity(1 + cfg.fallback.len());
-        chain.push((&primary, effective_model));
-        for endpoint in &cfg.fallback {
-            chain.push((endpoint, endpoint.model.as_str()));
-        }
-
-        let any_live = chain
-            .iter()
-            .any(|(endpoint, _)| !self.breaker.is_open(&endpoint.circuit_key()));
-
+        let chain = self.attempt_chain(cfg, effective_model);
+        let total = chain.len();
         let mut last_error: Option<AgentError> = None;
-        let mut tried = 0usize;
-        for (endpoint, model) in chain {
-            if any_live && self.breaker.is_open(&endpoint.circuit_key()) {
-                continue;
-            }
-            tried += 1;
-            let attempt_cfg;
-            let attempt = if *endpoint == primary {
-                cfg
-            } else {
-                attempt_cfg = cfg.with_endpoint(endpoint);
-                &attempt_cfg
-            };
-            let key = endpoint.circuit_key();
+        for (index, attempt) in chain.into_iter().enumerate() {
             match self
-                .complete_once(attempt, system_prompt, history, tools, model)
+                .complete_once(&attempt.cfg, system_prompt, history, tools, &attempt.model)
                 .await
             {
                 Ok(response) => {
-                    self.breaker.record_success(&key);
-                    if tried > 1 {
-                        tracing::info!(
-                            provider = ?endpoint.provider,
-                            model,
-                            "llm: turn served by a fallback provider"
-                        );
-                    }
+                    self.breaker.record_success(&attempt.key);
+                    attempt.note_rescue(index, "turn");
                     return Ok(response);
                 }
                 Err(error) => {
@@ -236,32 +257,44 @@ impl Llm {
                         // every provider. Surface it rather than burn the chain.
                         return Err(error);
                     };
-                    self.breaker.record_failure(&key, kind);
-                    tracing::warn!(
-                        provider = ?endpoint.provider,
-                        model,
-                        kind = kind.as_str(),
-                        error = %error,
-                        "llm: endpoint failed"
-                    );
+                    self.breaker.record_failure(&attempt.key, kind);
+                    attempt.note_failure(kind, &error);
                     last_error = Some(error);
                 }
             }
         }
+        Err(chain_exhausted(last_error, total))
+    }
 
-        Err(match last_error {
-            // Only reworded when more than one endpoint was in play, so a
-            // single-provider deployment's errors read exactly as before.
-            Some(AgentError::LlmUnavailable { kind, detail }) if tried > 1 => {
-                AgentError::LlmUnavailable {
-                    kind,
-                    detail: format!("all {tried} providers failed; last: {detail}"),
-                }
-            }
-            Some(error) => error,
-            // Unreachable — the chain always holds at least the primary.
-            None => AgentError::Llm("no provider endpoint configured".into()),
-        })
+    /// The endpoints to try for this call, in order, each paired with the
+    /// config aimed at it.
+    ///
+    /// The primary honors the caller's effective model — a `session/set_model`
+    /// override arrives that way. Each fallback uses its own slot's model
+    /// instead: the primary's model id means nothing to a different provider.
+    ///
+    /// Endpoints the breaker has benched are dropped, unless that would leave
+    /// nothing to try — then the whole chain comes back. Stale breaker state
+    /// must never be the reason a call has nowhere to go.
+    fn attempt_chain(&self, cfg: &Config, effective_model: &str) -> Vec<Attempt> {
+        let mut candidates: Vec<(Endpoint, &str)> = Vec::with_capacity(1 + cfg.fallback.len());
+        candidates.push((cfg.primary_endpoint(), effective_model));
+        for endpoint in &cfg.fallback {
+            candidates.push((endpoint.clone(), endpoint.model.as_str()));
+        }
+        let any_live = candidates
+            .iter()
+            .any(|(endpoint, _)| !self.breaker.is_open(&endpoint.circuit_key()));
+        candidates
+            .into_iter()
+            .filter(|(endpoint, _)| !any_live || !self.breaker.is_open(&endpoint.circuit_key()))
+            .map(|(endpoint, model)| Attempt {
+                key: endpoint.circuit_key(),
+                provider: endpoint.provider,
+                cfg: cfg.with_endpoint(&endpoint),
+                model: model.to_owned(),
+            })
+            .collect()
     }
 
     /// One turn against exactly one endpoint. No failover: `cfg` names the
@@ -389,7 +422,54 @@ impl Llm {
         })
     }
 
+    /// Summarize, failing over exactly as [`Llm::complete`] does.
+    ///
+    /// This is not a nice-to-have. Summarization drives handoff and context
+    /// compaction, so a primary that cannot serve it strands a long
+    /// conversation at the context ceiling with no way to continue — the same
+    /// outage the completion path exists to survive, arriving by another door.
     pub async fn summarize(
+        &self,
+        cfg: &Config,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_output_tokens: u32,
+        effective_model: &str,
+    ) -> Result<String, AgentError> {
+        let chain = self.attempt_chain(cfg, effective_model);
+        let total = chain.len();
+        let mut last_error: Option<AgentError> = None;
+        for (index, attempt) in chain.into_iter().enumerate() {
+            match self
+                .summarize_once(
+                    &attempt.cfg,
+                    system_prompt,
+                    user_prompt,
+                    max_output_tokens,
+                    &attempt.model,
+                )
+                .await
+            {
+                Ok(text) => {
+                    self.breaker.record_success(&attempt.key);
+                    attempt.note_rescue(index, "summary");
+                    return Ok(text);
+                }
+                Err(error) => {
+                    let Some(kind) = cutover_kind(&error) else {
+                        return Err(error);
+                    };
+                    self.breaker.record_failure(&attempt.key, kind);
+                    attempt.note_failure(kind, &error);
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(chain_exhausted(last_error, total))
+    }
+
+    /// One summary against exactly one endpoint. No failover.
+    async fn summarize_once(
         &self,
         cfg: &Config,
         system_prompt: &str,
@@ -7020,5 +7100,76 @@ mod tests {
             "a single-provider error must not gain chain wording: got {err:?}"
         );
         assert_eq!(requested_models(&primary_seen).await.len(), 1);
+    }
+
+    /// Summarization drives handoff and context compaction. Without failover a
+    /// quota wall strands a long conversation at the context ceiling — the same
+    /// outage the completion path survives, arriving by another door.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn summarize_fails_over_to_the_next_provider() {
+        let (primary_url, primary_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::error(402, "quota exhausted")]).await;
+        let (fallback_url, fallback_seen) = spawn_sequence_stub(vec![StubHttpResponse::ok(
+            chat_response("summary from fallback"),
+        )])
+        .await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        let text = llm
+            .summarize(&c, "system", "summarize this", 256, "primary-model")
+            .await
+            .expect("a quota wall on the primary must not strand compaction");
+        assert_eq!(text, "summary from fallback");
+
+        assert_eq!(requested_models(&primary_seen).await, vec!["primary-model"]);
+        assert_eq!(
+            requested_models(&fallback_seen).await,
+            vec!["fallback-model"],
+            "the summary must be asked of the fallback's own model"
+        );
+    }
+
+    /// The breaker is shared across both paths. A primary benched by failed
+    /// turns is skipped by summarization too, rather than each path paying to
+    /// rediscover the same outage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_primary_benched_by_turns_is_skipped_by_summarize() {
+        let (primary_url, primary_seen) = spawn_sequence_stub(vec![
+            StubHttpResponse::error(402, "quota exhausted"),
+            StubHttpResponse::error(402, "quota exhausted"),
+        ])
+        .await;
+        let (fallback_url, fallback_seen) = spawn_sequence_stub(vec![
+            StubHttpResponse::ok(chat_response("one")),
+            StubHttpResponse::ok(chat_response("two")),
+            StubHttpResponse::ok(chat_response("the summary")),
+        ])
+        .await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        // Two turns fail the primary over — that opens its circuit.
+        for _ in 0..2 {
+            complete_model(&llm, &c, "primary-model").await.unwrap();
+        }
+        let text = llm
+            .summarize(&c, "system", "summarize this", 256, "primary-model")
+            .await
+            .unwrap();
+        assert_eq!(text, "the summary");
+
+        assert_eq!(
+            requested_models(&primary_seen).await.len(),
+            2,
+            "summarize must not re-probe a primary the turns already benched"
+        );
+        assert_eq!(requested_models(&fallback_seen).await.len(), 3);
     }
 }
