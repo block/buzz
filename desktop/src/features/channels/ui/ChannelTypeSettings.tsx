@@ -34,6 +34,7 @@ const CHANNEL_TYPE_RESIZE_TRANSITION = {
 
 export function ChannelTypeSettings({
   disabled,
+  label = "Channel type",
   onOpenChange,
   onTemporaryChange,
   onTtlSecondsChange,
@@ -43,6 +44,7 @@ export function ChannelTypeSettings({
   ttlSeconds,
 }: {
   disabled?: boolean;
+  label?: string;
   onOpenChange?: (open: boolean) => void;
   onTemporaryChange: (temporary: boolean) => void;
   onTtlSecondsChange: (ttlSeconds: number) => void;
@@ -77,9 +79,7 @@ export function ChannelTypeSettings({
         className="flex items-center justify-between gap-3 px-3 py-3"
         data-testid={`${testIdPrefix}-channel-type-row`}
       >
-        <span className="text-sm font-medium text-foreground">
-          Channel type
-        </span>
+        <span className="text-sm font-medium text-foreground">{label}</span>
         <ChannelTypePicker
           align="end"
           className="-mr-2.5"
