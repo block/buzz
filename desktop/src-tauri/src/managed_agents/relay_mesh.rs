@@ -47,6 +47,13 @@ pub fn apply_relay_mesh_env(
     // may deliberately choose a smaller cap or a different effort. This function
     // runs after those layers during readiness, so never clobber their values.
     insert_default_if_unset(env, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096");
+    // Mesh agents run on small local models, which are the ones most likely to
+    // do the work and then end the turn without publishing it — the failure the
+    // reply guard exists to catch. Everywhere else it stays opt-in and unset.
+    // A default, not policy: an explicit `0` from the agent/persona/global env
+    // survives (see `insert_default_if_unset`, and the copy-forward list in
+    // `relay_mesh_process_env` that preserves it through the spawn path).
+    insert_default_if_unset(env, "BUZZ_AGENT_REQUIRE_REPLY", "1");
     // Deliberately no BUZZ_AGENT_THINKING_EFFORT default: mesh translates
     // `reasoning_effort` into the chat template's `enable_thinking` flag, so any
     // value we pick overrides each model's own template default — and the right
@@ -80,7 +87,15 @@ pub fn relay_mesh_process_env(
     model: &str,
 ) -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
-    for key in ["BUZZ_AGENT_MAX_OUTPUT_TOKENS", "BUZZ_AGENT_THINKING_EFFORT"] {
+    for key in [
+        "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
+        "BUZZ_AGENT_THINKING_EFFORT",
+        // Must be copied forward for the user's value to survive: this map is
+        // written onto the command *after* the layered user env, so a key absent
+        // here is re-defaulted by `apply_relay_mesh_env` below and an explicit
+        // `BUZZ_AGENT_REQUIRE_REPLY=0` would be silently overridden back to `1`.
+        "BUZZ_AGENT_REQUIRE_REPLY",
+    ] {
         if let Some(value) = effective_env.get(key) {
             env.insert(key.to_string(), value.clone());
         }
@@ -142,6 +157,78 @@ mod tests {
         assert_eq!(
             env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
             Some("high")
+        );
+    }
+
+    #[test]
+    fn native_provider_enables_reply_guard_by_default() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("1"),
+            "mesh agents opt into the reply guard automatically"
+        );
+    }
+
+    #[test]
+    fn native_provider_preserves_explicit_reply_guard_opt_out() {
+        let mut env = BTreeMap::from([("BUZZ_AGENT_REQUIRE_REPLY".to_string(), "0".to_string())]);
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("0"),
+            "an explicit opt-out is a user decision, not a value to re-default"
+        );
+    }
+
+    #[test]
+    fn non_mesh_provider_leaves_reply_guard_unset() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(&mut env, Some("anthropic"), Some("claude-haiku-4.5"));
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY"),
+            None,
+            "the guard stays opt-in everywhere except mesh"
+        );
+        assert!(env.is_empty(), "non-mesh providers get no mesh env at all");
+    }
+
+    /// The spawn path writes this map onto the command *after* the layered user
+    /// env, so an explicit opt-out only survives if it is copied forward. Without
+    /// the copy-forward, `apply_relay_mesh_env` re-defaults it to `1` here and
+    /// silently overrides the user at spawn while readiness still shows `0`.
+    #[test]
+    fn process_env_preserves_explicit_reply_guard_opt_out() {
+        let effective_env =
+            BTreeMap::from([("BUZZ_AGENT_REQUIRE_REPLY".to_string(), "0".to_string())]);
+
+        let env = relay_mesh_process_env(&effective_env, "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn process_env_enables_reply_guard_when_user_is_silent() {
+        let env = relay_mesh_process_env(&BTreeMap::new(), "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
+            Some("1")
         );
     }
 

@@ -48,6 +48,37 @@ test("global back and forward move across channel routes", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("random");
 });
 
+test("back/forward keyboard chords work while the composer has focus", async ({
+  page,
+}) => {
+  const backChord = process.platform === "darwin" ? "Meta+[" : "Alt+ArrowLeft";
+  const forwardChord =
+    process.platform === "darwin" ? "Meta+]" : "Alt+ArrowRight";
+
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  // The composer autofocuses on channel switch; make the regression
+  // condition explicit by clicking into it. The chords must still fire
+  // from inside the contenteditable (#3775).
+  await page.getByTestId("message-input").click();
+  await expect(page.getByTestId("message-input")).toBeFocused();
+
+  await page.keyboard.press(backChord);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.keyboard.press(forwardChord);
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  // preventDefault kept the chord out of the editor — no stray characters.
+  await expect(page.getByTestId("message-input")).toHaveText("");
+});
+
 // FIXME: the forum post "Back to posts" header renders under the fixed top
 // chrome drag region, which intercepts the click. Pre-existing breakage —
 // this spec file was never registered in playwright.config.ts until now.

@@ -36,8 +36,14 @@ class _MessageBubble extends ConsumerWidget {
 
     // Build mention names map from event p-tags.
     final userCache = ref.watch(userCacheProvider);
-    final knownAgentPubkeys = ref.watch(
-      mentionAgentPubkeysProvider(currentChannelId),
+    final knownAgentPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: ref.watch(
+        agentMentionPubkeysProvider(currentChannelId),
+      ),
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
     );
     final mentionNames = <String, String>{};
     final agentMentionPubkeys = <String>{};
@@ -51,6 +57,12 @@ class _MessageBubble extends ConsumerWidget {
         agentMentionPubkeys.add(normalizedPubkey);
       }
     }
+    final resolvedMentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: message.mentionPubkeys,
+      profileMentionNames: mentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     return Padding(
       padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
@@ -166,7 +178,7 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         MessageContent(
                           content: message.content,
-                          mentionNames: mentionNames,
+                          mentionNames: resolvedMentionNames,
                           agentMentionPubkeys: agentMentionPubkeys,
                           channelNames: channelNames,
                           tags: message.tags,

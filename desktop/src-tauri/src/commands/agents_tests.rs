@@ -264,6 +264,19 @@ fn normalize_relay_mesh_trims_and_preserves_valid_config() {
 }
 
 #[test]
+fn deploy_refuses_resolved_relay_mesh_provider_with_padding() {
+    let record = bare_agent_record(Some("p1"), None, None);
+    let personas = vec![persona_record("p1", None, Some("  relay-mesh  "))];
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+
+    let (_, provider) = resolve_deploy_model_provider(&record, &personas, &global);
+    let error = ensure_remote_provider_supported(provider.as_deref())
+        .expect_err("resolved shared-compute provider must not deploy remotely");
+
+    assert!(error.contains("cannot be deployed remotely"), "{error}");
+}
+
+#[test]
 fn created_avatar_prefers_explicit_input() {
     let resolved = resolve_created_avatar_url(
         Some(" https://x/input.png "),
@@ -398,50 +411,93 @@ fn legacy_avatar_empty_when_nothing_resolves() {
 
 // ── Provider deploy payload completeness ─────────────────────────────────────
 
-/// Regression (PR #1667 review, Thufir): the provider deploy payload must
-/// carry every behavioral field the local spawn path applies — a field
-/// missing here silently strips it from provider-backed agents.
+/// The shared provider fixture is the contract arbiter: it must be the exact
+/// richest deploy request produced by the real desktop serializers.
 #[test]
-fn deploy_payload_carries_the_full_behavioral_quad() {
-    let allow = "a".repeat(64);
-    let record: ManagedAgentRecord = serde_json::from_str(&format!(
-        r#"{{
-            "pubkey": "abcd1234",
-            "name": "test-agent",
-            "private_key_nsec": "nsec1fake",
-            "relay_url": "wss://localhost:3000",
-            "acp_command": "buzz-acp",
-            "agent_command": "goose",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": null,
-            "parallelism": 4,
-            "respond_to": "allowlist",
-            "respond_to_allowlist": ["{allow}"],
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }}"#
-    ))
-    .expect("sample record");
-
-    let payload = deploy_payload_json(
+fn deploy_payload_matches_the_shared_full_launch_fixture() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../crates/buzz-backend-kubernetes/tests/fixtures/provider-wire/deploy-full-launch.request.json",
+    );
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+    )
+    .expect("parse shared provider fixture");
+    let record: ManagedAgentRecord = serde_json::from_value(serde_json::json!({
+        "pubkey": "abcd1234",
+        "name": "worker",
+        "private_key_nsec": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
+        "relay_url": "wss://localhost:3000",
+        "auth_tag": "tag-1",
+        "acp_command": "buzz-acp",
+        "agent_command": "goose",
+        "runtime": "goose",
+        "model": "gpt-5",
+        "provider": "openai",
+        "env_vars": {"USER_KEY": "user-value"},
+        "agent_args": [],
+        "mcp_command": "",
+        "turn_timeout_seconds": 300,
+        "system_prompt": null,
+        "idle_timeout_seconds": null,
+        "max_turn_duration_seconds": null,
+        "parallelism": 10,
+        "respond_to": "allowlist",
+        "respond_to_allowlist": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z"
+    }))
+    .expect("fixture source record");
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
         &record,
-        "wss://relay.example".to_string(),
-        Some("gpt-x".to_string()),
-        Some("openai".to_string()),
+        &[],
+        &crate::managed_agents::GlobalAgentConfig::default(),
+    )
+    .expect("resolve fixture source record descriptor");
+    let launch = super::deploy::build_launch_block(
+        &record,
+        &descriptor,
+        &[],
         None,
-        std::collections::BTreeMap::new(),
+        Some("gpt-5"),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    let agent = deploy_payload_json(
+        &record,
+        "wss://relay.example".into(),
+        Some("gpt-5".into()),
+        Some("openai".into()),
+        None,
+        std::collections::BTreeMap::from([("USER_KEY".into(), "user-value".into())]),
+        launch,
     );
 
-    assert_eq!(payload["parallelism"], 4);
-    assert_eq!(payload["respond_to"], "allowlist");
-    assert_eq!(payload["respond_to_allowlist"][0], "a".repeat(64));
-    assert_eq!(payload["model"], "gpt-x");
-    assert_eq!(payload["provider"], "openai");
-    assert_eq!(payload["relay_url"], "wss://relay.example");
+    assert_eq!(
+        agent, fixture["agent"],
+        "desktop payload drifted from the shared provider fixture"
+    );
+}
+
+#[test]
+fn tauri_platform_configs_bundle_kubernetes_only_on_supported_hosts() {
+    use tauri_utils::{config::parse::read_from, platform::Target};
+
+    let config_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (target, expected) in [
+        (Target::MacOS, true),
+        (Target::Linux, true),
+        (Target::Windows, false),
+    ] {
+        let (config, paths) = read_from(target, config_root).expect("read Tauri config");
+        let external_bins = config["bundle"]["externalBin"]
+            .as_array()
+            .expect("bundle.externalBin array");
+        let has_kubernetes = external_bins
+            .iter()
+            .any(|value| value == "binaries/buzz-backend-kubernetes");
+        assert_eq!(
+            has_kubernetes, expected,
+            "unexpected Kubernetes externalBin for {target}; merged {paths:?}"
+        );
+    }
 }

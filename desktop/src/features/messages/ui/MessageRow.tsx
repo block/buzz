@@ -88,6 +88,7 @@ export const MessageRow = React.memo(
     onMarkRead,
     onToggleReaction,
     onReply,
+    onOpenThread,
     onEntranceComplete,
     playEntrance = false,
     onUnfollowThread,
@@ -135,6 +136,7 @@ export const MessageRow = React.memo(
       remove: boolean,
     ) => Promise<void>;
     onReply?: (message: TimelineMessage) => void;
+    onOpenThread?: (message: TimelineMessage) => void;
     onUnfollowThread?: (message: TimelineMessage) => void;
     onEntranceComplete?: (messageId: string) => void;
     playEntrance?: boolean;
@@ -335,7 +337,7 @@ export const MessageRow = React.memo(
             <HuddleAttachment
               channelId={channelId}
               message={message}
-              onOpenThread={onReply}
+              onOpenThread={onOpenThread}
             />
           );
         default:
@@ -433,8 +435,8 @@ export const MessageRow = React.memo(
       <div
         aria-hidden="true"
         className={cn(
-          "flex w-9 shrink-0 items-start justify-end pt-0.5",
-          isThreadReplyLayout ? "min-h-9 self-start" : "self-stretch",
+          "flex w-9 shrink-0 justify-end items-start pt-0.5",
+          isThreadReplyLayout ? "self-start" : "self-stretch",
         )}
       >
         <MessageTimestamp
@@ -485,7 +487,9 @@ export const MessageRow = React.memo(
         className={cn(
           "absolute right-2 top-1 z-10 sm:pointer-events-none",
           actionBarPlacement === "floating"
-            ? "sm:top-0 sm:-translate-y-1/2"
+            ? isContinuation
+              ? "sm:-top-3 sm:-translate-y-1/2"
+              : "sm:top-0 sm:-translate-y-1/2"
             : "sm:top-1 sm:translate-y-0",
         )}
       >

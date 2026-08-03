@@ -1204,6 +1204,43 @@ Photos
         expect(find.text('Alice'), findsOneWidget);
       });
 
+      testWidgets('renders a known agent mention with the bot chip', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+              maxLines: 2,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('@'), findsNothing);
+        expect(find.text('Helper Bot'), findsOneWidget);
+      });
+
+      testWidgets('normalizes passed multi-word agent mentions', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('Helper Bot'), findsOneWidget);
+        expect(_allRichText(tester), isNot(contains('Bot Bot')));
+      });
+
       testWidgets('highlights an entire multi-word display name', (
         tester,
       ) async {
