@@ -12,8 +12,12 @@
 //!   call mints a new live credential, so it is sent exactly once (see
 //!   [`BuzzClient::post_authed_once`]).
 //! - `claim` — `POST /api/invites/claim`, signed by the *joining* pubkey.
-//!   Idempotent: re-claiming an already-redeemed code returns
-//!   `already_member`, so the standard retry policy applies.
+//!   Effectively idempotent: re-claiming an already-redeemed code returns
+//!   `already_member`, so the standard retry policy applies. One caveat — the
+//!   relay checks expiry before existing membership, so a retry that lands
+//!   after the code expires reports `invite_expired` even though the earlier
+//!   attempt joined. Re-run `buzz channels list` to confirm membership before
+//!   treating that as a failure.
 //!
 //! The community (tenant) is selected by the relay host in `--relay` /
 //! `BUZZ_RELAY_URL`; a code minted for one community is rejected on another.

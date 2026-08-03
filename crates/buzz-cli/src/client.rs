@@ -898,9 +898,11 @@ impl BuzzClient {
     /// unexpired invite code in circulation that the caller never saw.
     ///
     /// Connect failures are definitively unreceived and stay
-    /// [`CliError::Network`] (retryable). Every other failure after the request
-    /// left the process — timeout, mid-body loss, proxy 502–504 — is ambiguous
-    /// and surfaces as [`CliError::DeliveryUnknown`] (never retryable).
+    /// [`CliError::Network`] (retryable), as is a pre-ingest 429 carrying a
+    /// `rate-limited:` body — the relay provably did not execute. Every other
+    /// failure after the request left the process — timeout, mid-body loss,
+    /// proxy 429, proxy 502–504 — is ambiguous and surfaces as
+    /// [`CliError::DeliveryUnknown`] (never retryable).
     pub async fn post_authed_once(
         &self,
         path: &str,
@@ -931,6 +933,26 @@ impl BuzzClient {
                 )))
             }
         };
+        if resp.status().as_u16() == 429 {
+            // Same split as `submit_moderation_event`: only the relay's own
+            // pre-ingest rate limiter proves the request did not execute, and it
+            // says so with a `rate-limited:` body. A proxy 429 — or any body we
+            // do not recognise — leaves execution ambiguous, and `Relay { 429 }`
+            // is retryable (`error::is_retryable`), which for a mint would put a
+            // second live credential in circulation that the caller never saw.
+            let body_text = resp.text().await.unwrap_or_default();
+            let extracted = extract_relay_message_field(&body_text);
+            let msg = extracted.as_deref().unwrap_or(&body_text);
+            if msg.starts_with("rate-limited:") {
+                return Err(CliError::Relay {
+                    status: 429,
+                    body: body_text,
+                });
+            }
+            return Err(CliError::DeliveryUnknown(format!(
+                "POST {path} outcome unknown: HTTP 429"
+            )));
+        }
         if matches!(resp.status().as_u16(), 502..=504) {
             // Proxy-level error: the relay may have executed before the proxy failed.
             return Err(CliError::DeliveryUnknown(format!(
@@ -2068,6 +2090,68 @@ mod retry_policy_tests {
             attempts.load(Ordering::SeqCst),
             1,
             "non-idempotent POST must be sent exactly once"
+        );
+    }
+
+    /// A 429 with no `rate-limited:` body is a proxy-level throttle: the relay
+    /// may already have minted. `Relay { status: 429 }` is retryable, so it must
+    /// be reclassified as `DeliveryUnknown` or a caller obeying `retryable` will
+    /// mint a second live code nobody ever sees.
+    #[tokio::test]
+    async fn post_authed_once_treats_proxy_429_as_unknown() {
+        let (url, attempts) = post_server(|_n| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "<html>429 Too Many Requests</html>".to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let err = client
+            .post_authed_once("/api/invites", &serde_json::json!({"ttl_secs": 3600}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "proxy 429 on a non-idempotent POST must be DeliveryUnknown, got {err:?}"
+        );
+        assert!(
+            !crate::error::is_retryable_error(&err),
+            "an ambiguous 429 must not advertise itself as retryable"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    /// The relay's own pre-ingest limiter answers `rate-limited:` and proves it
+    /// did not execute, so the same command is safe to re-send: keep it as
+    /// `Relay { status: 429 }` (retryable) rather than the pessimistic
+    /// `DeliveryUnknown`.
+    #[tokio::test]
+    async fn post_authed_once_keeps_pre_ingest_429_retryable() {
+        let (url, attempts) = post_server(|_n| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate-limited: retry in 2s".to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let err = client
+            .post_authed_once("/api/invites", &serde_json::json!({"ttl_secs": 3600}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::Relay { status: 429, .. }),
+            "pre-ingest 429 must stay a relay error, got {err:?}"
+        );
+        assert!(
+            crate::error::is_retryable_error(&err),
+            "the relay proved it did not execute — re-sending is safe"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "post_authed_once still never retries internally"
         );
     }
 
