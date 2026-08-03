@@ -114,8 +114,11 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
+| `AGENT_CWD` | no | process working directory | Absolute path passed as `NewSessionRequest.cwd`. This is the directory the agent runtime resolves `AGENTS.md`/`CLAUDE.md`, skills, hooks and settings from, so pinning it is how one supervised runtime serves a workspace other than the directory it was launched from. Must be an existing absolute directory; buzz-acp refuses to start otherwise. |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
+
+**Note:** `AGENT_CWD` sets the *session* working directory delivered over ACP; it does not change the working directory of the buzz-acp process or of the agent subprocess. One buzz-acp process still serves all its channels from a single workspace — see [#3822](https://github.com/block/buzz/issues/3822) for the channel-scoped follow-up.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
