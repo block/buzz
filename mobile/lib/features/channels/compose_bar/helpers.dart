@@ -1,6 +1,47 @@
 part of '../compose_bar.dart';
 
 const _typingThrottleMs = 3000;
+
+class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
+  final FlutterView view;
+  final VoidCallback onKeyboardHidden;
+  bool _wasVisible;
+
+  _ComposerKeyboardMetricsObserver({
+    required this.view,
+    required this.onKeyboardHidden,
+  }) : _wasVisible = view.viewInsets.bottom > 0;
+
+  @override
+  void didChangeMetrics() {
+    final isVisible = view.viewInsets.bottom > 0;
+    if (_wasVisible && !isVisible) onKeyboardHidden();
+    _wasVisible = isVisible;
+  }
+}
+
+void _runComposerAction(VoidCallback action) {
+  unawaited(HapticFeedback.selectionClick());
+  action();
+}
+
+void _showComposerEmojiPicker(
+  BuildContext context,
+  ValueChanged<String> onSelect,
+  VoidCallback onDismiss,
+) {
+  showEmojiPicker(
+    context: context,
+    onSelect: (emoji) => _runComposerAction(() => onSelect(emoji)),
+    onDismiss: onDismiss,
+  );
+}
+
+void _dismissComposerKeyboard(FocusNode focusNode) {
+  focusNode.unfocus();
+  unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
+}
+
 const _pastedImageMimeTypes = <String>[
   'image/jpeg',
   'image/jpg',

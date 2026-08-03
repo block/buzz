@@ -85,7 +85,7 @@ test.describe("channel muting", () => {
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
   });
 
-  test("03 — muted channel with @mention shows unread dot", async ({
+  test("03 — muted channel with a top-level @mention is emphasized", async ({
     page,
   }) => {
     await seedMuteState(page, ENGINEERING_CHANNEL_ID);
@@ -123,7 +123,13 @@ test.describe("channel muting", () => {
       },
     );
 
-    await expect(page.getByTestId("channel-unread-engineering")).toBeVisible();
+    await expect(page.getByTestId("channel-engineering")).toHaveCSS(
+      "font-weight",
+      "600",
+    );
+    await expect(
+      page.getByTestId("channel-unread-dot-engineering"),
+    ).toHaveCount(0);
   });
 
   test("04 — context menu shows Unmute channel when muted", async ({

@@ -364,8 +364,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     }
     // This is restoration of a previously inference-ready serving node. Keep
     // the enabled checkpoint armed while restoring so a transient startup
-    // failure does not silently turn Share Compute off. New starts remain
-    // disarmed in `mesh_start_node` until their first inference probe passes.
+    // failure does not silently turn Share Compute off.
     let request = mesh_llm::StartMeshNodeRequest {
         mode: mesh_llm::MeshNodeMode::Serve,
         model_id: Some(config.model_id.clone()),
@@ -378,20 +377,26 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
         .map_err(|error| format!("failed to restore Share Compute: {error:#}"))?;
-    if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
-        let cleanup = started.stop().await;
-        if let Err(cleanup_error) = cleanup {
-            eprintln!(
-                "buzz-mesh: restored node failed inference readiness and cleanup was incomplete: {cleanup_error:#}"
-            );
-        }
-        return Err(format!("failed to restore Share Compute: {error}"));
-    }
+    // Install the restored runtime immediately: it is tracked by AppState from
+    // here on, so it can never be orphaned. Restoring a previously
+    // inference-ready node still has to load ~tens of GB of weights and may
+    // download package layers after the ports bind, and the readiness probe
+    // itself serializes behind any first inference. None of that is a failed
+    // restore — stopping the node and reporting failure (the old behaviour)
+    // tore down a node that was simply still warming up. The checkpoint stays
+    // armed (`enabled`), so a genuinely broken restore is retried next launch
+    // rather than silently turning Share Compute off.
     *runtime = Some(started);
     config.enabled = true;
     config.start_on_next_launch = false;
     save_mesh_sharing_config(app, &config)?;
     drop(runtime);
+    if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
+        eprintln!(
+            "buzz-mesh: restored node is not inference-ready yet ({error}); \
+             leaving it to warm up without tearing it down"
+        );
+    }
     mesh_llm::publish_current_status_once(app, "restore").await;
     Ok(())
 }
@@ -467,9 +472,11 @@ pub async fn mesh_start_node(
     }
 
     if let Some(config) = sharing_config.as_ref() {
-        // Do not arm launch restoration until the exact inference path used by
-        // agents succeeds. Mesh may bind its ports after primary weights load
-        // while package layers are still downloading.
+        // Persist a DISARMED checkpoint to cover the window of the potentially
+        // long `start()` below: if Buzz exits before the runtime is installed
+        // and tracked, the next launch stays stopped rather than trying to
+        // restore a node that never came up. The enabled config is armed right
+        // after install succeeds.
         save_mesh_sharing_config(&app, &pending_new_start_checkpoint(config))?;
     }
 
@@ -496,25 +503,28 @@ pub async fn mesh_start_node(
             ));
         }
     };
-    if let Some(config) = sharing_config.as_ref() {
-        if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
-            let cleanup = started.stop().await;
-            if let Err(cleanup_error) = &cleanup {
-                eprintln!(
-                    "buzz-mesh: started node failed inference readiness and cleanup was incomplete: {cleanup_error:#}"
-                );
-            }
-            drop(runtime);
-            app.request_restart();
-            return Err(format!(
-                "mesh node started but inference never became ready: {error}; Buzz is restarting to guarantee cleanup"
-            ));
-        }
-    }
+    // Install (track) the runtime BEFORE probing readiness so it can never be
+    // orphaned. A readiness timeout is not death: mesh binds its ports before
+    // weights finish loading / layers finish downloading, and serializes all
+    // ingress HTTP (this probe included) behind any in-flight turn — a cold
+    // start can take minutes. The old code stopped the node and restarted the
+    // app on that timeout, turning startup latency into a restart loop.
     *runtime = Some(started);
     drop(runtime);
     if let Some(config) = sharing_config.as_ref() {
+        // Installed + tracked == Share Compute is on, so persist the enabled
+        // config now (mirroring restore), not gated on the probe. Gating it
+        // meant a slow first start served fine but came back OFF next launch.
+        // Safe: neither the watchdog (evicts only a closed port) nor restore
+        // (leaves a warming node alone) can loop a slow-but-alive node, and an
+        // unstartable config fails earlier in `start()`. Probe is informational.
         save_mesh_sharing_config(&app, config)?;
+        if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
+            eprintln!(
+                "buzz-mesh: node started but inference is not ready yet ({error}); \
+                 leaving it to warm up (Share Compute stays armed for next launch)"
+            );
+        }
     }
     mesh_llm::publish_current_status_once(&app, "start").await;
     Ok(status)

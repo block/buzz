@@ -106,7 +106,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Oh My Pi",
         command: "omp",
         args: &["acp"],
-        install_instructions_url: "https://github.com/can1357/oh-my-pi",
+        install_instructions_url: "https://omp.sh/",
         install_hint: "Buzz talks to Oh My Pi through its CLI's ACP mode (omp acp).",
         underlying_cli: None,
     },

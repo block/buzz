@@ -165,6 +165,14 @@ type EnvVarsEditorProps = {
   inheritedRows?: readonly InheritedEnvRow[];
   /** Label for the inherited-row tag (e.g. "build"). Defaults to "build". */
   inheritedRowsLabel?: string;
+  /**
+   * Optional muted one-line annotation for specific env var keys. Rendered
+   * below any row whose key appears in this map — required rows, user rows,
+   * and user rows whose key is typed mid-edit. Intended for contextual hints
+   * like `{ OPENAI_API_KEY: "Used for minting agent trading cards" }` that
+   * help users distinguish two keys with similar names.
+   */
+  keyAnnotations?: Readonly<Record<string, string>>;
 };
 
 type Row = { id: string; key: string; value: string };
@@ -191,6 +199,7 @@ export function EnvVarsEditor({
   focusKey,
   inheritedRows = [],
   inheritedRowsLabel = "build",
+  keyAnnotations,
 }: EnvVarsEditorProps) {
   // Keys that render as their own special rows (required amber rows or
   // file-satisfied read-only rows). These must NEVER enter `rows` state —
@@ -406,6 +415,14 @@ export function EnvVarsEditor({
                   </p>
                 );
               })()}
+              {keyAnnotations?.[key] ? (
+                <p
+                  className="ml-1 text-xs text-muted-foreground"
+                  data-testid="env-vars-key-annotation"
+                >
+                  {keyAnnotations[key]}
+                </p>
+              ) : null}
             </div>
           );
         })}
@@ -596,6 +613,14 @@ export function EnvVarsEditor({
                   </p>
                 );
               })()}
+              {row.key.length > 0 && keyAnnotations?.[row.key] ? (
+                <p
+                  className="ml-1 text-xs text-muted-foreground"
+                  data-testid="env-vars-key-annotation"
+                >
+                  {keyAnnotations[row.key]}
+                </p>
+              ) : null}
             </div>
           );
         })}

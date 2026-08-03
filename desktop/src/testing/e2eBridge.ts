@@ -507,6 +507,11 @@ type E2eConfig = {
      * returning a catalog.
      */
     discoverAgentModelsError?: string;
+    // Backend provider mocks for the create-agent "Run on" section. See
+    // tests/helpers/bridge.ts:MockBridgeOptions for semantics.
+    backendProviders?: Array<{ id: string; binaryPath: string }>;
+    backendProviderProbeResult?: Record<string, unknown>;
+    backendProviderProbeDelayMs?: number;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -11064,9 +11069,22 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "discover_backend_providers":
-        return [];
-      case "probe_backend_provider":
-        return { ok: false, error: "mock: no providers available" };
+        return activeConfig?.mock?.backendProviders ?? [];
+      case "probe_backend_provider": {
+        const probeDelayMs =
+          activeConfig?.mock?.backendProviderProbeDelayMs ?? 0;
+        if (probeDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, probeDelayMs),
+          );
+        }
+        return (
+          activeConfig?.mock?.backendProviderProbeResult ?? {
+            ok: false,
+            error: "mock: no providers available",
+          }
+        );
+      }
       case "discover_managed_agent_prereqs":
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
@@ -11183,6 +11201,50 @@ export function maybeInstallE2eTauriMocks() {
           created_at: template.createdAt,
           updated_at: template.updatedAt,
         }));
+      case "create_channel_template": {
+        const { input } = payload as {
+          input: {
+            name: string;
+            description?: string;
+            channelType?: "stream" | "forum";
+            visibility?: "open" | "private";
+            canvasTemplate?: string;
+            agents?: ChannelTemplate["agents"];
+          };
+        };
+        const timestamp = new Date().toISOString();
+        const created: ChannelTemplate = {
+          id: `template-${Date.now()}`,
+          name: input.name,
+          description: input.description ?? null,
+          channelType: input.channelType ?? "stream",
+          visibility: input.visibility ?? "open",
+          canvasTemplate: input.canvasTemplate ?? null,
+          agents: input.agents ?? { personas: [], teams: [] },
+          isBuiltin: false,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.channelTemplates = [
+            ...(activeConfig.mock.channelTemplates ?? []),
+            created,
+          ];
+        }
+        return {
+          id: created.id,
+          name: created.name,
+          description: created.description,
+          channel_type: created.channelType,
+          visibility: created.visibility,
+          canvas_template: created.canvasTemplate,
+          agents: created.agents,
+          is_builtin: created.isBuiltin,
+          created_at: created.createdAt,
+          updated_at: created.updatedAt,
+        };
+      }
       case "create_team":
         return handleCreateTeam(
           payload as Parameters<typeof handleCreateTeam>[0],
@@ -11282,6 +11344,9 @@ export function maybeInstallE2eTauriMocks() {
           memoryEntryCount: 0,
           hasSourceAllowlist: false,
           sourceAllowlistCount: 0,
+          sourceAllowlist: [],
+          manifestJson: "{}",
+          locked: false,
         };
       }
       case "confirm_agent_snapshot_import": {
@@ -11825,10 +11890,19 @@ export function maybeInstallE2eTauriMocks() {
       case "download_image":
       case "save_png_data_url":
       case "download_file":
+      case "save_agent_card":
         // The save dialog can't run headlessly; report a successful save so the
         // FileCard / image-menu click handlers resolve. Specs assert the
         // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
+      case "card_mint_key_status":
+        // Cards: pretend a key is configured in global defaults so the mint
+        // form renders and the key-status row is shown.
+        return "global";
+      case "list_agent_cards":
+        // Cards archive starts empty in E2E; specs exercising the gallery
+        // can extend this with a seeded config knob when needed.
+        return [];
       case "copy_image_to_clipboard":
         return;
       case "copy_text_to_clipboard":

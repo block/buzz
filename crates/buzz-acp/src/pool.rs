@@ -32,6 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    SystemPromptTransport,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -171,6 +172,13 @@ pub struct OwnedAgent {
     pub protocol_version: u32,
 }
 
+/// Package name reported by `claude-agent-acp` in its `initialize` response.
+/// Any adapter reporting this name supports `_meta.systemPrompt: {append: ...}`
+/// on `session/new` — the feature landed in v0.6.0 (Oct 2025), before the
+/// `@zed-industries/claude-code-acp` → `@agentclientprotocol/claude-agent-acp`
+/// rename, so the new name is a reliable capability gate.
+const CLAUDE_AGENT_ACP_NAME: &str = "@agentclientprotocol/claude-agent-acp";
+
 fn has_system_prompt_support(
     protocol_version: u32,
     agent_name: &str,
@@ -178,20 +186,25 @@ fn has_system_prompt_support(
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
+    } else if agent_name == CLAUDE_AGENT_ACP_NAME {
+        true
     } else {
         protocol_version >= 2
     }
 }
 
-fn session_new_system_prompt(
+fn session_new_system_prompt<'a>(
     is_goose: bool,
     protocol_version: u32,
-    prompt: Option<&str>,
-) -> Option<&str> {
-    if is_goose || protocol_version < 2 {
+    agent_name: &str,
+    prompt: Option<&'a str>,
+) -> Option<SystemPromptTransport<'a>> {
+    if is_goose || (protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME) {
         None
+    } else if agent_name == CLAUDE_AGENT_ACP_NAME {
+        prompt.map(SystemPromptTransport::ClaudeMeta)
     } else {
-        prompt
+        prompt.map(SystemPromptTransport::Field)
     }
 }
 
@@ -907,6 +920,7 @@ async fn create_session_and_apply_model(
             session_new_system_prompt(
                 is_goose,
                 agent.protocol_version,
+                &agent.agent_name,
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
@@ -3624,7 +3638,11 @@ pub(crate) fn build_turn_metric_counts(
             // from input+output.
             total_tokens: usage.turn_total_tokens,
             cost_usd: usage.turn_cost_usd,
-            cache_read_tokens: None,
+            // Field-local: present when the cumulative counter was monotonic
+            // across this turn. Zero means no cache hits this turn (not absent).
+            cache_read_tokens: usage.turn_cache_read_tokens,
+            // buzz-agent does not emit a cache-write count on the wire today;
+            // leave None rather than deriving it from other fields.
             cache_write_tokens: None,
         })
     } else {
@@ -3642,7 +3660,13 @@ pub(crate) fn build_turn_metric_counts(
         // one. Never derived from input+output (NIP-AM MUST NOT).
         total_tokens: usage.cumulative_total_tokens,
         cost_usd: usage.cumulative_cost_usd,
-        cache_read_tokens: None,
+        // Session-cumulative cache-read tokens; None when the harness never
+        // reported this field (e.g. goose or older buzz-agent sessions).
+        // Passes through directly — do not wrap in Some() as the field already
+        // carries provenance (None vs Some(0) are distinct meanings).
+        cache_read_tokens: usage.cumulative_cache_read_tokens,
+        // buzz-agent does not emit a cache-write count on the wire today;
+        // leave None rather than deriving it from other fields.
         cache_write_tokens: None,
     });
     (turn_counts, cumulative_counts)
@@ -3993,18 +4017,48 @@ mod tests {
         assert!(has_system_prompt_support(2, "goose", Some(true)));
         assert!(has_system_prompt_support(1, "goose", Some(true)));
         assert!(has_system_prompt_support(2, "buzz-agent", None));
+        // Goose never receives system prompt via session/new (uses post-hoc method).
         assert_eq!(
-            session_new_system_prompt(true, 2, Some("instructions")),
+            session_new_system_prompt(true, 2, "goose", Some("instructions")),
             None
         );
+        // Protocol-v2 non-goose gets Field transport.
         assert_eq!(
-            session_new_system_prompt(false, 2, Some("instructions")),
-            Some("instructions")
+            session_new_system_prompt(false, 2, "buzz-agent", Some("instructions")),
+            Some(SystemPromptTransport::Field("instructions"))
         );
+        // Protocol-v1 non-goose, non-claude gets None (legacy user-message framing).
         assert_eq!(
-            session_new_system_prompt(false, 1, Some("instructions")),
+            session_new_system_prompt(false, 1, "codex", Some("instructions")),
             None
         );
+        // claude-agent-acp gets ClaudeMeta transport regardless of protocol version.
+        assert_eq!(
+            session_new_system_prompt(false, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
+            Some(SystemPromptTransport::ClaudeMeta("instructions"))
+        );
+        assert_eq!(
+            session_new_system_prompt(true, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
+            None,
+            "goose path must never produce a transport even when agent_name matches"
+        );
+    }
+
+    #[test]
+    fn claude_agent_acp_has_system_prompt_support_regardless_of_protocol_version() {
+        // claude-agent-acp declares protocolVersion:1 but supports _meta.systemPrompt;
+        // has_system_prompt_support must return true so user-message framing is suppressed.
+        assert!(has_system_prompt_support(1, CLAUDE_AGENT_ACP_NAME, None));
+        assert!(has_system_prompt_support(2, CLAUDE_AGENT_ACP_NAME, None));
+    }
+
+    #[test]
+    fn old_zed_adapter_name_falls_through_to_protocol_version_gate() {
+        // The renamed @zed-industries package predates the _meta.systemPrompt support,
+        // so it must not be treated as capable and stays on legacy user-message framing.
+        let old_name = "@zed-industries/claude-code-acp";
+        assert!(!has_system_prompt_support(1, old_name, None));
+        assert!(has_system_prompt_support(2, old_name, None));
     }
 
     #[test]
@@ -6022,10 +6076,12 @@ mod tests {
             turn_output_tokens: Some(50),
             turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 100,
             cumulative_output_tokens: 50,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // owner_pubkey = None → early return, no panic.
@@ -6056,10 +6112,12 @@ mod tests {
             turn_output_tokens: Some(80),
             turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 80,
             cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
@@ -6091,10 +6149,12 @@ mod tests {
             turn_output_tokens: Some(20),
             turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 150,
             cumulative_output_tokens: 70,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
@@ -6126,10 +6186,12 @@ mod tests {
             turn_output_tokens: None,
             turn_total_tokens: None,
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 400,
             cumulative_output_tokens: 100,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
@@ -6158,10 +6220,12 @@ mod tests {
             turn_output_tokens: Some(30),
             turn_total_tokens: Some(130), // genuine per-turn total
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 500,
             cumulative_output_tokens: 120,
             cumulative_total_tokens: Some(620), // genuine cumulative total
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
 
@@ -6205,10 +6269,12 @@ mod tests {
             turn_output_tokens: Some(60),
             turn_total_tokens: None, // provider did not supply a total
             turn_cost_usd: None,
+            turn_cache_read_tokens: None,
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 60,
             cumulative_total_tokens: None, // session has no total
             cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
             model: None,
         };
 
@@ -6245,6 +6311,96 @@ mod tests {
         assert_ne!(
             turn_json["totalTokens"], derived_sum,
             "total_tokens must never equal input+output when provider omitted it"
+        );
+    }
+
+    /// A payload with nonzero `accumulatedCachedInputTokens` on the second turn
+    /// must produce a kind:44200 payload where `cumulative.cacheReadTokens` is
+    /// nonzero and `turn.cacheReadTokens` reflects the per-turn delta.
+    /// This is the acceptance-criterion test: it proves the threading is live,
+    /// not hardcoded to None.
+    #[test]
+    fn test_build_turn_metric_counts_cache_read_tokens_thread_through() {
+        // Wire-parse a buzz-agent payload with cache, run it through the tracker,
+        // and verify the published TokenCounts carry the cache field.
+        let raw1 = serde_json::json!({
+            "sessionId": "cache-sess",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 15_091,
+                "accumulatedOutputTokens": 156,
+                "accumulatedCachedInputTokens": 5_033,
+            }
+        });
+        let raw2 = serde_json::json!({
+            "sessionId": "cache-sess",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 28_500,
+                "accumulatedOutputTokens": 310,
+                "accumulatedCachedInputTokens": 11_000,
+            }
+        });
+
+        let mut tracker = crate::usage::UsageTracker::default();
+
+        // Turn 1 — establish baseline (delta unreliable, but cumulative still present).
+        tracker.begin_turn("cache-sess");
+        if let crate::usage::GooseSessionUpdateVariant::UsageUpdate(p) =
+            serde_json::from_value::<crate::usage::GooseSessionUpdateNotification>(raw1)
+                .unwrap()
+                .update
+        {
+            tracker.record("cache-sess", &p);
+        }
+        let t1 = tracker.take().expect("turn 1");
+
+        // Turn 1: cumulative must carry the cache count; turn delta is None (no baseline).
+        let (turn1, cum1) = crate::pool::build_turn_metric_counts(&t1);
+        // delta_reliable = false on first turn → no turn counts.
+        assert!(turn1.is_none(), "first turn: no reliable turn counts");
+        let cum1 = cum1.expect("cumulative always present");
+        assert_eq!(
+            cum1.cache_read_tokens,
+            Some(5_033),
+            "cumulative.cacheReadTokens must be 5033 after turn 1"
+        );
+
+        // Turn 2 — delta reliable.
+        tracker.begin_turn("cache-sess");
+        if let crate::usage::GooseSessionUpdateVariant::UsageUpdate(p) =
+            serde_json::from_value::<crate::usage::GooseSessionUpdateNotification>(raw2)
+                .unwrap()
+                .update
+        {
+            tracker.record("cache-sess", &p);
+        }
+        let t2 = tracker.take().expect("turn 2");
+
+        let (turn2, cum2) = crate::pool::build_turn_metric_counts(&t2);
+
+        let turn2 = turn2.expect("reliable turn counts on turn 2");
+        // Per-turn cache delta: 11_000 - 5_033 = 5_967.
+        assert_eq!(
+            turn2.cache_read_tokens,
+            Some(5_967),
+            "turn.cacheReadTokens must be the per-turn delta"
+        );
+        // cache_write_tokens is always None — buzz-agent doesn't emit it.
+        assert!(
+            turn2.cache_write_tokens.is_none(),
+            "cache_write_tokens must be None — not emitted by buzz-agent"
+        );
+
+        let cum2 = cum2.expect("cumulative always present");
+        assert_eq!(
+            cum2.cache_read_tokens,
+            Some(11_000),
+            "cumulative.cacheReadTokens must be 11_000 after turn 2"
+        );
+        assert!(
+            cum2.cache_write_tokens.is_none(),
+            "cache_write_tokens must be None on cumulative too"
         );
     }
 

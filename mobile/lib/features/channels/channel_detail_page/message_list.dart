@@ -10,6 +10,7 @@ class _MessageList extends HookConsumerWidget {
   final bool isMember;
   final bool isArchived;
   final double appBarTitleContentHeight;
+  final double composerBottomInset;
 
   const _MessageList({
     required this.entries,
@@ -21,6 +22,7 @@ class _MessageList extends HookConsumerWidget {
     required this.isMember,
     required this.isArchived,
     required this.appBarTitleContentHeight,
+    required this.composerBottomInset,
   });
 
   @override
@@ -259,7 +261,7 @@ class _MessageList extends HookConsumerWidget {
                   context,
                   titleContentHeight: appBarTitleContentHeight,
                 ),
-                bottom: 0,
+                bottom: composerBottomInset,
               ),
               itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
               itemBuilder: (context, index) {
@@ -356,25 +358,76 @@ class _MessageList extends HookConsumerWidget {
           Positioned(
             left: 0,
             right: 0,
-            bottom: Grid.xs,
+            bottom: composerBottomInset + Grid.xs,
             child: Center(
-              child: FilledButton.icon(
+              child: _JumpToLatestButton(
                 key: const ValueKey('channel-jump-to-latest'),
                 onPressed: scrollToLatest,
-                style: FilledButton.styleFrom(
-                  backgroundColor: context.colors.primaryContainer,
-                  foregroundColor: context.colors.onPrimaryContainer,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.gutter,
-                    vertical: Grid.xxs,
-                  ),
-                ),
-                icon: const Icon(LucideIcons.arrowDown, size: 16),
-                label: const Text('Latest'),
               ),
             ),
           ),
       ],
+    );
+  }
+}
+
+class _JumpToLatestButton extends StatelessWidget {
+  final VoidCallback onPressed;
+
+  const _JumpToLatestButton({required this.onPressed, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final borderRadius = BorderRadius.circular(Radii.full);
+    return Semantics(
+      button: true,
+      child: ClipRRect(
+        borderRadius: borderRadius,
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          child: Container(
+            key: const ValueKey('channel-jump-to-latest-surface'),
+            decoration: BoxDecoration(
+              color: context.colors.surface.withValues(alpha: 0.5),
+              borderRadius: borderRadius,
+              border: Border.all(
+                color: Colors.black.withValues(alpha: 0.04),
+                width: 1,
+              ),
+            ),
+            child: Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                onTap: onPressed,
+                borderRadius: borderRadius,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.gutter,
+                    vertical: Grid.xxs,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        LucideIcons.arrowDown,
+                        size: 16,
+                        color: context.colors.onSurface,
+                      ),
+                      const SizedBox(width: Grid.half),
+                      Text(
+                        'Latest',
+                        style: context.textTheme.labelLarge?.copyWith(
+                          color: context.colors.onSurface,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
