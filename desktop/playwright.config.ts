@@ -126,6 +126,7 @@ export default defineConfig({
         "**/agent-provider-dropdowns.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",
         "**/agent-access-warning.spec.ts",
+        "**/edit-agent-run-on.spec.ts",
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/observer-archive-policy.spec.ts",
