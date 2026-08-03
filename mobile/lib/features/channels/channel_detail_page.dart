@@ -25,9 +25,11 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
 import 'channel.dart';
+import 'channel_actions_sheet.dart';
 import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
+import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
@@ -38,7 +40,6 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
-import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
@@ -277,27 +278,25 @@ class ChannelDetailPage extends HookConsumerWidget {
             channel: resolvedChannel,
             currentPubkey: currentPubkey,
           ),
-          if (!resolvedChannel.isDm)
-            IconButton(
-              color: context.colors.primary,
-              onPressed: () async {
-                final shouldClose = await showModalBottomSheet<bool>(
-                  context: context,
-                  isScrollControlled: true,
-                  showDragHandle: true,
-                  constraints: BoxConstraints(
-                    maxWidth: 640,
-                    maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-                  ),
-                  builder: (_) => ManageChannelSheet(channel: resolvedChannel),
-                );
-                if (shouldClose == true && context.mounted) {
-                  Navigator.of(context).pop();
-                }
-              },
-              tooltip: 'Manage channel',
-              icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
-            ),
+          IconButton(
+            color: context.colors.primary,
+            onPressed: () async {
+              final shouldClose = await showChannelActionsSheet(
+                context: context,
+                channel: resolvedChannel,
+                isUnread: false,
+                sectionId: ref
+                    .read(channelSectionsProvider)
+                    .store
+                    .assignments[resolvedChannel.id],
+              );
+              if (shouldClose == true && context.mounted) {
+                Navigator.of(context).pop();
+              }
+            },
+            tooltip: 'Channel actions',
+            icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
+          ),
         ],
       ),
       body: Stack(

@@ -29,6 +29,7 @@ import '../profile/user_cache_provider.dart';
 import '../pairing/pairing_page.dart';
 import '../pairing/pairing_provider.dart';
 import 'channel.dart';
+import 'channel_actions_sheet.dart';
 import 'channel_detail_page.dart';
 import 'channel_management_provider.dart';
 import 'dm_channel_labels.dart';
