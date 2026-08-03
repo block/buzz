@@ -75,7 +75,10 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
+import {
+  getProviderApiKeyEnvVar,
+  getProviderApiKeyLabel,
+} from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -1061,14 +1064,11 @@ export function AgentInstanceEditDialog({
             {llmProviderFieldVisible && topLevelSecretEnvVar ? (
               <PersonaProviderApiKeyField
                 disabled={updateMutation.isPending}
+                envVarName={topLevelSecretEnvVar}
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
                 isRequired={apiKeyIsRequired}
-                label={
-                  effectiveProvider === "anthropic"
-                    ? "Anthropic API Key"
-                    : "OpenAI API Key"
-                }
+                label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({
                     ...prev,
