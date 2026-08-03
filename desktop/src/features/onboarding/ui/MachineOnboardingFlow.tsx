@@ -293,24 +293,27 @@ export function MachineOnboardingFlow({
                 className="shrink-0"
                 initial={reduceMotion ? false : { opacity: 0, y: 10 }}
                 key={keyImportStage}
-                transition={reduceMotion ? { duration: 0 } : { duration: 0.22 }}
+                transition={{
+                  duration: reduceMotion ? 0 : 0.3,
+                  ease: "easeOut",
+                }}
               >
-                <h1 className="text-[40px] font-semibold leading-none tracking-tight text-foreground">
-                  {keyImportStage === "password"
-                    ? "Enter password"
+                <h1 className="text-title font-normal text-foreground">
+                  {keyImportStage === "backup-password"
+                    ? "Unlock your account"
                     : identityLost
-                      ? "Recover your identity"
-                      : "Use an existing key"}
+                      ? "Re-import your key"
+                      : "Enter your private key"}
                 </h1>
-                <p className="mt-3 text-base leading-6 text-muted-foreground">
-                  {keyImportStage === "password"
-                    ? "This key is encrypted. Enter the password you set when you backed it up."
+                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                  {keyImportStage === "backup-password"
+                    ? "Enter your backup password to unlock your key and restore your identity."
                     : identityLost
-                      ? "Your identity key is missing from this device. Paste a backup nsec or ncryptsec to recover it."
-                      : "Paste an nsec or an encrypted ncryptsec to continue with that identity."}
+                      ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
+                      : "If you already have a Buzz account, enter your private key below to get started."}
                 </p>
               </motion.div>
-              <div className="mt-8 w-full max-w-[560px] flex-1">
+              <div className="buzz-onboarding-key-import-position w-full">
                 <NostrKeyImportForm
                   backLabel={identityLost ? "Start new identity" : "Back"}
                   onBack={
@@ -320,86 +323,95 @@ export function MachineOnboardingFlow({
                   }
                   onImport={importExistingIdentity}
                   onStageChange={setKeyImportStage}
-                  stage={keyImportStage}
+                  variant="spotlight"
                 />
               </div>
             </OnboardingSlideTransition>
           ) : page === "backup" ? (
-            <OnboardingSlideTransition
-              className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[837px] flex-col items-center text-center"
-              direction={backupDirection}
-              effect={backupSubview === "created" ? "fade" : "slide"}
-              transitionKey={`machine-backup-${backupSubview}`}
-            >
-              {backupSubview === "created" ? (
-                <DownloadKeyStep
-                  identityStorage={identityStorage}
-                  onBack={() => setPage("identity")}
-                  onContinue={() => {
-                    resetEncryptedBackupSession(backupSession);
-                    setPage("setup");
-                  }}
-                  onOpenBackupOptions={() => {
-                    setBackupDirection("forward");
-                    setReturningFromSecurity(false);
-                    setBackupSubview("options");
-                  }}
-                  returningFromSecurity={returningFromSecurity}
-                />
-              ) : (
-                <BackupStep
-                  initialView={
-                    backupSubview === "password" ? "password" : "options"
-                  }
-                  onBack={() => {
-                    setBackupDirection("backward");
-                    setReturningFromSecurity(true);
-                    setBackupSubview("created");
-                  }}
-                  onContinue={() => {
-                    resetEncryptedBackupSession(backupSession);
-                    setPage("setup");
-                  }}
-                  onViewChange={(view) =>
-                    setBackupSubview(view === "password" ? "password" : "options")
-                  }
-                  session={backupSessionToPasswordEntry(backupSession)}
-                />
-              )}
-            </OnboardingSlideTransition>
+            backupSubview === "password" ? (
+              <DownloadKeyStep
+                direction={backupDirection}
+                onBack={() => {
+                  resetEncryptedBackupSession(backupSession);
+                  setBackupDirection("backward");
+                  setReturningFromSecurity(false);
+                  setBackupSubview("options");
+                }}
+                session={backupSession}
+              />
+            ) : (
+              <BackupStep
+                direction={backupDirection}
+                identityStorage={identityStorage}
+                onBack={() => setPage("identity")}
+                onNext={() => setPage("setup")}
+                onOpenPasswordBackup={() => {
+                  resetEncryptedBackupSession(backupSession);
+                  setBackupDirection("forward");
+                  setReturningFromSecurity(false);
+                  setBackupSubview("password");
+                }}
+                onShowOptions={() => {
+                  setBackupDirection("forward");
+                  setReturningFromSecurity(false);
+                  setBackupSubview("options");
+                }}
+                optionsExpanded={backupSubview === "options"}
+                returningFromSecurity={returningFromSecurity}
+              />
+            )
           ) : page === "setup" ? (
             <SetupStep
-              onBack={() => {
-                if (identityWasImported) {
-                  setPage("key-import");
-                  return;
-                }
-                setBackupDirection("backward");
-                setReturningFromSecurity(true);
-                setBackupSubview("created");
-                setPage("backup");
+              actions={{
+                // Fresh-key users return to whichever identity backup subview
+                // they used to reach setup; imported keys skip backup entirely.
+                back: () => {
+                  if (identityWasImported) {
+                    setKeyImportStage("key-entry");
+                    setPage("key-import");
+                    return;
+                  }
+                  if (backupSubview === "password") {
+                    backupSessionToPasswordEntry(backupSession);
+                  }
+                  setBackupDirection("backward");
+                  setReturningFromSecurity(false);
+                  setPage("backup");
+                },
+                next: (runtimeIds) => {
+                  const ids = Array.from(runtimeIds);
+                  setReadyRuntimeIds(ids);
+                  // Harness install can fail (Windows/PATH/network). Don't soft-lock
+                  // onboarding — users can finish setup later in Settings → Agents.
+                  if (ids.length === 0) {
+                    complete(selectedPubkey ?? undefined);
+                    return;
+                  }
+                  setPage("config");
+                },
+                navigateToAgentSettings: () => {
+                  // Complete onboarding first, then delegate the Settings → Agents
+                  // navigation to the parent.  The parent owns RouterProvider, so
+                  // navigation from within the onboarding flow races with the
+                  // router mounting — calling router.navigate() here is unsafe.
+                  complete(selectedPubkey ?? undefined);
+                  navigateAfterComplete?.({
+                    to: "/settings",
+                    search: { section: "agents" },
+                  });
+                },
               }}
-              onContinue={() => setPage("config")}
+              direction="forward"
               onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
-              onSkip={() => {
-                complete(selectedPubkey ?? undefined);
-              }}
-              readyRuntimeIds={readyRuntimeIds}
             />
           ) : (
             <DefaultConfigStep
-              onBack={() => setPage("setup")}
-              onComplete={() => {
-                complete(selectedPubkey ?? undefined);
-              }}
-              onNavigateToAgents={() => {
-                complete(selectedPubkey ?? undefined);
-                navigateAfterComplete?.({ to: "/settings", search: { tab: "agents" } });
-              }}
-              session={{
+              actions={{
+                back: () => setPage("setup"),
                 complete: () => complete(selectedPubkey ?? undefined),
-                queryClient,
               }}
+              direction="forward"
+              readyRuntimeIds={readyRuntimeIds}
             />
           )}
         </div>
