@@ -177,7 +177,7 @@ class _AttachmentSurfacePanel extends HookWidget {
         final height =
             menuLayout.height +
             ((expandedHeight - menuLayout.height) * sizeProgress);
-        final baseColor = context.colors.surfaceContainerHighest;
+        final baseColor = appPopoverColor(context);
         final expandedColor =
             visibleExpandedSurface == _AttachmentSurface.camera
             ? Colors.black
@@ -189,57 +189,51 @@ class _AttachmentSurfacePanel extends HookWidget {
           child: SizedBox(
             width: width,
             height: height,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: Color.lerp(baseColor, expandedColor, sizeProgress),
-                borderRadius: BorderRadius.circular(Radii.dialog),
-                border: Border.all(
-                  color: Colors.black.withValues(alpha: 0.04),
-                  width: 1,
-                ),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(Radii.dialog),
-                child: Material(
-                  type: MaterialType.transparency,
-                  child: Stack(
-                    clipBehavior: Clip.hardEdge,
-                    children: [
-                      Positioned(
-                        left: 0,
-                        top: 0,
-                        width: _attachmentMenuWidth,
-                        height: menuLayout.height,
-                        child: IgnorePointer(
-                          ignoring: surface != _AttachmentSurface.menu,
-                          child: Opacity(
-                            opacity: menuOpacity,
-                            child: _AttachmentMenu(
-                              layout: menuLayout,
-                              onCamera: onCamera,
-                              onPhotos: onPhotos,
-                              onVideo: onVideo,
-                              onFiles: onFiles,
-                            ),
-                          ),
+            child: Material(
+              key: const ValueKey('attachment-surface-popover'),
+              type: MaterialType.card,
+              color: Color.lerp(baseColor, expandedColor, sizeProgress),
+              surfaceTintColor: Colors.transparent,
+              elevation: appPopoverElevation,
+              shadowColor: appPopoverShadowColor(context),
+              shape: appPopoverShape(context),
+              clipBehavior: Clip.antiAlias,
+              child: Stack(
+                clipBehavior: Clip.hardEdge,
+                children: [
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    width: _attachmentMenuWidth,
+                    height: menuLayout.height,
+                    child: IgnorePointer(
+                      ignoring: surface != _AttachmentSurface.menu,
+                      child: Opacity(
+                        opacity: menuOpacity,
+                        child: _AttachmentMenu(
+                          layout: menuLayout,
+                          onCamera: onCamera,
+                          onPhotos: onPhotos,
+                          onVideo: onVideo,
+                          onFiles: onFiles,
                         ),
                       ),
-                      Positioned(
-                        left: 0,
-                        top: 0,
-                        width: expandedWidth,
-                        height: expandedHeight,
-                        child: IgnorePointer(
-                          ignoring: !isExpanded,
-                          child: Opacity(
-                            opacity: expandedOpacity,
-                            child: expandedContent,
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    width: expandedWidth,
+                    height: expandedHeight,
+                    child: IgnorePointer(
+                      ignoring: !isExpanded,
+                      child: Opacity(
+                        opacity: expandedOpacity,
+                        child: expandedContent,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -308,7 +302,7 @@ class _AttachmentTrigger extends StatelessWidget {
             _AttachmentSurface.camera ||
             _AttachmentSurface.photos => 'Back to attachment options',
           },
-          onPressed: () => onTap(context),
+          onPressed: () => _runComposerAction(() => onTap(context)),
           padding: EdgeInsets.zero,
           visualDensity: VisualDensity.compact,
           icon: AnimatedRotation(
@@ -417,7 +411,7 @@ class _AttachmentMenuItem extends StatelessWidget {
       child: Tooltip(
         message: label,
         child: InkWell(
-          onTap: onTap,
+          onTap: () => _runComposerAction(onTap),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
             child: Row(
@@ -617,7 +611,8 @@ class _AttachmentStrip extends StatelessWidget {
                     width: 24,
                     height: 24,
                     child: IconButton(
-                      onPressed: () => onRemove(attachment.url),
+                      onPressed: () =>
+                          _runComposerAction(() => onRemove(attachment.url)),
                       tooltip: 'Remove attachment',
                       visualDensity: VisualDensity.compact,
                       style: IconButton.styleFrom(

@@ -4,7 +4,8 @@ use buzz_core::{
 };
 use nostr::{Event, EventBuilder, Tag, Timestamp};
 
-use crate::client::{normalize_write_response, BuzzClient};
+use crate::client::BuzzClient;
+use crate::commands::parse_write_response;
 use crate::error::CliError;
 use crate::validate::validate_repo_id;
 
@@ -186,25 +187,10 @@ fn protection_rules_json(event: &Event) -> Result<serde_json::Value, CliError> {
 }
 
 fn validate_write_response(raw: &str) -> Result<String, CliError> {
-    let response: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|error| CliError::Other(format!("relay response is not JSON: {error} ({raw})")))?;
-    let accepted = response
-        .get("accepted")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let message = response
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if !accepted {
-        return Err(CliError::Other(format!("relay rejected event: {message}")));
-    }
-    if message == "duplicate" || message.starts_with("duplicate:") {
-        return Err(CliError::Conflict(
-            "repository changed concurrently; fetch the latest rules and retry".into(),
-        ));
-    }
-    Ok(normalize_write_response(raw))
+    parse_write_response(
+        raw,
+        "repository changed concurrently; fetch the latest rules and retry",
+    )
 }
 
 async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Result<(), CliError> {

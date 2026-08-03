@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' show min;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
@@ -32,6 +33,7 @@ import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
+import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
@@ -125,6 +127,7 @@ class ChannelDetailPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final composerDockHeight = useState(0.0);
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
@@ -156,6 +159,10 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
+    final showsComposer =
+        !resolvedChannel.isForum &&
+        resolvedChannel.isMember &&
+        !resolvedChannel.isArchived;
     final messagesNotifier = ref.read(
       channelMessagesProvider(channel.id).notifier,
     );
@@ -187,6 +194,11 @@ class ChannelDetailPage extends HookConsumerWidget {
       channel: resolvedChannel,
       messagesState: messagesState,
     );
+
+    useEffect(() {
+      final session = ref.read(relaySessionProvider.notifier);
+      return session.registerVisibleChannel(channel.id);
+    }, [channel.id]);
 
     // Preload channel member profiles so @mentions resolve correctly.
     useEffect(() {
@@ -288,122 +300,162 @@ class ChannelDetailPage extends HookConsumerWidget {
             ),
         ],
       ),
-      body: Column(
+      body: Stack(
+        fit: StackFit.expand,
         children: [
-          Expanded(
-            child: resolvedChannel.isForum
-                ? Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      ForumPostsView(
-                        channel: resolvedChannel,
-                        currentPubkey: currentPubkey,
-                      ),
-                      if (showConnectionSkeleton.value)
-                        Positioned(
-                          top:
-                              frostedAppBarHeight(
+          Column(
+            children: [
+              Expanded(
+                child: resolvedChannel.isForum
+                    ? Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          ForumPostsView(
+                            channel: resolvedChannel,
+                            currentPubkey: currentPubkey,
+                          ),
+                          if (showConnectionSkeleton.value)
+                            Positioned(
+                              top:
+                                  frostedAppBarHeight(
+                                    context,
+                                    titleContentHeight:
+                                        appBarTitleContentHeight,
+                                  ) +
+                                  Grid.xs,
+                              left: Grid.gutter,
+                              right: Grid.gutter,
+                              child: _ForumConnectionSkeleton(
+                                status: sessionStatus,
+                              ),
+                            ),
+                        ],
+                      )
+                    : SkeletonReveal(
+                        loading:
+                            showInitialConnectionSkeleton ||
+                            showConnectionSkeleton.value ||
+                            messagesState.isLoading,
+                        shimmerEnabled:
+                            sessionStatus != SessionStatus.disconnected,
+                        skeleton: _MessageTimelineSkeleton(
+                          appBarTitleContentHeight: appBarTitleContentHeight,
+                          status: sessionStatus,
+                        ),
+                        content: messagesState.when(
+                          loading: SizedBox.shrink,
+                          error: (e, _) => Padding(
+                            padding: EdgeInsets.only(
+                              top: frostedAppBarHeight(
                                 context,
                                 titleContentHeight: appBarTitleContentHeight,
-                              ) +
-                              Grid.xs,
-                          left: Grid.gutter,
-                          right: Grid.gutter,
-                          child: _ForumConnectionSkeleton(
-                            status: sessionStatus,
-                          ),
-                        ),
-                    ],
-                  )
-                : SkeletonReveal(
-                    loading:
-                        showInitialConnectionSkeleton ||
-                        showConnectionSkeleton.value ||
-                        messagesState.isLoading,
-                    shimmerEnabled: sessionStatus != SessionStatus.disconnected,
-                    skeleton: _MessageTimelineSkeleton(
-                      appBarTitleContentHeight: appBarTitleContentHeight,
-                      status: sessionStatus,
-                    ),
-                    content: messagesState.when(
-                      loading: SizedBox.shrink,
-                      error: (e, _) => Padding(
-                        padding: EdgeInsets.only(
-                          top: frostedAppBarHeight(
-                            context,
-                            titleContentHeight: appBarTitleContentHeight,
-                          ),
-                        ),
-                        child: Center(
-                          child: Text(
-                            'Failed to load messages',
-                            style: context.textTheme.bodyMedium?.copyWith(
-                              color: context.colors.error,
+                              ),
+                            ),
+                            child: Center(
+                              child: Text(
+                                'Failed to load messages',
+                                style: context.textTheme.bodyMedium?.copyWith(
+                                  color: context.colors.error,
+                                ),
+                              ),
                             ),
                           ),
+                          data: (events) {
+                            final messages = formatTimeline(
+                              events,
+                              currentPubkey: currentPubkey,
+                            );
+                            final summaries = ref
+                                .read(
+                                  channelMessagesProvider(channel.id).notifier,
+                                )
+                                .threadSummaries;
+                            final entries = buildMainTimelineEntries(
+                              messages,
+                              relaySummaries: summaries,
+                            );
+                            return _MessageList(
+                              entries: entries,
+                              allMessages: messages,
+                              initialMessageId: initialMessageId,
+                              initialThreadRootId: initialThreadRootId,
+                              channelId: channel.id,
+                              currentPubkey: currentPubkey,
+                              isMember: resolvedChannel.isMember,
+                              isArchived: resolvedChannel.isArchived,
+                              appBarTitleContentHeight:
+                                  appBarTitleContentHeight,
+                              composerBottomInset: showsComposer
+                                  ? composerDockHeight.value
+                                  : 0,
+                            );
+                          },
                         ),
                       ),
-                      data: (events) {
-                        final messages = formatTimeline(
-                          events,
-                          currentPubkey: currentPubkey,
-                        );
-                        final summaries = ref
-                            .read(channelMessagesProvider(channel.id).notifier)
-                            .threadSummaries;
-                        final entries = buildMainTimelineEntries(
-                          messages,
-                          relaySummaries: summaries,
-                        );
-                        return _MessageList(
-                          entries: entries,
-                          allMessages: messages,
-                          initialMessageId: initialMessageId,
-                          initialThreadRootId: initialThreadRootId,
-                          channelId: channel.id,
-                          currentPubkey: currentPubkey,
-                          isMember: resolvedChannel.isMember,
-                          isArchived: resolvedChannel.isArchived,
-                          appBarTitleContentHeight: appBarTitleContentHeight,
-                        );
-                      },
-                    ),
-                  ),
+              ),
+              if (!resolvedChannel.isForum &&
+                  (!resolvedChannel.isMember ||
+                      resolvedChannel.isArchived)) ...[
+                AnimatedSize(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.bottomCenter,
+                  child: typingEntries.isEmpty
+                      ? const SizedBox.shrink()
+                      : ChannelTypingIndicator(entries: typingEntries),
+                ),
+                if (!resolvedChannel.isDm)
+                  _ReadOnlyNotice(channel: resolvedChannel),
+              ],
+            ],
           ),
-          if (!resolvedChannel.isForum)
-            AnimatedSize(
-              duration: MediaQuery.disableAnimationsOf(context)
-                  ? Duration.zero
-                  : const Duration(milliseconds: 180),
-              curve: Curves.easeOutCubic,
+          if (showsComposer)
+            Align(
               alignment: Alignment.bottomCenter,
-              child: typingEntries.isEmpty
-                  ? const SizedBox.shrink()
-                  : ChannelTypingIndicator(entries: typingEntries),
+              child: ComposerDockSizeReporter(
+                key: const ValueKey('channel-composer-dock'),
+                onHeightChanged: (height) {
+                  if ((composerDockHeight.value - height).abs() < 0.5) return;
+                  composerDockHeight.value = height;
+                },
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AnimatedSize(
+                      duration: MediaQuery.disableAnimationsOf(context)
+                          ? Duration.zero
+                          : const Duration(milliseconds: 180),
+                      curve: Curves.easeOutCubic,
+                      alignment: Alignment.bottomCenter,
+                      child: typingEntries.isEmpty
+                          ? const SizedBox.shrink()
+                          : ChannelTypingIndicator(entries: typingEntries),
+                    ),
+                    ComposeBar(
+                      channelId: channel.id,
+                      channelName: resolvedChannel.isDm
+                          ? ''
+                          : resolvedChannel.name,
+                      onSend:
+                          (
+                            content,
+                            mentionPubkeys, {
+                            mediaTags = const <List<String>>[],
+                          }) => ref
+                              .read(sendMessageProvider)
+                              .call(
+                                channelId: channel.id,
+                                content: content,
+                                mentionPubkeys: mentionPubkeys,
+                                mediaTags: mediaTags,
+                              ),
+                    ),
+                  ],
+                ),
+              ),
             ),
-          if (!resolvedChannel.isForum &&
-              resolvedChannel.isMember &&
-              !resolvedChannel.isArchived)
-            ComposeBar(
-              channelId: channel.id,
-              channelName: resolvedChannel.isDm ? '' : resolvedChannel.name,
-              onSend:
-                  (
-                    content,
-                    mentionPubkeys, {
-                    mediaTags = const <List<String>>[],
-                  }) => ref
-                      .read(sendMessageProvider)
-                      .call(
-                        channelId: channel.id,
-                        content: content,
-                        mentionPubkeys: mentionPubkeys,
-                        mediaTags: mediaTags,
-                      ),
-            )
-          else if (!resolvedChannel.isDm &&
-              (!resolvedChannel.isMember || resolvedChannel.isArchived))
-            _ReadOnlyNotice(channel: resolvedChannel),
         ],
       ),
     );

@@ -27,8 +27,13 @@ const keyboardDismissDragThreshold = 48.0;
 /// `WindowInsetsAnimationController`).
 class KeyboardDismissOnDrag extends HookWidget {
   final Widget child;
+  final VoidCallback? onUserScrollStart;
 
-  const KeyboardDismissOnDrag({super.key, required this.child});
+  const KeyboardDismissOnDrag({
+    super.key,
+    this.onUserScrollStart,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -37,8 +42,12 @@ class KeyboardDismissOnDrag extends HookWidget {
     final downwardTravel = useRef(0.0);
 
     bool handle(ScrollNotification notification) {
-      if (notification is ScrollStartNotification ||
-          notification is ScrollEndNotification) {
+      if (notification is ScrollStartNotification) {
+        if (notification.dragDetails != null) onUserScrollStart?.call();
+        downwardTravel.value = 0;
+        return false;
+      }
+      if (notification is ScrollEndNotification) {
         downwardTravel.value = 0;
         return false;
       }
