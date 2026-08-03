@@ -7,6 +7,7 @@ import type {
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { resolveThreadReplyTarget } from "@/features/messages/hooks";
+import type { TimelineMessage } from "@/features/messages/types";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -24,6 +25,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
   markRevealedRepliesRead,
+  recordThreadInteraction,
   onOptimisticOpenThreadHeadIdChange,
   onRequestEmptyEditDelete,
   openThreadHeadId,
@@ -43,6 +45,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
   markRevealedRepliesRead: (messageId: string) => void;
+  recordThreadInteraction: (rootId: string) => void;
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
     React.SetStateAction<string | null | undefined>
   >;
@@ -344,14 +347,21 @@ export function useChannelPaneHandlers({
   );
 
   const handleToggleReaction = React.useCallback(
-    async (message: { id: string }, emoji: string, remove: boolean) => {
+    async (
+      message: Pick<TimelineMessage, "id" | "rootId">,
+      emoji: string,
+      remove: boolean,
+    ) => {
       await toggleMutateRef.current({
         emoji,
         eventId: message.id,
         remove,
       });
+      if (!remove) {
+        recordThreadInteraction(message.rootId ?? message.id);
+      }
     },
-    [],
+    [recordThreadInteraction],
   );
 
   return {

@@ -36,6 +36,7 @@ import { useThreadViewMode } from "@/features/channels/lib/threadViewModePrefere
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
+import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
@@ -408,7 +409,11 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel?.id ?? null,
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
-  const hasComposerBottomActivity = hasComposerBotActivity || hasTypingActivity;
+  // Background card mints surface in the same rail ("Minting card…" chip),
+  // so they must also reserve the activity row.
+  const hasCardMintActivity = useCardMintJobs().length > 0;
+  const hasComposerBottomActivity =
+    hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) return [];
     return botTypingEntries
@@ -676,6 +681,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             onMarkUnread={onMarkUnread}
             onMarkRead={onMarkRead}
             onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
+            onOpenThread={onOpenThread}
             channelName={activeChannel?.name}
             channelType={activeChannel?.channelType ?? null}
             isSendingVideoReviewComment={isSending}

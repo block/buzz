@@ -1064,7 +1064,7 @@ pub async fn receive_pack(
         state.config.bind_addr.port()
     );
     let hooks_dir = repo.path().join("hooks").display().to_string();
-    let hook_env = vec![
+    let mut hook_env = vec![
         ("BUZZ_HOOK_URL", hook_url),
         (
             "BUZZ_HOOK_SECRET",
@@ -1077,13 +1077,8 @@ pub async fn receive_pack(
             auth.tenant.community().as_uuid().to_string(),
         ),
         ("BUZZ_PUSHER_PUBKEY", pusher_hex.clone()),
-        // Override any repo-local core.hooksPath setting; defense in
-        // depth even though the hydrated workspace has no inherited
-        // config.
-        ("GIT_CONFIG_COUNT", "1".to_string()),
-        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
-        ("GIT_CONFIG_VALUE_0", hooks_dir),
     ];
+    hook_env.extend(receive_pack_git_config(hooks_dir));
 
     // Run receive-pack against the tempdir. Returns the *owned* subprocess
     // output (PackOutput) — crucially NOT a Response, so the post-push
@@ -1109,6 +1104,23 @@ pub async fn receive_pack(
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
+}
+
+/// Per-process git configuration for the hydrated receive-pack workspace.
+fn receive_pack_git_config(hooks_dir: String) -> Vec<(&'static str, String)> {
+    vec![
+        // Override any repo-local core.hooksPath setting; defense in depth
+        // even though the hydrated workspace has no inherited config.
+        ("GIT_CONFIG_COUNT", "2".to_string()),
+        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
+        ("GIT_CONFIG_VALUE_0", hooks_dir),
+        // A bare repository rejects deletion of its symbolic HEAD branch by
+        // default. Hydrated repositories are ephemeral, and cas_publish
+        // selects a surviving branch for the next manifest HEAD, so allow
+        // receive-pack to apply the deletion before that selection runs.
+        ("GIT_CONFIG_KEY_1", "receive.denyDeleteCurrent".to_string()),
+        ("GIT_CONFIG_VALUE_1", "ignore".to_string()),
+    ]
 }
 
 /// Buffered output of a `git --stateless-rpc` subprocess.
@@ -1921,9 +1933,146 @@ mod track_c_tests {
     use buzz_core::CommunityId;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::process::Output;
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
+    }
+
+    fn run_test_git(cwd: &Path, args: &[&str], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("run git")
+    }
+
+    fn run_test_receive_pack(repo: &Path, request: &[u8], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("receive-pack")
+            .arg("--stateless-rpc")
+            .arg(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn receive-pack");
+        child
+            .stdin
+            .take()
+            .expect("receive-pack stdin")
+            .write_all(request)
+            .expect("write receive-pack request");
+        child.wait_with_output().expect("wait for receive-pack")
+    }
+
+    fn assert_git_success(output: Output, operation: &str) {
+        assert!(
+            output.status.success(),
+            "{operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn receive_pack_config_allows_deleting_current_branch() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let remote_arg = remote.to_str().expect("utf-8 remote path");
+        let source_arg = source.to_str().expect("utf-8 source path");
+
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--bare", "--initial-branch=main", remote_arg],
+                &[],
+            ),
+            "initialize bare remote",
+        );
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--initial-branch=main", source_arg],
+                &[],
+            ),
+            "initialize source repository",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["config", "user.name", "Buzz Test"], &[]),
+            "configure user name",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["config", "user.email", "buzz-test@example.com"],
+                &[],
+            ),
+            "configure user email",
+        );
+        std::fs::write(source.join("README.md"), "test\n").expect("write fixture");
+        assert_git_success(
+            run_test_git(source.as_path(), &["add", "README.md"], &[]),
+            "stage fixture",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["commit", "-m", "fixture"], &[]),
+            "commit fixture",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["push", remote_arg, "main:main", "main:master"],
+                &[],
+            ),
+            "seed main and master",
+        );
+
+        let oid_output = run_test_git(remote.as_path(), &["rev-parse", "refs/heads/main"], &[]);
+        assert!(oid_output.status.success());
+        let old_oid = String::from_utf8(oid_output.stdout)
+            .expect("utf-8 oid")
+            .trim()
+            .to_string();
+        let command = format!(
+            "{old_oid} {} refs/heads/main\0report-status\n",
+            "0".repeat(40)
+        );
+        let mut request = format!("{:04x}", command.len() + 4).into_bytes();
+        request.extend_from_slice(command.as_bytes());
+        request.extend_from_slice(b"0000");
+
+        let git_config = receive_pack_git_config(remote.join("hooks").display().to_string());
+        let output = run_test_receive_pack(remote.as_path(), &request, &git_config);
+        assert!(
+            output.status.success(),
+            "receive-pack failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !receive_pack_report_rejected(&output.stdout),
+            "receive-pack rejected the deletion: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        assert!(!remote.join("refs/heads/main").exists());
+        assert!(remote.join("refs/heads/master").exists());
     }
 
     /// A gzip-encoded request body is transparently inflated before it

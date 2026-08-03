@@ -27,12 +27,18 @@ class _SystemMessageRow extends ConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final sourceMessages = groupedMessages ?? [message];
     final groupedMembership = _membershipDisplayEvent(sourceMessages);
-    final channelCreator = systemEvent.type == SystemEventType.channelCreated
-        ? systemEvent.actorPubkey?.trim()
-        : null;
+    final messageStyleAction = switch (systemEvent.type) {
+      SystemEventType.channelCreated => 'created this channel',
+      SystemEventType.huddleStarted => 'started a huddle',
+      SystemEventType.huddleEnded => 'ended the huddle',
+      _ => null,
+    };
+    final messageStyleActor = messageStyleAction == null
+        ? null
+        : systemEvent.actorPubkey?.trim();
     final usesMessageStyleLayout =
         groupedMembership != null ||
-        (channelCreator != null && channelCreator.isNotEmpty);
+        (messageStyleActor != null && messageStyleActor.isNotEmpty);
 
     String resolveLabel(String? pubkey) {
       if (pubkey == null) return 'Someone';
@@ -102,13 +108,15 @@ class _SystemMessageRow extends ConsumerWidget {
                   resolveLabel: resolveLabel,
                   userCache: userCache,
                 )
-              else if (channelCreator != null && channelCreator.isNotEmpty)
+              else if (messageStyleActor != null &&
+                  messageStyleActor.isNotEmpty &&
+                  messageStyleAction != null)
                 _MessageStyleSystemMessageContent(
-                  displayPubkey: channelCreator,
+                  displayPubkey: messageStyleActor,
                   createdAt: message.createdAt,
                   resolveLabel: resolveLabel,
                   userCache: userCache,
-                  actionSpans: const [TextSpan(text: 'created this channel')],
+                  actionSpans: [TextSpan(text: messageStyleAction)],
                 )
               else
                 Row(

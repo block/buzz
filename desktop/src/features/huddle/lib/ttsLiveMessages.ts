@@ -152,34 +152,49 @@ export function createLatestStateGate<T>(apply: (value: T) => void): {
   };
 }
 
-/** Hold live events until the first authoritative agent-membership lookup. */
-export function createInitialMembershipGate<T>(
+/** Hold live events until initial membership and TTS state are both known. */
+export function createInitialTtsReadinessGate<T>(
   deliver: (event: T) => void,
-  drop: (event: T) => void = () => {},
+  drop: (
+    event: T,
+    reason: "membership_unavailable" | "tts_state_unavailable",
+  ) => void = () => {},
 ): {
   push: (event: T) => void;
-  succeed: () => void;
-  fail: () => void;
+  markMembershipKnown: () => void;
+  markTtsStateKnown: () => void;
+  fail: (reason: "membership_unavailable" | "tts_state_unavailable") => void;
 } {
   let settled = false;
+  let membershipKnown = false;
+  let ttsStateKnown = false;
   let pending: T[] = [];
+  const releaseIfReady = () => {
+    if (settled || !membershipKnown || !ttsStateKnown) return;
+    settled = true;
+    const buffered = pending;
+    pending = [];
+    for (const event of buffered) deliver(event);
+  };
   return {
     push(event) {
       if (settled) deliver(event);
       else pending.push(event);
     },
-    succeed() {
-      if (settled) return;
-      settled = true;
-      const buffered = pending;
-      pending = [];
-      for (const event of buffered) deliver(event);
+    markMembershipKnown() {
+      membershipKnown = true;
+      releaseIfReady();
     },
-    fail() {
+    markTtsStateKnown() {
+      ttsStateKnown = true;
+      releaseIfReady();
+    },
+    fail(reason) {
+      if (settled) return;
       settled = true;
       const dropped = pending;
       pending = [];
-      for (const event of dropped) drop(event);
+      for (const event of dropped) drop(event, reason);
     },
   };
 }

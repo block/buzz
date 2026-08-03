@@ -25,6 +25,7 @@ class _ComposeBarLayout extends StatelessWidget {
   final VoidCallback onChannel;
   final VoidCallback onEmoji;
   final VoidCallback onOpenFormatting;
+  final bool canSend;
   final bool hasPendingUploads;
   final bool isSending;
 
@@ -53,6 +54,7 @@ class _ComposeBarLayout extends StatelessWidget {
     required this.onChannel,
     required this.onEmoji,
     required this.onOpenFormatting,
+    required this.canSend,
     required this.hasPendingUploads,
     required this.isSending,
   });
@@ -63,10 +65,17 @@ class _ComposeBarLayout extends StatelessWidget {
   }
 
   Widget _buildBar(BuildContext context) {
+    final trimmedDraft = controller.text.trim();
+    final collapsedText = trimmedDraft.isEmpty
+        ? resolvedHint
+        : trimmedDraft.replaceAll(RegExp(r'\s+'), ' ');
+    final composerRadius =
+        Radii.dialog + Grid.quarter * (1 - expansionProgress);
     return Container(
+      key: const ValueKey('composer-surface'),
       decoration: BoxDecoration(
         color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.dialog),
+        borderRadius: BorderRadius.circular(composerRadius),
         border: Border.all(
           color: Colors.black.withValues(alpha: 0.04),
           width: 1,
@@ -142,7 +151,7 @@ class _ComposeBarLayout extends StatelessWidget {
                     label: resolvedHint,
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
-                      onTap: onExpand,
+                      onTap: () => _runComposerAction(onExpand),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
                           vertical: Grid.half,
@@ -150,15 +159,25 @@ class _ComposeBarLayout extends StatelessWidget {
                         child: Align(
                           alignment: Alignment.centerLeft,
                           child: Text(
-                            resolvedHint,
+                            collapsedText,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: context.textTheme.bodyLarge?.copyWith(
-                              color: context.colors.onSurfaceVariant,
+                              color: trimmedDraft.isEmpty
+                                  ? context.colors.onSurfaceVariant
+                                  : context.colors.onSurface,
                             ),
                           ),
                         ),
                       ),
                     ),
                   ),
+                ),
+                const SizedBox(width: Grid.xxs),
+                _SendButton(
+                  isDisabled: !canSend || hasPendingUploads,
+                  isSending: isSending,
+                  onTap: onSend,
                 ),
               ],
             ),
@@ -167,7 +186,7 @@ class _ComposeBarLayout extends StatelessWidget {
               alignment: Alignment.topCenter,
               heightFactor: expansionValue,
               child: IgnorePointer(
-                ignoring: expansionValue < 0.98,
+                ignoring: !isExpanded,
                 child: Opacity(
                   opacity: expansionProgress,
                   child: Transform.translate(
@@ -225,7 +244,8 @@ class _ComposeBarLayout extends StatelessWidget {
                                           ),
                                           const Spacer(),
                                           _SendButton(
-                                            isDisabled: hasPendingUploads,
+                                            isDisabled:
+                                                !canSend || hasPendingUploads,
                                             isSending: isSending,
                                             onTap: onSend,
                                           ),
