@@ -11852,8 +11852,9 @@ export function maybeInstallE2eTauriMocks() {
         // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
       case "card_mint_key_status":
-        // Cards: pretend a key is configured so the mint form renders.
-        return true;
+        // Cards: pretend a key is configured in global defaults so the mint
+        // form renders and the key-status row is shown.
+        return "global";
       case "list_agent_cards":
         // Cards archive starts empty in E2E; specs exercising the gallery
         // can extend this with a seeded config knob when needed.
