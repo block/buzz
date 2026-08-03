@@ -42,6 +42,7 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getProviderApiKeyLabel,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
@@ -907,14 +908,11 @@ export function AgentDefinitionDialog({
               topLevelSecretEnvVar ? (
                 <PersonaProviderApiKeyField
                   disabled={isPending}
+                  envVarName={topLevelSecretEnvVar}
                   isInherited={apiKeyIsInherited}
                   inheritedLabel={apiKeyInheritedLabel}
                   isRequired={apiKeyIsRequired}
-                  label={
-                    effectiveProvider === "anthropic"
-                      ? "Anthropic API key"
-                      : "OpenAI API key"
-                  }
+                  label={getProviderApiKeyLabel(effectiveProvider) ?? "API key"}
                   onValueChange={(next) => {
                     setEnvVars((prev) => ({
                       ...prev,

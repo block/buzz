@@ -200,6 +200,80 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('section menu matches desktop labels, icons, and inset', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(
+              const ChannelSectionStore(
+                sections: [
+                  ChannelSection(id: 'section-1', name: 'Design', order: 0),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('section-menu-section-1')));
+    await tester.pumpAndSettle();
+
+    final popover = find.byKey(const Key('section-popover-section-1'));
+    expect(popover, findsOneWidget);
+    for (final label in [
+      'Rename section',
+      'Move up',
+      'Move down',
+      'Delete section',
+    ]) {
+      expect(
+        find.descendant(of: popover, matching: find.text(label)),
+        findsOne,
+      );
+    }
+    for (final icon in [
+      LucideIcons.pencil,
+      LucideIcons.arrowUp,
+      LucideIcons.arrowDown,
+      LucideIcons.trash2,
+    ]) {
+      expect(
+        find.descendant(of: popover, matching: find.byIcon(icon)),
+        findsOne,
+      );
+    }
+
+    final menuItems = tester.widgetList<PopupMenuItem<String>>(
+      find.descendant(
+        of: popover,
+        matching: find.byWidgetPredicate(
+          (widget) => widget is PopupMenuItem<String>,
+        ),
+      ),
+    );
+    expect(menuItems, hasLength(4));
+    for (final item in menuItems) {
+      expect(
+        item.padding,
+        const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0),
+      );
+    }
+
+    final error = Theme.of(tester.element(popover)).colorScheme.error;
+    final deleteText = tester.widget<Text>(find.text('Delete section'));
+    final deleteIcon = tester.widget<Icon>(
+      find.descendant(of: popover, matching: find.byIcon(LucideIcons.trash2)),
+    );
+    expect(deleteText.style?.color, error);
+    expect(deleteIcon.color, error);
+  });
+
   testWidgets('aligns the top, section, row, and skeleton label columns', (
     tester,
   ) async {
