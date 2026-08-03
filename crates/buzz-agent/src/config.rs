@@ -237,6 +237,7 @@ pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEff
 ///
 /// Gateway prefixes (`databricks-`) and date/build suffixes (`-2025-04-01`) are allowed
 /// because they start with `-` which is the only permitted boundary character.
+#[cfg(test)]
 fn gpt5_token_matches(lower_model: &str, token: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = lower_model[start..].find(token) {
@@ -265,6 +266,7 @@ fn gpt5_token_matches(lower_model: &str, token: &str) -> bool {
 ///   separator e.g. `-10`, `-10-preview` → **rejected** (version-like suffix)
 /// - `digit_run >= 4` regardless of what follows e.g. `-1106`, `-1106-preview`, `-0514` →
 ///   **accepted** (date/build segment)
+#[cfg(test)]
 fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = lower_model[start..].find(token) {
@@ -320,7 +322,7 @@ fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
 ///
 /// Note the `none` vs `minimal` split: `gpt-5` (base) supports `minimal` but not `none`;
 /// `gpt-5.1`/`gpt-5.4`/`gpt-5.5`/`gpt-5.6` support `none` but not `minimal`. These are matched via
-/// nearest-supported fallback in `normalize_effort_for_openai_route`.
+/// nearest-supported fallback in `resolve_openai_effort`.
 ///
 /// Match order: `-pro` variant checked before versioned strings to prevent `gpt-5-pro` from
 /// falling into the `gpt-5` base bucket (substring "gpt-5" is shared).
@@ -331,6 +333,7 @@ fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
 /// Versioned tokens use `gpt5_token_matches` (end-of-string or `-` boundary, blocking digit
 /// and letter continuations). The base token uses `gpt5_base_matches`, which additionally
 /// rejects short `-<1-3 digit>` suffixes that look like two-digit version numbers.
+#[cfg(test)]
 fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     // Effort ordered from lowest to highest for each family.
     const GPT5_PRO: &[ThinkingEffort] = &[ThinkingEffort::High];
@@ -520,37 +523,6 @@ fn resolve_openai_effort(
     resolved
 }
 
-/// Normalize the effort value for an OpenAI-shaped request body (Chat Completions or Responses).
-///
-/// Per-model effort availability is applied for doc-verified OpenAI model families. A requested
-/// level not in the model's supported set is substituted with the nearest supported level (see
-/// `resolve_openai_effort` for preference order). For unknown/unverified models, `max` is clamped
-/// to `xhigh` because its support cannot be confirmed; all other values pass through unchanged.
-///
-/// Applies to pure-OpenAI request paths AND DBv2 OpenAI-shaped routes.
-///
-/// Doc-verified model table (July 2025):
-/// - `gpt-5-pro`: `high` only
-/// - `gpt-5.6`: `none, low, medium, high, xhigh, max`
-/// - `gpt-5.5`, `gpt-5.4`: `none, low, medium, high, xhigh`
-/// - `gpt-5.1`: `none, low, medium, high`
-/// - `gpt-5` (base): `minimal, low, medium, high`
-/// - unknown: `max` clamps to `xhigh`; other values pass through
-pub fn normalize_effort_for_openai_route(effort: ThinkingEffort, model: &str) -> ThinkingEffort {
-    match openai_efforts_for_model(model) {
-        Some(supported) => resolve_openai_effort(model, effort, supported),
-        None if effort == ThinkingEffort::Max => {
-            tracing::warn!(
-                requested = "max",
-                resolved = "xhigh",
-                "BUZZ_AGENT_THINKING_EFFORT=max not confirmed for unknown OpenAI model; clamping to xhigh"
-            );
-            ThinkingEffort::XHigh
-        }
-        None => effort,
-    }
-}
-
 /// Normalize the effort value for an Anthropic-shaped request body (Messages API).
 ///
 /// Anthropic-shaped bodies (`anthropic_body`) do not have a `none` or `minimal` concept —
@@ -577,12 +549,10 @@ pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<Th
 }
 
 // ---------------------------------------------------------------------------
-// Generated-backed production helpers (Phase 2 cutover)
+// Generated-backed production helpers (Phase 2 cutover, old tables retired in Phase 3)
 //
 // One adapter per request path — resolves the effective provider/model ONCE
 // from the generated manifest and applies every manifest-owned axis.
-// Old hand-table implementations are renamed `_old_*` and used only in tests
-// and the behavioral differential shims — they have no production callers.
 // ---------------------------------------------------------------------------
 
 /// Normalize the effort value for any OpenAI-shaped request (pure OpenAI or legacy Databricks).
@@ -594,8 +564,7 @@ pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<Th
 /// → `[low,medium,high]`) are enforced in production.
 ///
 /// This is the single production authority for `Provider::OpenAi` and
-/// `Provider::Databricks` effort normalization.  The old helper
-/// `normalize_effort_for_openai_route` exists only as a test/differential shim.
+/// `Provider::Databricks` effort normalization.
 pub fn normalize_effort_for_provider(
     provider: &str,
     raw_model: &str,
@@ -616,7 +585,7 @@ pub fn normalize_effort_for_provider(
 ///
 /// This is the production authority for DatabricksV2 effort normalization.
 /// `normalize_effort_for_provider` is the authority for pure OpenAI and legacy
-/// Databricks; `normalize_effort_for_openai_route` is a test/differential shim only.
+/// Databricks effort normalization.
 pub fn normalize_effort_for_databricks_v2(
     effort: ThinkingEffort,
     raw_model: &str,
@@ -723,45 +692,6 @@ pub fn anthropic_thinking_config_generated(
             // omit thinking fields rather than guess.
             (None, None)
         }
-    }
-}
-
-/// Old DatabricksV2-scoped Anthropic thinking config — kept as a differential shim.
-///
-/// Production code uses `anthropic_thinking_config_generated` instead.
-/// This hard-codes `"databricks_v2"` and uses the legacy `clamp_adaptive_effort` hand table.
-#[cfg(test)]
-pub(crate) fn _old_anthropic_thinking_config_for_databricks_v2(
-    raw_model: &str,
-    effort: ThinkingEffort,
-    max_output_tokens: u32,
-) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
-    use crate::generated_model_capabilities::{resolve_model_capabilities, ThinkingMode};
-    use serde_json::json;
-
-    match resolve_model_capabilities("databricks_v2", raw_model).thinking_mode {
-        ThinkingMode::ManualBudget => {
-            const MIN_ANSWER_TOKENS: u32 = 1024;
-            let level_budget = effort.anthropic_budget_tokens();
-            let headroom = max_output_tokens.saturating_sub(MIN_ANSWER_TOKENS);
-            let budget = level_budget.min(headroom);
-            if budget < MIN_ANSWER_TOKENS {
-                return (None, None);
-            }
-            (
-                Some(json!({ "type": "enabled", "budget_tokens": budget })),
-                None,
-            )
-        }
-        ThinkingMode::Adaptive => {
-            let model = strip_catalog_prefix(raw_model);
-            let clamped = clamp_adaptive_effort(model, effort);
-            (
-                Some(json!({ "type": "adaptive" })),
-                Some(json!({ "effort": clamped.anthropic_effort_str() })),
-            )
-        }
-        ThinkingMode::OmitFields | ThinkingMode::None | ThinkingMode::NotApplicable => (None, None),
     }
 }
 
@@ -1168,7 +1098,7 @@ impl Config {
         //
         // OpenAI, Databricks, and DatabricksV2 defer effort validation to request-time routing:
         // availability is model-dependent, and `session/set_model` can change the effective model
-        // after startup. `normalize_effort_for_openai_route` / `normalize_effort_for_anthropic_route`
+        // after startup. `normalize_effort_for_provider` / `normalize_effort_for_anthropic_route`
         // apply route-aware normalization in `llm.rs` when building each request.
         if let Some(effort) = self.thinking_effort {
             let is_pure_anthropic = matches!(self.provider, Provider::Anthropic);
@@ -1338,32 +1268,6 @@ fn parse_hook_servers(raw: Option<&str>) -> HookServers {
         return HookServers::All;
     }
     HookServers::Only(names)
-}
-
-// ---------------------------------------------------------------------------
-// Test-only re-exports: let llm.rs tests call private classifiers without
-// duplicating them. These wrappers are cfg(test)-only and intentionally thin.
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-pub(crate) fn is_manual_budget_model_for_test(model: &str) -> bool {
-    is_manual_budget_model(model)
-}
-
-#[cfg(test)]
-pub(crate) fn is_adaptive_thinking_model_for_test(model: &str) -> bool {
-    is_adaptive_thinking_model(model)
-}
-
-/// Mirror of the `tests::valid_effort_values_for_provider_model` helper in config's
-/// own test module, promoted to a module-level cfg(test) function so llm.rs tests
-/// can call it without re-implementing the logic.
-#[cfg(test)]
-pub(crate) fn valid_effort_values_for_provider_model_for_test(
-    provider: &str,
-    model: &str,
-) -> (Vec<&'static str>, Option<&'static str>) {
-    tests::valid_effort_values_for_provider_model(provider, model)
 }
 
 #[cfg(test)]
@@ -2245,36 +2149,6 @@ mod tests {
         );
     }
 
-    // ---- normalize_effort_for_openai_route ----
-
-    #[test]
-    fn normalize_openai_route_clamps_max_to_xhigh() {
-        // Use an unknown model so only the max→xhigh clamp fires, not per-model logic.
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::Max, "llama-4"),
-            ThinkingEffort::XHigh
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_passes_through_all_other_values_for_unknown_model() {
-        // Unknown/unverified models pass through unchanged (server-validated).
-        for effort in [
-            ThinkingEffort::None,
-            ThinkingEffort::Minimal,
-            ThinkingEffort::Low,
-            ThinkingEffort::Medium,
-            ThinkingEffort::High,
-            ThinkingEffort::XHigh,
-        ] {
-            assert_eq!(
-                normalize_effort_for_openai_route(effort, "unknown-future-model"),
-                effort,
-                "normalize_effort_for_openai_route must pass through {effort:?} for unknown model"
-            );
-        }
-    }
-
     // ---- normalize_effort_for_anthropic_route ----
 
     #[test]
@@ -2449,527 +2323,6 @@ mod tests {
         let t = thinking.unwrap();
         assert_eq!(t["type"], "adaptive");
         assert_eq!(output_config.unwrap()["effort"], "max");
-    }
-
-    // ---- openai_efforts_for_model / normalize_effort_for_openai_route per-model table ----
-
-    #[test]
-    fn openai_efforts_for_model_gpt5_pro_high_only() {
-        // gpt-5-pro: high only — any other value must be substituted.
-        let supported = openai_efforts_for_model("gpt-5-pro").expect("gpt-5-pro must be in table");
-        assert_eq!(
-            supported,
-            &[ThinkingEffort::High],
-            "gpt-5-pro supports only high"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_gpt5_6_includes_max() {
-        let expected: &[ThinkingEffort] = &[
-            ThinkingEffort::None,
-            ThinkingEffort::Low,
-            ThinkingEffort::Medium,
-            ThinkingEffort::High,
-            ThinkingEffort::XHigh,
-            ThinkingEffort::Max,
-        ];
-
-        for model in ["gpt-5.6", "gpt-5.6-sol", "gpt-5-6-sol", "goose-gpt-5-6-sol"] {
-            assert_eq!(
-                openai_efforts_for_model(model),
-                Some(expected),
-                "{model} must match the gpt-5.6 effort table"
-            );
-        }
-    }
-
-    #[test]
-    fn openai_efforts_for_model_gpt5_5_includes_xhigh() {
-        let supported = openai_efforts_for_model("gpt-5.5").expect("gpt-5.5 must be in table");
-        assert!(
-            supported.contains(&ThinkingEffort::XHigh),
-            "gpt-5.5 must support xhigh"
-        );
-        assert!(
-            supported.contains(&ThinkingEffort::None),
-            "gpt-5.5 must support none"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_gpt5_1_excludes_xhigh_and_minimal() {
-        let supported = openai_efforts_for_model("gpt-5.1").expect("gpt-5.1 must be in table");
-        assert!(
-            !supported.contains(&ThinkingEffort::XHigh),
-            "gpt-5.1 must NOT support xhigh"
-        );
-        assert!(
-            !supported.contains(&ThinkingEffort::Minimal),
-            "gpt-5.1 must NOT support minimal"
-        );
-        assert!(
-            supported.contains(&ThinkingEffort::None),
-            "gpt-5.1 must support none"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_gpt5_base_excludes_none_includes_minimal() {
-        let supported = openai_efforts_for_model("gpt-5").expect("gpt-5 base must be in table");
-        assert!(
-            !supported.contains(&ThinkingEffort::None),
-            "gpt-5 base must NOT support none"
-        );
-        assert!(
-            supported.contains(&ThinkingEffort::Minimal),
-            "gpt-5 base must support minimal"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_unknown_returns_none() {
-        // Unknown models are not doc-verified — caller treats as server-validated pass-through.
-        assert!(openai_efforts_for_model("llama-4").is_none());
-        assert!(openai_efforts_for_model("claude-opus-4-8").is_none());
-        assert!(openai_efforts_for_model("gpt-4o").is_none());
-    }
-
-    // ---- Boundary-safe matching: version digits must not false-match longer versions ----
-
-    #[test]
-    fn openai_efforts_for_model_boundary_dated_base_ids_are_not_versioned() {
-        // gpt-5-1106: the "-1" is not version 5.1 — it's a date segment on the base model.
-        // Must fall through to base table, not gpt-5.1.
-        let result = openai_efforts_for_model("gpt-5-1106");
-        let base = openai_efforts_for_model("gpt-5").unwrap();
-        assert_eq!(
-            result,
-            Some(base),
-            "gpt-5-1106 must match base table (not gpt-5.1): got {result:?}"
-        );
-        // Crucially, must NOT support None (that's a gpt-5.1 property, not base).
-        assert!(
-            !result.unwrap().contains(&ThinkingEffort::None),
-            "gpt-5-1106 must NOT support none — base table only has minimal"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_boundary_gpt5_4o_is_base_not_5_4() {
-        // gpt-5-4o: the "-4" could false-match the gpt-5.4 family, but "4o" is a
-        // capability suffix on the base gpt-5 model, not version 5.4.
-        // Must fall through to base table.
-        let result = openai_efforts_for_model("gpt-5-4o");
-        let base = openai_efforts_for_model("gpt-5").unwrap();
-        assert_eq!(
-            result,
-            Some(base),
-            "gpt-5-4o must match base table (not gpt-5.4): got {result:?}"
-        );
-        // Crucially, must NOT support XHigh (that's a gpt-5.4 property, not base).
-        assert!(
-            !result.unwrap().contains(&ThinkingEffort::XHigh),
-            "gpt-5-4o must NOT support xhigh — that's a gpt-5.4 property and would 400"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_boundary_multi_digit_versions_pass_through() {
-        // Dotted two-digit versions (gpt-5.10, gpt5.10, gpt-5.50) must not match any known
-        // single-digit family — the digit boundary check on dotted tokens blocks them.
-        // These return None (server-validated pass-through).
-        assert!(
-            openai_efforts_for_model("gpt-5.10").is_none(),
-            "gpt-5.10 must pass through (unknown future model)"
-        );
-        assert!(
-            openai_efforts_for_model("gpt5.10").is_none(),
-            "gpt5.10 must pass through (unknown future model)"
-        );
-        assert!(
-            openai_efforts_for_model("gpt-5.50").is_none(),
-            "gpt-5.50 must pass through (not gpt-5.5)"
-        );
-        // Dash two-digit versions (gpt-5-10, databricks-gpt-5-10) look like short numeric
-        // version segments and must also pass through as unknown — not bucketed as base.
-        assert!(
-            openai_efforts_for_model("gpt-5-10").is_none(),
-            "gpt-5-10 must pass through (short numeric suffix = potential unrecognized version)"
-        );
-        assert!(
-            openai_efforts_for_model("databricks-gpt-5-10").is_none(),
-            "databricks-gpt-5-10 must pass through (short numeric suffix)"
-        );
-        // Short numeric suffix + textual continuation (e.g. a hypothetical 'gpt-5.10-preview')
-        // must also pass through — the digit count (1-3) determines version-like, regardless of
-        // what follows.
-        assert!(
-            openai_efforts_for_model("gpt-5-10-preview").is_none(),
-            "gpt-5-10-preview must pass through (short numeric version suffix with text tail)"
-        );
-        assert!(
-            openai_efforts_for_model("databricks-gpt-5-10-preview").is_none(),
-            "databricks-gpt-5-10-preview must pass through (short numeric version suffix with text tail)"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_boundary_date_segment_with_suffix_is_base() {
-        // 4+ digit date segment followed by a textual suffix must still resolve to the base
-        // table — the date length (>=4) determines it's a build/date, not a version number.
-        let result = openai_efforts_for_model("gpt-5-1106-preview");
-        assert!(
-            result.is_some(),
-            "gpt-5-1106-preview must match base table (4-digit date segment)"
-        );
-        let supported = result.unwrap();
-        assert!(
-            supported.contains(&ThinkingEffort::Minimal),
-            "gpt-5-1106-preview (base) must support minimal"
-        );
-        assert!(
-            !supported.contains(&ThinkingEffort::None),
-            "gpt-5-1106-preview (base) must NOT support none"
-        );
-        assert!(
-            !supported.contains(&ThinkingEffort::XHigh),
-            "gpt-5-1106-preview (base) must NOT support xhigh"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_boundary_databricks_prefixed_still_matches() {
-        // Databricks-prefixed names (gateway forwarding) must still resolve to the right table.
-        let result = openai_efforts_for_model("databricks-gpt-5-5");
-        assert_eq!(
-            result,
-            openai_efforts_for_model("gpt-5.5"),
-            "databricks-gpt-5-5 must match gpt-5.5 family table"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_boundary_date_suffixed_still_matches() {
-        // Date-suffixed names (e.g. gpt-5.1-2025-04-01) must still resolve to the right family.
-        let result = openai_efforts_for_model("gpt-5.1-2025-04-01");
-        assert_eq!(
-            result,
-            openai_efforts_for_model("gpt-5.1"),
-            "gpt-5.1-2025-04-01 must match gpt-5.1 family table"
-        );
-    }
-
-    #[test]
-    fn openai_efforts_for_model_pro_before_base_gpt5() {
-        // gpt-5-pro must match the -pro table, not the base gpt-5 table.
-        let pro = openai_efforts_for_model("gpt-5-pro").unwrap();
-        let base = openai_efforts_for_model("gpt-5").unwrap();
-        assert_ne!(
-            pro, base,
-            "gpt-5-pro and gpt-5 base must hit different table entries"
-        );
-        assert_eq!(pro, &[ThinkingEffort::High]);
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_pro_high_passes_through() {
-        // gpt-5-pro: high is the only supported value → high passes through unchanged.
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::High, "gpt-5-pro"),
-            ThinkingEffort::High
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_pro_anything_but_high_becomes_high() {
-        // gpt-5-pro: any effort other than high must resolve to high.
-        for effort in [
-            ThinkingEffort::None,
-            ThinkingEffort::Minimal,
-            ThinkingEffort::Low,
-            ThinkingEffort::Medium,
-            ThinkingEffort::XHigh,
-        ] {
-            assert_eq!(
-                normalize_effort_for_openai_route(effort, "gpt-5-pro"),
-                ThinkingEffort::High,
-                "gpt-5-pro: {effort:?} must resolve to high"
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_base_none_becomes_minimal() {
-        // gpt-5 base supports minimal but not none. none → minimal (peer fallback).
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::None, "gpt-5"),
-            ThinkingEffort::Minimal,
-            "gpt-5 base: none must fall back to minimal (peer)"
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_passes_max_through_for_gpt5_6() {
-        for model in ["gpt-5.6", "gpt-5-6-sol"] {
-            assert_eq!(
-                normalize_effort_for_openai_route(ThinkingEffort::Max, model),
-                ThinkingEffort::Max,
-                "{model} must preserve max"
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_5_max_becomes_xhigh() {
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5"),
-            ThinkingEffort::XHigh,
-            "gpt-5.5 must clamp max to xhigh"
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_5_minimal_becomes_none() {
-        // gpt-5.5 supports none but not minimal. minimal → none (peer fallback).
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::Minimal, "gpt-5.5"),
-            ThinkingEffort::None,
-            "gpt-5.5: minimal must fall back to none (peer)"
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_1_xhigh_becomes_high() {
-        // gpt-5.1 does not support xhigh → nearest supported below xhigh is high.
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::XHigh, "gpt-5.1"),
-            ThinkingEffort::High,
-            "gpt-5.1: xhigh must resolve to high"
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_4_xhigh_passes_through() {
-        // gpt-5.4 supports xhigh → pass through unchanged.
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::XHigh, "gpt-5.4"),
-            ThinkingEffort::XHigh
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_5_xhigh_passes_through() {
-        // gpt-5.5 supports xhigh → pass through unchanged.
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::XHigh, "gpt-5.5"),
-            ThinkingEffort::XHigh
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_gpt5_dash_suffix_variants_match_correctly() {
-        // Databricks-prefixed or date-suffixed names must still hit the right family.
-        // "gpt-5.5" and "gpt-5-5" are treated identically; ditto for other families.
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::XHigh, "gpt-5-5"),
-            ThinkingEffort::XHigh,
-            "gpt-5-5 (dash) must match gpt-5.5 table"
-        );
-        assert_eq!(
-            normalize_effort_for_openai_route(ThinkingEffort::None, "gpt-5-1"),
-            ThinkingEffort::None,
-            "gpt-5-1 (dash) must match gpt-5.1 table"
-        );
-    }
-
-    #[test]
-    fn normalize_openai_route_unknown_model_passthrough() {
-        // Unknown models: all values pass through without substitution (server-validated).
-        for effort in [
-            ThinkingEffort::None,
-            ThinkingEffort::Minimal,
-            ThinkingEffort::Low,
-            ThinkingEffort::Medium,
-            ThinkingEffort::High,
-            ThinkingEffort::XHigh,
-        ] {
-            assert_eq!(
-                normalize_effort_for_openai_route(effort, "llama-4"),
-                effort,
-                "unknown model: {effort:?} must pass through unchanged"
-            );
-        }
-    }
-
-    // ---- effort-table fixture sync guard ----------------------------------------
-    //
-    // Loads `effortTable.fixture.json` (the single source of truth shared with
-    // the TS test in `buzzAgentConfig.test.mjs`) and verifies that this Rust
-    // implementation produces the same valid-effort-value sets and default values
-    // as the TS `getProviderEffortConfig` function.
-    //
-    // Drift (a new model family added to one side but not the other) fails CI here
-    // before it can silently diverge in production.
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    /// Compute the valid effort values for a provider/model pair, mirroring
-    /// `getProviderEffortConfig` in `buzzAgentConfig.ts`.
-    ///
-    /// Returns `(valid_values, default_value)` where `default_value` is `None`
-    /// for Anthropic manual-budget models (TS `defaultValue: null`), otherwise
-    /// `Some("medium")` or `Some("high")`.
-    pub(super) fn valid_effort_values_for_provider_model(
-        provider: &str,
-        model: &str,
-    ) -> (Vec<&'static str>, Option<&'static str>) {
-        const ALL_7: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-        const ALL_EXCEPT_MAX: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
-        const GPT5_PRO: &[&str] = &["high"];
-        const GPT5_1: &[&str] = &["none", "low", "medium", "high"];
-
-        let p = provider.to_ascii_lowercase();
-        // Canonicalize provider aliases — mirrors the production path and TS
-        // PROVIDER_ALIASES so this shim stays in sync with the fixture.
-        let p = match p.as_str() {
-            "openai-compat" => "openai".to_owned(),
-            "databricks-v2" => "databricks_v2".to_owned(),
-            _ => p,
-        };
-        // Strip arbitrary endpoint-naming prefix before model matching, mirroring TS and
-        // strip_catalog_prefix: find the first known family token (claude-, gpt-) and
-        // drop everything before it. Handles any catalog naming convention.
-        let raw_model = model.trim();
-        let lower_raw = raw_model.to_ascii_lowercase();
-        const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
-        let first_idx = FAMILY_TOKENS
-            .iter()
-            .filter_map(|tok| lower_raw.find(tok))
-            .min();
-        let stripped = match first_idx {
-            Some(idx) => &raw_model[idx..],
-            None => raw_model,
-        };
-        let m = stripped.to_ascii_lowercase();
-
-        // Thin adapter: converts production helper output to the string-based
-        // return type used by this function.
-        fn anthropic_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
-            let (values, default) = anthropic_efforts_for_model(m);
-            let strs: Vec<&'static str> = values.iter().map(|e| e.openai_effort_str()).collect();
-            (strs, default.map(|e| e.openai_effort_str()))
-        }
-
-        fn openai_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
-            if let Some(values) = openai_efforts_for_model(m) {
-                let strs: Vec<&'static str> =
-                    values.iter().map(|e| e.openai_effort_str()).collect();
-                // Determine default from the family.
-                let default_val = if strs == GPT5_PRO {
-                    Some("high")
-                } else if strs == GPT5_1 {
-                    Some("none")
-                } else {
-                    Some("medium")
-                };
-                (strs, default_val)
-            } else {
-                // Unknown model → all-except-max, default medium.
-                (ALL_EXCEPT_MAX.to_vec(), Some("medium"))
-            }
-        }
-
-        if p == "anthropic" {
-            return anthropic_result(&m);
-        }
-        if p == "openai" {
-            return openai_result(&m);
-        }
-        if p == "databricks_v2" {
-            if m.starts_with("claude-") {
-                return anthropic_result(&m);
-            }
-            // gpt-5 family check mirrors gpt5FamilyModel in TS.
-            let is_gpt5 = gpt5_token_matches(&m, "gpt-5-pro")
-                || gpt5_token_matches(&m, "gpt5-pro")
-                || gpt5_token_matches(&m, "gpt-5.6")
-                || gpt5_token_matches(&m, "gpt5.6")
-                || gpt5_token_matches(&m, "gpt-5-6")
-                || gpt5_token_matches(&m, "gpt5-6")
-                || gpt5_token_matches(&m, "gpt-5.5")
-                || gpt5_token_matches(&m, "gpt5.5")
-                || gpt5_token_matches(&m, "gpt-5.4")
-                || gpt5_token_matches(&m, "gpt5.4")
-                || gpt5_token_matches(&m, "gpt-5.1")
-                || gpt5_token_matches(&m, "gpt5.1")
-                || gpt5_base_matches(&m, "gpt-5")
-                || gpt5_base_matches(&m, "gpt5");
-            if is_gpt5 {
-                return openai_result(&m);
-            }
-            if !m.is_empty() {
-                // Concrete non-claude, non-gpt5: MLflow path → all-except-max.
-                return openai_result(&m);
-            }
-            // Blank model: route unknown, all-7.
-            return (ALL_7.to_vec(), Some("medium"));
-        }
-        if p == "databricks" {
-            return openai_result(&m);
-        }
-        if p == "openrouter" {
-            return (ALL_7.to_vec(), Some("medium"));
-        }
-        // Unknown/empty provider → all-7, default medium.
-        (ALL_7.to_vec(), Some("medium"))
-    }
-
-    #[derive(serde::Deserialize)]
-    struct FixtureEntry {
-        note: Option<String>,
-        provider: String,
-        model: String,
-        #[serde(rename = "validValues")]
-        valid_values: Vec<String>,
-        #[serde(rename = "defaultValue")]
-        default_value: Option<String>,
-    }
-
-    #[test]
-    fn effort_table_fixture_matches_rust_implementation() {
-        let fixture_json =
-            include_str!("../../../desktop/src/features/agents/ui/effortTable.fixture.json");
-        let entries: Vec<FixtureEntry> =
-            serde_json::from_str(fixture_json).expect("fixture must be valid JSON");
-
-        assert!(
-            !entries.is_empty(),
-            "fixture must contain at least one entry"
-        );
-
-        for entry in &entries {
-            let label = entry.note.as_deref().unwrap_or(entry.model.as_str());
-            let (valid_values, default_value) =
-                valid_effort_values_for_provider_model(&entry.provider, &entry.model);
-
-            let expected: Vec<&str> = entry.valid_values.iter().map(String::as_str).collect();
-            assert_eq!(
-                valid_values, expected,
-                "validValues mismatch for fixture entry \"{label}\" \
-                 (provider={}, model={}): Rust side has {valid_values:?}, \
-                 fixture expects {expected:?}",
-                entry.provider, entry.model,
-            );
-
-            let expected_default: Option<&str> = entry.default_value.as_deref();
-            assert_eq!(
-                default_value, expected_default,
-                "defaultValue mismatch for fixture entry \"{label}\" \
-                 (provider={}, model={}): Rust side has {default_value:?}, \
-                 fixture expects {expected_default:?}",
-                entry.provider, entry.model,
-            );
-        }
     }
 
     // ---- normalize_effort_for_databricks_v2 regression tests (F1 corrections) ----

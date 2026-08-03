@@ -5,7 +5,6 @@
  * Reads `scripts/model-capabilities.json` and emits:
  *   - `crates/buzz-agent/src/generated_model_capabilities.rs`
  *   - `desktop/src/features/agents/ui/modelCapabilities.ts`
- *   - `scripts/generated-model-capabilities-coverage.json` (snapshot/drift fixture — full-table resolver output, diff-checked by CI)
  *
  * The generator performs three ordered resolution steps (resolver contract, plan v4):
  *   1. Provider-qualified raw exact lookup — key is (provider, raw_model_id), matched
@@ -568,68 +567,6 @@ function getProviderFallback(provider, isBlank) {
     ...rec,
     _provenance: { source: "fallback", provider, state },
   };
-}
-
-// ---------------------------------------------------------------------------
-// Build full-table snapshot/drift fixture
-// Every (provider, model) pair that can be reached by any manifest rule is resolved
-// and written here. CI diffs this against the committed copy — any resolver output
-// change for any input shows up as a diff, catching silent behavior shifts.
-// ---------------------------------------------------------------------------
-
-const allEntries = [];
-
-// All family rule canonical model IDs
-for (const rule of manifest.family_rules) {
-  for (const provider of rule.providers) {
-    const result = resolve(provider, rule.match_value);
-    allEntries.push({
-      note: `family rule ${rule.id} / provider ${provider}`,
-      provider,
-      model: rule.match_value,
-      resolved: result,
-    });
-    // Also test aliases
-    for (const alias of rule.match_aliases ?? []) {
-      const r2 = resolve(provider, alias);
-      allEntries.push({
-        note: `family rule ${rule.id} alias ${alias} / provider ${provider}`,
-        provider,
-        model: alias,
-        resolved: r2,
-      });
-    }
-  }
-}
-
-// All exact_records
-for (const rec of manifest.exact_records ?? []) {
-  const result = resolve(rec.provider, rec.raw_model_id);
-  allEntries.push({
-    note: `exact record ${rec.provider}::${rec.raw_model_id}`,
-    provider: rec.provider,
-    model: rec.raw_model_id,
-    resolved: result,
-  });
-}
-
-// All provider fallbacks (blank + concrete unknown examples)
-for (const [provider] of Object.entries(manifest.provider_fallbacks)) {
-  if (provider === "_default") continue;
-  const blankResult = resolve(provider, "");
-  allEntries.push({
-    note: `fallback ${provider} blank`,
-    provider,
-    model: "",
-    resolved: blankResult,
-  });
-  const unknownResult = resolve(provider, "some-unknown-model-xyz");
-  allEntries.push({
-    note: `fallback ${provider} concrete_unknown`,
-    provider,
-    model: "some-unknown-model-xyz",
-    resolved: unknownResult,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,13 +1420,6 @@ const outputs = [
         ),
     content: tsContent,
     label: "TypeScript",
-  },
-  {
-    path: outputDirOverride
-      ? join(outputDirOverride, "generated-model-capabilities-coverage.json")
-      : join(repoRoot, "scripts", "generated-model-capabilities-coverage.json"),
-    content: JSON.stringify(allEntries, null, 2) + "\n",
-    label: "Coverage snapshot/drift fixture",
   },
 ];
 

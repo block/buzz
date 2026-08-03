@@ -130,6 +130,50 @@ jobs:
       - name: Unit tests
         run: just test-unit
 
+  model-capabilities:
+    name: Model Capabilities (regen + corpus + schema + buzz-agent tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Regenerate artifacts
+        run: node scripts/generate-model-capabilities.mjs
+
+      - name: Diff check — fail if generated files are stale
+        run: |
+          if ! git diff --exit-code \
+            crates/buzz-agent/src/generated_model_capabilities.rs \
+            desktop/src/features/agents/ui/modelCapabilities.ts; then
+            echo ""
+            echo "ERROR: Generated model-capability files are stale."
+            echo "Run: node scripts/generate-model-capabilities.mjs"
+            echo "Then commit the regenerated files."
+            exit 1
+          fi
+          echo "✓ All generated files are up to date."
+
+      - name: Run corpus (TS interpreter via --experimental-strip-types)
+        run: node --experimental-strip-types scripts/run-corpus.mjs
+
+      - name: Validate manifest (schema-negative tests)
+        run: node --test scripts/test-manifest-validator.mjs
+
+      - name: Run buzz-agent unit tests (normative corpus + generated interpreter)
+        run: cargo test -p buzz-agent --lib
+
   desktop-core:
     name: Desktop Core
     runs-on: ubuntu-latest
