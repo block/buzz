@@ -27,6 +27,7 @@ members = [
     "crates/buzz-relay-mesh",
     "crates/buzz-dev-mcp",
     "crates/buzz-voice",
+    "crates/buzz-backend-kubernetes",
     "examples/countdown-bot",
 ]
 exclude = ["desktop/src-tauri"]
@@ -57,6 +58,13 @@ sqlx = { version = "0.9", features = [
 # Redis
 redis        = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
 deadpool-redis = { version = "0.23", features = ["rt_tokio_1"] }
+
+# Kubernetes (buzz-backend-kubernetes provider). No `ring` feature here: the
+# process-level CryptoProvider is installed explicitly at startup, matching
+# buzz-cli/buzz-acp/buzz-admin/buzz-relay/buzz-dev-mcp — see the comment on the
+# crate's own rustls dependency.
+kube = { version = "2.0", default-features = false, features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "0.26", features = ["v1_31"] }
 
 # Nostr
 nostr = { version = "0.44", features = ["nip44", "nip98"] }

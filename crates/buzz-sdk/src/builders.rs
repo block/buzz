@@ -11,8 +11,8 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_USER_STATUS,
-        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1499,12 +1499,7 @@ pub fn build_workflow_delete(
     author_pubkey: &str,
     workflow_id: Uuid,
 ) -> Result<EventBuilder, SdkError> {
-    let pk = check_pubkey_hex(author_pubkey, "author_pubkey")?;
-    let tags = vec![tag(&[
-        "a",
-        &format!("{}:{pk}:{workflow_id}", KIND_WORKFLOW_DEF),
-    ])?];
-    Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
+    build_delete_addressable(KIND_WORKFLOW_DEF, author_pubkey, &workflow_id.to_string())
 }
 
 /// Build a workflow trigger event (kind 46020).
@@ -1836,6 +1831,364 @@ pub fn build_unarchive_identity_request(
             .tags(tags)
             .allow_self_tagging(),
     )
+}
+
+// ─── NIP-MP: Multi-repo projects (kind:30621) ────────────────────────────────
+//
+//  Public surface:
+//  • `validate_project_envelope` — Layer A protocol validator (8 ingest rules)
+//  • `build_project_with_tags`   — Layer A raw builder (content + tags, no canonicalization)
+//  • `ProjectMemberCoord`        — parsed member coordinate + optional relay hint
+//  • `build_project`             — Layer B writer-policy builder
+//  • `build_delete_addressable`  — generic NIP-09 kind:5 coordinate delete
+//
+//  Byte-length bounds from NIP-MP §Relay Processing:
+/// Maximum byte length of a project `d` tag value.
+pub const PROJECT_D_MAX_LEN: usize = 1024;
+/// Maximum byte length of a project `name` tag value.
+pub const PROJECT_NAME_MAX: usize = 256;
+/// Maximum byte length of a project `description` tag value.
+pub const PROJECT_DESCRIPTION_MAX: usize = 2048;
+/// Maximum byte length of a project `buzz-channel` tag value.
+pub const PROJECT_CHANNEL_MAX: usize = 256;
+/// Maximum byte length of a project `buzz-visibility` tag value.
+pub const PROJECT_VISIBILITY_MAX: usize = 256;
+/// Maximum number of `a` member tags per project event (checked before dedup).
+pub const PROJECT_MEMBER_CAP: usize = 64;
+
+/// A validated NIP-MP member `a`-tag coordinate with an optional relay hint.
+///
+/// Equality and `Hash` are by `coord` only (per spec: duplicate detection ignores hint).
+#[derive(Clone, Debug)]
+pub struct ProjectMemberCoord {
+    /// The full `30617:<owner-hex>:<repo-d>` coordinate string.
+    pub coord: String,
+    /// Optional opaque relay hint (third `a`-tag element, never validated by content).
+    pub hint: Option<String>,
+}
+
+impl PartialEq for ProjectMemberCoord {
+    fn eq(&self, other: &Self) -> bool {
+        self.coord == other.coord
+    }
+}
+
+impl Eq for ProjectMemberCoord {}
+
+impl std::hash::Hash for ProjectMemberCoord {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.coord.hash(state);
+    }
+}
+
+impl ProjectMemberCoord {
+    /// Parse a full `30617:<owner-hex>:<repo-d>` coordinate string.
+    ///
+    /// Accepts an optional relay hint as the third colon-separated element
+    /// after the split, but the split is always first-two-colons: kind, owner,
+    /// everything-else-as-repo-d.
+    ///
+    /// Rules enforced:
+    /// - Exactly three segments after splitting on the first two colons
+    /// - First segment must be the literal string `"30617"`
+    /// - Second segment must be exactly 64 lowercase hex characters
+    /// - Third segment (repo-d) must be non-empty
+    /// - Uppercase owners are rejected (never normalized)
+    pub fn parse_full(coord: &str) -> Result<Self, SdkError> {
+        // Split on first two colons only: kind:owner:rest
+        let mut parts = coord.splitn(3, ':');
+        let kind_part = parts.next().unwrap_or("");
+        let owner_part = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("");
+
+        if kind_part != "30617" {
+            return Err(SdkError::InvalidInput(format!(
+                "member coordinate must start with '30617:' (got kind {kind_part:?})"
+            )));
+        }
+        if owner_part.len() != 64 || !owner_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(SdkError::InvalidInput(format!(
+                "member owner must be a 64-character hex pubkey (got {owner_part:?})"
+            )));
+        }
+        // Reject uppercase (spec: lowercase hex required)
+        if owner_part.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(SdkError::InvalidInput(
+                "member owner hex must be lowercase".into(),
+            ));
+        }
+        if rest.is_empty() {
+            return Err(SdkError::InvalidInput(
+                "member coordinate repo-d must not be empty".into(),
+            ));
+        }
+        Ok(ProjectMemberCoord {
+            coord: format!("30617:{owner_part}:{rest}"),
+            hint: None,
+        })
+    }
+
+    /// Returns the `a`-tag element slice: `[coord]` or `[coord, hint]`.
+    pub fn to_tag_parts(&self) -> Vec<String> {
+        let mut parts = vec!["a".to_string(), self.coord.clone()];
+        if let Some(h) = &self.hint {
+            parts.push(h.clone());
+        }
+        parts
+    }
+}
+
+/// **Layer A**: Validate a complete kind:30621 envelope against the 8 NIP-MP
+/// ingest rules.  This is the single source of protocol truth used by both
+/// `build_project_with_tags` (raw path) and `build_project` (policy path).
+///
+/// Rules enforced (matches relay `buzz-db` ingest logic):
+/// 1. `d` cardinality: exactly one `d` tag.
+/// 2. `d` value: non-empty, ≤1024 bytes.
+/// 3. Member cap: raw count of every `a` tag ≤ 64 (checked **before** per-tag
+///    parsing, matching relay rule order).
+/// 4. Member tag arity: every `a` tag has 2 or 3 elements (no more, no fewer).
+/// 5. Member coordinate grammar: first-two-colons split; kind literal `"30617"`;
+///    owner lowercase 64-hex; repo-d non-empty verbatim.
+/// 6. Member deduplication: coordinate equality only (hint ignored); any
+///    coordinate that appears more than once is a duplicate.
+/// 7. Singleton metadata: each of `name`, `description`, `buzz-channel`,
+///    `buzz-visibility` appears at most once.
+/// 8. Metadata byte lengths: `name` ≤256, `description` ≤2048,
+///    `buzz-channel` ≤256, `buzz-visibility` ≤256.
+pub fn validate_project_envelope(tags: &[Tag], _content: &str) -> Result<(), SdkError> {
+    // --- Rule 1 & 2: d tag ---
+    let d_tags: Vec<&Tag> = tags.iter().filter(|t| tag_name(t) == Some("d")).collect();
+    match d_tags.len() {
+        0 => {
+            return Err(SdkError::InvalidInput(
+                "project must have exactly one 'd' tag (rule: d-cardinality)".into(),
+            ))
+        }
+        1 => {}
+        _ => {
+            return Err(SdkError::InvalidInput(
+                "project must have exactly one 'd' tag (rule: d-cardinality)".into(),
+            ))
+        }
+    }
+    let d_val = tag_value(d_tags[0]).unwrap_or("");
+    if d_val.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "project 'd' tag must not be empty (rule: d-empty)".into(),
+        ));
+    }
+    if d_val.len() > PROJECT_D_MAX_LEN {
+        return Err(SdkError::InvalidInput(format!(
+            "project 'd' tag exceeds {PROJECT_D_MAX_LEN} bytes (rule: d-empty)"
+        )));
+    }
+
+    let a_tags: Vec<&Tag> = tags.iter().filter(|t| tag_name(t) == Some("a")).collect();
+
+    // --- Rule 3: member cap (checked before per-tag parsing, matching relay rule order) ---
+    if a_tags.len() > PROJECT_MEMBER_CAP {
+        return Err(SdkError::InvalidInput(format!(
+            "project exceeds member cap of {PROJECT_MEMBER_CAP} (got {}) (rule: member-cap)",
+            a_tags.len()
+        )));
+    }
+
+    // --- Rule 4: member arity ---
+    for a in &a_tags {
+        let len = a.as_slice().len() - 1; // exclude the "a" name element
+        if !(1..=2).contains(&len) {
+            return Err(SdkError::InvalidInput(format!(
+                "member 'a' tag must have 1 or 2 value elements (got {len}) (rule: member-tag-arity)"
+            )));
+        }
+    }
+
+    // --- Rules 5 & 6: coordinate grammar + deduplication ---
+    let mut seen_coords: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for a in &a_tags {
+        let coord_val = tag_value(a).unwrap_or("");
+        ProjectMemberCoord::parse_full(coord_val).map_err(|e| {
+            SdkError::InvalidInput(format!("{e} (rule: member-coordinate-malformed)"))
+        })?;
+        if !seen_coords.insert(coord_val.to_string()) {
+            return Err(SdkError::InvalidInput(format!(
+                "duplicate member coordinate {coord_val:?} (rule: member-duplicate)"
+            )));
+        }
+    }
+
+    // --- Rules 7 & 8: singleton metadata + byte bounds ---
+    let singleton_fields = [
+        (
+            "name",
+            PROJECT_NAME_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+        (
+            "description",
+            PROJECT_DESCRIPTION_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+        (
+            "buzz-channel",
+            PROJECT_CHANNEL_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+        (
+            "buzz-visibility",
+            PROJECT_VISIBILITY_MAX,
+            "metadata-cardinality",
+            "metadata-length",
+        ),
+    ];
+    for (field, max_bytes, card_rule, len_rule) in singleton_fields {
+        let matches: Vec<&Tag> = tags.iter().filter(|t| tag_name(t) == Some(field)).collect();
+        if matches.len() > 1 {
+            return Err(SdkError::InvalidInput(format!(
+                "project must have at most one '{field}' tag (rule: {card_rule})"
+            )));
+        }
+        if let Some(t) = matches.first() {
+            let val = tag_value(t).unwrap_or("");
+            if val.len() > max_bytes {
+                return Err(SdkError::InvalidInput(format!(
+                    "'{field}' tag exceeds {max_bytes} bytes (rule: {len_rule})"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Helper: tag name (first element).
+fn tag_name(tag: &Tag) -> Option<&str> {
+    tag.as_slice().first().map(String::as_str)
+}
+
+/// Helper: tag value (second element).
+fn tag_value(tag: &Tag) -> Option<&str> {
+    tag.as_slice().get(1).map(String::as_str)
+}
+
+/// **Layer A raw builder**: Build a kind:30621 project event from a raw
+/// `content` string and a raw `tags` slice, without any canonicalization.
+///
+/// Validates the entire envelope through `validate_project_envelope` before
+/// accepting it.  The caller is responsible for supplying the correct `d` tag.
+/// This is the path exercised by fixture conformance tests and by read-modify-
+/// write mutations in the CLI.
+pub fn build_project_with_tags(content: &str, tags: Vec<Tag>) -> Result<EventBuilder, SdkError> {
+    validate_project_envelope(&tags, content)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_PROJECT as u16), content).tags(tags))
+}
+
+/// **Layer B writer-policy builder**: Build a kind:30621 project event with
+/// enforced writer policy:
+/// - The `d` tag is constructed from `slug`; `check_project_slug` rejects
+///   an empty or over-length slug.
+/// - `channel` must be a valid UUID string.
+/// - `visibility` must be `"listed"` or `"unlisted"`.
+/// - Content is always empty.
+/// - Member coordinates are parsed through `ProjectMemberCoord::parse_full`.
+///
+/// The resulting envelope is validated through Layer A before the builder is
+/// returned.
+pub fn build_project(
+    slug: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    members: &[ProjectMemberCoord],
+    channel: Option<&str>,
+    visibility: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    // Slug validation
+    if slug.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "project slug must not be empty".into(),
+        ));
+    }
+    if slug.len() > PROJECT_D_MAX_LEN {
+        return Err(SdkError::InvalidInput(format!(
+            "project slug must not exceed {PROJECT_D_MAX_LEN} bytes (got {})",
+            slug.len()
+        )));
+    }
+
+    // Channel UUID validation
+    if let Some(ch) = channel {
+        uuid::Uuid::parse_str(ch).map_err(|_| {
+            SdkError::InvalidInput(format!("buzz-channel must be a valid UUID (got {ch:?})"))
+        })?;
+    }
+
+    // Visibility enum validation
+    if let Some(vis) = visibility {
+        if vis != "listed" && vis != "unlisted" {
+            return Err(SdkError::InvalidInput(format!(
+                "buzz-visibility must be 'listed' or 'unlisted' (got {vis:?})"
+            )));
+        }
+    }
+
+    let mut tags: Vec<Tag> = Vec::new();
+    tags.push(tag(&["d", slug])?);
+
+    if let Some(n) = name {
+        tags.push(tag(&["name", n])?);
+    }
+    if let Some(d) = description {
+        tags.push(tag(&["description", d])?);
+    }
+    for m in members {
+        let tag_parts = m.to_tag_parts();
+        let parts: Vec<&str> = tag_parts.iter().map(|s| s.as_str()).collect();
+        // Safety: to_tag_parts always produces ["a", coord, ...hint]
+        tags.push(
+            Tag::parse(parts.iter().copied()).map_err(|e| SdkError::InvalidTag(e.to_string()))?,
+        );
+    }
+    if let Some(ch) = channel {
+        tags.push(tag(&["buzz-channel", ch])?);
+    }
+    if let Some(vis) = visibility {
+        tags.push(tag(&["buzz-visibility", vis])?);
+    }
+
+    build_project_with_tags("", tags)
+}
+
+/// **Generic NIP-09 coordinate delete**: Build a kind:5 deletion event with
+/// a single `a`-tag addressing `<kind>:<pubkey>:<d>`.
+///
+/// Validates:
+/// - `kind` is an addressable kind (10000–19999 or 30000–39999).
+/// - `pubkey` is a 64-character lowercase hex string.
+/// - `d` is non-empty.
+///
+/// `build_workflow_delete` delegates to this function.
+pub fn build_delete_addressable(
+    kind: u32,
+    pubkey: &str,
+    d: &str,
+) -> Result<EventBuilder, SdkError> {
+    let is_addressable = (10000..20000).contains(&kind) || (30000..40000).contains(&kind);
+    if !is_addressable {
+        return Err(SdkError::InvalidInput(format!(
+            "kind {kind} is not an addressable kind (must be 10000–19999 or 30000–39999)"
+        )));
+    }
+    let pk = check_pubkey_hex(pubkey, "pubkey")?;
+    if d.is_empty() {
+        return Err(SdkError::InvalidInput("d must not be empty".into()));
+    }
+    let coord = format!("{kind}:{pk}:{d}");
+    let tags = vec![tag(&["a", &coord])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
 }
 
 #[cfg(test)]
@@ -3883,5 +4236,281 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().map(String::as_str) == Some("replaced-by")));
+    }
+
+    // ── NIP-MP cap-before-arity ordering ─────────────────────────────────────
+
+    /// When an envelope exceeds the member cap AND contains a malformed `a` tag,
+    /// the validator must fire `member-cap` (rule 3) — not `member-tag-arity`
+    /// (rule 4).  This matches the relay's ingest ordering and means a client
+    /// sending an oversized list never receives a per-tag parse error.
+    #[test]
+    fn validate_project_envelope_cap_wins_over_arity_when_both_fail() {
+        let owner = "a".repeat(64);
+        // Build 65 well-formed `a` tags — enough to trigger the cap.
+        let mut tags = vec![Tag::parse(["d", "platform"]).unwrap()];
+        for i in 0..65usize {
+            let coord = format!("30617:{owner}:repo-{i}");
+            tags.push(Tag::parse(["a", &coord]).unwrap());
+        }
+        // Also add one malformed tag (four elements) that would fire
+        // member-tag-arity if evaluated before the cap check.
+        let coord_extra = format!("30617:{owner}:repo-extra");
+        tags.push(
+            Tag::parse([
+                "a",
+                &coord_extra,
+                "wss://relay.example.com",
+                "extra-element",
+            ])
+            .unwrap(),
+        );
+
+        let err = validate_project_envelope(&tags, "").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("member-cap"),
+            "expected member-cap to win, got: {msg}"
+        );
+        assert!(
+            !msg.contains("member-tag-arity"),
+            "arity rule must not fire before cap rule, got: {msg}"
+        );
+    }
+
+    // ── Layer B writer-policy builder ───────────────────────────────────────
+
+    const OWNER64: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const VALID_UUID: &str = "3580ca9b-47b4-4af9-b22a-1068778f26c6";
+
+    fn member_coord(repo: &str) -> ProjectMemberCoord {
+        ProjectMemberCoord::parse_full(&format!("30617:{OWNER64}:{repo}")).unwrap()
+    }
+
+    #[test]
+    fn build_project_emitted_envelope_has_correct_shape() {
+        // slug, name, description, channel, visibility, and one member.
+        let m = member_coord("buzz");
+        let ev = sign(
+            build_project(
+                "my-proj",
+                Some("My Project"),
+                Some("A description"),
+                &[m],
+                Some(VALID_UUID),
+                Some("listed"),
+            )
+            .expect("Layer B must accept valid inputs"),
+        );
+
+        // Kind must be 30621.
+        assert_eq!(ev.kind.as_u16(), KIND_PROJECT as u16);
+        // Content must be empty (Layer B policy).
+        assert!(ev.content.is_empty(), "content must be empty");
+
+        let all_tags: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+
+        // d tag must be present exactly once.
+        let d_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "d").collect();
+        assert_eq!(d_tags.len(), 1);
+        assert_eq!(d_tags[0][1], "my-proj");
+
+        // name, description, buzz-channel, buzz-visibility present.
+        let name_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "name").collect();
+        assert_eq!(name_tags.len(), 1);
+        assert_eq!(name_tags[0][1], "My Project");
+
+        let desc_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "description").collect();
+        assert_eq!(desc_tags.len(), 1);
+        assert_eq!(desc_tags[0][1], "A description");
+
+        let ch_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "buzz-channel").collect();
+        assert_eq!(ch_tags.len(), 1);
+        assert_eq!(ch_tags[0][1], VALID_UUID);
+
+        let vis_tags: Vec<_> = all_tags
+            .iter()
+            .filter(|t| t[0] == "buzz-visibility")
+            .collect();
+        assert_eq!(vis_tags.len(), 1);
+        assert_eq!(vis_tags[0][1], "listed");
+
+        // member a tag.
+        let a_tags: Vec<_> = all_tags.iter().filter(|t| t[0] == "a").collect();
+        assert_eq!(a_tags.len(), 1);
+        assert_eq!(a_tags[0][1], format!("30617:{OWNER64}:buzz"));
+    }
+
+    #[test]
+    fn build_project_optional_fields_absent_when_not_supplied() {
+        let m = member_coord("core");
+        let ev = sign(
+            build_project("my-proj", None, None, &[m], None, None)
+                .expect("minimal build must succeed"),
+        );
+        let names: Vec<_> = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("name"))
+            .collect();
+        assert!(names.is_empty(), "name tag must not be emitted when absent");
+    }
+
+    #[test]
+    fn build_project_rejects_empty_slug() {
+        let m = member_coord("r");
+        let err = build_project("", None, None, &[m], None, None).unwrap_err();
+        assert!(
+            matches!(err, SdkError::InvalidInput(_)),
+            "empty slug must be InvalidInput, got: {err:?}"
+        );
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn build_project_rejects_overlong_slug() {
+        let long_slug = "a".repeat(PROJECT_D_MAX_LEN + 1);
+        let m = member_coord("r");
+        let err = build_project(&long_slug, None, None, &[m], None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn build_project_rejects_invalid_channel_uuid() {
+        let m = member_coord("r");
+        let err = build_project("slug", None, None, &[m], Some("not-a-uuid"), None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(err.to_string().contains("UUID") || err.to_string().contains("uuid"));
+    }
+
+    #[test]
+    fn build_project_rejects_invalid_visibility_token() {
+        let m = member_coord("r");
+        let err = build_project("slug", None, None, &[m], None, Some("chartreuse")).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(err.to_string().contains("listed") || err.to_string().contains("unlisted"));
+    }
+
+    #[test]
+    fn build_project_rejects_over_cap_members() {
+        let members: Vec<_> = (0..=PROJECT_MEMBER_CAP)
+            .map(|i| member_coord(&format!("repo-{i}")))
+            .collect();
+        let err = build_project("slug", None, None, &members, None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("member-cap"),
+            "over-cap must report member-cap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_project_rejects_duplicate_members() {
+        let m = member_coord("same");
+        let err = build_project("slug", None, None, &[m.clone(), m], None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("dedup") || err.to_string().contains("duplicate"),
+            "duplicate member must report dedup, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_project_content_is_always_empty() {
+        // build_project forces content="" regardless; Layer A also enforces
+        // that the envelope is valid. Any non-empty content would be dropped.
+        // This test pins the Layer B content-forced-empty policy.
+        let m = member_coord("r");
+        let ev = sign(build_project("slug", None, None, &[m], None, None).unwrap());
+        assert!(
+            ev.content.is_empty(),
+            "Layer B must always emit empty content"
+        );
+    }
+
+    // ── NIP-MP conformance fixtures ──────────────────────────────────────────
+    // `build_project_with_tags` directly.  Accept cases must build; reject
+    // cases must fail with an error message containing the expected rule name.
+    // A count assertion guards against silent omissions.
+    //
+    // `include_str!` path is relative to this source file.
+    fn nip_mp_fixture_tags(json_tags: &serde_json::Value) -> Vec<Tag> {
+        json_tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let parts: Vec<String> = t
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                let parts_ref: Vec<&str> = parts.iter().map(String::as_str).collect();
+                Tag::parse(parts_ref.iter().copied())
+                    .unwrap_or_else(|e| panic!("fixture tag parse error: {e}\n  raw: {t}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nip_mp_fixtures_all_31_cases_exercised() {
+        const FIXTURE_JSON: &str = include_str!("../../../docs/nips/NIP-MP.fixtures.json");
+
+        let data: serde_json::Value =
+            serde_json::from_str(FIXTURE_JSON).expect("fixture JSON must parse");
+        let cases = data["cases"].as_array().expect("cases must be array");
+
+        // Count gate: the spec says "required to test against this one file"
+        // with the exact count as-shipped.
+        assert_eq!(
+            cases.len(),
+            31,
+            "expected 31 fixture cases, got {} — was NIP-MP.fixtures.json edited?",
+            cases.len()
+        );
+
+        let mut accept_count = 0usize;
+        let mut reject_count = 0usize;
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let expect = case["expect"].as_str().unwrap();
+            let template = &case["template"];
+            let content = template["content"].as_str().unwrap_or("");
+            let tags = nip_mp_fixture_tags(&template["tags"]);
+
+            match expect {
+                "accept" => {
+                    build_project_with_tags(content, tags).unwrap_or_else(|e| {
+                        panic!("fixture '{name}' (accept) must build successfully, got: {e}")
+                    });
+                    accept_count += 1;
+                }
+                "reject" => {
+                    let reject_rules = case["reject_rules"]
+                        .as_array()
+                        .expect("reject case must have reject_rules")
+                        .iter()
+                        .map(|r| r.as_str().unwrap().to_string())
+                        .collect::<Vec<_>>();
+
+                    let err = build_project_with_tags(content, tags).unwrap_err();
+                    let err_msg = err.to_string();
+
+                    // The error must mention at least one of the expected rules.
+                    let rule_matched = reject_rules.iter().any(|r| err_msg.contains(r.as_str()));
+                    assert!(
+                        rule_matched,
+                        "fixture '{name}' rejected with wrong rule.\n  expected one of: {reject_rules:?}\n  got error: {err_msg}"
+                    );
+                    reject_count += 1;
+                }
+                other => panic!("fixture '{name}' has unknown expect value: {other:?}"),
+            }
+        }
+
+        assert_eq!(accept_count, 11, "expected 11 accept cases");
+        assert_eq!(reject_count, 20, "expected 20 reject cases");
     }
 }
