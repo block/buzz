@@ -467,6 +467,8 @@ type MockBridgeOptions = {
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;
+  /** Sequenced save failures. A string rejects that call; null succeeds. */
+  setGlobalAgentConfigErrors?: (string | null)[];
   /** Errors returned by successive backup verification attempts. Null succeeds. */
   backupVerificationErrors?: (string | null)[];
   /** Public identities returned by successive successful backup verifications. */
