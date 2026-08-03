@@ -240,7 +240,8 @@ pub struct RestClient {
 
 /// Whether an HTTP status code is retriable (transient server/rate-limit errors).
 fn is_retriable_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 429 | 502 | 503 | 504)
+    let status = status.as_u16();
+    status == 408 || status == 429 || (500..600).contains(&status)
 }
 
 /// Base retry delays for transient HTTP failures: 500ms, 1s, 2s.
@@ -308,7 +309,7 @@ impl RestClient {
     }
 
     /// Retry helper: executes `build_request` up to 4 times (1 attempt + 3 retries)
-    /// on transient failures (429, 502, 503, 504, timeout, connect errors).
+    /// on transient failures (408, 429, 5xx, timeout, connect errors).
     ///
     /// NIP-98 auth events are re-signed on each attempt (they have a ±60s window).
     async fn request_with_retry<F, Fut>(
@@ -3994,6 +3995,23 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rest_retry_statuses_cover_transient_relay_failures() {
+        for status in [408, 429, 500, 501, 502, 503, 504, 599] {
+            assert!(
+                is_retriable_status(reqwest::StatusCode::from_u16(status).unwrap()),
+                "HTTP {status} should be retried"
+            );
+        }
+
+        for status in [400, 401, 403, 404, 409, 422] {
+            assert!(
+                !is_retriable_status(reqwest::StatusCode::from_u16(status).unwrap()),
+                "HTTP {status} should fail without retry"
+            );
+        }
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
