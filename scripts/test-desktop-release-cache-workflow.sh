@@ -28,6 +28,32 @@ for workflow in "${canaries[@]}"; do
   fi
 done
 
+# GitHub expressions must enter cache-key steps through env, never by direct
+# interpolation into generated shell scripts. This blocks shell injection if a
+# matrix or upstream output ever becomes attacker-controlled.
+python3 - "$proof" "${canaries[@]}" <<'PY'
+import pathlib
+import re
+import sys
+
+for filename in sys.argv[1:]:
+    text = pathlib.Path(filename).read_text()
+    steps = re.findall(
+        r"(?ms)^      - name: Compute exact release cache key\n(.*?)(?=^      - (?:name:|uses:)|\Z)",
+        text,
+    )
+    if not steps:
+        raise SystemExit(f"cache-key step missing: {filename}")
+    for step in steps:
+        run = re.search(r"(?ms)^        run: \|\n(.*?)(?=^        \S|\Z)", step)
+        if not run:
+            raise SystemExit(f"cache-key run block missing: {filename}")
+        if "${{" in run.group(1):
+            raise SystemExit(f"GitHub expression interpolated into cache-key shell: {filename}")
+        if "NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}" not in step:
+            raise SystemExit(f"native toolchain output not passed through env: {filename}")
+PY
+
 # Producer/proof coverage must match all four release targets and features.
 for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
   grep -q -- "$target" "$proof" || { echo "proof missing $target" >&2; exit 1; }

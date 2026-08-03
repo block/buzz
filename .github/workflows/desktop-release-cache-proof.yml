@@ -38,8 +38,12 @@ jobs:
         run: echo "id=$(scripts/desktop-native-toolchain-id.sh macos)" >> "$GITHUB_OUTPUT"
       - name: Compute exact release cache key
         id: rust_cache_key
+        env:
+          CACHE_TARGET: ${{ matrix.target }}
+          CACHE_FEATURES: ${{ matrix.features }}
+          NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
         run: |
-          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target "${{ matrix.target }}" --features "${{ matrix.features }}" --native-inputs "${{ steps.native_toolchain.outputs.id }}")
+          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target "$CACHE_TARGET" --features "$CACHE_FEATURES" --native-inputs "$NATIVE_TOOLCHAIN_ID")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
       - name: Restore exact default-branch cache from tag
         id: rust_cache
@@ -88,8 +92,10 @@ jobs:
         run: echo "id=$(scripts/desktop-native-toolchain-id.sh linux)" >> "$GITHUB_OUTPUT"
       - name: Compute exact release cache key
         id: rust_cache_key
+        env:
+          NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
         run: |
-          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target x86_64-unknown-linux-gnu --features mesh-llm --native-inputs "${{ steps.native_toolchain.outputs.id }}")
+          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target x86_64-unknown-linux-gnu --features mesh-llm --native-inputs "$NATIVE_TOOLCHAIN_ID")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
       - name: Restore exact default-branch cache from tag
         id: rust_cache
@@ -133,8 +139,10 @@ jobs:
       - name: Compute exact release cache key
         id: rust_cache_key
         shell: bash
+        env:
+          NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
         run: |
-          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target x86_64-pc-windows-msvc --features default --native-inputs "${{ steps.native_toolchain.outputs.id }}")
+          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target x86_64-pc-windows-msvc --features default --native-inputs "$NATIVE_TOOLCHAIN_ID")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
       - name: Restore exact default-branch cache from tag
         id: rust_cache

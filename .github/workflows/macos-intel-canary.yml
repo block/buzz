@@ -52,12 +52,14 @@ jobs:
 
       - name: Compute exact release cache key
         id: rust_cache_key
+        env:
+          NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
         run: |
           KEY=$(scripts/desktop-release-cache-key.py \
             --platform "$RUNNER_OS" \
             --target "$TARGET" \
             --features default \
-            --native-inputs "${{ steps.native_toolchain.outputs.id }}")
+            --native-inputs "$NATIVE_TOOLCHAIN_ID")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           echo "Release cache key: $KEY"
 
