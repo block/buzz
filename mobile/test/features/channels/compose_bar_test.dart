@@ -334,12 +334,14 @@ class _RecordingRelaySocket extends RelaySocket {
   SocketState get state => SocketState.connected;
 
   @override
-  void send(List<dynamic> payload) {
+  bool send(List<dynamic> payload) {
     if (payload case ['EVENT', final Map<String, dynamic> event]) {
       events.add(event);
       final id = event['id'] as String;
       super.debugHandleOkForTest(['OK', id, true, '']);
+      return true;
     }
+    return false;
   }
 
   @override
@@ -2262,6 +2264,7 @@ void main() {
         session.debugHandleSocketMessageForTest,
       );
       session.debugAttachSocketForTest(socket);
+      await session.debugHandleConnected();
 
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');

@@ -14,7 +14,8 @@ class SendMessage {
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId) _completeLocalMessage;
-  final void Function(String channelId, String eventId) _removeLocalMessage;
+  final void Function(String channelId, String eventId) _unconfirmLocalMessage;
+  final void Function(String channelId, String eventId) _failLocalMessage;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -24,13 +25,16 @@ class SendMessage {
     required void Function(String channelId, NostrEvent event) addLocalMessage,
     required void Function(String channelId, String eventId)
     completeLocalMessage,
-    required void Function(String channelId, String eventId) removeLocalMessage,
+    required void Function(String channelId, String eventId)
+    unconfirmLocalMessage,
+    required void Function(String channelId, String eventId) failLocalMessage,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
-       _removeLocalMessage = removeLocalMessage;
+       _unconfirmLocalMessage = unconfirmLocalMessage,
+       _failLocalMessage = failLocalMessage;
 
   /// Send a text message to a channel.
   ///
@@ -45,6 +49,7 @@ class SendMessage {
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    List<String> implicitRecipientPubkeys = const [],
     List<List<String>> mediaTags = const [],
   }) async {
     // Use explicitly passed pubkeys, or resolve @mentions against
@@ -58,7 +63,7 @@ class SendMessage {
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
+      for (final pk in [...implicitRecipientPubkeys, ...resolvedMentions])
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 
@@ -79,12 +84,24 @@ class SendMessage {
           localMessage = event;
           _addLocalMessage(channelId, event);
         },
+        onDeliveryState: (state) {
+          final event = localMessage;
+          if (event == null) return;
+          switch (state) {
+            case EventDeliveryState.unconfirmed:
+              _unconfirmLocalMessage(channelId, event.id);
+            case EventDeliveryState.sent:
+              _completeLocalMessage(channelId, event.id);
+            case EventDeliveryState.failed:
+              _failLocalMessage(channelId, event.id);
+          }
+        },
       );
       final event = localMessage;
       if (event != null) _completeLocalMessage(channelId, event.id);
     } catch (_) {
       final event = localMessage;
-      if (event != null) _removeLocalMessage(channelId, event.id);
+      if (event != null) _failLocalMessage(channelId, event.id);
       rethrow;
     }
   }
@@ -176,8 +193,11 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     completeLocalMessage: (channelId, eventId) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .completeLocalMessage(eventId),
-    removeLocalMessage: (channelId, eventId) => ref
+    unconfirmLocalMessage: (channelId, eventId) => ref
         .read(channelMessagesProvider(channelId).notifier)
-        .removeLocalMessage(eventId),
+        .unconfirmLocalMessage(eventId),
+    failLocalMessage: (channelId, eventId) => ref
+        .read(channelMessagesProvider(channelId).notifier)
+        .failLocalMessage(eventId),
   );
 });

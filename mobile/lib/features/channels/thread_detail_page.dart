@@ -25,6 +25,7 @@ import 'day_divider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
+import 'pending_local_messages_provider.dart';
 import 'reaction_row.dart';
 import 'read_state/read_state_format.dart';
 import 'read_state/read_state_provider.dart';
@@ -230,9 +231,13 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
     final channelNamesMap = <String, String>{};
+    var activeChannelParticipantPubkeys = const <String>[];
     channelsAsync.whenData((channels) {
       for (final ch in channels) {
         channelNamesMap[ch.name.toLowerCase()] = ch.id;
+        if (ch.id == channelId && ch.isDm) {
+          activeChannelParticipantPubkeys = ch.participantPubkeys;
+        }
       }
     });
 
@@ -407,6 +412,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                         channelId: channelId,
                         content: content,
                         mentionPubkeys: mentionPubkeys,
+                        implicitRecipientPubkeys:
+                            activeChannelParticipantPubkeys,
                         parentEventId: threadHead.id,
                         rootEventId: effectiveRootId,
                         mediaTags: mediaTags,
@@ -596,6 +603,11 @@ class _ThreadMessage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final deliveryState = ref.watch(
+      localMessageDeliveryStatesProvider(
+        channelId,
+      ).select((states) => states[message.id]),
+    );
     final pk = message.pubkey.toLowerCase();
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
@@ -788,6 +800,49 @@ class _ThreadMessage extends ConsumerWidget {
                             onMentionTap: (pubkey) =>
                                 showUserProfileSheet(context, pubkey),
                           ),
+                          if (deliveryState != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: Grid.quarter),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    switch (deliveryState) {
+                                      LocalMessageDeliveryState.sending =>
+                                        'Sending…',
+                                      LocalMessageDeliveryState.unconfirmed =>
+                                        'Unconfirmed',
+                                      LocalMessageDeliveryState.sent => 'Sent',
+                                      LocalMessageDeliveryState.failed =>
+                                        'Failed',
+                                    },
+                                    style: context.textTheme.labelSmall
+                                        ?.copyWith(
+                                          color:
+                                              deliveryState ==
+                                                  LocalMessageDeliveryState
+                                                      .failed
+                                              ? context.colors.error
+                                              : context.colors.onSurfaceVariant,
+                                        ),
+                                  ),
+                                  if (deliveryState ==
+                                      LocalMessageDeliveryState.failed) ...[
+                                    const SizedBox(width: Grid.quarter),
+                                    TextButton(
+                                      onPressed: () => ref
+                                          .read(
+                                            channelMessagesProvider(
+                                              channelId,
+                                            ).notifier,
+                                          )
+                                          .retryLocalMessage(message.id),
+                                      child: const Text('Retry'),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
                           ReactionRow(
                             messageId: message.id,
                             reactions: message.reactions,

@@ -11,7 +11,7 @@ void main() {
     () async {
       final session = _PendingPublishRelaySession();
       final localMessages = <NostrEvent>[];
-      final removedIds = <String>[];
+      final failedIds = <String>[];
       final completedIds = <String>[];
       final send = SendMessage(
         signedEventRelay: SignedEventRelay(
@@ -22,7 +22,8 @@ void main() {
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
-        removeLocalMessage: (_, eventId) => removedIds.add(eventId),
+        unconfirmLocalMessage: (_, _) {},
+        failLocalMessage: (_, eventId) => failedIds.add(eventId),
       );
 
       final result = send(channelId: _channelId, content: 'hello');
@@ -32,20 +33,20 @@ void main() {
       expect(localMessages.single.id, session.event.id);
       expect(localMessages.single.content, 'hello');
       expect(localMessages.single.channelId, _channelId);
-      expect(removedIds, isEmpty);
+      expect(failedIds, isEmpty);
 
       session.accept();
       await result;
       expect(completedIds, [localMessages.single.id]);
-      expect(removedIds, isEmpty);
+      expect(failedIds, isEmpty);
     },
   );
 
-  test('rolls back the signed local message when publish fails', () async {
+  test('keeps the signed local message retryable when publish fails', () async {
     final session = _PendingPublishRelaySession();
     final localMessages = <NostrEvent>[];
     final completedIds = <String>[];
-    final removedIds = <String>[];
+    final failedIds = <String>[];
     final send = SendMessage(
       signedEventRelay: SignedEventRelay(
         session: session,
@@ -55,7 +56,8 @@ void main() {
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
       completeLocalMessage: (_, eventId) => completedIds.add(eventId),
-      removeLocalMessage: (_, eventId) => removedIds.add(eventId),
+      unconfirmLocalMessage: (_, _) {},
+      failLocalMessage: (_, eventId) => failedIds.add(eventId),
     );
 
     final result = send(channelId: _channelId, content: 'hello');
@@ -64,8 +66,85 @@ void main() {
 
     await expectLater(result, throwsException);
     expect(completedIds, isEmpty);
-    expect(removedIds, [localMessages.single.id]);
+    expect(failedIds, [localMessages.single.id]);
   });
+
+  test(
+    'adds cached direct-message recipients without a channel refresh',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) => throw StateError('must not fetch channel members'),
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        unconfirmLocalMessage: (_, _) {},
+        failLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'plain DM',
+        implicitRecipientPubkeys: const ['recipient-pubkey'],
+      );
+      await session.published;
+
+      expect(
+        session.event.tags,
+        contains(
+          predicate<List<dynamic>>(
+            (tag) =>
+                tag.length == 2 &&
+                tag[0] == 'p' &&
+                tag[1] == 'recipient-pubkey',
+          ),
+        ),
+      );
+      session.accept();
+      await result;
+    },
+  );
+
+  test(
+    'non-DM send bypasses channel loading when explicit mentions are known',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) => throw StateError('channel list is unavailable'),
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        unconfirmLocalMessage: (_, _) {},
+        failLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'ordinary channel message',
+        mentionPubkeys: const ['known-member'],
+      );
+      await session.published;
+      expect(
+        session.event.tags,
+        contains(
+          predicate<List<dynamic>>(
+            (tag) =>
+                tag.length == 2 && tag[0] == 'p' && tag[1] == 'known-member',
+          ),
+        ),
+      );
+      session.accept();
+      await result;
+    },
+  );
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
@@ -84,6 +163,7 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    void Function(EventDeliveryState state)? onDeliveryState,
   }) {
     this.event = event;
     _published.complete();

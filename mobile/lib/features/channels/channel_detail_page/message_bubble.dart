@@ -23,6 +23,11 @@ class _MessageBubble extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final deliveryState = ref.watch(
+      localMessageDeliveryStatesProvider(
+        currentChannelId,
+      ).select((states) => states[message.id]),
+    );
     // Watch only this user's profile to avoid rebuilding on unrelated cache changes.
     final pk = message.pubkey.toLowerCase();
     final profile =
@@ -229,6 +234,21 @@ class _MessageBubble extends ConsumerWidget {
                           onMentionTap: (pubkey) =>
                               showUserProfileSheet(context, pubkey),
                         ),
+                        if (deliveryState != null)
+                          _DeliveryStateRow(
+                            state: deliveryState,
+                            onRetry:
+                                deliveryState ==
+                                    LocalMessageDeliveryState.failed
+                                ? () => ref
+                                      .read(
+                                        channelMessagesProvider(
+                                          currentChannelId,
+                                        ).notifier,
+                                      )
+                                      .retryLocalMessage(message.id)
+                                : null,
+                          ),
                         if (message.reactions.isNotEmpty)
                           ReactionRow(
                             messageId: message.id,
@@ -250,6 +270,43 @@ class _MessageBubble extends ConsumerWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _DeliveryStateRow extends StatelessWidget {
+  final LocalMessageDeliveryState state;
+  final VoidCallback? onRetry;
+
+  const _DeliveryStateRow({required this.state, this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (state) {
+      LocalMessageDeliveryState.sending => 'Sending…',
+      LocalMessageDeliveryState.unconfirmed => 'Unconfirmed',
+      LocalMessageDeliveryState.sent => 'Sent',
+      LocalMessageDeliveryState.failed => 'Failed',
+    };
+    final color = state == LocalMessageDeliveryState.failed
+        ? context.colors.error
+        : context.colors.onSurfaceVariant;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: Grid.quarter),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: context.textTheme.labelSmall?.copyWith(color: color),
+          ),
+          if (onRetry != null) ...[
+            const SizedBox(width: Grid.quarter),
+            TextButton(onPressed: onRetry, child: const Text('Retry')),
+          ],
+        ],
       ),
     );
   }

@@ -432,6 +432,142 @@ void main() {
     expect(session.state.status, SessionStatus.disconnected);
   });
 
+  test(
+    'queues a disconnected publish and dispatches it exactly once on reconnect',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          authProvider.overrideWith(() => _FakeAuthNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      await container.read(authProvider.future);
+      await pumpEventQueue();
+
+      final firstSocket = _testSocket();
+      session.debugAttachSocketForTest(firstSocket);
+      session.debugHandleDisconnected();
+
+      final publish = session.publish(_event());
+      expect(firstSocket.sentPayloads, isEmpty);
+
+      final replacementSocket = _testSocket();
+      session.debugAttachSocketForTest(replacementSocket);
+      await session.debugHandleConnected();
+
+      expect(replacementSocket.sentPayloads, hasLength(1));
+      expect(replacementSocket.sentPayloads.single.first, 'EVENT');
+
+      session.debugHandleSocketMessageForTest(['OK', _event().id, true, '']);
+      await expectLater(publish, completion(_event()));
+      expect(replacementSocket.sentPayloads, hasLength(1));
+    },
+  );
+
+  test(
+    'replays a dispatched ACK-lost event after a background interval beyond its acknowledgement timeout',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final session = RelaySessionNotifier(
+        socketFactory: _controlledSocketFactory(sockets),
+      );
+      final container = _authenticatedContainer(session, keychain.nsec);
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+
+      await container.read(authProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+      final event = _event();
+      final publish = session.publish(event);
+      final firstSocket = sockets.single;
+      expect(firstSocket.sentPayloads, hasLength(1));
+
+      session.onAppPaused();
+      await Future<void>.delayed(const Duration(seconds: 9));
+      session.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(2));
+      final replacementSocket = sockets.last;
+      replacementSocket.connectSuccessfully();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(replacementSocket.sentPayloads, hasLength(1));
+      expect(
+        (replacementSocket.sentPayloads.single[1]
+            as Map<String, dynamic>)['id'],
+        event.id,
+      );
+      session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
+      await expectLater(publish, completion(_event()));
+    },
+  );
+
+  test('same-tick resume then send dispatches one replacement event', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory: _controlledSocketFactory(sockets),
+    );
+    final container = _authenticatedContainer(session, keychain.nsec);
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+    sockets.single.connectSuccessfully();
+
+    session.debugHandleDisconnected();
+    session.onAppResumed();
+    final event = _event();
+    final publish = session.publish(event);
+    expect(sockets, hasLength(2));
+    expect(sockets.last.sentPayloads, isEmpty);
+
+    sockets.last.connectSuccessfully();
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets.last.sentPayloads, hasLength(1));
+    expect((sockets.last.sentPayloads.single[1] as Map)['id'], event.id);
+    session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
+    await expectLater(publish, completion(event));
+  });
+
+  test('same-tick send then resume dispatches one replacement event', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory: _controlledSocketFactory(sockets),
+    );
+    final container = _authenticatedContainer(session, keychain.nsec);
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+    sockets.single.connectSuccessfully();
+
+    session.debugHandleDisconnected();
+    final event = _event();
+    final publish = session.publish(event);
+    session.onAppResumed();
+    expect(sockets, hasLength(2));
+    expect(sockets.last.sentPayloads, isEmpty);
+
+    sockets.last.connectSuccessfully();
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets.last.sentPayloads, hasLength(1));
+    expect((sockets.last.sentPayloads.single[1] as Map)['id'], event.id);
+    session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
+    await expectLater(publish, completion(event));
+  });
+
   test('delivers the same live event to each matching subscription', () async {
     final session = RelaySessionNotifier();
     final firstEvents = <NostrEvent>[];
@@ -469,6 +605,117 @@ void main() {
     unsubscribeFirst();
     unsubscribeSecond();
   });
+
+  test(
+    'reconnect cancels an in-flight history request so it can be retried',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final session = RelaySessionNotifier(
+        socketFactory: _controlledSocketFactory(sockets),
+      );
+      final container = _authenticatedContainer(session, keychain.nsec);
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+      final first = session.fetchHistory(const NostrFilter(kinds: [39002]));
+      final firstExpectation = expectLater(first, throwsException);
+      await session.reconnect();
+      await firstExpectation;
+      expect(sockets, hasLength(2));
+      sockets.last.connectSuccessfully();
+      await Future<void>.delayed(Duration.zero);
+
+      final retry = session.fetchHistory(const NostrFilter(kinds: [39002]));
+      session.debugHandleMessage(['EOSE', 'h-2']);
+      await expectLater(retry, completion(isEmpty));
+    },
+  );
+
+  test(
+    'disconnect flushes mixed-age buffered events before reconnect',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final session = RelaySessionNotifier(
+        socketFactory: _controlledSocketFactory(sockets),
+      );
+      final container = _authenticatedContainer(session, keychain.nsec);
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+      final delivered = <String>[];
+      const filter = NostrFilter(kinds: EventKind.channelEventKinds, limit: 50);
+      final subscribe = session.subscribe(
+        filter,
+        (event) => delivered.add(event.id),
+      );
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+
+      session.debugHandleMessage([
+        'EVENT',
+        'l-1',
+        _eventWithId('old').toJson(),
+      ]);
+      session.debugHandleMessage([
+        'EVENT',
+        'l-1',
+        _eventWithId('new').toJson(),
+      ]);
+      sockets.single.disconnectWith(null);
+
+      expect(delivered, ['event-old', 'event-new']);
+      unsubscribe();
+    },
+  );
+
+  test(
+    'retains recent delivery keys across a bounded dedup rollover',
+    () async {
+      RelaySessionNotifier.debugRecentDeliveryKeyLimit = 3;
+      addTearDown(
+        () => RelaySessionNotifier.debugRecentDeliveryKeyLimit = 5000,
+      );
+      final session = RelaySessionNotifier();
+      final delivered = <String>[];
+      const filter = NostrFilter(
+        kinds: EventKind.channelEventKinds,
+        tags: {
+          '#h': [_channelId],
+        },
+        limit: 50,
+      );
+
+      final subscribe = session.subscribe(
+        filter,
+        (event) => delivered.add(event.id),
+      );
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+      for (var index = 1; index <= 4; index++) {
+        session.debugHandleMessage([
+          'EVENT',
+          'l-1',
+          _eventWithId('$index').toJson(),
+        ]);
+        session.debugFlushEventBuffer();
+      }
+
+      // A replay of the newest retained key must remain deduplicated after the
+      // oldest key was evicted; clearing the whole set would redeliver it.
+      session.debugHandleMessage(['EVENT', 'l-1', _eventWithId('4').toJson()]);
+      session.debugFlushEventBuffer();
+      expect(delivered, ['event-1', 'event-2', 'event-3', 'event-4']);
+      unsubscribe();
+    },
+  );
 
   test('flushes replay events before a post-EOSE query can begin', () async {
     final session = RelaySessionNotifier();
@@ -1143,6 +1390,8 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 class _ControlledRelaySocket extends RelaySocket {
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
+  final List<List<dynamic>> sentPayloads = [];
+  int disposeCalls = 0;
 
   _ControlledRelaySocket({
     required super.wsUrl,
@@ -1157,12 +1406,64 @@ class _ControlledRelaySocket extends RelaySocket {
   Future<void> connect() async {}
 
   @override
-  void dispose() {}
+  void dispose() {
+    disposeCalls++;
+  }
+
+  @override
+  void send(List<dynamic> payload) {
+    sentPayloads.add(payload);
+  }
 
   void connectSuccessfully() => _connected();
 
   void disconnectWith(Object? error) => _disconnected(error);
 }
+
+_ControlledRelaySocket _testSocket() => _ControlledRelaySocket(
+  wsUrl: 'wss://relay.example',
+  nsec: null,
+  onMessage: (_) {},
+  onConnected: () {},
+  onDisconnected: (_) {},
+);
+
+RelaySocketFactory _controlledSocketFactory(
+  List<_ControlledRelaySocket> sockets,
+) =>
+    ({
+      required wsUrl,
+      required nsec,
+      required onMessage,
+      required onConnected,
+      required onDisconnected,
+    }) {
+      final socket = _ControlledRelaySocket(
+        wsUrl: wsUrl,
+        nsec: nsec,
+        onMessage: onMessage,
+        onConnected: onConnected,
+        onDisconnected: onDisconnected,
+      );
+      sockets.add(socket);
+      return socket;
+    };
+
+ProviderContainer _authenticatedContainer(
+  RelaySessionNotifier session,
+  String nsec,
+) => ProviderContainer(
+  overrides: [
+    relaySessionProvider.overrideWith(() => session),
+    relayConfigProvider.overrideWith(
+      () => _FakeRelayConfigNotifier(
+        baseUrl: 'https://relay.example',
+        nsec: nsec,
+      ),
+    ),
+    authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+  ],
+);
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
 
@@ -1185,6 +1486,20 @@ NostrEvent _event({int createdAt = 20}) {
     createdAt: createdAt,
     kind: EventKind.streamMessageV2,
     tags: [
+      ['h', _channelId],
+    ],
+    content: 'hello',
+    sig: 'sig',
+  );
+}
+
+NostrEvent _eventWithId(String suffix) {
+  return NostrEvent(
+    id: 'event-$suffix',
+    pubkey: 'alice',
+    createdAt: 20,
+    kind: EventKind.streamMessageV2,
+    tags: const [
       ['h', _channelId],
     ],
     content: 'hello',

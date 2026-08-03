@@ -2,6 +2,44 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 
+enum LocalMessageDeliveryState { sending, unconfirmed, sent, failed }
+
+/// Delivery state for locally signed messages. This is deliberately separate
+/// from the event map so a confirmed message can remain visibly `sent` while a
+/// failed message retains its original signed event for idempotent retry.
+class LocalMessageDeliveryStatesNotifier
+    extends Notifier<Map<String, LocalMessageDeliveryState>> {
+  final String channelId;
+
+  LocalMessageDeliveryStatesNotifier(this.channelId);
+
+  @override
+  Map<String, LocalMessageDeliveryState> build() => const {};
+
+  void markSending(String eventId) =>
+      _set(eventId, LocalMessageDeliveryState.sending);
+
+  void markSent(String eventId) =>
+      _set(eventId, LocalMessageDeliveryState.sent);
+
+  void markUnconfirmed(String eventId) =>
+      _set(eventId, LocalMessageDeliveryState.unconfirmed);
+
+  void markFailed(String eventId) =>
+      _set(eventId, LocalMessageDeliveryState.failed);
+
+  void _set(String eventId, LocalMessageDeliveryState deliveryState) {
+    state = {...state, eventId: deliveryState};
+  }
+}
+
+final localMessageDeliveryStatesProvider =
+    NotifierProvider.family<
+      LocalMessageDeliveryStatesNotifier,
+      Map<String, LocalMessageDeliveryState>,
+      String
+    >(LocalMessageDeliveryStatesNotifier.new);
+
 /// Signed local messages whose publish has not yet been corroborated by an
 /// authoritative relay EVENT or query result.
 class PendingLocalMessagesNotifier extends Notifier<Map<String, NostrEvent>> {
