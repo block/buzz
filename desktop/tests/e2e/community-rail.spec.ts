@@ -510,13 +510,17 @@ test.describe("community rail", () => {
       const config = (
         window as Window & {
           __BUZZ_E2E__?: {
-            mock?: { channelsReadErrors?: (string | null)[] };
+            mock?: {
+              channelsReadError?: string;
+              channelsReadErrors?: (string | null)[];
+            };
           };
         }
       ).__BUZZ_E2E__;
       if (!config) throw new Error("missing E2E config");
       config.mock = {
         ...config.mock,
+        channelsReadError: "temporary channel read failure",
         channelsReadErrors: ["temporary channel read failure"],
       };
     });
@@ -554,17 +558,24 @@ test.describe("community rail", () => {
           }
         ).__BUZZ_E2E_CHANNELS_READ_PENDING__ === 1,
     );
-    await page.evaluate(async () => {
-      const invoke = (
-        window as Window & {
-          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
-            command: string,
-          ) => Promise<unknown>;
+    expect(
+      await page.evaluate(async () => {
+        const invoke = (
+          window as Window & {
+            __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+              command: string,
+            ) => Promise<unknown>;
+          }
+        ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+        if (!invoke) throw new Error("missing mock command seam");
+        try {
+          await invoke("get_channels");
+          return null;
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
         }
-      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
-      if (!invoke) throw new Error("missing mock command seam");
-      await invoke("get_channels");
-    });
+      }),
+    ).toBe("temporary channel read failure");
     expect(
       await page.evaluate(
         () =>
@@ -597,20 +608,28 @@ test.describe("community rail", () => {
         ).__BUZZ_E2E_RELEASE_CHANNELS_READ__?.() ?? 0,
     );
     expect(released).toBe(1);
-    await page.evaluate(async () => {
-      const testWindow = window as Window & {
-        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
-          command: string,
-        ) => Promise<unknown>;
-        __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
-      };
-      const invoke = testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
-      if (!invoke) throw new Error("missing mock command seam");
-      await invoke("get_channels");
-      if (testWindow.__BUZZ_E2E_CHANNELS_READ_PENDING__ !== 0) {
-        throw new Error("release left the channel-read latch armed");
-      }
-    });
+    expect(
+      await page.evaluate(async () => {
+        const testWindow = window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+          ) => Promise<unknown>;
+          __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+        };
+        const invoke = testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+        if (!invoke) throw new Error("missing mock command seam");
+        let message: string | null = null;
+        try {
+          await invoke("get_channels");
+        } catch (error) {
+          message = error instanceof Error ? error.message : String(error);
+        }
+        return {
+          message,
+          pending: testWindow.__BUZZ_E2E_CHANNELS_READ_PENDING__,
+        };
+      }),
+    ).toEqual({ message: "temporary channel read failure", pending: 0 });
     await expect
       .poll(() =>
         page.evaluate(
@@ -629,6 +648,32 @@ test.describe("community rail", () => {
         }, COMMUNITY_B.id),
       )
       .toEqual({ kind: "channel", channelId: "general" });
+    await page.evaluate(async () => {
+      const testWindow = window as Window & {
+        __BUZZ_E2E__?: {
+          mock?: { channelsReadError?: string };
+        };
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      };
+      const config = testWindow.__BUZZ_E2E__;
+      const invalidateChannels = testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__;
+      if (!config?.mock) throw new Error("missing E2E mock config");
+      if (!invalidateChannels) {
+        throw new Error("missing channel invalidation seam");
+      }
+      config.mock.channelsReadError = undefined;
+      await invalidateChannels();
+    });
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "home" });
   });
 
   test("does not restore a remembered destination on cold boot", async ({
