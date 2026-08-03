@@ -476,6 +476,10 @@ void main() {
         ),
       );
       await _expandComposer(tester);
+      final focusNode = tester
+          .widget<TextField>(find.byType(TextField))
+          .focusNode!;
+      expect(focusNode.hasFocus, isTrue);
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
       await tester.pump();
@@ -484,6 +488,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsNothing);
+      expect(focusNode.hasFocus, isFalse);
       final compactDecoration =
           tester
                   .widget<Container>(
@@ -494,6 +499,14 @@ void main() {
       expect(
         compactDecoration.borderRadius,
         BorderRadius.circular(Radii.dialog + Grid.quarter),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+        isTrue,
       );
     });
 

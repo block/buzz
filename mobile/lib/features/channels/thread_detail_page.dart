@@ -117,6 +117,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final didJumpToInitialMessage = useRef(false);
     final followsThreadTail = useRef(false);
     final pendingTailAlignment = useRef<double?>(null);
+    final tailRealignmentQueued = useRef(false);
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
@@ -284,6 +285,37 @@ class ThreadDetailPage extends HookConsumerWidget {
         );
       });
     }
+
+    // Composer size changes and keyboard metrics changes are independent:
+    // the dock grows first, then the Scaffold's viewport shrinks once the
+    // keyboard appears. Re-align after that latter layout pass too, but only
+    // while the user was already following the thread tail.
+    void realignThreadTailAfterMetricsChange() {
+      final shouldFollowTail = followsThreadTail.value || threadTailIsVisible();
+      if (!shouldFollowTail || tailRealignmentQueued.value) return;
+      followsThreadTail.value = true;
+      tailRealignmentQueued.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        tailRealignmentQueued.value = false;
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        final lastIndex = replies.isEmpty
+            ? headIndex
+            : indexForReply(replies.length - 1);
+        itemScrollController.scrollTo(
+          index: lastIndex,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    }
+
+    useEffect(() {
+      final observer = _ThreadTailMetricsObserver(
+        onMetricsChanged: realignThreadTailAfterMetricsChange,
+      );
+      WidgetsBinding.instance.addObserver(observer);
+      return () => WidgetsBinding.instance.removeObserver(observer);
+    }, [itemScrollController, replies.length]);
 
     // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
@@ -659,6 +691,15 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
       ),
     );
   }
+}
+
+class _ThreadTailMetricsObserver with WidgetsBindingObserver {
+  final VoidCallback onMetricsChanged;
+
+  _ThreadTailMetricsObserver({required this.onMetricsChanged});
+
+  @override
+  void didChangeMetrics() => onMetricsChanged();
 }
 
 class _ThreadMessage extends ConsumerWidget {

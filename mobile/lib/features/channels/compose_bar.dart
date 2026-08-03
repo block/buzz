@@ -188,11 +188,17 @@ class ComposeBar extends HookConsumerWidget {
     useEffect(() {
       final observer = _ComposerKeyboardMetricsObserver(
         view: appView,
-        onKeyboardHidden: collapseComposer,
+        onKeyboardHidden: () {
+          collapseComposer();
+          // Android Back and iOS dismissal gestures can hide the keyboard
+          // without changing Flutter focus. Clear it as well so reopening the
+          // compact capsule establishes a new text-input connection.
+          focusNode.unfocus();
+        },
       );
       WidgetsBinding.instance.addObserver(observer);
       return () => WidgetsBinding.instance.removeObserver(observer);
-    }, [appView]);
+    }, [appView, focusNode]);
 
     final resolvedHint =
         hintText ??

@@ -2748,6 +2748,18 @@ void main() {
         tester.getBottomLeft(latestReply).dy,
         lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
       );
+
+      // The dock size change above is separate from the later Scaffold
+      // viewport resize caused by the keyboard. Keep following the tail after
+      // that metrics change too.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.reset);
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
     });
 
     testWidgets(
