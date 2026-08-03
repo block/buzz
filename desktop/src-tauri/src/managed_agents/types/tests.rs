@@ -694,3 +694,12 @@ fn mint_rejects_out_of_range_input_parallelism() {
         "input-branch error must not blame the definition: {err}"
     );
 }
+
+#[test]
+fn managed_agent_parallelism_defaults_to_one() {
+    assert_eq!(
+        super::DEFAULT_AGENT_PARALLELISM,
+        1,
+        "one idle managed identity must not eagerly reserve multiple ACP runtimes",
+    );
+}
