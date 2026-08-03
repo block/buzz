@@ -722,11 +722,28 @@ mod tests {
 
     #[tokio::test]
     async fn classify_body_error_detects_real_tower_http_timeout_by_type() {
-        // Drive a genuine tower_http::timeout::TimeoutBody over a body that
-        // never produces a frame, so the classified error is the real typed
-        // TimeoutError — not a hand-rolled stand-in — wrapped the way axum
-        // wraps body errors in production.
+        // Drive a genuine tower_http::timeout::TimeoutBody so the classified
+        // error is the real typed TimeoutError — not a hand-rolled stand-in —
+        // wrapped the way axum wraps body errors in production.
         use crate::error::{classify_body_error, BodyErrorKind};
+
+        let wrapped = axum::Error::new(real_tower_http_timeout_error().await);
+        assert_eq!(
+            classify_body_error(&wrapped),
+            BodyErrorKind::IdleTimeout,
+            "typed TimeoutError must classify as IdleTimeout through the axum::Error wrapping"
+        );
+
+        // Control: an unrelated wrapped error must NOT classify as a timeout.
+        let other = axum::Error::new(std::io::Error::other("connection reset"));
+        assert_eq!(classify_body_error(&other), BodyErrorKind::Other);
+    }
+
+    /// Produce a genuine `tower_http::timeout::TimeoutError` by driving a
+    /// real `TimeoutBody` over a body that never yields a frame — the exact
+    /// boxed error shape the media router's `RequestBodyTimeoutLayer`
+    /// produces when a client withholds body bytes past the idle deadline.
+    async fn real_tower_http_timeout_error() -> Box<dyn std::error::Error + Send + Sync> {
         use http_body_util::BodyExt;
 
         struct PendingBody;
@@ -747,22 +764,83 @@ mod tests {
             std::time::Duration::from_millis(5),
             PendingBody,
         ));
-        let timeout_error = body
-            .frame()
+        body.frame()
             .await
             .expect("timeout should produce a frame result")
-            .expect_err("withheld body must error, not yield data");
+            .expect_err("withheld body must error, not yield data")
+    }
 
-        let wrapped = axum::Error::new(timeout_error);
-        assert_eq!(
-            classify_body_error(&wrapped),
-            BodyErrorKind::IdleTimeout,
-            "typed TimeoutError must classify as IdleTimeout through the axum::Error wrapping"
+    #[tokio::test]
+    async fn video_stream_idle_timeout_maps_to_request_body_timeout_not_500() {
+        // Pins the timeout *conversion* chain at the video-stream boundary:
+        // a real tower_http TimeoutError, wrapped the way axum wraps body
+        // errors in production, must survive `axum::Error →
+        // classify_body_error → io::ErrorKind::TimedOut → the StreamReader
+        // read loop` and surface as RequestBodyTimeout / 408 — never as
+        // Io / 500, which would page operators for a storage failure that
+        // never happened.
+        //
+        // Honest scope (measured by Sami's mutation pass, M3): this test
+        // proves the conversion, NOT the video routing. The read loop
+        // returns on the error before `looks_like_mp4_iso_bmff` ever runs,
+        // so the chunk content is causally irrelevant here — the sniff
+        // decision (`should_stream_as_video`) lives in the relay's
+        // `upload_blob`, upstream of this entry point, and is not covered
+        // by this test. The MP4-shaped first chunk only makes the stream
+        // realistic: bytes flowed, then the client stalled mid-body.
+        use axum::response::IntoResponse;
+
+        let mp4_prefix: &[u8] = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42";
+        let timeout_error = real_tower_http_timeout_error().await;
+        let body_stream = futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(mp4_prefix)),
+            Err(axum::Error::new(timeout_error)),
+        ]);
+
+        // Storage/auth are constructed but never reached: the body error
+        // fires inside step 1 (stream-to-temp-file), before the MP4 check,
+        // auth verification, or any storage call. Static dummy creds keep
+        // `MediaStorage::new` off the AWS credential chain (which fails on
+        // hosts without AWS creds), and the unroutable endpoint guarantees
+        // any accidental network use fails loudly instead of hanging.
+        let config = MediaConfig {
+            s3_endpoint: "http://127.0.0.1:1".to_string(),
+            s3_access_key: "test".to_string(),
+            s3_secret_key: "test".to_string(),
+            s3_bucket: "unused".to_string(),
+            ..test_config()
+        };
+        let storage = MediaStorage::new(&config).expect("static-cred storage client");
+        let ctx = buzz_core::tenant::TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+            "media.example.com",
         );
+        let keys = nostr::Keys::generate();
+        let auth_event = nostr::EventBuilder::new(nostr::Kind::from(24242), "Upload buzz-media")
+            .sign_with_keys(&keys)
+            .expect("signable auth event");
 
-        // Control: an unrelated wrapped error must NOT classify as a timeout.
-        let other = axum::Error::new(std::io::Error::other("connection reset"));
-        assert_eq!(classify_body_error(&other), BodyErrorKind::Other);
+        let result = process_video_upload(
+            &storage,
+            &config,
+            &ctx,
+            &auth_event,
+            body_stream,
+            None,
+            None,
+        )
+        .await;
+
+        let error = result.expect_err("a timed-out video stream must fail the upload");
+        assert!(
+            matches!(error, MediaError::RequestBodyTimeout),
+            "post-sniff video-stream timeout must map to RequestBodyTimeout, got {error:?}"
+        );
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            "and it must answer the client with 408"
+        );
     }
 
     #[test]
