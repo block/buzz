@@ -40,9 +40,10 @@ const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// slow links are legitimate (the video auth window is 3600s precisely so
 /// they can finish), so media must NOT get a tight wall-clock deadline like
 /// [`API_REQUEST_TIMEOUT`] — a 500 MiB body under such a bound would
-/// require a minimum sustained uplink and cut off real slow uploads. Any
-/// progressing upload delivers a byte well inside 60s; only a withheld body
-/// (the parked-task attack) trips it.
+/// require a minimum sustained uplink and cut off real slow uploads. A
+/// progressing upload delivers a byte well inside 60s and completes as long
+/// as it finishes within [`MEDIA_UPLOAD_CEILING`]; only a withheld body
+/// (the parked-task attack) trips this bound.
 const MEDIA_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Wall-clock ceiling on a media *upload* request's whole service future.
@@ -65,13 +66,20 @@ const MEDIA_UPLOAD_CEILING: Duration = Duration::from_secs(3600);
 /// Deadline for media *read* routes (`GET`/`HEAD /media/{sha256_ext}`).
 /// These carry no request body, so the idle body timeout is inapplicable —
 /// without their own bound, a hung storage read would park a task forever
-/// (the same shape as #4424, on the read side; the handlers await several
-/// sequential storage calls, so rust-s3's per-call 60s default is not a
-/// request bound). Wall-clock is the correct instrument here and can be
-/// tight: it only covers until response headers are produced — a streaming
-/// blob download escapes it once headers are sent, so large/slow downloads
-/// are never truncated.
-const MEDIA_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// (the same shape as #4424, on the read side). Wall-clock is the correct
+/// instrument here: it only covers until response headers are produced — a
+/// streaming blob download escapes it once headers are sent, so large/slow
+/// downloads are never truncated.
+///
+/// 300s preserves the read bound these routes already had when the previous
+/// shared media deadline shipped — splitting uploads off must not silently
+/// tighten reads. It also covers the multi-call pre-header path: the read
+/// handler awaits several *sequential* storage calls before headers (sidecar
+/// MIME read, ext cross-check, HEAD, then GET/range), each independently
+/// allowed up to 60s by rust-s3's per-call default, so a 60s request
+/// deadline could cancel a sequence whose individual calls are all within
+/// their own dependency budgets.
+const MEDIA_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Apply a sub-router's request-body limit with a request deadline **outside**
 /// it, so a stalled body is cancelled by the timeout instead of sitting inside
@@ -99,7 +107,8 @@ where
 
 /// Apply the media *upload* sub-router's request-body limit plus an
 /// **idle-based** body timeout ([`RequestBodyTimeoutLayer`]): the deadline
-/// resets on every body frame, so a slow-but-progressing upload completes
+/// resets on every body frame, so a slow-but-progressing upload within the
+/// wall-clock ceiling completes
 /// while a withheld body still fails closed. Unlike [`with_request_deadline`]
 /// the layer does not synthesize the response itself — the timeout surfaces
 /// as a body read error ([`tower_http::timeout::TimeoutError`] in the source
@@ -799,13 +808,16 @@ mod tests {
     }
 
     /// A test router shaped like the production media router **after the
-    /// upload/read split and merge**: `/upload` (POST, streams its request
-    /// body and classifies read errors exactly the way `upload_blob` does)
-    /// is wrapped by [`with_media_body_guards`]; `/hang` (GET, no request
-    /// body, stalls without ever polling one — a hung storage read) is
-    /// wrapped by [`with_request_deadline`]; the two are merged like
-    /// `build_router` does. `received` counts body bytes the upload handler
-    /// actually observed.
+    /// upload/read split and merge**: `/upload` (POST) and the legacy
+    /// `/media/upload` alias (PUT, as in production — the literal that must
+    /// keep winning over the read router's `/media/{sha256_ext}` param
+    /// capture) stream their request body and classify read errors the way
+    /// the test handler below does, wrapped by [`with_media_body_guards`];
+    /// `/hang` and `GET /media/{sha256_ext}` (no request body, stall without
+    /// ever polling one — a hung storage read) are wrapped by
+    /// [`with_request_deadline`]; the two are merged like `build_router`
+    /// does. `received` counts body bytes the upload handlers actually
+    /// observed.
     fn media_guards_test_router(
         idle_timeout: Duration,
         upload_ceiling: Duration,
@@ -813,44 +825,44 @@ mod tests {
         body_limit: usize,
         received: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Router {
-        let upload_router = Router::new().route(
-            "/upload",
-            axum::routing::post(move |request: axum::extract::Request| {
-                let received = received.clone();
-                async move {
-                    use futures_util::StreamExt;
-                    let mut stream = request.into_body().into_data_stream();
-                    while let Some(next) = stream.next().await {
-                        match next {
-                            Ok(chunk) => {
-                                received.fetch_add(chunk.len(), Ordering::SeqCst);
-                            }
-                            Err(error) => {
-                                return match buzz_media::classify_body_error(&error) {
-                                    buzz_media::BodyErrorKind::IdleTimeout => {
-                                        StatusCode::REQUEST_TIMEOUT
-                                    }
-                                    buzz_media::BodyErrorKind::LengthLimit => {
-                                        StatusCode::PAYLOAD_TOO_LARGE
-                                    }
-                                    buzz_media::BodyErrorKind::Other => {
-                                        StatusCode::INTERNAL_SERVER_ERROR
-                                    }
-                                };
-                            }
+        let upload_handler = move |request: axum::extract::Request| {
+            let received = received.clone();
+            async move {
+                use futures_util::StreamExt;
+                let mut stream = request.into_body().into_data_stream();
+                while let Some(next) = stream.next().await {
+                    match next {
+                        Ok(chunk) => {
+                            received.fetch_add(chunk.len(), Ordering::SeqCst);
+                        }
+                        Err(error) => {
+                            return match buzz_media::classify_body_error(&error) {
+                                buzz_media::BodyErrorKind::IdleTimeout => {
+                                    StatusCode::REQUEST_TIMEOUT
+                                }
+                                buzz_media::BodyErrorKind::LengthLimit => {
+                                    StatusCode::PAYLOAD_TOO_LARGE
+                                }
+                                buzz_media::BodyErrorKind::Other => {
+                                    StatusCode::INTERNAL_SERVER_ERROR
+                                }
+                            };
                         }
                     }
-                    StatusCode::OK
                 }
-            }),
-        );
-        let read_router = Router::new().route(
-            "/hang",
-            get(|| async {
-                std::future::pending::<()>().await;
                 StatusCode::OK
-            }),
-        );
+            }
+        };
+        let upload_router = Router::new()
+            .route("/upload", axum::routing::post(upload_handler.clone()))
+            .route("/media/upload", axum::routing::put(upload_handler));
+        let hang_handler = || async {
+            std::future::pending::<()>().await;
+            StatusCode::OK
+        };
+        let read_router = Router::new()
+            .route("/hang", get(hang_handler))
+            .route("/media/{sha256_ext}", get(hang_handler));
         with_media_body_guards(upload_router, body_limit, idle_timeout, upload_ceiling)
             .merge(with_request_deadline(read_router, body_limit, read_timeout))
     }
@@ -1000,6 +1012,56 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "read deadline must fire at its own bound, not the upload ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_media_upload_alias_stays_under_the_upload_guards() {
+        // Route-precedence regression (Sami's alias seam): `/media/upload`
+        // lives in the *upload* sub-router while `/media/{sha256_ext}` lives
+        // in the *read* sub-router — two routers sharing a path prefix,
+        // merged. If axum ever resolved the literal under the param capture,
+        // the alias would inherit the tight read wall-clock and the commit-3
+        // regression would survive on exactly one route, invisible to tests
+        // that only use `/upload`. The read deadline here is deliberately
+        // TIGHTER than the total upload duration so misrouting is fatal to
+        // the test, not silent.
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let router = media_guards_test_router(
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+            64 * 1024,
+            received.clone(),
+        );
+
+        // 10 x 100 bytes, 20ms apart: total ~180ms — past the 50ms read
+        // deadline, every gap inside the 50ms idle bound.
+        let request = Request::put("/media/upload")
+            .body(paced_body(10, 100, Duration::from_millis(20)))
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a slow-but-progressing PUT /media/upload must complete under the \
+             upload guards, not die at the read deadline"
+        );
+        assert_eq!(received.load(Ordering::SeqCst), 1000);
+
+        // Discriminator: GET on the literal must be 405 (method not allowed
+        // on the upload router's literal route), NOT a 408 from the read
+        // deadline — proving the static literal still wins over the read
+        // router's `{sha256_ext}` param capture. The status alone
+        // discriminates: the param route's stalling handler can only ever
+        // produce 408.
+        let request = Request::get("/media/upload").body(Body::empty()).unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "GET /media/upload must resolve to the upload router's literal \
+             (405), not the read router's param capture"
         );
     }
 
