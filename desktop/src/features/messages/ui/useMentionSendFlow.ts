@@ -8,6 +8,7 @@ import {
   useCreateChannelManagedAgentMutation,
   useManagedAgentsQuery,
   useProvisionChannelManagedAgentMutation,
+  useRelayAgentsQuery,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
@@ -196,6 +197,7 @@ export function useMentionSendFlow({
     useProvisionChannelManagedAgentMutation(channelId);
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
+  const relayAgentsQuery = useRelayAgentsQuery();
   const startAgentMutation = useStartManagedAgentMutation();
 
   const getManagedAgentsByPubkey = React.useCallback(async () => {
@@ -327,6 +329,27 @@ export function useMentionSendFlow({
         }
         seenPersonaIds.add(persona.id);
 
+        // A live relay agent with this name already exists — it may be hosted
+        // by another desktop, where this machine cannot (and must not) spawn a
+        // second instance. Mention the live agent instead of instantiating a
+        // new one from the persona. Prefer an agent already in this channel.
+        const needle = displayName.trim().toLowerCase();
+        const livePubkeys = (relayAgentsQuery.data ?? [])
+          .filter((agent) => agent.name.trim().toLowerCase() === needle)
+          .map((agent) => normalizePubkey(agent.pubkey));
+        if (livePubkeys.length > 0) {
+          const preferred =
+            livePubkeys.find((pubkey) =>
+              mentions.memberPubkeys.has(normalizePubkey(pubkey)),
+            ) ?? livePubkeys[0];
+          const pubkey = normalizePubkey(preferred);
+          pubkeys.push(pubkey);
+          mentions.registerMentionPubkey(displayName, pubkey, {
+            isAgent: true,
+          });
+          continue;
+        }
+
         const { runtime } = resolvePersonaRuntime(
           persona.runtime,
           runtimes,
@@ -381,6 +404,8 @@ export function useMentionSendFlow({
       channelType,
       getAvailableRuntimes,
       mentions.extractMentionPersonas,
+      mentions.memberPubkeys,
+      relayAgentsQuery.data,
       mentions.registerMentionPubkey,
       onPrepareSendChannel,
       provisionPersonaAgentMutation,
