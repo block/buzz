@@ -59,6 +59,7 @@ import type {
   RawInstallRuntimeResult,
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
+import type { RawGooseUpdateStatus } from "@/shared/api/tauriGooseUpdates";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type TestIdentity = {
@@ -213,6 +214,8 @@ type E2eConfig = {
     /** Catalog responses for successive discovery calls. The final response repeats. */
     acpRuntimesCatalogSequence?: RawAcpRuntimeCatalogEntry[][];
     acpRuntimesDelayMs?: number;
+    /** Goose update-check responses in call order. The final response repeats. */
+    gooseUpdateStatuses?: RawGooseUpdateStatus[];
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
@@ -7163,6 +7166,7 @@ function withMockRuntimeConfigMetadata(
 }
 
 let runtimeCatalogDiscoveryCount = 0;
+let gooseUpdateStatusCallCount = 0;
 let mockInstallCompleted = false;
 let mockConnectCompleted = false;
 
@@ -7289,6 +7293,22 @@ async function handleDiscoverAcpRuntimes(
   return mergeMockCustomHarnesses(
     defaultCatalog.map(withMockRuntimeConfigMetadata),
   );
+}
+
+function handleCheckGooseUpdateStatus(
+  config: E2eConfig | undefined,
+): RawGooseUpdateStatus {
+  const statuses = config?.mock?.gooseUpdateStatuses;
+  if (!statuses?.length) {
+    return {
+      status: "up_to_date",
+      installed_version: "1.45.0",
+      latest_version: "1.45.0",
+    };
+  }
+  const index = Math.min(gooseUpdateStatusCallCount, statuses.length - 1);
+  gooseUpdateStatusCallCount += 1;
+  return statuses[index];
 }
 
 async function handleDiscoverAcpAuthMethods(
@@ -11044,6 +11064,8 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
+      case "check_goose_update_status":
+        return handleCheckGooseUpdateStatus(activeConfig);
       case "save_custom_harness":
         return handleSaveCustomHarness(
           payload as Parameters<typeof handleSaveCustomHarness>[0],

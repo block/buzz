@@ -8,7 +8,9 @@ import {
   entryStatusLabel,
   filterCatalogEntries,
   groupCatalogEntries,
+  isConfirmedGooseUpdateAvailable,
   isYourHarnessEntry,
+  runtimeRowSetupAction,
   stableRowOrder,
   yourHarnessEntries,
 } from "./harnessCatalogLogic.ts";
@@ -396,5 +398,86 @@ describe("catalogPrimaryAction", () => {
 
   it("none when nothing is actionable", () => {
     assert.deepEqual(catalogPrimaryAction(entry({})), { kind: "none" });
+  });
+});
+
+// ── runtimeRowSetupAction ───────────────────────────────────────────────────
+
+describe("runtimeRowSetupAction", () => {
+  it("offers Update for available Goose only when a newer release is confirmed", () => {
+    assert.equal(
+      runtimeRowSetupAction(
+        entry({
+          id: "goose",
+          availability: "available",
+          canAutoInstall: true,
+        }),
+        true,
+      ),
+      "Update",
+    );
+  });
+
+  it("does not offer Update for current or unchecked Goose", () => {
+    const goose = entry({
+      id: "goose",
+      availability: "available",
+      canAutoInstall: true,
+    });
+
+    assert.equal(runtimeRowSetupAction(goose), null);
+    assert.equal(runtimeRowSetupAction(goose, false), null);
+  });
+
+  it("does not offer Update for other available runtimes", () => {
+    assert.equal(
+      runtimeRowSetupAction(
+        entry({
+          id: "claude",
+          availability: "available",
+          canAutoInstall: true,
+        }),
+        true,
+      ),
+      null,
+    );
+  });
+
+  it("keeps Install for missing Goose", () => {
+    assert.equal(
+      runtimeRowSetupAction(
+        entry({
+          id: "goose",
+          availability: "not_installed",
+          canAutoInstall: true,
+        }),
+      ),
+      "Install",
+    );
+  });
+});
+
+describe("isConfirmedGooseUpdateAvailable", () => {
+  it("returns true only for a settled update-available result", () => {
+    assert.equal(
+      isConfirmedGooseUpdateAvailable("update_available", false, false),
+      true,
+    );
+    assert.equal(
+      isConfirmedGooseUpdateAvailable("up_to_date", false, false),
+      false,
+    );
+    assert.equal(isConfirmedGooseUpdateAvailable(null, false, false), false);
+  });
+
+  it("hides stale availability while checking or after an error", () => {
+    assert.equal(
+      isConfirmedGooseUpdateAvailable("update_available", true, false),
+      false,
+    );
+    assert.equal(
+      isConfirmedGooseUpdateAvailable("update_available", false, true),
+      false,
+    );
   });
 });

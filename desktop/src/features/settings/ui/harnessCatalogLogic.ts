@@ -154,6 +154,32 @@ export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
 }
 
 /**
+ * Optional setup action rendered directly on a runtime row.
+ *
+ * Goose is the only ready runtime with an optional CLI update. The action is
+ * offered only after the Settings-only check confirms a newer stable release.
+ */
+export function runtimeRowSetupAction(
+  entry: AcpRuntimeCatalogEntry,
+  gooseUpdateAvailable = false,
+): "Install" | "Update" | null {
+  if (!entry.canAutoInstall || entry.nodeRequired) return null;
+  if (entry.availability === "available") {
+    return entry.id === "goose" && gooseUpdateAvailable ? "Update" : null;
+  }
+  return entry.availability === "adapter_outdated" ? "Update" : "Install";
+}
+
+/** True only for a completed, successful check that found a newer Goose. */
+export function isConfirmedGooseUpdateAvailable(
+  status: "up_to_date" | "update_available" | null | undefined,
+  isFetching: boolean,
+  isError: boolean,
+): boolean {
+  return status === "update_available" && !isFetching && !isError;
+}
+
+/**
  * Body copy for the confirmation dialog shown before replacing an
  * already-installed (but outdated) adapter.
  *

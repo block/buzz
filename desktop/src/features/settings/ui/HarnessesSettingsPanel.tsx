@@ -6,6 +6,7 @@ import {
   useAcpRuntimesQuery,
   useGitBashPrerequisiteQuery,
 } from "@/features/agents/hooks";
+import { useGooseUpdateStatusQuery } from "@/features/agents/gooseUpdateHooks";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -13,7 +14,11 @@ import { SectionHeader } from "@/shared/ui/PageHeader";
 
 import { HarnessCatalogDialog } from "./HarnessCatalogDialog";
 import { HarnessRow } from "./HarnessRow";
-import { stableRowOrder, yourHarnessEntries } from "./harnessCatalogLogic";
+import {
+  isConfirmedGooseUpdateAvailable,
+  stableRowOrder,
+  yourHarnessEntries,
+} from "./harnessCatalogLogic";
 
 function GitBashCard({
   prerequisite,
@@ -86,6 +91,17 @@ function GitBashCard({
 export function HarnessesSettingsPanel() {
   const runtimesQuery = useAcpRuntimesQuery();
   const gitBashQuery = useGitBashPrerequisiteQuery();
+  const gooseAvailable = (runtimesQuery.data ?? []).some(
+    (runtime) => runtime.id === "goose" && runtime.availability === "available",
+  );
+  const gooseUpdateQuery = useGooseUpdateStatusQuery({
+    enabled: gooseAvailable,
+  });
+  const isGooseUpdateAvailable = isConfirmedGooseUpdateAvailable(
+    gooseUpdateQuery.data?.status,
+    gooseUpdateQuery.isFetching,
+    gooseUpdateQuery.isError,
+  );
   const [catalogOpen, setCatalogOpen] = React.useState(false);
   // Incremented each time the user clicks "Check again" so HarnessRow
   // useEffect clears stale install results from before the refresh.
@@ -107,7 +123,7 @@ export function HarnessesSettingsPanel() {
       .filter((e): e is AcpRuntimeCatalogEntry => e !== undefined);
   }, [entries]);
 
-  const isRefreshing = runtimesQuery.isFetching;
+  const isRefreshing = runtimesQuery.isFetching || gooseUpdateQuery.isFetching;
 
   return (
     <section className="min-w-0 space-y-4" data-testid="settings-harnesses">
@@ -122,6 +138,9 @@ export function HarnessesSettingsPanel() {
               setResetEpoch((e) => e + 1);
               void runtimesQuery.refetch();
               void gitBashQuery.refetch();
+              if (gooseAvailable) {
+                void gooseUpdateQuery.refetch();
+              }
             }}
             size="sm"
             type="button"
@@ -173,6 +192,9 @@ export function HarnessesSettingsPanel() {
             <div className="space-y-3" data-testid="doctor-runtime-list">
               {rows.map((runtime) => (
                 <HarnessRow
+                  isGooseUpdateAvailable={
+                    runtime.id === "goose" && isGooseUpdateAvailable
+                  }
                   key={runtime.id}
                   resetEpoch={resetEpoch}
                   runtime={runtime}

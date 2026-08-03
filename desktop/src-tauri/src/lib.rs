@@ -725,6 +725,7 @@ pub fn run() {
             discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,
+            check_goose_update_status,
             install_acp_runtime,
             save_custom_harness,
             delete_custom_harness,

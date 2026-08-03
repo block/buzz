@@ -131,6 +131,7 @@ export default defineConfig({
         "**/observer-archive-policy.spec.ts",
         "**/harness-management.spec.ts",
         "**/harness-catalog-screenshots.spec.ts",
+        "**/goose-update-screenshots.spec.ts",
         "**/inline-custom-harness.spec.ts",
         "**/where-to-run-config.spec.ts",
         "**/huddle-transcription.spec.ts",

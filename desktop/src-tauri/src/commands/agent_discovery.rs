@@ -11,6 +11,7 @@ use crate::{
     relay::query_relay,
 };
 
+mod cli_setup;
 mod post_install_verification;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -316,16 +317,12 @@ fn install_acp_runtime_blocking(
     // Today every entry in `cli_install_commands` is a curl-pipe; npm-backed
     // adapter installs live in Phase 2 below where they are rewritten to a
     // Buzz-private prefix before execution.
-    if let Some(cli) = runtime.underlying_cli {
-        if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd, &reporter);
-                let success = result.success;
-                steps.push(result);
-                if !success {
-                    return Ok(reporter.failed(steps));
-                }
-            }
+    for (step, command) in cli_setup::plan(runtime) {
+        let result = run_install_command_with_retry(step, &command, &reporter);
+        let success = result.success;
+        steps.push(result);
+        if !success {
+            return Ok(reporter.failed(steps));
         }
     }
 
