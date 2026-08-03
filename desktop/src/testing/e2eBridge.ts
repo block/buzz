@@ -507,6 +507,11 @@ type E2eConfig = {
      * returning a catalog.
      */
     discoverAgentModelsError?: string;
+    // Backend provider mocks for the create-agent "Run on" section. See
+    // tests/helpers/bridge.ts:MockBridgeOptions for semantics.
+    backendProviders?: Array<{ id: string; binaryPath: string }>;
+    backendProviderProbeResult?: Record<string, unknown>;
+    backendProviderProbeDelayMs?: number;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -11064,9 +11069,22 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "discover_backend_providers":
-        return [];
-      case "probe_backend_provider":
-        return { ok: false, error: "mock: no providers available" };
+        return activeConfig?.mock?.backendProviders ?? [];
+      case "probe_backend_provider": {
+        const probeDelayMs =
+          activeConfig?.mock?.backendProviderProbeDelayMs ?? 0;
+        if (probeDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, probeDelayMs),
+          );
+        }
+        return (
+          activeConfig?.mock?.backendProviderProbeResult ?? {
+            ok: false,
+            error: "mock: no providers available",
+          }
+        );
+      }
       case "discover_managed_agent_prereqs":
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
