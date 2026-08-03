@@ -214,7 +214,7 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
   );
 });
 
-test("shouldHideAgentFromMentions: shows member agents with unknown invocability (not in directory)", () => {
+test("shouldHideAgentFromMentions: shows remote member agents without local managed cards when invocability is unknown", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
