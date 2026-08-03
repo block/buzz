@@ -10,6 +10,7 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+mod sibling_auth;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -43,6 +44,7 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use sibling_auth::{OwnerCache, SiblingAuthorization};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -128,11 +130,11 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
             match buzz_sdk::nip_oa::verify_auth_tag(&auth_tag, &agent_pk) {
                 Ok(owner_pk) => {
                     let owner_hex = owner_pk.to_hex().to_ascii_lowercase();
-                    tracing::info!("owner resolved from BUZZ_AUTH_TAG: {owner_hex}");
+                    tracing::info!("owner authorization resolved from configured attestation");
                     return Some(owner_hex);
                 }
-                Err(e) => {
-                    tracing::warn!("BUZZ_AUTH_TAG verification failed: {e} — falling back");
+                Err(_) => {
+                    tracing::warn!("configured owner authorization proof rejected — falling back");
                 }
             }
         }
@@ -140,49 +142,6 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
 
     // Fall back to --agent-owner config.
     config.agent_owner.clone()
-}
-
-/// Cache for the agent's owner pubkey.
-///
-/// Owner is now provided via `--agent-owner` config flag (no REST lookup).
-/// Cache for the agent's owner pubkey + sibling lookups.
-///
-/// Siblings are other agents whose NIP-OA auth tag proves the same owner.
-/// Lookup results are cached for the process lifetime (attestations are immutable).
-struct OwnerCache {
-    pubkey: Option<String>,
-    /// author_hex → is_sibling (true = same owner, false = not)
-    siblings: std::sync::Mutex<HashMap<String, bool>>,
-}
-
-impl OwnerCache {
-    fn new(initial: Option<String>) -> Self {
-        Self {
-            pubkey: initial,
-            siblings: std::sync::Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Return the cached owner pubkey.
-    fn get(&self) -> Option<&str> {
-        self.pubkey.as_deref()
-    }
-
-    /// Check if author is a known sibling (cached result).
-    fn is_known_sibling(&self, author: &str) -> Option<bool> {
-        self.siblings.lock().ok()?.get(author).copied()
-    }
-
-    /// Cache a sibling lookup result.
-    fn cache_sibling(&self, author: String, is_sibling: bool) {
-        if let Ok(mut map) = self.siblings.lock() {
-            // Cap at 256 entries to prevent unbounded growth.
-            if map.len() >= 256 {
-                map.clear();
-            }
-            map.insert(author, is_sibling);
-        }
-    }
 }
 
 /// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
@@ -193,26 +152,107 @@ async fn is_owner_or_sibling(
     author: &str,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> SiblingAuthorization {
     let my_owner = match owner_cache.get() {
         Some(o) => o,
-        None => return false, // no owner configured — fail closed
+        None => return SiblingAuthorization::Denied, // no owner configured — fail closed
     };
 
     // Direct owner check.
     if author == my_owner {
-        return true;
+        return SiblingAuthorization::Authorized;
     }
 
     // Check sibling cache.
     if let Some(cached) = owner_cache.is_known_sibling(author) {
-        return cached;
+        return if cached {
+            SiblingAuthorization::Authorized
+        } else {
+            SiblingAuthorization::Denied
+        };
     }
 
     // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
-    is_sibling
+    let authorization = check_sibling_via_profile(author, my_owner, rest_client).await;
+    cache_sibling_authorization(owner_cache, author, authorization)
+}
+
+fn cache_sibling_authorization(
+    owner_cache: &OwnerCache,
+    author: &str,
+    authorization: SiblingAuthorization,
+) -> SiblingAuthorization {
+    match authorization {
+        SiblingAuthorization::Authorized => {
+            owner_cache.cache_sibling(author.to_string(), true);
+        }
+        SiblingAuthorization::Denied => {
+            owner_cache.cache_sibling(author.to_string(), false);
+        }
+        SiblingAuthorization::Unavailable => {}
+    }
+    authorization
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorGateDecision {
+    Allow,
+    Drop(AuthorGateDropReason),
+}
+
+impl AuthorGateDecision {
+    fn is_allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorGateDropReason {
+    RespondToNobody,
+    DmOwnerOrSiblingRequired,
+    OwnerOrSiblingRequired,
+    AllowlistOrSiblingRequired,
+    AuthorizationLookupUnavailable,
+}
+
+impl AuthorGateDropReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RespondToNobody => "respond_to_nobody",
+            Self::DmOwnerOrSiblingRequired => "dm_owner_or_sibling_required",
+            Self::OwnerOrSiblingRequired => "owner_or_sibling_required",
+            Self::AllowlistOrSiblingRequired => "allowlist_or_sibling_required",
+            Self::AuthorizationLookupUnavailable => "authorization_lookup_unavailable",
+        }
+    }
+}
+
+fn log_author_gate_drop(
+    channel_id: Uuid,
+    mode: &RespondTo,
+    is_dm: bool,
+    reason: AuthorGateDropReason,
+) {
+    tracing::info!(
+        channel_id = %channel_id,
+        mode = %mode,
+        is_dm,
+        reason = %reason.as_str(),
+        "inbound author gate — dropping event"
+    );
+}
+
+fn sibling_gate_decision(
+    authorization: SiblingAuthorization,
+    denied_reason: AuthorGateDropReason,
+) -> AuthorGateDecision {
+    match authorization {
+        SiblingAuthorization::Authorized => AuthorGateDecision::Allow,
+        SiblingAuthorization::Denied => AuthorGateDecision::Drop(denied_reason),
+        SiblingAuthorization::Unavailable => {
+            AuthorGateDecision::Drop(AuthorGateDropReason::AuthorizationLookupUnavailable)
+        }
+    }
 }
 
 /// Inbound author gate decision: does this author's event fire a turn?
@@ -232,6 +272,39 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+async fn author_gate_decision(
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    author: &str,
+    is_dm: bool,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> AuthorGateDecision {
+    if is_dm {
+        return match respond_to {
+            RespondTo::Nobody => AuthorGateDecision::Drop(AuthorGateDropReason::RespondToNobody),
+            _ => sibling_gate_decision(
+                is_owner_or_sibling(author, owner_cache, rest_client).await,
+                AuthorGateDropReason::DmOwnerOrSiblingRequired,
+            ),
+        };
+    }
+    match respond_to {
+        RespondTo::Anyone => AuthorGateDecision::Allow,
+        RespondTo::Nobody => AuthorGateDecision::Drop(AuthorGateDropReason::RespondToNobody),
+        RespondTo::OwnerOnly => sibling_gate_decision(
+            is_owner_or_sibling(author, owner_cache, rest_client).await,
+            AuthorGateDropReason::OwnerOrSiblingRequired,
+        ),
+        RespondTo::Allowlist if allowlist.contains(author) => AuthorGateDecision::Allow,
+        RespondTo::Allowlist => sibling_gate_decision(
+            is_owner_or_sibling(author, owner_cache, rest_client).await,
+            AuthorGateDropReason::AllowlistOrSiblingRequired,
+        ),
+    }
+}
+
+#[cfg(test)]
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -240,21 +313,16 @@ async fn author_allowed(
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
-    if is_dm {
-        return match respond_to {
-            RespondTo::Nobody => false,
-            _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
-        };
-    }
-    match respond_to {
-        RespondTo::Anyone => true,
-        RespondTo::Nobody => false,
-        RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
-        RespondTo::Allowlist => {
-            allowlist.contains(author)
-                || is_owner_or_sibling(author, owner_cache, rest_client).await
-        }
-    }
+    author_gate_decision(
+        respond_to,
+        allowlist,
+        author,
+        is_dm,
+        owner_cache,
+        rest_client,
+    )
+    .await
+    .is_allowed()
 }
 
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
@@ -292,12 +360,12 @@ async fn check_sibling_via_profile(
     author: &str,
     expected_owner: &str,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> SiblingAuthorization {
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
         .author(match nostr::PublicKey::from_hex(author) {
             Ok(pk) => pk,
-            Err(_) => return false,
+            Err(_) => return SiblingAuthorization::Denied,
         })
         .limit(1);
 
@@ -305,28 +373,28 @@ async fn check_sibling_via_profile(
         .await
     {
         Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
+        _ => return SiblingAuthorization::Unavailable, // fail closed, but retry later
     };
 
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
-        None => return false,
+        None => return SiblingAuthorization::Unavailable,
     };
     let event = match events.first() {
         Some(e) => e,
-        None => return false,
+        None => return SiblingAuthorization::Denied,
     };
     let tags = match event.get("tags").and_then(|t| t.as_array()) {
         Some(t) => t,
-        None => return false,
+        None => return SiblingAuthorization::Denied,
     };
 
     // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
     // Don't trust the relay — verify ourselves.
     let agent_pk = match nostr::PublicKey::from_hex(author) {
         Ok(pk) => pk,
-        Err(_) => return false,
+        Err(_) => return SiblingAuthorization::Denied,
     };
 
     for tag in tags {
@@ -349,16 +417,16 @@ async fn check_sibling_via_profile(
         let tag_json = serde_json::to_string(tag).unwrap_or_default();
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
-                tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
+                tracing::debug!("sibling authorization verified via NIP-OA");
+                return SiblingAuthorization::Authorized;
             }
-            Err(e) => {
-                tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
+            Err(_) => {
+                tracing::debug!("sibling authorization proof rejected");
             }
         }
     }
 
-    false
+    SiblingAuthorization::Denied
 }
 
 const OBSERVER_PUBLISH_INTERVAL: Duration = Duration::from_millis(167);
@@ -1395,7 +1463,7 @@ async fn tokio_main() -> Result<()> {
     let mut relay_observer_publisher = None;
     if config.relay_observer {
         if let (Some(observer), Some(owner_pubkey_hex)) =
-            (observer.clone(), owner_cache.pubkey.clone())
+            (observer.clone(), owner_cache.get().map(str::to_owned))
         {
             match PublicKey::from_hex(&owner_pubkey_hex) {
                 Ok(owner_pubkey) => {
@@ -1887,7 +1955,7 @@ async fn tokio_main() -> Result<()> {
                     let _ = result_rx;
                     match control_event {
                         Some(event) => {
-                            if let Some(ref owner_hex) = owner_cache.pubkey {
+                            if let Some(owner_hex) = owner_cache.get() {
                                 handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
@@ -2149,7 +2217,7 @@ async fn tokio_main() -> Result<()> {
                                 // exercised by non-owner authors inside DMs.
                                 let is_dm =
                                     is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
-                                let allowed = author_allowed(
+                                let decision = author_gate_decision(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
@@ -2158,13 +2226,12 @@ async fn tokio_main() -> Result<()> {
                                     &ctx.rest_client,
                                 )
                                 .await;
-                                if !allowed {
-                                    tracing::debug!(
-                                        channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
-                                        mode = %config.respond_to,
+                                if let AuthorGateDecision::Drop(reason) = decision {
+                                    log_author_gate_drop(
+                                        buzz_event.channel_id,
+                                        &config.respond_to,
                                         is_dm,
-                                        "inbound author gate — dropping event"
+                                        reason,
                                     );
                                     continue;
                                 }
@@ -4420,6 +4487,20 @@ mod owner_cache_tests {
 mod author_gate_tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A `RestClient` for tests. The author-gate decisions exercised here all
     /// resolve from the owner pubkey or sibling cache before any HTTP call, so
     /// this client is never actually used to make a request.
@@ -4436,6 +4517,8 @@ mod author_gate_tests {
     const SIBLING: &str = "11";
     const EXTERNAL: &str = "22";
     const STRANGER: &str = "33";
+    const UNCACHED_VALID_AUTHOR: &str =
+        "4444444444444444444444444444444444444444444444444444444444444444";
 
     /// Owner + a known sibling, none of them on the explicit allowlist.
     fn cache_with_sibling() -> OwnerCache {
@@ -4444,6 +4527,67 @@ mod author_gate_tests {
         cache.cache_sibling(STRANGER.into(), false);
         cache.cache_sibling(EXTERNAL.into(), false);
         cache
+    }
+
+    #[test]
+    fn test_gate_drop_diagnostic_is_info_and_secret_safe() {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer_bytes = bytes.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .without_time()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(move || LogBuffer(writer_bytes.clone()))
+            .finish();
+        let channel_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_author_gate_drop(
+                channel_id,
+                &RespondTo::OwnerOnly,
+                true,
+                AuthorGateDropReason::AuthorizationLookupUnavailable,
+            );
+        });
+
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains(" INFO "),
+            "drop marker must be info: {output}"
+        );
+        assert!(output.contains("inbound author gate — dropping event"));
+        assert!(output.contains("channel_id=11111111-2222-3333-4444-555555555555"));
+        assert!(output.contains("mode=owner-only"));
+        assert!(output.contains("is_dm=true"));
+        assert!(output.contains("reason=authorization_lookup_unavailable"));
+        for forbidden in ["author=", "owner=", "content=", "tag=", "key=", "error="] {
+            assert!(
+                !output.contains(forbidden),
+                "drop marker leaked forbidden field {forbidden}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unavailable_sibling_lookup_is_not_cached_and_retries() {
+        let cache = OwnerCache::new(Some(OWNER.into()));
+
+        for _ in 0..2 {
+            assert_eq!(
+                cache_sibling_authorization(
+                    &cache,
+                    UNCACHED_VALID_AUTHOR,
+                    SiblingAuthorization::Unavailable,
+                ),
+                SiblingAuthorization::Unavailable,
+            );
+            assert_eq!(
+                cache.is_known_sibling(UNCACHED_VALID_AUTHOR),
+                None,
+                "transport failures must remain retryable"
+            );
+        }
     }
 
     #[tokio::test]

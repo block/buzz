@@ -71,10 +71,11 @@ pub(crate) enum AcpAvailabilityStatus {
 }
 
 use crate::{
-    author_allowed,
+    author_gate_decision,
     config::Config,
-    event_mentions_agent, filter,
+    event_mentions_agent, filter, log_author_gate_drop,
     relay::{HarnessRelay, RelayEventPublisher},
+    AuthorGateDecision,
 };
 
 // ── Payload ───────────────────────────────────────────────────────────────────
@@ -430,7 +431,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
         let author_hex = buzz_event.event.pubkey.to_hex();
         let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
-        let allowed = author_allowed(
+        let decision = author_gate_decision(
             &config.respond_to,
             &config.respond_to_allowlist,
             &author_hex,
@@ -439,6 +440,10 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &rest_client,
         )
         .await;
+        if let AuthorGateDecision::Drop(reason) = decision {
+            log_author_gate_drop(buzz_event.channel_id, &config.respond_to, is_dm, reason);
+        }
+        let allowed = decision.is_allowed();
 
         // Apply channel/kind filter rules.
         let filter_matched = filter::match_event(
