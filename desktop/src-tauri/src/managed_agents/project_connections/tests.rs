@@ -35,6 +35,9 @@ fn stored_connection() -> StoredProjectConnection {
 #[test]
 fn project_scope_requires_canonical_relay_identity_and_coordinate() {
     assert_eq!(canonical_project_scope(&scope()).unwrap(), scope());
+    let mut localhost = scope();
+    localhost.relay_url = "ws://localhost:3000".to_string();
+    assert_eq!(canonical_project_scope(&localhost).unwrap(), scope());
     let mut invalid = scope();
     invalid.repo_address = "local-project-id".to_string();
     assert!(canonical_project_scope(&invalid).is_err());
