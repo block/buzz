@@ -149,6 +149,7 @@ test("parses a relay-pushed live thread summary", () => {
   const parsed = parseLiveThreadSummary(push);
   assert.equal(parsed.rootId, rootId);
   assert.equal(parsed.live.createdAt, 700);
+  assert.equal(parsed.live.eventId, push.id);
   assert.deepEqual(parsed.live.summary, {
     replyCount: 4,
     descendantCount: 6,

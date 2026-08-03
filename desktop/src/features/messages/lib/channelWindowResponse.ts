@@ -63,6 +63,7 @@ export function parseLiveThreadSummary(
       live: {
         summary: mapSummary(JSON.parse(event.content) as SummaryPayload),
         createdAt: event.created_at,
+        eventId: event.id,
       },
     };
   } catch {

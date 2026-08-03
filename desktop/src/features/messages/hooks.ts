@@ -19,6 +19,7 @@ import {
   refreshChannelWindowMessages,
 } from "@/features/messages/lib/projectChannelWindow";
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
+import { reconcileLiveThreadSummary } from "@/features/messages/lib/threadSummaryReconciliation";
 import {
   mergeMessages,
   mergeTimelineCacheMessages,
@@ -52,14 +53,10 @@ import {
   emptyChannelWindowStore,
   mapChannelWindowEvents,
   mergeLiveChannelWindowEvent,
-  mergeLiveThreadSummary,
   replaceNewestChannelWindow,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
-import {
-  parseChannelWindowResponse,
-  parseLiveThreadSummary,
-} from "@/features/messages/lib/channelWindowResponse";
+import { parseChannelWindowResponse } from "@/features/messages/lib/channelWindowResponse";
 import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -266,14 +263,7 @@ export function useChannelSubscription(channel: Channel | null) {
     if (event.kind === KIND_CHANNEL_THREAD_SUMMARY) {
       // Relay-pushed live badge recount — window-store overlay only, never a
       // timeline row (mirrors the page path, where 39005 is metadata).
-      const parsed = parseLiveThreadSummary(event);
-      if (!parsed) return;
-      const windowKey = channelWindowKey(channelId);
-      const current =
-        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-        emptyChannelWindowStore();
-      const next = mergeLiveThreadSummary(current, parsed.rootId, parsed.live);
-      if (next !== current) queryClient.setQueryData(windowKey, next);
+      reconcileLiveThreadSummary(queryClient, channelId, event);
       return;
     }
     const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);

@@ -13,8 +13,9 @@ export type ChannelWindowRow = {
 };
 export type LiveThreadSummary = {
   summary: ChannelWindowThreadSummary;
-  /** `created_at` of the relay 39005 that carried it — newest wins per root. */
+  /** NIP-01 ordering fields of the relay 39005 — newest wins per root. */
   createdAt: number;
+  eventId: string;
 };
 export type ChannelWindowPage = {
   startCursor: ChannelWindowCursor | null;
@@ -156,12 +157,12 @@ export function appendOlderChannelWindow(
 }
 
 /**
- * Record a relay-pushed live `39005` summary. Newest `created_at` wins per
- * root: the relay pushes a full recount on every thread mutation, so the
- * latest push is authoritative for that root — including counting *down*
- * after a delete. Retained across scrollback pages (a racing push can be
- * fresher than a just-fetched page summary) and cleared only by the head
- * refetch in `replaceNewestChannelWindow`.
+ * Record a relay-pushed live `39005` summary. Canonical NIP-01 replaceable
+ * ordering wins per root: newest `created_at`, then lowest event id when two
+ * recounts land in the same second. The latest push is authoritative for that
+ * root — including counting *down* after a delete. Retained across scrollback
+ * pages (a racing push can be fresher than a just-fetched page summary) and
+ * cleared only by the head refetch in `replaceNewestChannelWindow`.
  */
 export function mergeLiveThreadSummary(
   current: ChannelWindowStore,
@@ -169,7 +170,14 @@ export function mergeLiveThreadSummary(
   incoming: LiveThreadSummary,
 ): ChannelWindowStore {
   const existing = current.liveSummaries[rootId];
-  if (existing && existing.createdAt >= incoming.createdAt) return current;
+  if (
+    existing &&
+    (existing.createdAt > incoming.createdAt ||
+      (existing.createdAt === incoming.createdAt &&
+        existing.eventId <= incoming.eventId))
+  ) {
+    return current;
+  }
   return {
     ...current,
     liveSummaries: { ...current.liveSummaries, [rootId]: incoming },

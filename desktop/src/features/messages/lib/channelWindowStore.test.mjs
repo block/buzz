@@ -305,9 +305,10 @@ const summary = (replyCount) => ({
   lastReplyAt: 500,
   participantPubkeys: ["c".repeat(64)],
 });
-const live = (replyCount, createdAt) => ({
+const live = (replyCount, createdAt, eventId = "8".repeat(64)) => ({
   summary: summary(replyCount),
   createdAt,
+  eventId,
 });
 
 test("live thread summary overlays the page summary for its root", () => {
@@ -332,17 +333,33 @@ test("live thread summary gives a badge to roots with no page summary", () => {
   assert.equal(summaries.get(event("a", 100).id).replyCount, 1);
 });
 
-test("stale live thread summaries never roll a newer one back", () => {
+test("live thread summaries use NIP-01 ordering within the same second", () => {
   const rootId = event("a", 100).id;
   const store = mergeLiveThreadSummary(
     emptyChannelWindowStore(),
     rootId,
-    live(3, 300),
+    live(3, 300, "8".repeat(64)),
   );
-  // Same-timestamp and older pushes are both ignored; identity proves no churn.
-  assert.equal(mergeLiveThreadSummary(store, rootId, live(2, 300)), store);
-  assert.equal(mergeLiveThreadSummary(store, rootId, live(2, 250)), store);
-  assert.equal(channelWindowThreadSummaries(store).get(rootId).replyCount, 3);
+  // A higher id loses a same-second tie, and an older timestamp stays stale.
+  assert.equal(
+    mergeLiveThreadSummary(store, rootId, live(2, 300, "f".repeat(64))),
+    store,
+  );
+  assert.equal(
+    mergeLiveThreadSummary(store, rootId, live(2, 250, "1".repeat(64))),
+    store,
+  );
+
+  // NIP-01 selects the lower event id when created_at is tied.
+  const sameSecondWinner = mergeLiveThreadSummary(
+    store,
+    rootId,
+    live(2, 300, "1".repeat(64)),
+  );
+  assert.equal(
+    channelWindowThreadSummaries(sameSecondWinner).get(rootId).replyCount,
+    2,
+  );
 });
 
 test("head refetch clears live summaries in favor of the fresh snapshot", () => {
