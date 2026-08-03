@@ -296,6 +296,69 @@ test("shows speaker identity on every huddle chat message", async ({
   await expect(page.getByTestId("message-thread-panel")).toHaveCount(0);
 });
 
+test("ignores persisted community onboarding in the huddle room", async ({
+  page,
+}) => {
+  const persistedTransaction = {
+    id: "main-window-community-transaction",
+    source: "deep-link-join",
+    stage: "claiming",
+    relayUrl: "wss://other.example",
+    inviteCode: "main-window-invite",
+    communityName: "Other community",
+    createdAt: "2026-08-03T20:00:00.000Z",
+    updatedAt: "2026-08-03T20:00:00.000Z",
+  };
+  await page.addInitScript((transaction) => {
+    window.localStorage.setItem(
+      "buzz-community-onboarding-transaction.v1",
+      JSON.stringify(transaction),
+    );
+  }, persistedTransaction);
+  const claimRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/invites/claim")) {
+      claimRequests.push(request.url());
+    }
+  });
+  await installMockBridge(page, {
+    windowLabel: `huddle-${HUDDLE_CHANNEL_ID}`,
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+  });
+
+  for (let load = 0; load < 2; load += 1) {
+    await page.goto("/");
+    await expect(page.getByTestId("huddle-transcript-intro")).toBeVisible();
+    await expect(
+      page.getByText("Setting up your community", { exact: true }),
+    ).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-onboarding-transaction.v1",
+          );
+          return raw ? JSON.parse(raw) : null;
+        }),
+      )
+      .toEqual(persistedTransaction);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          JSON.parse(window.localStorage.getItem("buzz-communities") ?? "[]"),
+        ),
+      )
+      .not.toContainEqual(
+        expect.objectContaining({ relayUrl: persistedTransaction.relayUrl }),
+      );
+    expect(claimRequests).toHaveLength(0);
+  }
+});
+
 test("keeps main-app shortcuts from navigating the huddle room", async ({
   page,
 }) => {
