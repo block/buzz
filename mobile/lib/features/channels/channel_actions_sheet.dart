@@ -77,16 +77,23 @@ class ChannelActionsSheet extends ConsumerWidget {
       (member) => member?.pubkey.toLowerCase() == currentPubkey,
       orElse: () => null,
     );
-    final ownsOwnerAgent = membersAsync.value?.any(
-      (member) =>
-          member.isOwner &&
-          agentOwnersAsync.value?[member.pubkey.toLowerCase()]?.toLowerCase() ==
-              currentPubkey,
-    );
-    final canArchive =
+    final ownsOwnerAgent =
+        currentPubkey != null &&
+        membersAsync.value?.any(
+              (member) =>
+                  member.isOwner &&
+                  agentOwnersAsync.value?[member.pubkey.toLowerCase()]
+                          ?.toLowerCase() ==
+                      currentPubkey,
+            ) ==
+            true;
+    final canManageLifecycle =
+        currentMember?.isElevated == true || ownsOwnerAgent;
+    final canArchive = !channel.isArchived && canManageLifecycle;
+    final canUnarchive = channel.isArchived && canManageLifecycle;
+    final canDelete =
         !channel.isArchived &&
-        (currentMember?.isElevated == true || ownsOwnerAgent == true);
-    final canDelete = currentMember?.isOwner == true || ownsOwnerAgent == true;
+        (currentMember?.isOwner == true || ownsOwnerAgent);
     final lifecycleCapabilitiesLoading =
         membersAsync.isLoading || agentOwnersAsync.isLoading;
     final lifecycleCapabilitiesUnavailable =
@@ -268,6 +275,21 @@ class ChannelActionsSheet extends ConsumerWidget {
                       action: () => ref
                           .read(channelActionsProvider)
                           .archiveChannel(channel.id),
+                    ),
+                  ),
+                if (canUnarchive)
+                  _ActionTile(
+                    icon: LucideIcons.archiveRestore,
+                    label: 'Unarchive channel',
+                    onTap: () => _confirmAndRun(
+                      context,
+                      ref,
+                      title: 'Unarchive #${channel.name}?',
+                      body: 'The channel will become active again.',
+                      confirmLabel: 'Unarchive',
+                      action: () => ref
+                          .read(channelActionsProvider)
+                          .unarchiveChannel(channel.id),
                     ),
                   ),
                 if (canDelete)

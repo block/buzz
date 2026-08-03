@@ -12,7 +12,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 const _currentPubkey = 'me';
 
-Channel _channel({String type = 'stream'}) => Channel(
+Channel _channel({String type = 'stream', bool isArchived = false}) => Channel(
   id: 'channel-id',
   name: type == 'dm' ? 'Alice' : 'general',
   channelType: type,
@@ -22,6 +22,7 @@ Channel _channel({String type = 'stream'}) => Channel(
   createdAt: DateTime(2025),
   memberCount: 2,
   isMember: true,
+  archivedAt: isArchived ? DateTime(2025, 1, 2) : null,
 );
 
 Widget _app({
@@ -32,9 +33,10 @@ Widget _app({
     <String, String>{},
   ),
   ChannelActions Function(Ref ref)? createChannelActions,
+  String? currentPubkey = _currentPubkey,
 }) => ProviderScope(
   overrides: [
-    currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
+    currentPubkeyProvider.overrideWith((ref) => currentPubkey),
     channelMembersProvider(channel.id).overrideWith((ref) => loadMembers()),
     agentOwnersProvider.overrideWithValue(agentOwners),
     if (createChannelActions != null)
@@ -171,6 +173,58 @@ void main() {
 
     expect(find.text('Archive channel'), findsOneWidget);
     expect(find.text('Delete channel'), findsOneWidget);
+  });
+
+  testWidgets('unresolved identity grants no lifecycle actions', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _app(
+        channel: _channel(),
+        currentPubkey: null,
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: 'ordinary-owner',
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Archive channel'), findsNothing);
+    expect(find.text('Delete channel'), findsNothing);
+  });
+
+  testWidgets('archived owner can unarchive but cannot delete', (tester) async {
+    late _FakeChannelActions actions;
+    await tester.pumpWidget(
+      _app(
+        channel: _channel(isArchived: true),
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        createChannelActions: (ref) => actions = _FakeChannelActions(ref),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Archive channel'), findsNothing);
+    expect(find.text('Unarchive channel'), findsOneWidget);
+    expect(find.text('Delete channel'), findsNothing);
+
+    await tester.tap(find.text('Unarchive channel'));
+    await tester.pumpAndSettle();
+    expect(find.text('Unarchive #general?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Unarchive'));
+    await tester.pumpAndSettle();
+
+    expect(actions.unarchivedChannelId, 'channel-id');
   });
 
   testWidgets('owned non-owner agent grants no lifecycle actions', (
@@ -324,6 +378,13 @@ class _FakeChannelActions extends ChannelActions {
         currentPubkey: _currentPubkey,
       );
 
+  String? unarchivedChannelId;
+
   @override
   Future<void> leaveChannel(String channelId) async {}
+
+  @override
+  Future<void> unarchiveChannel(String channelId) async {
+    unarchivedChannelId = channelId;
+  }
 }

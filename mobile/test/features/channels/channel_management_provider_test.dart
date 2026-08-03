@@ -201,10 +201,17 @@ void main() {
   });
 
   group('build channel lifecycle tags', () {
-    test('archive matches desktop kind 9002 tags', () {
-      expect(buildArchiveChannelTags('channel-id'), [
+    test('archive matches kind 9002 tags', () {
+      expect(buildSetChannelArchivedTags('channel-id', archived: true), [
         ['h', 'channel-id'],
         ['archived', 'true'],
+      ]);
+    });
+
+    test('unarchive matches kind 9002 tags', () {
+      expect(buildSetChannelArchivedTags('channel-id', archived: false), [
+        ['h', 'channel-id'],
+        ['archived', 'false'],
       ]);
     });
 
