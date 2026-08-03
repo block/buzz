@@ -544,9 +544,17 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // The caller supplies the explicit pair relay. This is the only relay this
+    // child may connect to, regardless of the record/workspace default.
+    //
+    // Dial the URL as requested, NOT `runtime_key.relay_url`. The key is an
+    // identity: `ManagedAgentRuntimeKey::new` canonicalizes it (folding loopback
+    // to 127.0.0.1) so `runtime_id()` stays stable, which is right for keying
+    // and wrong for addressing. The relay resolves a community from the literal
+    // request Host and fails closed on an unmapped one, so a deployment
+    // configured as `ws://localhost:PORT` rejects a canonicalized
+    // `ws://127.0.0.1:PORT` with a generic 404 and the harness never connects.
+    let effective_relay_url = relay_url.to_string();
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -908,13 +916,19 @@ pub fn spawn_agent_child(
 
     // Stamp the effective spawn config so the summary builder can flag
     // needs_restart when disk state drifts from what this process runs.
-    // `effective_relay_url` is already resolved, and resolution is idempotent,
-    // so it serves as the workspace-relay input here.
+    //
+    // Hash the CANONICAL pair URL, not the dialed one. `needs_restart`
+    // recomputes this hash from `key.relay_url` (the canonical identity), so
+    // feeding the requested spelling here would make the two disagree for any
+    // host the key folds (e.g. `localhost` vs `127.0.0.1`) and report
+    // needs_restart forever. The relay a child dials and the config it was
+    // spawned with are separate concerns: dial the request, fingerprint the
+    // identity.
     let spawn_config_hash = super::spawn_hash::spawn_config_hash(
         record,
         &personas,
         &teams,
-        &effective_relay_url,
+        &runtime_key.relay_url,
         &global,
     );
 
@@ -997,7 +1011,8 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    // Pass the requested URL, not the canonical key: the child dials this.
+    let mut process = spawn_agent_child(app, record, &relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
