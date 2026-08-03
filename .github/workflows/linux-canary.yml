@@ -7,8 +7,8 @@ name: Linux Canary
 # Design notes vs. signed-macos-canary.yml:
 #   - fix-appimage.sh is run without signing env vars; the script detects
 #     their absence and skips re-signing, repacking only (documented inline).
-#   - mold linker added (rui314/setup-mold) to reduce link time, matching
-#     the Linux Rust CI jobs in ci.yml.
+#   - Build tools match release.yml; cache keys derive the concrete linker and
+#     native library identity rather than assuming the moving runner image.
 #   - pnpm store restore/save pattern mirrors ci.yml:149-196.
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
     name: Build Linux canary
     if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
-    container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+    container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     timeout-minutes: 60
     permissions:
       contents: read
@@ -83,18 +83,6 @@ jobs:
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-
-      # Rust cache covering both the workspace sidecar build and the Tauri
-      # crate build. shared-key scoped to linux-canary-release so canary runs
-      # warm each other without colliding with CI's debug-profile keys.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: |
-            .
-            desktop/src-tauri
-          shared-key: linux-canary-release
-
       - name: Install appimagetool
         run: |
           case "$(uname -m)" in
@@ -154,6 +142,38 @@ jobs:
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
 
+      - name: Resolve native toolchain identity
+        id: native_toolchain
+        run: echo "id=$(scripts/desktop-native-toolchain-id.sh linux)" >> "$GITHUB_OUTPUT"
+
+      # Compute this after cargo update so the key describes the graph that is
+      # actually compiled. The helper normalizes only Buzz Desktop's release
+      # version, allowing a canary to warm an otherwise identical tag build.
+      - name: Compute exact release cache key
+        id: rust_cache_key
+        env:
+          NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
+        run: |
+          KEY=$(scripts/desktop-release-cache-key.py \
+            --platform "$RUNNER_OS" \
+            --target x86_64-unknown-linux-gnu \
+            --features mesh-llm \
+            --native-inputs "$NATIVE_TOOLCHAIN_ID")
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "Release cache key: $KEY"
+
+      - name: Restore exact release Cargo cache
+        id: rust_cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: ${{ steps.rust_cache_key.outputs.key }}
+
       - name: Generate non-updating bundle config
         run: |
           cat > desktop/src-tauri/tauri.canary.conf.json <<'JSON'
@@ -166,11 +186,11 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
           ./scripts/bundle-sidecars.sh
 
       - name: Build Linux Tauri app
-        run: cd desktop && pnpm tauri build --ci --bundles deb,appimage --config src-tauri/tauri.canary.conf.json
+        run: cd desktop && pnpm tauri build --ci --bundles deb,appimage --features mesh-llm --config src-tauri/tauri.canary.conf.json
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
@@ -189,6 +209,24 @@ jobs:
             exit 1
           fi
           bash desktop/scripts/fix-appimage.sh "${APPIMAGES[0]}"
+
+      - name: Measure release Cargo cache inputs
+        if: always()
+        run: du -sh ~/.cargo/registry ~/.cargo/git target desktop/src-tauri/target 2>/dev/null || true
+
+      # Only this trusted, main-bound canary writes the cache. Excluding bundle
+      # output prevents installers from entering it.
+      - name: Save exact release Cargo cache
+        if: steps.rust_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: ${{ steps.rust_cache_key.outputs.key }}
 
       - name: Save pnpm store cache
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

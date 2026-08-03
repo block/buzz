@@ -45,7 +45,6 @@ type UnifiedAgentsSectionProps = {
   onOpenPersonaProfile: (persona: AgentPersona) => void;
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
-  canChooseCatalog: boolean;
   personas: AgentPersona[];
   personasError: Error | null;
   personaFeedbackErrorMessage: string | null;
@@ -53,12 +52,13 @@ type UnifiedAgentsSectionProps = {
   isPersonasLoading: boolean;
   isPersonasPending: boolean;
   onCreatePersona: () => void;
-  onChooseCatalog: () => void;
+  onDiscoverPersonas: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
   onEditPersona: (persona: AgentPersona) => void;
   onSharePersona: (
     persona: AgentPersona,
     linkedAgent: ManagedAgent | undefined,
+    effectiveAvatarUrl: string | null,
   ) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
@@ -66,7 +66,9 @@ type UnifiedAgentsSectionProps = {
 };
 
 const AGENT_CARD_COLUMN_CLASS = "w-full";
-const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} mx-auto grid max-w-[996px] grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-center gap-3`;
+export const AGENT_CARD_GRID_COLUMNS_CLASS =
+  "grid-cols-[repeat(auto-fill,minmax(220px,240px))]";
+export const IDENTITY_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid justify-start gap-3 [@container(max-width:40rem)]:justify-center`;
 
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
@@ -83,7 +85,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onOpenPersonaProfile,
     onStartAgent,
     onStartPersona,
-    canChooseCatalog,
     personas,
     personasError,
     personaFeedbackErrorMessage,
@@ -91,7 +92,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isPersonasLoading,
     isPersonasPending,
     onCreatePersona,
-    onChooseCatalog,
+    onDiscoverPersonas,
     onDuplicatePersona,
     onEditPersona,
     onSharePersona,
@@ -152,14 +153,16 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
-          <div className={AGENT_CARD_GRID_CLASS}>
+          <div className={IDENTITY_CARD_GRID_CLASS}>
             {groups.map((group) => {
               const profileAgent = pickProfileAgent(group.agents);
               return (
                 <AgentPersonaCard
-                  actions={
+                  actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
                     <PersonaActionsMenu
-                      isActionPending={isActionPending}
+                      isActionPending={
+                        isActionPending || isEffectiveAvatarLoading
+                      }
                       isPending={isPersonasPending}
                       persona={group.persona}
                       linkedAgent={profileAgent}
@@ -167,9 +170,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       onDelete={onDeletePersona}
                       onDuplicate={onDuplicatePersona}
                       onEdit={onEditPersona}
-                      onShare={onSharePersona}
+                      onShare={(persona, linkedAgent) =>
+                        onSharePersona(persona, linkedAgent, effectiveAvatarUrl)
+                      }
                     />
-                  }
+                  )}
                   agent={profileAgent}
                   defaultModel={defaultModel}
                   key={group.persona.id}
@@ -184,11 +189,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               );
             })}
             <NewAgentCard
-              canChooseCatalog={canChooseCatalog}
-              isPersonasPending={isPersonasPending}
-              openFilePicker={openFilePicker}
-              onChooseCatalog={onChooseCatalog}
-              onCreatePersona={onCreatePersona}
+              isPending={isPersonasPending}
+              onCreate={onCreatePersona}
+              onDiscover={onDiscoverPersonas}
+              onImport={openFilePicker}
             />
           </div>
 
@@ -251,7 +255,10 @@ function AgentPersonaCard({
   onStartAgent,
   onStartPersona,
 }: {
-  actions?: React.ReactNode;
+  actions?: (
+    effectiveAvatarUrl: string | null,
+    isEffectiveAvatarLoading: boolean,
+  ) => React.ReactNode;
   agent: ManagedAgent | undefined;
   defaultModel: string;
   persona: AgentPersona;
@@ -283,7 +290,10 @@ function AgentPersonaCard({
 
   return (
     <AgentIdentityCard
-      actions={actions}
+      actions={actions?.(
+        avatarUrl,
+        Boolean(agent && !persona.avatarUrl && profileQuery.isPending),
+      )}
       ariaLabel={`${title} agent profile`}
       avatar={
         agent ? (
@@ -430,50 +440,37 @@ function firstAvatarUrl(
 }
 
 function NewAgentCard({
-  canChooseCatalog,
-  isPersonasPending,
-  openFilePicker,
-  onChooseCatalog,
-  onCreatePersona,
+  isPending,
+  onCreate,
+  onDiscover,
+  onImport,
 }: {
-  canChooseCatalog: boolean;
-  isPersonasPending: boolean;
-  openFilePicker: () => void;
-  onChooseCatalog: () => void;
-  onCreatePersona: () => void;
+  isPending: boolean;
+  onCreate: () => void;
+  onDiscover: () => void;
+  onImport: () => void;
 }) {
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <CreateIdentityCard
-          ariaLabel="New agent"
-          dataTestId="new-agent-card"
-          label="New agent"
-        />
+        <CreateIdentityCard ariaLabel="New agent" dataTestId="new-agent-card" />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        <DropdownMenuItem
-          disabled={isPersonasPending}
-          onClick={onCreatePersona}
-        >
-          Create from scratch
+        <DropdownMenuItem disabled={isPending} onClick={onCreate}>
+          Create agent
         </DropdownMenuItem>
-        {canChooseCatalog ? (
-          <DropdownMenuItem
-            disabled={isPersonasPending}
-            onClick={onChooseCatalog}
-          >
-            Choose from catalog
-          </DropdownMenuItem>
-        ) : null}
+        <DropdownMenuItem disabled={isPending} onClick={onDiscover}>
+          Discover agents
+        </DropdownMenuItem>
         <DropdownMenuItem
           data-testid="import-agent-snapshot-menu-item"
-          onClick={openFilePicker}
+          disabled={isPending}
+          onClick={onImport}
         >
-          Import agent snapshot
+          Import
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -482,7 +479,7 @@ function NewAgentCard({
 
 function LoadingSkeleton() {
   return (
-    <div className={AGENT_CARD_GRID_CLASS}>
+    <div className={IDENTITY_CARD_GRID_CLASS}>
       <IdentityCardSkeleton
         footerSubtitleWidthClass="w-14"
         footerTitleWidthClass="w-24"
@@ -540,7 +537,7 @@ function CollapsibleAgentGroup({
         <span className="text-xs text-muted-foreground">({agents.length})</span>
       </button>
       {!isCollapsed ? (
-        <div className={AGENT_CARD_GRID_CLASS}>
+        <div className={IDENTITY_CARD_GRID_CLASS}>
           {agents.map((agent) => (
             <StandaloneAgentCard
               agent={agent}

@@ -111,44 +111,71 @@ fn buzz_mesh_name_is_stable_and_does_not_expose_the_relay() {
 }
 
 #[test]
-fn sharing_config_pins_the_starting_community_relay() {
+fn sharing_config_keeps_the_community_where_sharing_was_enabled() {
     let request = mesh_llm::StartMeshNodeRequest {
         mode: mesh_llm::MeshNodeMode::Serve,
-        model_id: Some("org/community-model:q4".to_string()),
+        model_id: Some("test-model".to_string()),
         max_vram_gb: Some(24),
         join_token: None,
-        mesh_name: None,
-        relay_url: Some("wss://community-a.example".to_string()),
-        trusted_owner_ids: None,
+        mesh_name: Some("buzz-community-test".to_string()),
+        relay_url: Some("wss://community.example".to_string()),
+        trusted_owner_ids: Some(Vec::new()),
     };
 
-    let config = sharing_config_from_request(&request).expect("sharing config");
-
-    assert_eq!(config.model_id, "org/community-model:q4");
-    assert_eq!(config.max_vram_gb, Some(24));
-    assert_eq!(
-        config.relay_url.as_deref(),
-        Some("wss://community-a.example")
-    );
-    assert_eq!(
-        sharing_relay_url(&config, "wss://community-b.example"),
-        "wss://community-a.example"
-    );
+    let config = sharing_config_from_request(&request).expect("valid sharing config");
+    assert_eq!(config.relay_url.as_deref(), Some("wss://community.example"));
 }
 
 #[test]
-fn legacy_sharing_config_binds_to_the_active_community_once() {
+fn legacy_sharing_config_without_community_binding_still_loads() {
+    let config: MeshSharingConfig = serde_json::from_value(serde_json::json!({
+        "enabled": true,
+        "modelId": "test-model",
+        "maxVramGb": null
+    }))
+    .expect("legacy sharing config");
+
+    assert_eq!(config.relay_url, None);
+    assert!(!config.start_on_next_launch);
+}
+
+#[test]
+fn new_start_checkpoint_prevents_incomplete_download_restore() {
     let config = MeshSharingConfig {
         enabled: true,
-        model_id: "org/legacy-model:q4".to_string(),
-        max_vram_gb: None,
-        relay_url: None,
+        start_on_next_launch: false,
+        model_id: "test-model".to_string(),
+        max_vram_gb: Some(24),
+        relay_url: Some("wss://community.example".to_string()),
     };
 
-    assert_eq!(
-        sharing_relay_url(&config, "wss://active-community.example"),
-        "wss://active-community.example"
-    );
+    let checkpoint = pending_new_start_checkpoint(&config);
+    assert!(!checkpoint.enabled);
+    assert!(!checkpoint.start_on_next_launch);
+    assert_eq!(checkpoint.model_id, config.model_id);
+    assert_eq!(checkpoint.max_vram_gb, config.max_vram_gb);
+    assert_eq!(checkpoint.relay_url, config.relay_url);
+}
+
+#[test]
+fn role_switch_checkpoint_starts_exactly_once_after_restart() {
+    let config = MeshSharingConfig {
+        enabled: true,
+        start_on_next_launch: false,
+        model_id: "test-model".to_string(),
+        max_vram_gb: Some(24),
+        relay_url: Some("wss://community.example".to_string()),
+    };
+
+    let restart = one_shot_restart_checkpoint(&config);
+    assert!(!restart.enabled);
+    assert!(restart.start_on_next_launch);
+
+    let consumed = pending_new_start_checkpoint(&restart);
+    assert!(!consumed.enabled);
+    assert!(!consumed.start_on_next_launch);
+    assert_eq!(consumed.model_id, config.model_id);
+    assert_eq!(consumed.relay_url, config.relay_url);
 }
 
 #[test]
@@ -323,15 +350,10 @@ fn client_status_serializes_with_running_state_and_client_mode() {
         endpoint_id: None,
         device_id: None,
         device_name: None,
-        community_relay_url: Some("wss://community.example".to_string()),
     };
     let value = serde_json::to_value(&status).expect("serialize mesh status");
     assert_eq!(value["state"], serde_json::json!("running"));
     assert_eq!(value["mode"], serde_json::json!("client"));
-    assert_eq!(
-        value["communityRelayUrl"],
-        serde_json::json!("wss://community.example")
-    );
 }
 
 #[tokio::test]

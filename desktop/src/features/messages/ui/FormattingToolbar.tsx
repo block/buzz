@@ -16,7 +16,12 @@ import {
 
 import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { isolateSelectionForBlockFormatting } from "@/features/messages/lib/selectionBlockFormatting";
+import {
+  isolateSelectionForBlockFormatting,
+  mergeSelectedTextblocksIntoCodeBlock,
+  selectionIncludesList,
+  splitSelectedLinesForListFormatting,
+} from "@/features/messages/lib/selectionBlockFormatting";
 import { getEditorSpoilerRangeState } from "@/features/messages/lib/spoilerFormatting";
 import { SPOILER_MARK_NAME } from "@/features/messages/lib/spoilerMark";
 
@@ -196,12 +201,26 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   }, [formattingChain]);
 
   const toggleCodeBlock = React.useCallback(() => {
-    formattingChain()
-      ?.command(({ tr }) => {
+    const chain = formattingChain();
+    if (!chain) return;
+    chain
+      .command(({ tr, chain: currentChain }) => {
+        if (tr.selection.empty) {
+          isolateSelectionForBlockFormatting(tr);
+          return currentChain().toggleCodeBlock().run();
+        }
+
         isolateSelectionForBlockFormatting(tr);
-        return true;
+        if (selectionIncludesList(tr)) {
+          return currentChain()
+            .liftListItem("listItem")
+            .command(({ tr: currentTransaction }) =>
+              mergeSelectedTextblocksIntoCodeBlock(currentTransaction),
+            )
+            .run();
+        }
+        return mergeSelectedTextblocksIntoCodeBlock(tr);
       })
-      .toggleCodeBlock()
       .run();
   }, [formattingChain]);
 
@@ -251,8 +270,12 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   const toggleBulletList = React.useCallback(() => {
     formattingChain()
       ?.command(({ tr }) => {
-        isolateSelectionForBlockFormatting(tr);
+        splitSelectedLinesForListFormatting(tr);
         return true;
+      })
+      .command(({ tr, chain: currentChain }) => {
+        if (!selectionIncludesList(tr)) return true;
+        return currentChain().liftListItem("listItem").run();
       })
       .toggleBulletList()
       .run();
@@ -261,15 +284,29 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   const toggleOrderedList = React.useCallback(() => {
     formattingChain()
       ?.command(({ tr }) => {
-        isolateSelectionForBlockFormatting(tr);
+        splitSelectedLinesForListFormatting(tr);
         return true;
+      })
+      .command(({ tr, chain: currentChain }) => {
+        if (!selectionIncludesList(tr)) return true;
+        return currentChain().liftListItem("listItem").run();
       })
       .toggleOrderedList()
       .run();
   }, [formattingChain]);
 
   const toggleBlockquote = React.useCallback(() => {
-    formattingChain()?.toggleBlockquote().run();
+    formattingChain()
+      ?.command(({ tr }) => {
+        isolateSelectionForBlockFormatting(tr);
+        return true;
+      })
+      .command(({ tr, chain: currentChain }) => {
+        if (!selectionIncludesList(tr)) return true;
+        return currentChain().liftListItem("listItem").run();
+      })
+      .toggleBlockquote()
+      .run();
   }, [formattingChain]);
 
   const toggleSpoiler = React.useCallback(() => {

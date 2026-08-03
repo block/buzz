@@ -9,9 +9,12 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
     HarnessSource,
 };
-
+mod presets;
 mod runtime_metadata;
-
+#[macro_use]
+mod windows_install;
+use presets::{preset_catalog_entry, PRESET_HARNESSES};
+pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -19,7 +22,6 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
-
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
@@ -41,6 +43,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".local/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
+                home.join(".bun/bin"),
             ]);
         }
         // Windows well-known dirs for npm global shims and standalone installer targets.
@@ -82,7 +85,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
         // Goose's stable release currently publishes only the Unix installer;
         // its official Windows instructions intentionally point at this main-branch script.
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex\""],
+        cli_install_commands_windows: &[windows_install_command!("goose", "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1", "$env:CONFIGURE='false'; ")],
         adapter_install_commands: &[],
         cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
         adapter_install_instructions_url: "",
@@ -100,6 +103,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
+        max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
@@ -114,7 +118,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("claude"),
         cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
+        cli_install_commands_windows: &[windows_install_command!("claude", "https://claude.ai/install.ps1")],
         adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
         cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
@@ -132,6 +136,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
+        max_rounds_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
@@ -146,7 +151,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
+        cli_install_commands_windows: &[windows_install_command!("codex", "https://chatgpt.com/codex/install.ps1")],
         adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
         cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
@@ -164,6 +169,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
+        max_rounds_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
@@ -197,6 +203,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+        max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
@@ -275,11 +282,8 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
 /// The agent command a freshly-created agent defaults to when the create
 /// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
 /// the default cannot drift from the provider definition. Falls back to the id
-/// if the catalog entry is missing.
-///
-/// The previous default was the bare global `goose`, which is not on PATH on a
-/// stock Windows install: every worker failed with `program not found`. The
-/// bundled `buzz-agent` ships with the app and resolves on every platform.
+/// if the catalog entry is missing. (Previous default was bare `goose`, which
+/// is not on PATH on a stock Windows install; buzz-agent ships with the app.)
 pub fn default_agent_command() -> String {
     known_acp_runtime_exact("buzz-agent")
         .and_then(|p| p.commands.first().copied())
@@ -372,10 +376,8 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 /// Prefix of the typed dangling-harness error produced by
 /// `try_record_agent_command` / `resolve_effective_harness_descriptor`.
-///
-/// This sentinel is an internal Rust contract: user-facing surfaces must
-/// convert it to a sentence via [`user_facing_harness_error`] (spawn) or to
-/// the missing id via [`dangling_harness_id`] (summary) — never show it raw.
+/// Internal Rust contract: surfaces must convert it via [`user_facing_harness_error`] or
+/// [`dangling_harness_id`] — never show it raw.
 pub(crate) const DANGLING_HARNESS_PREFIX: &str = "DANGLING_HARNESS_ID:";
 
 /// Extract the missing harness id from a `DANGLING_HARNESS_ID:<id>` error.
@@ -395,22 +397,16 @@ pub(crate) fn user_facing_harness_error(error: &str) -> String {
     }
 }
 
-/// Summary-row display for a dangling harness id: shows the *missing* id so
-/// the agent list tells the same story as spawn (which refuses with the
-/// sentence above), rather than silently falling back to the default command
-/// as if the agent were healthy.
+/// Summary-row display for a dangling harness id: shows the *missing* id so the agent list
+/// tells the same story as spawn rather than silently falling back to the default command.
 pub(crate) fn dangling_harness_display(id: &str) -> String {
     format!("harness (deleted): {id}")
 }
 
 /// Spawn-time variant of `record_agent_command` that returns a typed error when
-/// a record's `runtime` id or its persona's `runtime` id is set but cannot be
-/// resolved (i.e. the definition was deleted after the agent was created).
-///
-/// Returns `Err("DANGLING_HARNESS_ID:<id>")` so callers can surface the error
-/// without falling through to `buzz-agent`.  When there is no runtime id at all
-/// the fallback to `default_agent_command()` is intentional (legacy agents
-/// pre-date the unified harness model).
+/// a record's `runtime` id or persona's `runtime` id is set but unresolvable
+/// (definition deleted after agent was created). Returns `Err("DANGLING_HARNESS_ID:<id>")`.
+/// When there is no runtime id at all, falls through to `default_agent_command()` intentionally.
 pub fn try_record_agent_command(
     record: &crate::managed_agents::types::ManagedAgentRecord,
     personas: &[crate::managed_agents::types::AgentDefinition],
@@ -603,7 +599,7 @@ pub fn clear_resolve_cache() {
 //
 // `build_managed_agent_summary` needs to compare the spawn-time adapter
 // availability against the *current* availability without triggering a live
-// `probe_codex_acp_major_version` subprocess on every poll cycle.  This cache
+// `probe_codex_acp_version` subprocess on every poll cycle.  This cache
 // stores the last availability status of the codex-acp binary at its resolved
 // path.  It is warmed by `discover_acp_runtimes` (which already probes), so
 // the badge path reads warm data, and is invalidated by `clear_resolve_cache`
@@ -1163,15 +1159,30 @@ pub(crate) fn classify_runtime(
     }
 }
 
-/// Probe the major version of a `codex-acp` binary by running `--version`.
+/// The oldest `codex-acp` version supported by Buzz managed agents.
+///
+/// Older 1.x adapters are detected successfully, but can still bundle a Codex runtime
+/// that does not reliably give `buzz` CLI subprocesses outbound relay access.
+///
+/// Bump policy: raise this only when a newer adapter fixes a defect that breaks managed
+/// agents, and only to a version already published on npm — every user below the floor is
+/// offered a reinstall on their next discovery pass.
+pub(crate) const MIN_CODEX_ACP_VERSION: (u64, u64, u64) = (1, 1, 7);
+
+/// Probe the full version of a `codex-acp` binary by running `--version`.
 ///
 /// The 1.x adapter (`@agentclientprotocol/codex-acp`) outputs
 /// `@agentclientprotocol/codex-acp <major>.<minor>.<patch>` on stdout and exits 0.
 /// The old 0.16.x adapter (`@zed-industries/codex-acp`) is a Rust binary that does
 /// not recognise `--version` and exits non-zero.
 ///
-/// Returns the major version on success, `None` on any failure (non-zero exit,
-/// unparseable output, timeout, or missing binary).
+/// Returns the `(major, minor, patch)` triple on success, `None` on any failure
+/// (non-zero exit, unparseable output, timeout, or missing binary).
+///
+/// The parse is deliberately strict: exactly three numeric dot-separated components.
+/// Partial versions (`1.2`) and prerelease tags (`1.2.0-rc1`) return `None` and so
+/// classify as [`AcpAvailabilityStatus::AdapterOutdated`] — failing closed offers a
+/// reinstall rather than running an adapter whose version cannot be compared.
 ///
 /// The probe is bounded by a 5-second deadline. The child is polled with
 /// [`std::process::Child::try_wait`] (the repo's standard deadline pattern) and
@@ -1180,16 +1191,16 @@ pub(crate) fn classify_runtime(
 /// Stdout is redirected to a temporary file rather than a pipe, so forked
 /// descendants cannot hold EOF open. Reads from a regular file return EOF at its
 /// current write position regardless of inherited file descriptors, cross-platform.
-pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
-    probe_codex_acp_major_version_with_path(
+pub(crate) fn probe_codex_acp_version(binary_path: &Path) -> Option<(u64, u64, u64)> {
+    probe_codex_acp_version_with_path(
         binary_path,
         crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
     )
 }
-pub(crate) fn probe_codex_acp_major_version_with_path(
+pub(crate) fn probe_codex_acp_version_with_path(
     binary_path: &Path,
     augmented_path: Option<&str>,
-) -> Option<u64> {
+) -> Option<(u64, u64, u64)> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::time::{Duration, Instant};
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1245,30 +1256,35 @@ pub(crate) fn probe_codex_acp_major_version_with_path(
     let stdout = String::from_utf8_lossy(&buf);
     // Output format: "<package-name> <major>.<minor>.<patch>"
     let version_str = stdout.split_whitespace().last()?;
-    let major_str = version_str.split('.').next()?;
-    major_str.parse::<u64>().ok()
+    let mut components = version_str.split('.');
+    let major = components.next()?.parse::<u64>().ok()?;
+    let minor = components.next()?.parse::<u64>().ok()?;
+    let patch = components.next()?.parse::<u64>().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
 }
 
 /// Classifies a resolved codex-acp binary path as [`AcpAvailabilityStatus::Available`]
 /// or [`AcpAvailabilityStatus::AdapterOutdated`].
 ///
 /// The 0.16.x adapter (`@zed-industries/codex-acp`) does not recognise `--version`
-/// and exits non-zero — that probe failure yields `AdapterOutdated`. The 1.x adapter
-/// (`@agentclientprotocol/codex-acp`) prints its version and exits 0; major ≥ 1
-/// yields `Available`.
+/// and exits non-zero — that probe failure yields `AdapterOutdated`. An adapter is
+/// available only when its version is at least [`MIN_CODEX_ACP_VERSION`].
 ///
 /// Used by `discover_acp_runtimes`, `cli_login_requirements`, and
 /// `install_acp_runtime_blocking` so the version-gate logic is not duplicated.
 pub(crate) fn codex_adapter_availability(path: &Path) -> AcpAvailabilityStatus {
-    match probe_codex_acp_major_version(path) {
-        Some(major) if major >= 1 => AcpAvailabilityStatus::Available,
+    match probe_codex_acp_version(path) {
+        Some(version) if version >= MIN_CODEX_ACP_VERSION => AcpAvailabilityStatus::Available,
         _ => AcpAvailabilityStatus::AdapterOutdated,
     }
 }
 
-/// Returns `true` when the codex-acp binary at `path` is outdated (major version < 1)
-/// or cannot be probed using `augmented_path`. Thin wrapper around
-/// [`codex_adapter_is_outdated_with_path`].
+/// Returns `true` when the codex-acp binary at `path` is below
+/// [`MIN_CODEX_ACP_VERSION`] or cannot be probed using `augmented_path`. Thin wrapper
+/// around [`codex_adapter_is_outdated_with_path`].
 #[cfg(test)]
 pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
     codex_adapter_is_outdated_with_path(
@@ -1277,15 +1293,15 @@ pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
     )
 }
 
-/// Returns `true` when the codex-acp binary at `path` is outdated (major version < 1)
-/// or cannot be probed with the supplied PATH.
+/// Returns `true` when the codex-acp binary at `path` is below
+/// [`MIN_CODEX_ACP_VERSION`] or cannot be probed with the supplied PATH.
 pub(crate) fn codex_adapter_is_outdated_with_path(
     path: &Path,
     augmented_path: Option<&str>,
 ) -> bool {
     !matches!(
-        probe_codex_acp_major_version_with_path(path, augmented_path),
-        Some(major) if major >= 1
+        probe_codex_acp_version_with_path(path, augmented_path),
+        Some(version) if version >= MIN_CODEX_ACP_VERSION
     )
 }
 
@@ -1308,9 +1324,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
     let (mut availability, command, binary_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
 
-    // For codex-acp: when the adapter resolves as Available, probe the
-    // version. An adapter with major version < 1 is treated as outdated —
-    // the CODEX_CONFIG spawn contract requires 1.x.
+    // For codex-acp: when the adapter resolves as Available, probe its full
+    // version. An adapter below MIN_CODEX_ACP_VERSION is treated as outdated.
     if runtime.id == "codex"
         && availability == AcpAvailabilityStatus::Available
         && command.as_deref() == Some("codex-acp")
@@ -1391,6 +1406,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
+            max_tokens_env_var: runtime.max_tokens_env_var.map(str::to_string),
+            context_limit_env_var: runtime.context_limit_env_var.map(str::to_string),
+            max_rounds_env_var: runtime.max_rounds_env_var.map(str::to_string),
             install_hint,
             install_instructions_url: install_instructions_url.to_string(),
             can_auto_install,
@@ -1415,225 +1433,6 @@ pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpA
     known_acp_runtime_exact(runtime_id)
         .map(discover_acp_runtime_phase1)
         .map(|partial| partial.entry.availability)
-}
-
-// ── Tier-2 preset harnesses ────────────────────────────────────────────────
-//
-// Static data for well-known ACP harnesses that have bundled logos and
-// verified command/args. PATH-probed at discovery time (Detected badge);
-// not editable or deletable by users. Logos are bundled assets referenced
-// by id in the frontend `RUNTIME_LOGOS` map.
-
-struct PresetHarness {
-    id: &'static str,
-    label: &'static str,
-    command: &'static str,
-    args: &'static [&'static str],
-    install_instructions_url: &'static str,
-    install_hint: &'static str,
-    /// Vendor CLI the ACP command wraps, when the preset is an adapter
-    /// (e.g. Amp's `amp-acp` wraps the separately-installed `amp` CLI).
-    /// Consulted only when the adapter is absent, so `AdapterMissing`
-    /// replaces the misleading `NotInstalled` when the CLI is present but
-    /// the adapter is not. Deliberately NOT fed through the builtins'
-    /// full `classify_runtime` predicate: that would flip
-    /// adapter-present/CLI-absent from today's `Available` to `CliMissing`
-    /// (unselectable), and presets carry a single flat `install_hint`, so
-    /// the `CliMissing` copy would tell the user to install the adapter
-    /// they already have. `None` when the command IS the vendor CLI.
-    underlying_cli: Option<&'static str>,
-}
-
-/// Build the catalog entry for one preset harness through an injectable
-/// resolver — the seam the preset loop consumes and tests bind.
-///
-/// Availability consumes only the adapter-missing arm of the builtin
-/// predicate: adapter presence alone decides `Available` (exactly today's
-/// behavior — an `amp-acp` without `amp` stays selectable), and
-/// `underlying_cli` is consulted only when the adapter is absent, to
-/// distinguish `AdapterMissing` (vendor CLI present) from `NotInstalled`
-/// (neither found). See the `underlying_cli` field doc for why the full
-/// `classify_runtime` predicate is deliberately not used here.
-fn preset_catalog_entry(
-    def: &PresetHarness,
-    resolve: impl Fn(&str) -> Option<PathBuf>,
-) -> AcpRuntimeCatalogEntry {
-    let (availability, command, binary_path) = match resolve(def.command) {
-        Some(path) => (
-            AcpAvailabilityStatus::Available,
-            Some(def.command.to_string()),
-            Some(path.display().to_string()),
-        ),
-        None => {
-            let underlying_cli_found = def
-                .underlying_cli
-                .map(|cli| resolve(cli).is_some())
-                .unwrap_or(false);
-            if underlying_cli_found {
-                (AcpAvailabilityStatus::AdapterMissing, None, None)
-            } else {
-                (AcpAvailabilityStatus::NotInstalled, None, None)
-            }
-        }
-    };
-    let underlying_cli_path = def
-        .underlying_cli
-        .and_then(resolve)
-        .map(|p| p.display().to_string());
-
-    let default_args = normalize_agent_args(
-        def.command,
-        def.args.iter().map(|s| s.to_string()).collect(),
-    );
-
-    AcpRuntimeCatalogEntry {
-        id: def.id.to_string(),
-        label: def.label.to_string(),
-        // No remote URL — all preset icons are bundled assets.
-        avatar_url: String::new(),
-        availability,
-        command,
-        binary_path,
-        default_args,
-        mcp_command: None,
-        model_env_var: None,
-        provider_env_var: None,
-        thinking_env_var: None,
-        install_hint: def.install_hint.to_string(),
-        install_instructions_url: def.install_instructions_url.to_string(),
-        can_auto_install: false,
-        // Kept false even for adapter presets: presets carry one flat
-        // install_hint (the adapter's), so the requiresExternalCli
-        // "CLI is missing" wording would pair the wrong noun with it.
-        // The builtin path, with per-availability hints, is the only
-        // consumer of the true case.
-        requires_external_cli: false,
-        underlying_cli_path,
-        node_required: false,
-        auth_status: AuthStatus::NotApplicable,
-        login_hint: None,
-        source: HarnessSource::Preset,
-        // Preset entries have static, non-editable env; definition_env is empty.
-        definition_env: Default::default(),
-    }
-}
-
-const PRESET_HARNESSES: &[PresetHarness] = &[
-    PresetHarness {
-        id: "cursor",
-        label: "Cursor",
-        command: "cursor-agent",
-        args: &["acp"],
-        install_instructions_url: "https://cursor.com/downloads",
-        install_hint: "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
-        underlying_cli: None,
-    },
-    PresetHarness {
-        id: "omp",
-        label: "Oh My Pi",
-        command: "omp",
-        args: &["acp"],
-        install_instructions_url: "https://github.com/can1357/oh-my-pi",
-        install_hint: "Buzz talks to Oh My Pi through its CLI's ACP mode (omp acp).",
-        underlying_cli: None,
-    },
-    PresetHarness {
-        id: "grok",
-        label: "Grok Build",
-        command: "grok",
-        args: &["agent", "--always-approve", "stdio"],
-        install_instructions_url: "https://build.x.ai/docs",
-        install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
-        underlying_cli: None,
-    },
-    PresetHarness {
-        id: "opencode",
-        label: "OpenCode",
-        command: "opencode",
-        args: &["acp"],
-        install_instructions_url: "https://opencode.ai/docs",
-        install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
-        underlying_cli: None,
-    },
-    PresetHarness {
-        id: "kimi",
-        label: "Kimi Code",
-        command: "kimi",
-        args: &["acp"],
-        install_instructions_url: "https://kimi.ai/download",
-        install_hint: "Buzz talks to Kimi Code through its CLI's ACP mode (kimi acp).",
-        underlying_cli: None,
-    },
-    PresetHarness {
-        id: "amp",
-        label: "Amp",
-        command: "amp-acp",
-        args: &[],
-        install_instructions_url: "https://github.com/tao12345666333/amp-acp",
-        install_hint: "Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
-        underlying_cli: Some("amp"),
-    },
-    PresetHarness {
-        id: "hermes",
-        label: "Hermes Agent",
-        command: "hermes-acp",
-        args: &[],
-        install_instructions_url: "https://hermes-agent.nousresearch.com",
-        install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
-        underlying_cli: None,
-    },
-    PresetHarness {
-        id: "openclaw",
-        label: "OpenClaw",
-        command: "openclaw",
-        args: &["acp"],
-        install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
-        install_hint: "Buzz talks to OpenClaw through its ACP mode (openclaw acp), which relies on the OpenClaw Gateway daemon. Follow the setup guide to install both.\n\n\
-            ⚠️  Execution-locus note: `openclaw acp` runs tools inside the \
-            OpenClaw Gateway daemon, not in the Desktop process. \
-            Desktop-injected BUZZ_* env vars are visible to the `openclaw` \
-            harness process itself, but do NOT automatically reach the \
-            Gateway's execution environment. If your tools or agent logic \
-            needs BUZZ_* credentials at execution time, set them on the \
-            Gateway's own environment separately.",
-        underlying_cli: None,
-    },
-];
-
-/// Return the static preset harness definitions as `HarnessDefinition` values.
-///
-/// Used by `warm_harness_registry_from_dir` to seed the loaded-harness registry
-/// at startup before the frontend triggers a full discovery run.
-pub(crate) fn preset_harness_definitions(
-) -> Vec<crate::managed_agents::custom_harnesses::HarnessDefinition> {
-    PRESET_HARNESSES
-        .iter()
-        .map(
-            |p| crate::managed_agents::custom_harnesses::HarnessDefinition {
-                id: p.id.to_string(),
-                label: p.label.to_string(),
-                command: p.command.to_string(),
-                args: p.args.iter().map(|s| s.to_string()).collect(),
-                env: std::collections::BTreeMap::new(),
-                install_instructions_url: p.install_instructions_url.to_string(),
-                install_hint: p.install_hint.to_string(),
-            },
-        )
-        .collect()
-}
-
-/// Return the static slice of preset harness IDs.
-///
-/// Used by `check_id_collision` in `custom_harnesses` to derive the reserved-ID
-/// set from the single source of truth (`PRESET_HARNESSES`) rather than a
-/// hand-maintained copy.  Adding a preset automatically reserves its ID.
-pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
-    // `PRESET_HARNESSES` is `'static`; we project its `id` fields.
-    // Computed once via OnceLock to avoid repeated allocations on hot paths.
-    use std::sync::OnceLock;
-    static IDS: OnceLock<Vec<&'static str>> = OnceLock::new();
-    IDS.get_or_init(|| PRESET_HARNESSES.iter().map(|p| p.id).collect())
-        .as_slice()
 }
 
 /// Discover all ACP runtimes, optionally merging user-defined custom harnesses
@@ -1768,6 +1567,9 @@ pub fn discover_acp_runtimes_from(
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,
+                max_tokens_env_var: None,
+                context_limit_env_var: None,
+                max_rounds_env_var: None,
                 install_hint: def.install_hint.clone(),
                 install_instructions_url: def.install_instructions_url.clone(),
                 // Security line: custom definitions carry no install scripts.

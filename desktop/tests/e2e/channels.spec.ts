@@ -712,7 +712,6 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeDisabled();
   await expect(page.getByTestId("new-dm-search")).toBeDisabled();
-  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "create_managed_agent"),
@@ -720,6 +719,9 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     .toBeGreaterThan(baselineCreateCount);
   await expect(page.getByTestId("chat-title")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+  // Assert popover hidden after chat-title settles — by this point the send
+  // flow has completed and the UI has fully transitioned away from the popover.
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
 
   const sendCommands = (await readCommandLog(page)).slice(
     baselineCommands.length,
@@ -782,8 +784,11 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
 test("routes an agent mention from an existing DM to the expanded conversation", async ({
   page,
 }) => {
+  // Delay persona provisioning so the follow-up expanded-DM open/start sequence
+  // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    createManagedAgentDelayMs: 100,
   });
   await page.goto("/");
 
@@ -837,7 +842,10 @@ test("routes an agent mention from an existing DM to the expanded conversation",
 test("routes a managed relay-agent mention from an existing DM to the expanded conversation", async ({
   page,
 }) => {
+  // Delay the expanded open_dm call so routing/navigation settles
+  // deterministically under fast CI execution.
   await installMockBridge(page, {
+    openDmDelayMs: 100,
     managedAgents: [
       {
         pubkey: DM_RELAY_AGENT_PUBKEY,
@@ -967,8 +975,11 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
 test("drops an expanded DM after the first message fails", async ({ page }) => {
   const retryMessage = "Retry without the agent";
   const sendError = "Mock first DM send failed.";
+  // Delay persona provisioning so the follow-up expanded-DM open/start sequence
+  // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    createManagedAgentDelayMs: 100,
     sendMessageErrors: [sendError],
   });
   await page.goto("/");
@@ -1325,8 +1336,26 @@ test("create channel template selector matches the lifecycle controls", async ({
         description: "Coordinate a new project from planning through launch.",
         channelType: "stream",
         visibility: "private",
-        canvasTemplate: null,
-        agents: { personas: [], teams: [] },
+        canvasTemplate: "# {channel.name}\n\nKickoff notes",
+        agents: {
+          personas: [
+            {
+              personaId: "planner",
+              runtime: null,
+              model: null,
+              role: null,
+              backend: null,
+            },
+          ],
+          teams: [
+            {
+              teamId: "research-team",
+              runtime: null,
+              model: null,
+              backend: null,
+            },
+          ],
+        },
         isBuiltin: false,
         createdAt: "2026-07-23T00:00:00Z",
         updatedAt: "2026-07-23T00:00:00Z",
@@ -1339,16 +1368,73 @@ test("create channel template selector matches the lifecycle controls", async ({
 
   const templateControl = page.getByTestId("create-channel-template");
   await expect(templateControl).toHaveRole("button");
-  await expect(templateControl).toHaveText("No template");
+  await expect(templateControl).toHaveText("None");
   await templateControl.click();
+  await expect(
+    page.getByRole("menuitem", { name: "Create new channel template…" }),
+  ).toBeVisible();
   await page.getByRole("menuitemradio", { name: "Project kickoff" }).click();
 
   await expect(templateControl).toHaveText("Project kickoff");
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Private · Canvas included · 1 agent · 1 team",
+  );
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
   await expect(page.getByTestId("create-channel-permissions")).toContainText(
     "Private",
+  );
+  await page.getByTestId("create-channel-permissions").click();
+  await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Open · Canvas included · 1 agent · 1 team",
+  );
+});
+
+test("create channel exposes templates when the library is empty", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelTemplates: [] });
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+
+  const typeContainer = page.getByTestId(
+    "create-channel-channel-type-container",
+  );
+  const visibilityContainer = page.getByTestId(
+    "create-channel-permissions-container",
+  );
+  const templateContainer = page.getByTestId(
+    "create-channel-template-container",
+  );
+  await expect(templateContainer).toContainText("TemplateOptional");
+  const typeBox = await typeContainer.boundingBox();
+  const visibilityBox = await visibilityContainer.boundingBox();
+  const templateBox = await templateContainer.boundingBox();
+  expect(typeBox).not.toBeNull();
+  expect(visibilityBox).not.toBeNull();
+  expect(templateBox).not.toBeNull();
+  expect(typeBox?.y ?? 0).toBeLessThan(visibilityBox?.y ?? 0);
+  expect(visibilityBox?.y ?? 0).toBeLessThan(templateBox?.y ?? 0);
+
+  const templateControl = page.getByTestId("create-channel-template");
+  await expect(templateControl).toHaveText("None");
+  await templateControl.click();
+  await page
+    .getByRole("menuitem", { name: "Create new channel template…" })
+    .click();
+
+  await expect(
+    page.getByText("Create template", { exact: true }),
+  ).toBeVisible();
+  await page.locator("#template-name").fill("Weekly planning");
+  await page.locator("#template-description").fill("Plan the next week.");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await expect(templateControl).toHaveText("Weekly planning");
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Plan the next week.",
   );
 });
 
@@ -2632,7 +2718,7 @@ test("Inbox All excludes generic channel traffic", async ({ page }) => {
   ).toHaveCount(0);
 });
 
-test("Inbox unread-only hides reminders and drafts from mixed All", async ({
+test("Inbox All never lists drafts and unread-only hides reminders", async ({
   page,
 }) => {
   const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
@@ -2737,7 +2823,8 @@ test("Inbox unread-only hides reminders and drafts from mixed All", async ({
   const draftRow = page.getByTestId(`home-all-drafts-${draftKey}`);
   await expect(messageRow).toBeVisible();
   await expect(reminderRow).toBeVisible();
-  await expect(draftRow).toBeVisible();
+  // Drafts belong to the dedicated Drafts filter — never the mixed All view.
+  await expect(draftRow).toHaveCount(0);
 
   await page.getByTestId("inbox-options-trigger").click();
   await page.getByRole("switch", { name: "Show unread only" }).click();
@@ -2745,6 +2832,12 @@ test("Inbox unread-only hides reminders and drafts from mixed All", async ({
   await expect(messageRow).toBeVisible();
   await expect(reminderRow).toHaveCount(0);
   await expect(draftRow).toHaveCount(0);
+
+  // The draft is still reachable under the Drafts filter.
+  await page.keyboard.press("Escape");
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await expect(page.getByTestId("home-inbox-drafts")).toBeVisible();
 });
 
 test("Inbox merges a due reminder into its represented conversation", async ({

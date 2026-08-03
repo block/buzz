@@ -8,6 +8,8 @@ import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
@@ -28,6 +30,7 @@ void main() {
     bool previewDirectory = false,
     double keyboardInset = 0,
     bool disableAnimations = false,
+    double bottomPadding = 0,
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
     TextScaler textScaler = TextScaler.noScaling,
@@ -52,6 +55,7 @@ void main() {
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
             textScaler: textScaler,
+            padding: EdgeInsets.only(bottom: bottomPadding),
             viewInsets: EdgeInsets.only(bottom: keyboardInset),
           ),
           child: child!,
@@ -131,6 +135,143 @@ void main() {
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
+
+    for (final label in ['general', 'Alice']) {
+      final text = tester.widget<Text>(find.text(label));
+      expect(text.style?.fontSize, contentListTitleTextStyle.fontSize);
+      expect(text.style?.height, contentListTitleTextStyle.height);
+    }
+    final sectionTitle = tester.widget<Text>(find.text('Channels'));
+    expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
+    expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('keeps the last channel above the floating tab bar', (
+    tester,
+  ) async {
+    const footerClearance = 102.0;
+    await tester.pumpWidget(
+      buildTestable(
+        bottomPadding: footerClearance,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final padding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.byType(SliverPadding),
+      ),
+    );
+    expect((padding.padding as EdgeInsets).bottom, footerClearance);
+  });
+
+  testWidgets('truncates long custom section names beside the menu', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    const sectionName = 'A deliberately long custom section name for testing';
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(
+              const ChannelSectionStore(
+                sections: [
+                  ChannelSection(id: 'section-1', name: sectionName, order: 0),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final label = tester.widget<Text>(find.text(sectionName));
+    expect(label.maxLines, 1);
+    expect(label.overflow, TextOverflow.ellipsis);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('section menu matches desktop labels, icons, and inset', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(
+              const ChannelSectionStore(
+                sections: [
+                  ChannelSection(id: 'section-1', name: 'Design', order: 0),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('section-menu-section-1')));
+    await tester.pumpAndSettle();
+
+    final popover = find.byKey(const Key('section-popover-section-1'));
+    expect(popover, findsOneWidget);
+    for (final label in [
+      'Rename section',
+      'Move up',
+      'Move down',
+      'Delete section',
+    ]) {
+      expect(
+        find.descendant(of: popover, matching: find.text(label)),
+        findsOne,
+      );
+    }
+    for (final icon in [
+      LucideIcons.pencil,
+      LucideIcons.arrowUp,
+      LucideIcons.arrowDown,
+      LucideIcons.trash2,
+    ]) {
+      expect(
+        find.descendant(of: popover, matching: find.byIcon(icon)),
+        findsOne,
+      );
+    }
+
+    final menuItems = tester.widgetList<PopupMenuItem<String>>(
+      find.descendant(
+        of: popover,
+        matching: find.byWidgetPredicate(
+          (widget) => widget is PopupMenuItem<String>,
+        ),
+      ),
+    );
+    expect(menuItems, hasLength(4));
+    for (final item in menuItems) {
+      expect(
+        item.padding,
+        const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0),
+      );
+    }
+
+    final error = Theme.of(tester.element(popover)).colorScheme.error;
+    final deleteText = tester.widget<Text>(find.text('Delete section'));
+    final deleteIcon = tester.widget<Icon>(
+      find.descendant(of: popover, matching: find.byIcon(LucideIcons.trash2)),
+    );
+    expect(deleteText.style?.color, error);
+    expect(deleteIcon.color, error);
   });
 
   testWidgets('aligns the top, section, row, and skeleton label columns', (
@@ -1373,6 +1514,16 @@ class _FakeNotifier extends ChannelsNotifier {
   @override
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel => _observedEventsByChannel;
+}
+
+class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
+  _FakeChannelSectionsNotifier(this._store);
+
+  final ChannelSectionStore _store;
+
+  @override
+  ChannelSectionsState build() =>
+      ChannelSectionsState(isReady: true, store: _store, version: 1);
 }
 
 class _FakeCommunityListNotifier extends CommunityListNotifier {

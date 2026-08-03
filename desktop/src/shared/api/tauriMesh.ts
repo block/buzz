@@ -36,7 +36,6 @@ export type MeshNodeStatus = {
   endpointId?: string | null;
   deviceId?: string | null;
   deviceName?: string | null;
-  communityRelayUrl: string | null;
 };
 
 export async function meshStartNode(

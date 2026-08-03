@@ -184,6 +184,7 @@ pub fn anthropic_thinking_config(
 fn anthropic_model_supports_xhigh(model: &str) -> bool {
     model.starts_with("claude-opus-4-7")
         || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-opus-5")
         || model.starts_with("claude-sonnet-5")
         || model.starts_with("claude-fable-5")
         || model.starts_with("claude-mythos-5")
@@ -606,6 +607,7 @@ fn is_adaptive_thinking_model(model: &str) -> bool {
     model.starts_with("claude-opus-4-6")
         || model.starts_with("claude-opus-4-7")
         || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-opus-5")
         // Sonnet 5.x (any patch/date suffix after "claude-sonnet-5").
         || model.starts_with("claude-sonnet-5")
         // Sonnet 4.6 exactly (not Sonnet 4.5 or earlier — not in the adaptive table).
@@ -669,6 +671,8 @@ pub enum Provider {
     /// Databricks AI Gateway v2. Routes by model family through the gateway's
     /// OpenAI Responses, Anthropic Messages, or MLflow Chat Completions paths.
     DatabricksV2,
+    /// OpenRouter multi-provider gateway. Routes to `{base_url}/chat/completions` with bearer auth. Wire format is OpenAI-chat-compatible.
+    OpenRouter,
 }
 
 /// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
@@ -716,6 +720,16 @@ pub struct Config {
     /// Maximum `_Stop` rejections per prompt. Default 3. Set to 0 to
     /// disable `_Stop` hooks entirely (agent always honors end_turn).
     pub stop_max_rejections: u32,
+    /// Remind the model to publish when a turn is about to end without any
+    /// recognized attempt to post to Buzz. Default off; opt in per agent with
+    /// `BUZZ_AGENT_REQUIRE_REPLY=1`.
+    ///
+    /// Advisory only: at most `MAX_REPLY_NAGS` reminders (see `agent.rs`),
+    /// then the turn ends regardless. Bounded by the same
+    /// `stop_max_rejections` budget as `_Stop` hooks, which is the outer cap on
+    /// all end-turn objections — at the default 3 both reminders fit; at 1 only
+    /// one does; at 0 the guard is off with the hooks.
+    pub require_reply: bool,
     /// Hook server allowlist. See [`HookServers`] for variant semantics.
     /// Default (env unset/empty) is `None` — hooks are off unless the
     /// operator explicitly opts in.
@@ -736,6 +750,14 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Emit Anthropic `cache_control` breakpoints on the stable prefix
+    /// (tools + system prompt) and the rolling conversation tail. Default on;
+    /// disable with `BUZZ_AGENT_PROMPT_CACHING=0`. Consulted on every route that
+    /// speaks the Anthropic caching dialect: first-party Anthropic, the
+    /// DatabricksV2 Claude route, and OpenRouter's `anthropic/*` models. The
+    /// Databricks gateway does not auto-cache, so without this the surfaced
+    /// `cache_read_input_tokens` is structurally always 0.
+    pub prompt_caching: bool,
 }
 
 impl Config {
@@ -746,6 +768,7 @@ impl Config {
             env("BUZZ_AGENT_PROVIDER").as_deref(),
             env("ANTHROPIC_API_KEY").as_deref(),
             env("OPENAI_COMPAT_API_KEY").as_deref(),
+            env("OPENROUTER_API_KEY").as_deref(),
         )?;
 
         // Universal model override — takes priority over provider-specific model
@@ -788,6 +811,16 @@ impl Config {
                 databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
                 OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
             ),
+            Provider::OpenRouter => (
+                req("OPENROUTER_API_KEY")?,
+                resolve_model(
+                    buzz_agent_model.as_deref(),
+                    env("OPENROUTER_MODEL").as_deref(),
+                )
+                .ok_or_else(|| "config: OPENROUTER_MODEL required".to_string())?,
+                env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+                OpenAiApi::Chat, // OpenRouter uses Chat Completions only
+            ),
         };
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
@@ -828,9 +861,11 @@ impl Config {
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
+            require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -869,9 +904,11 @@ impl Config {
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),
             stop_max_rejections: 0,
+            require_reply: false,
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            prompt_caching: false,
         }
     }
 
@@ -991,6 +1028,7 @@ fn resolve_provider(
     requested: Option<&str>,
     anthropic_key: Option<&str>,
     openai_key: Option<&str>,
+    openrouter_key: Option<&str>,
 ) -> Result<Provider, String> {
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => {
@@ -1006,6 +1044,8 @@ fn resolve_provider(
                 ),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
+                "openrouter" if present_nonempty(openrouter_key) => Ok(Provider::OpenRouter),
+                "openrouter" => Err("config: OPENROUTER_API_KEY required".into()),
                 _ => Err(format!(
                     "config: BUZZ_AGENT_PROVIDER={raw} not supported"
                 )),
@@ -1223,11 +1263,11 @@ mod tests {
     #[test]
     fn resolve_provider_keeps_requested_provider_when_token_present() {
         assert_eq!(
-            resolve_provider(Some("anthropic"), Some("sk-ant"), None,).unwrap(),
+            resolve_provider(Some("anthropic"), Some("sk-ant"), None, None).unwrap(),
             Provider::Anthropic
         );
         assert_eq!(
-            resolve_provider(Some("openai"), None, Some("sk-openai"),).unwrap(),
+            resolve_provider(Some("openai"), None, Some("sk-openai"), None).unwrap(),
             Provider::OpenAi
         );
     }
@@ -1235,17 +1275,17 @@ mod tests {
     #[test]
     fn resolve_provider_errors_when_requested_provider_key_missing() {
         // No fallback — missing key returns an error regardless of Databricks availability.
-        let err = resolve_provider(Some("anthropic"), None, None).unwrap_err();
+        let err = resolve_provider(Some("anthropic"), None, None, None).unwrap_err();
         assert!(err.contains("ANTHROPIC_API_KEY required"), "{err}");
 
-        let err = resolve_provider(Some("openai-compat"), None, Some("   ")).unwrap_err();
+        let err = resolve_provider(Some("openai-compat"), None, Some("   "), None).unwrap_err();
         assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
     }
 
     #[test]
     fn resolve_provider_errors_when_provider_env_absent() {
         // No implicit inference — absent BUZZ_AGENT_PROVIDER is an error.
-        let err = resolve_provider(None, None, None).unwrap_err();
+        let err = resolve_provider(None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
     }
 
@@ -1255,19 +1295,19 @@ mod tests {
         // When BUZZ_AGENT_PROVIDER=databricks, resolve_provider succeeds regardless
         // of DATABRICKS_HOST/MODEL (those are validated later in from_env()).
         assert_eq!(
-            resolve_provider(Some("databricks"), None, None).unwrap(),
+            resolve_provider(Some("databricks"), None, None, None).unwrap(),
             Provider::Databricks
         );
         // Missing key for other providers still errors — no Databricks fallback.
-        let err = resolve_provider(Some("openai"), None, None).unwrap_err();
+        let err = resolve_provider(Some("openai"), None, None, None).unwrap_err();
         assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
-        let err = resolve_provider(None, None, None).unwrap_err();
+        let err = resolve_provider(None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
     }
 
     #[test]
     fn resolve_provider_unsupported_error_preserves_user_casing() {
-        let err = resolve_provider(Some("OpenAIish"), None, None).unwrap_err();
+        let err = resolve_provider(Some("OpenAIish"), None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
     }
 
@@ -2655,6 +2695,9 @@ mod tests {
         if p == "databricks" {
             return openai_result(&m);
         }
+        if p == "openrouter" {
+            return (ALL_7.to_vec(), Some("medium"));
+        }
         // openai-compat, unknown, empty → all-7, default medium.
         (ALL_7.to_vec(), Some("medium"))
     }
@@ -2705,5 +2748,19 @@ mod tests {
                 entry.provider, entry.model,
             );
         }
+    }
+
+    #[test]
+    fn resolve_provider_openrouter_with_key() {
+        assert_eq!(
+            resolve_provider(Some("openrouter"), None, None, Some("sk-or-123")).unwrap(),
+            Provider::OpenRouter
+        );
+    }
+
+    #[test]
+    fn resolve_provider_openrouter_missing_key() {
+        let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
+        assert!(err.contains("OPENROUTER_API_KEY"));
     }
 }

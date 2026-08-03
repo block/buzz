@@ -14,15 +14,11 @@ pub(crate) use discovery::{
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
 
 mod catalog;
+pub(crate) use catalog::canonical_curated_model_id;
 pub use catalog::{model_catalog, MeshModelCatalog};
 
 mod identity;
 pub use identity::ensure_owner_identity;
-
-mod node_types;
-pub use node_types::{
-    stopped_status, MeshNodeMode, MeshNodeState, MeshNodeStatus, StartMeshNodeRequest,
-};
 
 mod progress;
 pub use progress::install_progress_sink;
@@ -174,6 +170,88 @@ impl MeshAvailability {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshNodeMode {
+    Serve,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshNodeState {
+    Off,
+    Starting,
+    Running,
+    Stopping,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartMeshNodeRequest {
+    pub mode: MeshNodeMode,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub max_vram_gb: Option<u64>,
+    #[serde(default)]
+    pub join_token: Option<String>,
+    /// Stable, relay-scoped mesh name injected by the Buzz backend. It is not
+    /// accepted from the frontend and contains no relay address.
+    #[serde(default, skip_deserializing)]
+    pub mesh_name: Option<String>,
+    /// Relay this runtime's community membership and discovery are bound to.
+    /// Injected by the backend when sharing starts and retained across UI
+    /// workspace switches; moving a share requires an explicit stop/start.
+    #[serde(default, skip_deserializing)]
+    pub relay_url: Option<String>,
+    /// Mesh owner ids admitted to this node (the member roster from
+    /// member-signed discovery notes). `None` = caller did not resolve a roster
+    /// (tests, direct invocations): the node runs without allowlist
+    /// enforcement, matching an open relay. `Some` = enforce
+    /// `TrustPolicy::Allowlist` over exactly these owners (self is always
+    /// included by the caller).
+    #[serde(default)]
+    pub trusted_owner_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshNodeStatus {
+    pub state: MeshNodeState,
+    pub mode: Option<MeshNodeMode>,
+    pub health: MeshHealth,
+    pub api_base_url: Option<String>,
+    pub console_url: Option<String>,
+    pub model_id: Option<String>,
+    pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invite_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+}
+
+pub fn stopped_status() -> MeshNodeStatus {
+    MeshNodeStatus {
+        state: MeshNodeState::Off,
+        mode: None,
+        health: MeshHealth::ok(),
+        api_base_url: None,
+        console_url: None,
+        model_id: None,
+        model_name: None,
+        invite_token: None,
+        endpoint_id: None,
+        device_id: None,
+        device_name: None,
+    }
+}
+
 /// Monotonic id source so callers can compare runtime *identity* across an
 /// `.await` point. The re-arm watchdog must not evict a fresh replacement that
 /// a concurrent stop/start swapped in while the ingress probe was in flight
@@ -236,59 +314,32 @@ pub const MESH_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// before the node starts. Without this the download happens *inside*
 /// `serve::start()` where the UI can only show a frozen "starting…" state.
 /// Already-installed models return immediately from the cache scan.
-async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
-    let started = std::time::Instant::now();
-    eprintln!("buzz-mesh: checking model cache model={model}");
-    let model_owned = model.to_string();
-    let installed = tokio::task::spawn_blocking(move || {
+async fn model_is_installed(model: &str) -> bool {
+    let model_owned = model.replace("@main", "");
+    tokio::task::spawn_blocking(move || {
         let cache = mesh_llm_node::models::default_huggingface_cache_dir();
         mesh_llm_node::models::scan_installed_models(cache)
             .iter()
-            .any(|m| m.model_ref.contains(&model_owned))
+            .any(|m| m.model_ref.replace("@main", "").contains(&model_owned))
     })
     .await
-    .unwrap_or(false);
-    if installed {
-        eprintln!(
-            "buzz-mesh: model already installed model={model} elapsed_ms={}",
-            started.elapsed().as_millis()
-        );
+    .unwrap_or(false)
+}
+
+async fn ensure_model_downloaded(model: &str) -> anyhow::Result<()> {
+    if model_is_installed(model).await {
         return Ok(());
     }
-    eprintln!("buzz-mesh: preparing model download model={model}");
-    match mesh_llm_host_runtime::models::download_model_ref_with_progress_details(model, true).await
-    {
-        Ok(_) => {
-            eprintln!(
-                "buzz-mesh: model download ready model={model} elapsed_ms={}",
-                started.elapsed().as_millis()
-            );
-            Ok(())
-        }
-        Err(error) => {
-            eprintln!(
-                "buzz-mesh: model download failed model={model} elapsed_ms={} error={error:#}",
-                started.elapsed().as_millis()
-            );
-            Err(anyhow::anyhow!("downloading {model} failed: {error}"))
-        }
-    }
+    mesh_llm_host_runtime::models::download_model_ref_with_progress_details(model, true)
+        .await
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("downloading {model} failed: {error}"))
 }
 
 impl DesktopMeshRuntime {
     pub async fn start(mut request: StartMeshNodeRequest) -> anyhow::Result<Self> {
-        let started = std::time::Instant::now();
         sanitize_no_leak_request(&mut request)?;
-        eprintln!(
-            "buzz-mesh: start requested mode={:?} model={}",
-            request.mode,
-            request.model_id.as_deref().unwrap_or("none")
-        );
         initialize_mesh_native_runtime().await?;
-        eprintln!(
-            "buzz-mesh: native runtime ready elapsed_ms={}",
-            started.elapsed().as_millis()
-        );
         let model_id = request
             .model_id
             .clone()
@@ -350,27 +401,7 @@ impl DesktopMeshRuntime {
                         .trust_policy(TrustPolicy::Allowlist)
                         .trust_owners(owners);
                 }
-                eprintln!(
-                    "buzz-mesh: model prepared; starting serve runtime model={} api_port={} console_port={} elapsed_ms={}",
-                    model_id.as_deref().unwrap_or("none"),
-                    api_port,
-                    console_port,
-                    started.elapsed().as_millis()
-                );
-                let ready = serve::start(builder.build()).await.map_err(|error| {
-                    eprintln!(
-                        "buzz-mesh: serve runtime failed model={} elapsed_ms={} error={error:#}",
-                        model_id.as_deref().unwrap_or("none"),
-                        started.elapsed().as_millis()
-                    );
-                    error
-                })?;
-                eprintln!(
-                    "buzz-mesh: serve runtime ready model={} elapsed_ms={}",
-                    model_id.as_deref().unwrap_or("none"),
-                    started.elapsed().as_millis()
-                );
-                DesktopMeshHandle::Ready(ready)
+                DesktopMeshHandle::Ready(serve::start(builder.build()).await?)
             }
             MeshNodeMode::Client => {
                 let mut builder = client::EmbeddedClientConfig::builder()
@@ -653,7 +684,6 @@ impl DesktopMeshRuntime {
             endpoint_id,
             device_id,
             device_name,
-            community_relay_url: self.start_request.relay_url.clone(),
         })
     }
 
@@ -670,7 +700,6 @@ impl DesktopMeshRuntime {
             endpoint_id: None,
             device_id: None,
             device_name: None,
-            community_relay_url: self.start_request.relay_url.clone(),
         }
     }
 
@@ -687,7 +716,6 @@ impl DesktopMeshRuntime {
             endpoint_id: None,
             device_id: None,
             device_name: None,
-            community_relay_url: self.start_request.relay_url.clone(),
         }
     }
 

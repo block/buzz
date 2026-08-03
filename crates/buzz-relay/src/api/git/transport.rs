@@ -28,6 +28,7 @@ use tokio::process::Command;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
+use super::binding::{resolve_repo_binding, RepoBinding};
 use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
 use super::hook::install_hook;
 use super::hydrate::{
@@ -377,7 +378,15 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
 /// error all deny. There is deliberately **no repo-owner bypass**: an owner
 /// removed from the bound channel loses read access, which is the exact
 /// exploit shape this gate closes. Every denial is the same generic 404 as a
-/// nonexistent repo so membership cannot be probed through the git endpoints.
+/// nonexistent repo so membership cannot be probed through the git endpoints
+/// — with exactly one carve-out: a **never-bound** repo read by its own
+/// **announcement author** returns a 404 whose body tells the author how to
+/// bind it (issue #3527: a vanilla NIP-34 client can announce without a
+/// `buzz-channel` tag, and the repo then 404s forever with no explanation
+/// for anyone). The author already knows the repo exists — they announced it
+/// — so the remediation body leaks nothing, and only the author can rebind
+/// (kind:30617 is keyed by `(author, d)`). A *broken* binding stays generic
+/// even for the author: ambiguity fails closed.
 async fn authorize_git_read(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
@@ -415,9 +424,32 @@ async fn authorize_git_read(
         }
     };
 
-    let Some(channel_id) = repo_bound_channel_id(&repo_event.event) else {
-        warn!(repo = %repo_name, "git read gate: missing/malformed buzz-channel binding (deny)");
-        return Err(denied());
+    let channel_id = match resolve_repo_binding(&repo_event.event) {
+        RepoBinding::Bound(id) => id,
+        RepoBinding::NotBound => {
+            // Remediation carve-out: author of a never-bound announcement.
+            // Status stays 404 — byte-identical to every other denial at the
+            // status level — so denial *class* is still unprobeable; only
+            // the body differs, and only for the one identity that already
+            // knows the repo exists. The body is a single verb-first line:
+            // Desktop error paths that keep one line keep the instruction.
+            if repo_event.event.pubkey == *caller {
+                warn!(repo = %repo_name, "git read gate: unbound repo read by its author (deny with remediation)");
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!(
+                        "run: buzz repos bind --id {repo_name} --channel <channel-uuid> — repository {repo_name:?} has no channel binding, so the relay cannot authorize access"
+                    ),
+                )
+                    .into_response());
+            }
+            warn!(repo = %repo_name, "git read gate: missing buzz-channel binding (deny)");
+            return Err(denied());
+        }
+        RepoBinding::Broken => {
+            warn!(repo = %repo_name, "git read gate: malformed buzz-channel binding (deny)");
+            return Err(denied());
+        }
     };
 
     match db
@@ -431,24 +463,6 @@ async fn authorize_git_read(
             Err(denied())
         }
     }
-}
-
-/// Extract the `buzz-channel` UUID from a kind:30617 announcement.
-///
-/// First-tag semantics, matching the push policy endpoint: only the *first*
-/// `buzz-channel` tag is considered, and it must carry a valid UUID. A
-/// malformed first binding denies even if a later duplicate tag is valid —
-/// an ambiguous announcement must fail closed, not silently resolve to
-/// whichever duplicate happens to parse.
-fn repo_bound_channel_id(event: &nostr::Event) -> Option<uuid::Uuid> {
-    let first = event
-        .tags
-        .iter()
-        .find(|t| t.as_slice().first().map(String::as_str) == Some("buzz-channel"))?;
-    first
-        .as_slice()
-        .get(1)
-        .and_then(|v| uuid::Uuid::parse_str(v).ok())
 }
 
 /// Pure decision for [`authorize_git_read`]: a read requires a current
@@ -1050,7 +1064,7 @@ pub async fn receive_pack(
         state.config.bind_addr.port()
     );
     let hooks_dir = repo.path().join("hooks").display().to_string();
-    let hook_env = vec![
+    let mut hook_env = vec![
         ("BUZZ_HOOK_URL", hook_url),
         (
             "BUZZ_HOOK_SECRET",
@@ -1063,13 +1077,8 @@ pub async fn receive_pack(
             auth.tenant.community().as_uuid().to_string(),
         ),
         ("BUZZ_PUSHER_PUBKEY", pusher_hex.clone()),
-        // Override any repo-local core.hooksPath setting; defense in
-        // depth even though the hydrated workspace has no inherited
-        // config.
-        ("GIT_CONFIG_COUNT", "1".to_string()),
-        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
-        ("GIT_CONFIG_VALUE_0", hooks_dir),
     ];
+    hook_env.extend(receive_pack_git_config(hooks_dir));
 
     // Run receive-pack against the tempdir. Returns the *owned* subprocess
     // output (PackOutput) — crucially NOT a Response, so the post-push
@@ -1095,6 +1104,23 @@ pub async fn receive_pack(
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
+}
+
+/// Per-process git configuration for the hydrated receive-pack workspace.
+fn receive_pack_git_config(hooks_dir: String) -> Vec<(&'static str, String)> {
+    vec![
+        // Override any repo-local core.hooksPath setting; defense in depth
+        // even though the hydrated workspace has no inherited config.
+        ("GIT_CONFIG_COUNT", "2".to_string()),
+        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
+        ("GIT_CONFIG_VALUE_0", hooks_dir),
+        // A bare repository rejects deletion of its symbolic HEAD branch by
+        // default. Hydrated repositories are ephemeral, and cas_publish
+        // selects a surviving branch for the next manifest HEAD, so allow
+        // receive-pack to apply the deletion before that selection runs.
+        ("GIT_CONFIG_KEY_1", "receive.denyDeleteCurrent".to_string()),
+        ("GIT_CONFIG_VALUE_1", "ignore".to_string()),
+    ]
 }
 
 /// Buffered output of a `git --stateless-rpc` subprocess.
@@ -1907,9 +1933,146 @@ mod track_c_tests {
     use buzz_core::CommunityId;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::process::Output;
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
+    }
+
+    fn run_test_git(cwd: &Path, args: &[&str], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("run git")
+    }
+
+    fn run_test_receive_pack(repo: &Path, request: &[u8], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("receive-pack")
+            .arg("--stateless-rpc")
+            .arg(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn receive-pack");
+        child
+            .stdin
+            .take()
+            .expect("receive-pack stdin")
+            .write_all(request)
+            .expect("write receive-pack request");
+        child.wait_with_output().expect("wait for receive-pack")
+    }
+
+    fn assert_git_success(output: Output, operation: &str) {
+        assert!(
+            output.status.success(),
+            "{operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn receive_pack_config_allows_deleting_current_branch() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let remote_arg = remote.to_str().expect("utf-8 remote path");
+        let source_arg = source.to_str().expect("utf-8 source path");
+
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--bare", "--initial-branch=main", remote_arg],
+                &[],
+            ),
+            "initialize bare remote",
+        );
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--initial-branch=main", source_arg],
+                &[],
+            ),
+            "initialize source repository",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["config", "user.name", "Buzz Test"], &[]),
+            "configure user name",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["config", "user.email", "buzz-test@example.com"],
+                &[],
+            ),
+            "configure user email",
+        );
+        std::fs::write(source.join("README.md"), "test\n").expect("write fixture");
+        assert_git_success(
+            run_test_git(source.as_path(), &["add", "README.md"], &[]),
+            "stage fixture",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["commit", "-m", "fixture"], &[]),
+            "commit fixture",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["push", remote_arg, "main:main", "main:master"],
+                &[],
+            ),
+            "seed main and master",
+        );
+
+        let oid_output = run_test_git(remote.as_path(), &["rev-parse", "refs/heads/main"], &[]);
+        assert!(oid_output.status.success());
+        let old_oid = String::from_utf8(oid_output.stdout)
+            .expect("utf-8 oid")
+            .trim()
+            .to_string();
+        let command = format!(
+            "{old_oid} {} refs/heads/main\0report-status\n",
+            "0".repeat(40)
+        );
+        let mut request = format!("{:04x}", command.len() + 4).into_bytes();
+        request.extend_from_slice(command.as_bytes());
+        request.extend_from_slice(b"0000");
+
+        let git_config = receive_pack_git_config(remote.join("hooks").display().to_string());
+        let output = run_test_receive_pack(remote.as_path(), &request, &git_config);
+        assert!(
+            output.status.success(),
+            "receive-pack failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !receive_pack_report_rejected(&output.stdout),
+            "receive-pack rejected the deletion: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        assert!(!remote.join("refs/heads/main").exists());
+        assert!(remote.join("refs/heads/master").exists());
     }
 
     /// A gzip-encoded request body is transparently inflated before it
@@ -2454,75 +2617,30 @@ mod sec005_read_gate_tests {
             .expect("sign 30617")
     }
 
-    #[test]
-    fn repo_bound_channel_id_extracts_valid_uuid() {
-        let keys = Keys::generate();
-        let ch = uuid::Uuid::new_v4();
-        let event = announcement(
-            &keys,
-            vec![
-                Tag::parse(["d", "r"]).unwrap(),
-                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
-            ],
-        );
-        assert_eq!(repo_bound_channel_id(&event), Some(ch));
+    // Binding *parse* semantics (first-tag fails-closed, duplicate-tag
+    // ambiguity, malformed vs. absent) are unit-tested where the resolver
+    // lives: `super::super::binding`. The tests below prove the *gate* wires
+    // each resolver outcome to the right response — allow, generic denial
+    // body, or the author remediation body — which the resolver tests
+    // cannot see.
+
+    /// Collapse an `authorize_git_read` denial to `(status, body)` so tests
+    /// can assert on the exact bytes a git client would see. A blind
+    /// `.is_err()` cannot distinguish the generic 404 from the remediation
+    /// 404 — and that distinction IS the security property.
+    async fn denial_parts(result: Result<(), Response>) -> (StatusCode, String) {
+        let response = result.expect_err("expected a denial");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read denial body");
+        (
+            status,
+            String::from_utf8(bytes.to_vec()).expect("utf-8 body"),
+        )
     }
 
-    #[test]
-    fn repo_bound_channel_id_rejects_absent_and_malformed_bindings() {
-        let keys = Keys::generate();
-        let absent = announcement(&keys, vec![Tag::parse(["d", "r"]).unwrap()]);
-        assert_eq!(repo_bound_channel_id(&absent), None);
-
-        let malformed = announcement(
-            &keys,
-            vec![
-                Tag::parse(["d", "r"]).unwrap(),
-                Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap(),
-            ],
-        );
-        assert_eq!(repo_bound_channel_id(&malformed), None);
-
-        let empty = announcement(
-            &keys,
-            vec![
-                Tag::parse(["d", "r"]).unwrap(),
-                Tag::parse(["buzz-channel"]).unwrap(),
-            ],
-        );
-        assert_eq!(repo_bound_channel_id(&empty), None);
-    }
-
-    #[test]
-    fn repo_bound_channel_id_fails_closed_on_ambiguous_duplicate_bindings() {
-        // First-tag semantics: a malformed first binding must deny even when
-        // a later duplicate tag is valid. An ambiguous announcement must not
-        // silently resolve to whichever duplicate happens to parse.
-        let keys = Keys::generate();
-        let ch = uuid::Uuid::new_v4();
-        let malformed_first = announcement(
-            &keys,
-            vec![
-                Tag::parse(["d", "r"]).unwrap(),
-                Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap(),
-                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
-            ],
-        );
-        assert_eq!(repo_bound_channel_id(&malformed_first), None);
-
-        // And the mirror image: a valid first binding wins, matching the
-        // push policy endpoint's first-tag resolution.
-        let other = uuid::Uuid::new_v4();
-        let valid_first = announcement(
-            &keys,
-            vec![
-                Tag::parse(["d", "r"]).unwrap(),
-                Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
-                Tag::parse(["buzz-channel", &other.to_string()]).unwrap(),
-            ],
-        );
-        assert_eq!(repo_bound_channel_id(&valid_first), Some(ch));
-    }
+    const GENERIC_DENIAL: &str = "repository not found";
 
     // ── authorize_git_read matrix (requires Postgres) ────────────────────
 
@@ -2544,6 +2662,11 @@ mod sec005_read_gate_tests {
         Missing,
         /// `buzz-channel` tag whose value is not a UUID.
         Malformed,
+        /// `buzz-channel` tag carrying a well-formed UUID that names no
+        /// channel. The resolver reports `Bound`; the membership lookup
+        /// (whose SQL joins `channels … deleted_at IS NULL`) then returns
+        /// no role — the deliberate phase-1 posture for dead bindings.
+        UnknownChannel,
     }
 
     struct RepoFixture {
@@ -2608,6 +2731,9 @@ mod sec005_read_gate_tests {
             Binding::Missing => {}
             Binding::Malformed => {
                 tags.push(Tag::parse(["buzz-channel", "not-a-uuid"]).unwrap());
+            }
+            Binding::UnknownChannel => {
+                tags.push(Tag::parse(["buzz-channel", &uuid::Uuid::new_v4().to_string()]).unwrap());
             }
         }
         let event = announcement(&owner_keys, tags);
@@ -2676,32 +2802,63 @@ mod sec005_read_gate_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn read_gate_denies_missing_or_malformed_binding_and_absent_repo() {
-        // Missing buzz-channel tag → deny even for a channel member.
+        // Missing buzz-channel tag → deny even for a channel member, with
+        // the generic body: the remediation carve-out is author-only.
         let f = setup_repo(Binding::Missing).await;
         let member = f.member_keys.public_key();
-        assert!(
-            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo)
-                .await
-                .is_err(),
-            "announcement without buzz-channel binding must deny"
+        let (status, body) = denial_parts(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body, GENERIC_DENIAL,
+            "unbound repo read by a NON-author must get the generic body — \
+             remediation for anyone but the announcement author leaks repo existence"
         );
 
-        // Malformed buzz-channel tag → deny.
+        // Malformed buzz-channel tag → deny with the generic body EVEN FOR
+        // THE AUTHOR. This is the assertion that pins the carve-out to
+        // NotBound: if it ever fires on Broken, this fails on bytes, not
+        // on Ok/Err (which cannot see the difference).
         let g = setup_repo(Binding::Malformed).await;
-        let member_g = g.member_keys.public_key();
-        assert!(
-            authorize_git_read(&g.db, g.community, &member_g, &g.owner_hex, &g.repo)
-                .await
-                .is_err(),
-            "announcement with malformed buzz-channel binding must deny"
+        let g_owner = g.owner_keys.public_key();
+        let (status, body) = denial_parts(
+            authorize_git_read(&g.db, g.community, &g_owner, &g.owner_hex, &g.repo).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body, GENERIC_DENIAL,
+            "broken binding must stay generic even for the author (ambiguity fails closed)"
+        );
+
+        // Well-formed UUID naming a nonexistent channel → resolver says
+        // Bound, membership lookup finds nothing → generic denial for
+        // everyone, author included. The dead-channel case must be
+        // indistinguishable from non-membership (phase-1 posture; ingest
+        // validation closes the front door in phase 2).
+        let u = setup_repo(Binding::UnknownChannel).await;
+        let u_owner = u.owner_keys.public_key();
+        let (status, body) = denial_parts(
+            authorize_git_read(&u.db, u.community, &u_owner, &u.owner_hex, &u.repo).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body, GENERIC_DENIAL,
+            "binding to a nonexistent channel must deny generically, even for the author"
         );
 
         // Nonexistent announcement → deny.
-        assert!(
-            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, "no-such-repo")
-                .await
-                .is_err(),
-            "nonexistent repo must deny"
+        let (status, body) = denial_parts(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, "no-such-repo").await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body, GENERIC_DENIAL,
+            "nonexistent repo must deny generically"
         );
 
         // Owner-mismatch: URL owner differs from announcement author → deny.
@@ -2724,6 +2881,53 @@ mod sec005_read_gate_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn read_gate_gives_author_of_unbound_repo_remediation_body() {
+        // Issue #3527: the author of a never-bound announcement is the one
+        // identity that can fix it (30617 is keyed by (author, d)) and the
+        // one identity remediation cannot leak anything to. Status must stay
+        // 404 — identical to every other denial — with the bind command in
+        // the body.
+        let f = setup_repo(Binding::Missing).await;
+        let author = f.owner_keys.public_key();
+
+        let response = authorize_git_read(&f.db, f.community, &author, &f.owner_hex, &f.repo)
+            .await
+            .expect_err("unbound repo must still deny its author");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Guard against a future "tidy" into Json(...) or a custom
+        // IntoResponse: git prints `remote:` lines only for text/plain
+        // bodies — any other content-type makes the remediation silently
+        // invisible in the user's terminal with no failing assertion.
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+            "remediation body must stay text/plain or git clients will swallow it"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read remediation body");
+        let body = String::from_utf8(bytes.to_vec()).expect("utf-8 body");
+        assert!(
+            body.starts_with(&format!("run: buzz repos bind --id {}", f.repo)),
+            "remediation must lead with the actionable command (got {body:?})"
+        );
+        assert_ne!(body, GENERIC_DENIAL);
+
+        // Same repo, same state, different caller: a member of some channel
+        // who is not the author still gets the generic body.
+        let member = f.member_keys.public_key();
+        let (_, body) = denial_parts(
+            authorize_git_read(&f.db, f.community, &member, &f.owner_hex, &f.repo).await,
+        )
+        .await;
+        assert_eq!(body, GENERIC_DENIAL, "remediation is author-only");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn read_gate_follows_current_announcement_not_stale_registry() {
         // Max's registry/pointer concern: a soft-deleted 30617 can leave the
         // `git_repo_names` reservation and the manifest pointer alive. Reads
@@ -2740,10 +2944,18 @@ mod sec005_read_gate_tests {
         );
 
         let owner_pk = f.owner_keys.public_key().to_bytes().to_vec();
+        // Tombstone timestamped after the announcement, per NIP-09's
+        // at-or-before scoping in `soft_delete_by_coordinate`.
         let deleted =
-            f.db.soft_delete_by_coordinate(f.community, 30617, &owner_pk, &f.repo)
-                .await
-                .expect("soft delete 30617");
+            f.db.soft_delete_by_coordinate(
+                f.community,
+                30617,
+                &owner_pk,
+                &f.repo,
+                chrono::Utc::now().timestamp() + 60,
+            )
+            .await
+            .expect("soft delete 30617");
         assert!(deleted, "precondition: a live announcement row was deleted");
 
         assert!(

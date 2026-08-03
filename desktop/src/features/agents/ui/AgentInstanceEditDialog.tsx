@@ -26,6 +26,7 @@ import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
+  ADVANCED_FIELDS_MOTION_TRANSITION,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
@@ -65,6 +66,7 @@ import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
+import { RunOnSummarySection } from "./RunOnSummarySection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -75,7 +77,10 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
+import {
+  getProviderApiKeyEnvVar,
+  getProviderApiKeyLabel,
+} from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -83,11 +88,12 @@ import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
-
-const ADVANCED_FIELDS_MOTION_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
+import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
+import {
+  ADD_CUSTOM_HARNESS_OPTION,
+  runtimeDropdownAction,
+  usePendingHarnessSelection,
+} from "./addCustomHarness";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -157,6 +163,7 @@ export function AgentInstanceEditDialog({
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
+  const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
   // Runtime selector: defaults to "custom" until the dialog opens and the
@@ -191,6 +198,7 @@ export function AgentInstanceEditDialog({
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
+      setIsAddHarnessOpen(false);
       runtimeTouched.current = false;
       const matched =
         runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
@@ -244,6 +252,7 @@ export function AgentInstanceEditDialog({
         value: selectedRuntimeId,
       });
     }
+    options.push(ADD_CUSTOM_HARNESS_OPTION);
     return options;
   }, [sortedRuntimes, selectedRuntimeId]);
 
@@ -257,16 +266,10 @@ export function AgentInstanceEditDialog({
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
 
-  // The runtime id that will actually be active after submit. When inheriting,
-  // resolve from the LINKED PERSONA's runtime — that is what will run once the
-  // override is cleared. Deriving from agent.agentCommand here is wrong for a
-  // pinned agent that just toggled "Inherit runtime from template": the override
-  // (e.g. a Claude pin) is still present on the record, so it would resolve to
-  // the old pin instead of the persona's runtime, hiding required credentials.
-  // Fall back to the agent.agentCommand dual-match (command path, then id) only
-  // when there is no linked persona or its runtime is unset. This single
-  // prospective id feeds BOTH the block-save gate (requiredEnvKeys) and the
-  // submit path so they never disagree on which runtime is being saved.
+  // The runtime id active after submit. Inheriting resolves from the LINKED PERSONA's runtime
+  // (that is what runs once the override is cleared, not the current override).
+  // Falls back to dual-match (command path, then id) when no persona or its runtime is unset.
+  // This single prospective id feeds BOTH the block-save gate and submit so they always agree.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
@@ -297,6 +300,15 @@ export function AgentInstanceEditDialog({
 
   const llmProviderFieldVisible =
     runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+
+  const prospectiveRuntime = runtimes.find(
+    (r) => r.id === prospectiveRuntimeId,
+  );
+  const runtimeCatalogStatus = runtimesQuery.isLoading
+    ? ("loading" as const)
+    : runtimesQuery.isError
+      ? ("error" as const)
+      : ("ready" as const);
 
   // One-shot focus: when the dialog opens from a card deep-link, scroll and
   // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
@@ -330,9 +342,8 @@ export function AgentInstanceEditDialog({
     return () => cancelAnimationFrame(id);
   }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
 
-  // Provider + env to PERSIST on submit — also fed to the credential gate so
-  // gate, saved record, and spawn snapshot all agree on one resolved value.
-  // See resolveInheritedRuntimeSubmission for the inherit/transition contract.
+  // Provider + env to PERSIST on submit — also fed to the credential gate so gate, saved record,
+  // and spawn snapshot all agree on one resolved value. See resolveInheritedRuntimeSubmission.
   const inheritedSubmission = React.useMemo(
     () =>
       resolveInheritedRuntimeSubmission({
@@ -367,12 +378,8 @@ export function AgentInstanceEditDialog({
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ inheritedEnvVars, open });
 
-  // Runtime/provider-required credential state, derived from the PROSPECTIVE
-  // post-submit runtime — see the hook for the inherit-transition rationale.
-  // Pass globalProvider so the hook uses it as a fallback when the per-agent
-  // provider is empty (global-provider-only configs must surface required keys).
-  // Pass globalEnvVars so keys satisfied by global config are excluded from
-  // requiredEnvKeys and do not block Save (display and gate agree).
+  // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
+  // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
   const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
     useRequiredCredentialState({
       open,
@@ -484,8 +491,12 @@ export function AgentInstanceEditDialog({
   }
 
   function handleRuntimeDropdownChange(nextValue: string) {
-    const nextRuntimeId =
-      nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+    const action = runtimeDropdownAction(nextValue);
+    if (action.kind === "add-custom-harness") {
+      setIsAddHarnessOpen(true);
+      return;
+    }
+    const nextRuntimeId = action.runtimeId;
     const previousRuntimeId = selectedRuntimeId;
     const nextRuntime = runtimes.find((r) => r.id === nextRuntimeId);
 
@@ -531,6 +542,16 @@ export function AgentInstanceEditDialog({
       }),
     );
   }
+
+  // Routed through the normal change handler so a harness registered inline
+  // pins its command and resets model/provider like a hand-picked one. Scoped
+  // to `open` so a pending id can't outlive the dialog that started the
+  // registration.
+  const selectSavedHarness = usePendingHarnessSelection(
+    runtimes,
+    handleRuntimeDropdownChange,
+    open,
+  );
 
   function handleProviderDropdownChange(nextValue: string) {
     const nextProvider =
@@ -913,7 +934,7 @@ export function AgentInstanceEditDialog({
               </div>
             </div>
 
-            {/* Who can talk to this agent */}
+            {/* Who can send instructions */}
             <CreateAgentRespondToField
               allowlist={respondToAllowlist}
               disabled={updateMutation.isPending}
@@ -922,6 +943,8 @@ export function AgentInstanceEditDialog({
               onModeChange={setRespondTo}
               variant="persona"
             />
+
+            <RunOnSummarySection backend={agent.backend} />
 
             {/* Provider (runtime) */}
             <div className="space-y-1.5">
@@ -949,6 +972,11 @@ export function AgentInstanceEditDialog({
                   </span>
                 </p>
               ) : null}
+              <AddCustomHarnessDialog
+                onOpenChange={setIsAddHarnessOpen}
+                onSaved={selectSavedHarness}
+                open={isAddHarnessOpen}
+              />
             </div>
             {selectedRuntimeId === "custom" && !inheritHarness ? (
               <div className="space-y-1.5">
@@ -1033,14 +1061,11 @@ export function AgentInstanceEditDialog({
             {llmProviderFieldVisible && topLevelSecretEnvVar ? (
               <PersonaProviderApiKeyField
                 disabled={updateMutation.isPending}
+                envVarName={topLevelSecretEnvVar}
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
                 isRequired={apiKeyIsRequired}
-                label={
-                  effectiveProvider === "anthropic"
-                    ? "Anthropic API Key"
-                    : "OpenAI API Key"
-                }
+                label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({
                     ...prev,
@@ -1172,6 +1197,8 @@ export function AgentInstanceEditDialog({
                       parallelism={parallelism}
                       provider={effectiveProvider}
                       requiredEnvKeys={advancedRequiredEnvKeys}
+                      catalogStatus={runtimeCatalogStatus}
+                      selectedRuntime={prospectiveRuntime}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}

@@ -22,8 +22,7 @@ pub(crate) use path::should_use_inherited;
 
 mod metadata;
 pub(crate) use metadata::{
-    resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
-    SESSION_TITLE_ENV_VAR,
+    resolve_session_title, runtime_metadata_env_vars, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -869,12 +868,7 @@ pub fn spawn_agent_child(
     // uses the same trim semantics as the preflight callers.
     #[cfg(feature = "mesh-llm")]
     if let Some(ref mesh_model_id) = mesh_model_id {
-        let mut mesh_env = std::collections::BTreeMap::new();
-        super::apply_relay_mesh_env(
-            &mut mesh_env,
-            Some(super::RELAY_MESH_PROVIDER_ID),
-            Some(mesh_model_id.as_str()),
-        );
+        let mesh_env = super::relay_mesh_process_env(&descriptor.env, mesh_model_id);
         command.env_remove("OPENAI_API_KEY");
         for (key, value) in mesh_env {
             command.env(key, value);

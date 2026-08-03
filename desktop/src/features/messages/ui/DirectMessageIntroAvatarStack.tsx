@@ -1,4 +1,5 @@
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type DirectMessageIntroParticipant = {
@@ -18,31 +19,36 @@ export function DirectMessageIntroAvatarStack({
 
   return (
     <div
-      aria-hidden="true"
       className="flex shrink-0 items-center"
       data-testid="message-dm-intro-avatar-stack"
     >
       {visibleParticipants.map((participant, index) => (
-        <div
-          className={index > 0 ? "-ml-5" : ""}
-          data-testid="message-dm-intro-avatar-stack-participant"
+        <UserProfilePopover
           key={participant.pubkey}
-          style={{
-            zIndex: index + 1,
-            ...(index < stackItemCount - 1 && {
-              mask: "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
-              WebkitMask:
-                "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
-            }),
-          }}
+          pubkey={participant.pubkey}
+          triggerAriaLabel={`Open profile for ${participant.displayName}`}
+          triggerElement="span"
         >
-          <UserAvatar
-            avatarUrl={participant.avatarUrl}
-            className="h-[60px] w-[60px] text-base"
-            displayName={participant.displayName}
-            size="md"
-          />
-        </div>
+          <span
+            className={index > 0 ? "-ml-5" : ""}
+            data-testid="message-dm-intro-avatar-stack-participant"
+            style={{
+              zIndex: index + 1,
+              ...(index < stackItemCount - 1 && {
+                mask: "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
+                WebkitMask:
+                  "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
+              }),
+            }}
+          >
+            <UserAvatar
+              avatarUrl={participant.avatarUrl}
+              className="h-[60px] w-[60px] text-base"
+              displayName={participant.displayName}
+              size="md"
+            />
+          </span>
+        </UserProfilePopover>
       ))}
       {hiddenCount > 0 ? (
         <div

@@ -13,6 +13,7 @@ fn member(name: &str) -> AgentSnapshot {
         version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
             name: name.to_string(),
+            source_is_builtin: false,
             system_prompt: Some(format!("{name} prompt")),
             runtime: Some("goose".to_string()),
             model: None,
@@ -64,8 +65,10 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             name_pool: vec![],
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -84,8 +87,10 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             name_pool: vec![],
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -145,8 +150,10 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         name_pool: vec![],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: vec![],
@@ -214,8 +221,10 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         respond_to_allowlist: vec![],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
@@ -723,4 +732,32 @@ fn full_rollback_at_teams_boundary_absent_agents_store() {
     );
     assert!(!teams_path.exists());
     assert_eq!(errors.len(), 1, "only the teams-write error");
+}
+
+// ── NIP-49 egress guard: boundary 6 (team snapshot engram submit) ────────────
+
+mod egress_guard_boundary {
+    use super::super::submit_engram_event;
+
+    const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
+    /// An engram body carrying an ncryptsec must be rejected by the guard
+    /// before any network I/O (the target port is a discard address; a guard
+    /// error — not a connection error — proves the abort ordering).
+    #[tokio::test]
+    async fn blocks_ncryptsec_before_network() {
+        let state = crate::app_state::build_app_state();
+        let keys = nostr::Keys::generate();
+        let body = format!("{{\"content\":\"{NCRYPTSEC}\"}}");
+        let err = submit_engram_event(
+            &state,
+            &keys,
+            body.as_bytes(),
+            "http://127.0.0.1:9/events",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("key-backup material"), "{err}");
+    }
 }

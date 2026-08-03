@@ -207,8 +207,13 @@ fn target_is_visible(target: &crate::mesh_llm::MeshServeTarget, peer_ids: &[Stri
 enum RosterReconcileAction {
     /// Keep the running allowlist untouched (no-op, or a failure we ride out).
     Keep,
-    /// Restart the node with a freshly resolved roster.
-    Restart(Vec<String>),
+    /// Restart Buzz so MeshLLM is rebuilt with a freshly resolved roster.
+    ///
+    /// MeshLLM's native listeners are process-owned in practice: stopping and
+    /// starting the embedded runtime in one process can terminate Buzz or race
+    /// ports 9337/3131. The process boundary is therefore part of the safety
+    /// contract, not an implementation detail.
+    RestartProcess,
     /// Observed a *shrink* (or empty) once. Hold the current allowlist and
     /// require the same reduced roster on the next poll before tearing down,
     /// so a single transient short-read never drops a member mid-inference.
@@ -230,9 +235,9 @@ fn roster_shrinks(current: &[String], fresh: &[String]) -> bool {
 /// Rules:
 /// - query failed (`Err`)              → `Keep` (never de-admit on a relay blip)
 /// - resolved roster == current        → `Keep` (no-op)
-/// - grows (only additions)            → `Restart` immediately (fast admission)
+/// - grows (only additions)            → `RestartProcess` immediately (fast admission)
 /// - shrinks/empties, first observation → `AwaitConfirm` (hold, re-check next poll)
-/// - shrinks/empties, confirmed         → `Restart` (same reduced roster twice)
+/// - shrinks/empties, confirmed         → `RestartProcess` (same reduced roster twice)
 fn roster_reconcile_action(
     current_owners: &[String],
     pending_shrink: Option<&[String]>,
@@ -254,13 +259,13 @@ fn roster_reconcile_action(
 
     // Growth (pure additions) is safe to apply immediately.
     if !roster_shrinks(current_owners, &fresh) {
-        return RosterReconcileAction::Restart(fresh);
+        return RosterReconcileAction::RestartProcess;
     }
 
     // A shrink (including down to empty) must be confirmed across two
     // consecutive polls with the *same* reduced roster before we tear down.
     match pending_shrink {
-        Some(pending) if pending == fresh => RosterReconcileAction::Restart(fresh),
+        Some(pending) if pending == fresh => RosterReconcileAction::RestartProcess,
         _ => RosterReconcileAction::AwaitConfirm(fresh),
     }
 }
@@ -295,7 +300,7 @@ async fn reconcile_roster(
         .map(str::to_owned)
         .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
     let query = crate::commands::mesh_llm::resolve_trusted_owner_ids_at(&state, &relay_url).await;
-    let fresh = match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
+    match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
         RosterReconcileAction::Keep => {
             *pending_shrink = None;
             return Ok(());
@@ -305,36 +310,12 @@ async fn reconcile_roster(
             *pending_shrink = Some(reduced);
             return Ok(());
         }
-        RosterReconcileAction::Restart(fresh) => {
+        RosterReconcileAction::RestartProcess => {
             *pending_shrink = None;
-            fresh
         }
-    };
+    }
 
-    let mut request = current_request.clone();
-    request.trusted_owner_ids = Some(fresh);
-    // Bootstrap endpoints are live device state, not configuration. The
-    // endpoint used at the previous start may belong to the member that just
-    // left or to a device whose iroh identity rotated while offline. Resolve a
-    // fresh validated peer for this restart; starting isolated is safe because
-    // the join watcher will converge it when a member next publishes.
-    request.join_token = match crate::commands::mesh_llm::resolve_buzz_mesh_join_targets_at(
-        &state, &relay_url,
-    )
-    .await
-    {
-        Ok(targets) => targets
-            .into_iter()
-            .next()
-            .map(|target| target.endpoint_addr),
-        Err(error) => {
-            eprintln!(
-                "buzz-mesh: could not refresh bootstrap endpoint for roster restart; starting isolated: {error}"
-            );
-            None
-        }
-    };
-    let mut guard = state.mesh_llm_runtime.lock().await;
+    let guard = state.mesh_llm_runtime.lock().await;
     let startup_pending = match guard.as_ref() {
         Some(runtime) => runtime.is_starting().await,
         None => false,
@@ -355,24 +336,14 @@ async fn reconcile_roster(
         // snapshot.
         return Ok(());
     }
-    let Some(running) = guard.take() else {
+    if guard.is_none() {
         return Ok(());
-    };
-    eprintln!("buzz-mesh: membership roster changed; restarting mesh node with fresh allowlist");
-    if let Err(error) = running.stop().await {
-        drop(guard);
-        eprintln!(
-            "buzz-mesh: stopping mesh node for roster restart failed; restarting Buzz instead of racing the occupied ingress: {error}"
-        );
-        app.request_restart();
-        return Err(format!(
-            "mesh node shutdown failed during roster change: {error}"
-        ));
     }
-    let replacement = crate::mesh_llm::DesktopMeshRuntime::start(request)
-        .await
-        .map_err(|error| format!("mesh node restart after roster change failed: {error:#}"))?;
-    *guard = Some(replacement);
+    drop(guard);
+    eprintln!(
+        "buzz-mesh: membership roster changed; restarting Buzz to rebuild MeshLLM with the fresh community allowlist"
+    );
+    app.request_restart();
     Ok(())
 }
 
@@ -596,11 +567,11 @@ mod tests {
 
     // Growth (pure additions) applies immediately — fast admission is fine.
     #[test]
-    fn roster_growth_restarts_immediately() {
+    fn roster_growth_requests_process_restart_immediately() {
         let current = vec!["owner-a".to_string()];
         let fresh = vec!["owner-a".to_string(), "owner-c".to_string()];
-        let action = roster_reconcile_action(&current, None, Ok(fresh.clone()));
-        assert_eq!(action, RosterReconcileAction::Restart(fresh));
+        let action = roster_reconcile_action(&current, None, Ok(fresh));
+        assert_eq!(action, RosterReconcileAction::RestartProcess);
     }
 
     // A shrink is NOT applied on first observation — it must be confirmed.
@@ -614,11 +585,11 @@ mod tests {
 
     // The same reduced roster on two consecutive polls confirms the shrink.
     #[test]
-    fn roster_shrink_restarts_once_confirmed() {
+    fn roster_shrink_requests_process_restart_once_confirmed() {
         let current = vec!["owner-a".to_string(), "owner-b".to_string()];
         let reduced = vec!["owner-a".to_string()];
         let action = roster_reconcile_action(&current, Some(&reduced), Ok(reduced.clone()));
-        assert_eq!(action, RosterReconcileAction::Restart(reduced));
+        assert_eq!(action, RosterReconcileAction::RestartProcess);
     }
 
     // A shrink that changes between polls is not confirmed — it re-holds with
@@ -642,7 +613,7 @@ mod tests {
         assert_eq!(first, RosterReconcileAction::AwaitConfirm(Vec::new()));
         let empty: Vec<String> = Vec::new();
         let confirmed = roster_reconcile_action(&current, Some(&empty), Ok(Vec::new()));
-        assert_eq!(confirmed, RosterReconcileAction::Restart(Vec::new()));
+        assert_eq!(confirmed, RosterReconcileAction::RestartProcess);
     }
 
     // A shrink followed by recovery to the full roster cancels the teardown.

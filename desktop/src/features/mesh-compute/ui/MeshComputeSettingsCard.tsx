@@ -1,9 +1,19 @@
 import * as React from "react";
-import { Check, ChevronDown, Cpu, Sparkles } from "lucide-react";
+import { Check, ChevronDown, Sparkles } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 import { cn } from "@/shared/lib/cn";
+import {
+  AgentConfigTextInput,
+  AgentDropdownSelect,
+  type AgentDropdownOption,
+} from "@/features/agents/ui/agentConfigControls";
+import {
+  CUSTOM_MODEL_DROPDOWN_VALUE,
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+} from "@/features/agents/ui/agentConfigOptions";
 
 import {
   meshStartNode,
@@ -17,10 +27,6 @@ import type {
   MeshModelOption,
   MeshNodeStatus,
 } from "@/shared/api/tauriMesh";
-import {
-  SettingsOptionGroup,
-  SettingsOptionRow,
-} from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { classifyModelRef } from "../classifyModelRef";
 import {
@@ -31,13 +37,26 @@ import {
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
 import { deriveMeshShareToggle } from "../shareToggleState";
-import { useCommunities } from "@/features/communities/useCommunities";
 import { deriveServingIndicator } from "../servingUsage";
 
 const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
 const ACCEPTED_RECOMMENDATION_STORAGE_KEY =
   "buzz.mesh-compute.share.accepted-recommendation.v1";
 const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
+
+// Keep the Share compute controls visually and behaviorally aligned with the
+// agent configuration fields. This is intentionally the same shell used by
+// AgentDefaultsEditor rather than a local approximation of a select.
+const MESH_SELECT_TRIGGER_CLASS = cn(
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+  "h-11 px-3 py-2 leading-6 hover:bg-muted/40 focus:bg-muted/40 [&>svg]:text-muted-foreground/60",
+);
+
+const SHARE_COMPUTE_REVEAL_TRANSITION = {
+  duration: 0.22,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
 
 function readDraft(key: string): string {
   try {
@@ -67,36 +86,28 @@ function writeDraft(key: string, value: string): void {
  * exposing implementation protocols or raw mesh controls.
  */
 export function MeshComputeSettingsCard() {
-  const { communities, activeCommunity } = useCommunities();
+  const shouldReduceMotion = useReducedMotion();
   const { status, error, refresh } = useMeshNodeStatus();
   const [installedModels, setInstalledModels] = React.useState<
     MeshModelOption[]
   >([]);
   const [catalog, setCatalog] = React.useState<MeshModelCatalog | null>(null);
-  const [acceptedRecommendation] = React.useState(() =>
-    readDraft(ACCEPTED_RECOMMENDATION_STORAGE_KEY),
+  const acceptedRecommendation = React.useMemo(
+    () => readDraft(ACCEPTED_RECOMMENDATION_STORAGE_KEY),
+    [],
   );
-  const [savedModelDraft] = React.useState(() =>
-    readDraft(MODEL_DRAFT_STORAGE_KEY),
-  );
-  // An accepted recommendation restores the compact result. A saved manual
-  // choice still restores the editable model controls (required when replacing
-  // a running client with this machine's local share choice), while retaining
-  // the diagnostic CTA above it.
   const [modelInput, setModelInput] = React.useState(
-    acceptedRecommendation || savedModelDraft,
+    () => acceptedRecommendation || readDraft(MODEL_DRAFT_STORAGE_KEY),
   );
   const [maxVramGb, setMaxVramGb] = React.useState<string>(() =>
     readDraft(MAX_VRAM_DRAFT_STORAGE_KEY),
   );
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const [recommenderState, setRecommenderState] = React.useState<
     "idle" | "scanning" | "result" | "selected"
   >(acceptedRecommendation ? "selected" : "idle");
   const [scanStep, setScanStep] = React.useState(0);
-  const [manualOpen, setManualOpen] = React.useState(
-    acceptedRecommendation !== "" || savedModelDraft !== "",
-  );
   const [actionInFlight, setActionInFlight] = React.useState(false);
   const [pendingAction, setPendingAction] = React.useState<
     "start" | "stop" | null
@@ -126,9 +137,9 @@ export function MeshComputeSettingsCard() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: status?.state is the intentional trigger — re-fetch installed models when the node transitions (a fresh start may have downloaded a new model)
   React.useEffect(() => refreshInstalled(), [refreshInstalled, status?.state]);
 
-  // One-shot hardware-aware catalog fetch. Purely additive: when it fails
-  // (stub build, survey error) the card falls back to the free-text field.
-  // Keep an empty draft empty so the UI can explicitly ask the member to choose.
+  // One-shot hardware-aware catalog fetch. Failures are non-fatal: manual
+  // selection still works. Keep an empty draft empty until the member accepts
+  // the recommendation so hardware detection remains an intentional action.
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -181,22 +192,6 @@ export function MeshComputeSettingsCard() {
   // toggling off must never tear down that unrelated consume session.
   const { isSharing, isConsuming, slotOccupied } =
     deriveMeshShareToggle(status);
-  const boundCommunity = React.useMemo(() => {
-    const relayUrl = status?.communityRelayUrl;
-    if (!relayUrl) return null;
-    return (
-      communities.find((community) => community.relayUrl === relayUrl) ?? null
-    );
-  }, [communities, status?.communityRelayUrl]);
-  const isSharingElsewhere =
-    isSharing &&
-    status?.communityRelayUrl != null &&
-    activeCommunity?.relayUrl !== status.communityRelayUrl;
-  const sharingCommunityLabel =
-    boundCommunity?.name ??
-    status?.communityRelayUrl ??
-    activeCommunity?.name ??
-    "this community";
   // Host-side "who is using the compute I'm sharing" — only polled while
   // actively sharing (serve mode). Read-only; reads the node's own metrics.
   const servingUsage = useMeshServingUsage(isSharing);
@@ -207,6 +202,7 @@ export function MeshComputeSettingsCard() {
   const controlsDisabled = actionInFlight || (slotOccupied && !isConsuming);
   const refClass = classifyModelRef(modelInput);
   const canStart = refClass.kind !== "unknown" && !actionInFlight;
+  const showSharingControls = isSharing || pendingAction === "start";
 
   async function handleToggle(next: boolean) {
     // Never let the Share switch tear down a consume session. The switch is
@@ -248,37 +244,8 @@ export function MeshComputeSettingsCard() {
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
       <SettingsSectionHeader
         title="Share compute"
-        description="Share one model with one community. Other communities cannot discover or use it."
+        description="Share this machine with members of this relay so they can run agents here."
       />
-
-      <div
-        className="mb-3 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-sm"
-        data-testid="mesh-community-binding"
-      >
-        <p className="font-medium text-foreground">Community-bound compute</p>
-        <p className="mt-0.5 text-muted-foreground">
-          {isSharing ? (
-            <>
-              <span className="font-medium text-foreground">
-                {status?.modelName ?? status?.modelId ?? "This model"}
-              </span>{" "}
-              is tied to{" "}
-              <span className="font-medium">{sharingCommunityLabel}</span>.
-              Switching communities will not move or stop it. To share with a
-              different community, stop sharing first.
-            </>
-          ) : (
-            <>
-              When enabled, the selected model will be tied to{" "}
-              <span className="font-medium">
-                {activeCommunity?.name ?? "the active community"}
-              </span>
-              . To share with a different community, stop sharing before
-              enabling it there.
-            </>
-          )}
-        </p>
-      </div>
 
       {error ? (
         <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -294,8 +261,8 @@ export function MeshComputeSettingsCard() {
         <DownloadProgressBar progress={downloadProgress} />
       ) : null}
 
-      <SettingsOptionGroup>
-        <SettingsOptionRow>
+      <div className="space-y-5">
+        <div className="flex min-w-0 items-start justify-between gap-6">
           <div className="min-w-0">
             <label
               className="text-sm font-medium"
@@ -303,31 +270,12 @@ export function MeshComputeSettingsCard() {
             >
               Share this machine
             </label>
-            <StatusLine
-              isConsuming={isConsuming}
-              isSharingElsewhere={isSharingElsewhere}
-              pendingAction={pendingAction}
-              sharingCommunityLabel={sharingCommunityLabel}
-              status={status}
-            />
-            {servingIndicator.show ? (
-              <p
-                className={
-                  servingIndicator.hasRemoteConsumers
-                    ? "mt-0.5 text-2xs text-emerald-600 dark:text-emerald-400"
-                    : "mt-0.5 text-2xs text-muted-foreground"
-                }
-                data-testid="mesh-serving-usage"
-                title={servingIndicator.detail ?? undefined}
-              >
-                {servingIndicator.label}
-                {servingIndicator.detail ? (
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · {servingIndicator.detail}
-                  </span>
-                ) : null}
-              </p>
+            {!isSharing ? (
+              <StatusLine
+                isConsuming={isConsuming}
+                pendingAction={pendingAction}
+                status={status}
+              />
             ) : null}
           </div>
           <Switch
@@ -347,215 +295,144 @@ export function MeshComputeSettingsCard() {
             id="mesh-share-compute-toggle"
             onCheckedChange={handleToggle}
           />
-        </SettingsOptionRow>
-
-        <div className="border-t border-border/60 px-4 py-4">
-          {recommenderState === "selected" ? (
-            <button
-              className="flex w-full items-center justify-between rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-left hover:bg-primary/10"
-              data-testid="mesh-smart-recommendation-selected"
-              onClick={() => setRecommenderState("result")}
-              type="button"
-            >
-              <span>
-                <span className="block text-sm font-medium">
-                  Smart recommendation
-                </span>
-                <span className="block text-sm text-muted-foreground">
-                  {modelInput}
-                </span>
-              </span>
-              <span className="text-sm text-primary">View recommendation</span>
-            </button>
-          ) : recommenderState === "idle" ? (
-            <button
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 disabled:opacity-50"
-              data-testid="mesh-smart-recommend"
-              disabled={!catalog}
-              onClick={() => {
-                setScanStep(0);
-                setRecommenderState("scanning");
-              }}
-              type="button"
-            >
-              <Sparkles className="h-4 w-4" />
-              Find the best model for this machine
-            </button>
-          ) : recommenderState === "scanning" ? (
-            <HardwareScan catalog={catalog} revealed={scanStep} />
-          ) : recommendation ? (
-            <div
-              className="rounded-xl border border-primary/30 bg-gradient-to-br from-primary/10 via-background to-background p-4"
-              data-testid="mesh-recommendation-result"
-            >
-              <div className="flex items-center gap-2 text-sm font-semibold text-primary">
-                <Sparkles className="h-4 w-4" /> Best match
-              </div>
-              <p className="mt-2 text-base font-semibold">
-                {recommendation.name}
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {recommendation.description} · {recommendation.size} ·{" "}
-                {FIT_LABEL[recommendation.fit]}
-              </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-                  data-testid="mesh-use-recommendation"
-                  onClick={() => {
-                    setModelInput(recommendation.name);
-                    writeDraft(MODEL_DRAFT_STORAGE_KEY, recommendation.name);
-                    writeDraft(
-                      ACCEPTED_RECOMMENDATION_STORAGE_KEY,
-                      recommendation.name,
-                    );
-                    setManualOpen(true);
-                    setRecommenderState("selected");
-                  }}
-                  type="button"
-                >
-                  Use this model
-                </button>
-                <button
-                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-muted"
-                  data-testid="mesh-see-other-options"
-                  onClick={() => setManualOpen(true)}
-                  type="button"
-                >
-                  See other options
-                </button>
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No compatible recommendation was found. Choose a model manually.
-            </p>
-          )}
         </div>
 
-        {manualOpen ? (
-          <>
-            <div className="px-4 pb-4 pt-5">
-              <label
-                className="mb-3 flex items-center gap-2 text-sm font-medium"
-                htmlFor="mesh-share-compute-model"
-              >
-                <Cpu className="h-4 w-4 text-muted-foreground" />
-                Model
+        <SmartHardwareRecommendation
+          catalog={catalog}
+          recommendation={recommendation}
+          scanStep={scanStep}
+          state={recommenderState}
+          onAccept={(entry) => {
+            setModelInput(entry.name);
+            setIsCustomModelEditing(false);
+            writeDraft(MODEL_DRAFT_STORAGE_KEY, entry.name);
+            writeDraft(ACCEPTED_RECOMMENDATION_STORAGE_KEY, entry.name);
+            setRecommenderState("selected");
+          }}
+          onScan={() => {
+            setScanStep(0);
+            setRecommenderState("scanning");
+          }}
+          onView={() => setRecommenderState("result")}
+        />
+
+        <MeshModelPicker
+          catalog={catalog}
+          disabled={controlsDisabled}
+          installedModels={installedModels}
+          isCustomModelEditing={isCustomModelEditing}
+          model={modelInput}
+          onCustomModelEditingChange={setIsCustomModelEditing}
+          onModelChange={(next) => {
+            setModelInput(next);
+            writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
+          }}
+        />
+
+        <div className="pt-3">
+          <button
+            aria-expanded={advancedOpen}
+            className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            data-testid="mesh-share-compute-advanced-toggle"
+            onClick={() => setAdvancedOpen((current) => !current)}
+            type="button"
+          >
+            <span>Advanced</span>
+            <ChevronDown
+              className={cn(
+                "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
+                advancedOpen && "rotate-180",
+              )}
+            />
+          </button>
+          {advancedOpen ? (
+            <div className="mt-3 space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="mesh-vram">
+                Max VRAM (GB)
               </label>
-              <div className="flex flex-col gap-2">
-                <Input
-                  data-testid="mesh-share-compute-model"
-                  disabled={controlsDisabled}
-                  id="mesh-share-compute-model"
-                  onChange={(e) => {
-                    const next = e.target.value;
-                    setModelInput(next);
-                    writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
-                  }}
-                  placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
-                  value={modelInput}
-                />
+              <AgentConfigTextInput
+                data-testid="mesh-share-compute-vram"
+                disabled={controlsDisabled}
+                id="mesh-vram"
+                inputMode="decimal"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setMaxVramGb(next);
+                  writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
+                }}
+                placeholder="No limit"
+                usePersonaInputStyle
+                value={maxVramGb}
+              />
+              {status?.consoleUrl ? (
                 <p className="text-sm font-normal text-muted-foreground">
-                  Choose a suggested model below, or enter a model reference or
-                  local file. Buzz downloads remote models when sharing starts.
+                  Debug console:{" "}
+                  <a
+                    className="underline"
+                    href={status.consoleUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {status.consoleUrl}
+                  </a>
                 </p>
-                {catalog && catalog.entries.length > 0 ? (
-                  <CatalogPicker
-                    catalog={catalog}
-                    disabled={controlsDisabled}
-                    onPick={(name) => {
-                      setModelInput(name);
-                      writeDraft(MODEL_DRAFT_STORAGE_KEY, name);
-                    }}
-                    selected={modelInput.trim()}
-                  />
-                ) : null}
-                {installedModels.length > 0 ? (
-                  <div className="mt-1">
-                    <p className="text-sm font-normal text-muted-foreground">
-                      Already installed on this machine:
-                    </p>
-                    <ul
-                      className="mt-1 flex flex-wrap gap-1.5"
-                      data-testid="mesh-share-compute-installed-list"
-                    >
-                      {installedModels.map((m) => (
-                        <li key={m.id}>
-                          <button
-                            className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-sm hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={controlsDisabled}
-                            onClick={() => {
-                              setModelInput(m.id);
-                              writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
-                            }}
-                            type="button"
-                          >
-                            {m.name ?? m.id}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-              </div>
+              ) : null}
             </div>
+          ) : null}
+        </div>
 
-            <details
-              className="px-4 py-3"
-              onToggle={(e) =>
-                setAdvancedOpen((e.target as HTMLDetailsElement).open)
+        <AnimatePresence initial={false}>
+          {showSharingControls ? (
+            <motion.div
+              animate={{ height: "auto", opacity: 1 }}
+              className="overflow-hidden"
+              data-testid="mesh-share-compute-options-motion"
+              exit={{ height: 0, opacity: 0 }}
+              initial={{ height: 0, opacity: 0 }}
+              key="mesh-share-compute-options"
+              transition={
+                shouldReduceMotion
+                  ? { duration: 0 }
+                  : SHARE_COMPUTE_REVEAL_TRANSITION
               }
-              open={advancedOpen}
             >
-              <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium text-foreground">
-                <ChevronDown
-                  className={cn(
-                    "h-4 w-4 text-muted-foreground transition-transform",
-                    advancedOpen ? "rotate-0" : "-rotate-90",
-                  )}
-                />
-                Advanced
-              </summary>
-              <div className="mt-3 flex flex-col gap-2">
-                <label className="text-sm font-medium" htmlFor="mesh-vram">
-                  Max VRAM (GB)
-                </label>
-                <Input
-                  data-testid="mesh-share-compute-vram"
-                  id="mesh-vram"
-                  inputMode="decimal"
-                  onChange={(e) => {
-                    const next = e.target.value;
-                    setMaxVramGb(next);
-                    writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
-                  }}
-                  placeholder="No limit"
-                  value={maxVramGb}
-                />
-                {status?.consoleUrl ? (
-                  <p className="text-sm font-normal text-muted-foreground">
-                    Debug console:{" "}
-                    <a
-                      className="underline"
-                      href={status.consoleUrl}
-                      rel="noreferrer"
-                      target="_blank"
+              <section
+                className="space-y-1"
+                data-testid="mesh-share-compute-sharing-status"
+              >
+                <h3 className="text-sm font-medium">Sharing</h3>
+                <div className="space-y-1 rounded-lg bg-muted/30 px-3 py-2">
+                  <StatusLine
+                    isConsuming={isConsuming}
+                    omitSharingVerb
+                    pendingAction={pendingAction}
+                    status={status}
+                  />
+                  {servingIndicator.show ? (
+                    <p
+                      className={
+                        servingIndicator.hasRemoteConsumers
+                          ? "text-2xs text-emerald-600 dark:text-emerald-400"
+                          : "text-2xs text-muted-foreground"
+                      }
+                      data-testid="mesh-serving-usage"
+                      title={servingIndicator.detail ?? undefined}
                     >
-                      {status.consoleUrl}
-                    </a>
-                  </p>
-                ) : null}
-              </div>
-            </details>
-          </>
-        ) : null}
-      </SettingsOptionGroup>
-
-      <p className="mt-3 rounded-lg bg-muted/30 px-3 py-2 text-sm font-normal text-muted-foreground">
-        Only members of <strong>{sharingCommunityLabel}</strong> can discover
-        and use this shared model. Other Buzz communities cannot access it.
-      </p>
+                      {servingIndicator.label}
+                      {servingIndicator.detail ? (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          · {servingIndicator.detail}
+                        </span>
+                      ) : null}
+                    </p>
+                  ) : null}
+                </div>
+              </section>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </div>
     </section>
   );
 }
@@ -570,61 +447,123 @@ export function MeshComputeSettingsCard() {
  * option group while the backend streams mesh-download-progress events —
  * the answer to "it just greys out while downloading".
  */
-function HardwareScan({
+function SmartHardwareRecommendation({
   catalog,
-  revealed,
+  recommendation,
+  scanStep,
+  state,
+  onAccept,
+  onScan,
+  onView,
 }: {
   catalog: MeshModelCatalog | null;
-  revealed: number;
+  recommendation: MeshCatalogEntry | undefined;
+  scanStep: number;
+  state: "idle" | "scanning" | "result" | "selected";
+  onAccept: (entry: MeshCatalogEntry) => void;
+  onScan: () => void;
+  onView: () => void;
 }) {
-  const recommendation = catalog?.entries.find(
-    (entry) => entry.recommended && entry.fit !== "too_large" && entry.fitsDisk,
-  );
-  const items = [
-    ["Chip", catalog?.gpuName ?? "Detecting…"],
-    ["AI memory", catalog?.vramDisplay ?? "Detecting…"],
-    ["Free disk", catalog?.diskFreeDisplay ?? "Detecting…"],
-    ["Best model", recommendation?.name ?? "Comparing…"],
-  ];
-  return (
-    <div
-      className="min-h-[24rem] overflow-hidden rounded-xl border border-primary/30 bg-gradient-to-br from-primary/10 via-background to-muted/30 px-4 py-8"
-      data-testid="mesh-hardware-scan"
-    >
-      <div className="flex flex-col items-center">
-        <div className="relative flex h-24 w-24 items-center justify-center">
-          <span className="absolute h-full w-full animate-ping rounded-full border border-primary/20" />
-          <span className="absolute h-2/3 w-2/3 rounded-full border border-primary/40" />
-          <Sparkles className="h-6 w-6 animate-pulse text-primary" />
+  if (state === "selected") {
+    return (
+      <button
+        className="flex w-full items-center justify-between rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-left hover:bg-primary/10"
+        data-testid="mesh-smart-recommendation-selected"
+        onClick={onView}
+        type="button"
+      >
+        <span>
+          <span className="block text-sm font-medium">
+            Smart recommendation
+          </span>
+          <span className="block text-sm text-muted-foreground">
+            {recommendation?.name ?? catalog?.recommended}
+          </span>
+        </span>
+        <span className="text-sm text-primary">View</span>
+      </button>
+    );
+  }
+  if (state === "idle") {
+    return (
+      <button
+        className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 disabled:opacity-50"
+        data-testid="mesh-smart-recommend"
+        disabled={!catalog}
+        onClick={onScan}
+        type="button"
+      >
+        <Sparkles className="h-4 w-4" />
+        Find the best model for this machine
+      </button>
+    );
+  }
+  if (state === "scanning") {
+    const items = [
+      ["Chip", catalog?.gpuName ?? "Detecting…"],
+      ["AI memory", catalog?.vramDisplay ?? "Detecting…"],
+      ["Free disk", catalog?.diskFreeDisplay ?? "Detecting…"],
+      ["Best model", recommendation?.name ?? "Comparing…"],
+    ];
+    return (
+      <div
+        className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-5"
+        data-testid="mesh-hardware-scan"
+      >
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <Sparkles className="h-4 w-4 animate-pulse text-primary" />
+          Checking your machine…
         </div>
-        <p className="mt-3 text-lg font-semibold">Checking your machine…</p>
-      </div>
-      <div className="mx-auto mt-5 grid max-w-md gap-2 font-mono">
-        {items.map(([label, value], index) => {
-          const isRevealed = index < revealed;
-          return (
+        <div className="mt-3 grid gap-2">
+          {items.map(([label, value], index) => (
             <div
-              className={cn(
-                "grid grid-cols-[1rem_7rem_minmax(0,1fr)] items-center gap-2 rounded-lg px-2 py-1.5 transition-all duration-300",
-                isRevealed
-                  ? "translate-y-0 opacity-100"
-                  : "translate-y-2 opacity-30",
-              )}
+              className="grid grid-cols-[1rem_6rem_minmax(0,1fr)] gap-2 text-sm"
               key={label}
             >
-              {isRevealed ? (
+              {index < scanStep ? (
                 <Check className="h-4 w-4 text-emerald-500" />
               ) : (
-                <span className="text-sm text-muted-foreground">›</span>
+                <span>›</span>
               )}
-              <span className="text-sm text-muted-foreground">{label}</span>
-              <span className="min-w-0 truncate text-sm font-medium">
-                {isRevealed ? value : ""}
+              <span className="text-muted-foreground">{label}</span>
+              <span className="truncate font-medium">
+                {index < scanStep ? value : ""}
               </span>
             </div>
-          );
-        })}
+          ))}
+        </div>
       </div>
+    );
+  }
+  if (!recommendation) {
+    return (
+      <p className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+        No recommendation fits both this machine's AI memory and free disk.
+        Choose a smaller model manually.
+      </p>
+    );
+  }
+  return (
+    <div
+      className="rounded-xl border border-primary/30 bg-primary/5 p-4"
+      data-testid="mesh-recommendation-result"
+    >
+      <div className="flex items-center gap-2 text-sm font-semibold text-primary">
+        <Sparkles className="h-4 w-4" /> Best match
+      </div>
+      <p className="mt-2 text-base font-semibold">{recommendation.name}</p>
+      <p className="mt-1 text-sm text-muted-foreground">
+        {recommendation.description} · {recommendation.size} ·{" "}
+        {FIT_LABEL[recommendation.fit]}
+      </p>
+      <button
+        className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        data-testid="mesh-use-recommendation"
+        onClick={() => onAccept(recommendation)}
+        type="button"
+      >
+        Use this model
+      </button>
     </div>
   );
 }
@@ -683,115 +622,165 @@ const FIT_CLASS: Record<MeshCatalogEntry["fit"], string> = {
 };
 
 /**
- * Hardware-ranked curated model list (mesh-console's diagnose pattern).
- * Click a row to fill the model field. Models too large for this machine are
- * listed but disabled — honest about why, instead of hiding them.
+ * Share Compute's models use the agent configuration picker instead of a
+ * second, hand-rolled option system. The catalog remains hardware-aware, but
+ * its recommendations, installed models, and advanced choices now appear in
+ * the same searchable dropdown used when customizing an agent.
  */
-function CatalogPicker({
+function MeshModelPicker({
   catalog,
   disabled,
-  onPick,
-  selected,
+  installedModels,
+  isCustomModelEditing,
+  model,
+  onCustomModelEditingChange,
+  onModelChange,
 }: {
-  catalog: MeshModelCatalog;
+  catalog: MeshModelCatalog | null;
   disabled: boolean;
-  onPick: (name: string) => void;
-  selected: string;
+  installedModels: readonly MeshModelOption[];
+  isCustomModelEditing: boolean;
+  model: string;
+  onCustomModelEditingChange: (editing: boolean) => void;
+  onModelChange: (model: string) => void;
 }) {
-  const [expanded, setExpanded] = React.useState(false);
-  // Above the fold: the Buzz-curated picks (models known to work well with
-  // agents on shared compute). Below: everything else, as advanced options.
-  const curated = catalog.entries.filter((e) => e.curated);
-  const advanced = catalog.entries.filter((e) => !e.curated);
-  const visible = expanded ? catalog.entries : curated;
+  const options = React.useMemo<AgentDropdownOption[]>(() => {
+    const seen = new Set<string>();
+    const catalogOptions = (catalog?.entries ?? []).map((entry) => {
+      seen.add(entry.name);
+      return {
+        disabled: entry.fit === "too_large" || !entry.fitsDisk,
+        label: <MeshModelOptionLabel entry={entry} />,
+        value: entry.name,
+      };
+    });
+    const localOptions = installedModels.flatMap((installed) => {
+      if (seen.has(installed.id)) return [];
+      return [
+        {
+          label: (
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <span className="min-w-0 truncate">
+                {installed.name ?? installed.id}
+              </span>
+              <span className="shrink-0 text-2xs text-muted-foreground">
+                Installed
+              </span>
+            </div>
+          ),
+          value: installed.id,
+        },
+      ];
+    });
+    return [
+      ...catalogOptions,
+      ...localOptions,
+      { label: "Custom model…", value: CUSTOM_MODEL_DROPDOWN_VALUE },
+    ];
+  }, [catalog?.entries, installedModels]);
+  const knownModel = options.some((option) => option.value === model.trim());
+  const showCustomModelInput =
+    isCustomModelEditing || (model.trim().length > 0 && !knownModel);
+  const selectedValue = showCustomModelInput
+    ? CUSTOM_MODEL_DROPDOWN_VALUE
+    : model.trim();
+
+  function handleModelChange(next: string) {
+    if (next === CUSTOM_MODEL_DROPDOWN_VALUE) {
+      onCustomModelEditingChange(true);
+      return;
+    }
+    onCustomModelEditingChange(false);
+    onModelChange(next);
+  }
+
   return (
-    <div className="mt-1" data-testid="mesh-share-compute-catalog">
+    <div className="space-y-1.5" data-testid="mesh-share-compute-catalog">
+      <label className="text-sm font-medium" htmlFor="mesh-share-compute-model">
+        Model
+      </label>
+      <AgentDropdownSelect
+        className={MESH_SELECT_TRIGGER_CLASS}
+        disabled={disabled}
+        id="mesh-share-compute-model"
+        onValueChange={handleModelChange}
+        options={options}
+        placeholder="Select a model"
+        placeholderClassName="text-muted-foreground/55"
+        searchable
+        testId="mesh-share-compute-model"
+        value={selectedValue}
+      />
+      {showCustomModelInput ? (
+        <AgentConfigTextInput
+          aria-label="Custom model reference"
+          autoCorrect="off"
+          disabled={disabled}
+          onChange={(event) => {
+            // A stored custom ref starts out inferred rather than explicitly
+            // selected. Mark it as an active custom edit before applying a
+            // cleared value so the field stays mounted while it is replaced.
+            onCustomModelEditingChange(true);
+            onModelChange(event.target.value);
+          }}
+          placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
+          usePersonaInputStyle
+          value={model}
+        />
+      ) : null}
       <p className="text-sm font-normal text-muted-foreground">
-        Models ranked for this machine
-        {catalog.gpuName ? ` (${catalog.gpuName}, ` : " ("}
-        {catalog.vramDisplay} AI memory
-        {catalog.diskFreeDisplay === "—"
-          ? ""
-          : `, ${catalog.diskFreeDisplay} free`}
-        ):
+        {catalog
+          ? `Hardware profile: ${catalog.gpuName ?? "detected accelerator"}, ${catalog.vramDisplay} AI memory, ${catalog.diskFreeDisplay} free disk.`
+          : "Choose a model or enter a model reference or local file."}{" "}
+        Buzz downloads remote models when sharing starts.
       </p>
-      <ul className="mt-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto">
-        {visible.map((entry) => {
-          const isSelected = entry.name === selected;
-          const tooLarge = entry.fit === "too_large";
-          const noDisk = !entry.fitsDisk;
-          return (
-            <li key={entry.name}>
-              <button
-                className={cn(
-                  "flex w-full items-baseline gap-2 rounded border px-2 py-1 text-left text-sm",
-                  isSelected
-                    ? "border-primary/60 bg-primary/10"
-                    : "border-border/60 bg-muted/20 hover:bg-muted/40",
-                  "disabled:cursor-not-allowed disabled:opacity-50",
-                )}
-                data-testid={`mesh-catalog-${entry.name}`}
-                disabled={disabled || tooLarge || noDisk}
-                onClick={() => onPick(entry.name)}
-                title={entry.description}
-                type="button"
-              >
-                <span className="min-w-0 truncate font-medium">
-                  {entry.name}
-                </span>
-                <span className="shrink-0 text-muted-foreground">
-                  {entry.size}
-                </span>
-                <span className={cn("shrink-0", FIT_CLASS[entry.fit])}>
-                  {FIT_LABEL[entry.fit]}
-                </span>
-                {entry.recommended ? (
-                  <span className="shrink-0 rounded bg-primary/15 px-1.5 text-2xs font-medium text-primary">
-                    Recommended
-                  </span>
-                ) : null}
-                {noDisk && !tooLarge ? (
-                  <span className="shrink-0 rounded bg-muted px-1.5 text-2xs font-medium text-amber-600 dark:text-amber-400">
-                    Not enough disk
-                  </span>
-                ) : null}
-                {entry.installed ? (
-                  <span className="shrink-0 text-2xs text-muted-foreground">
-                    Installed
-                  </span>
-                ) : null}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-      {advanced.length > 0 ? (
-        <button
-          className="mt-1 text-sm text-muted-foreground underline hover:text-foreground"
-          data-testid="mesh-catalog-advanced-toggle"
-          onClick={() => setExpanded((v) => !v)}
-          type="button"
-        >
-          {expanded
-            ? "Hide advanced models"
-            : `Advanced: ${advanced.length} more models`}
-        </button>
+    </div>
+  );
+}
+
+function MeshModelOptionLabel({ entry }: { entry: MeshCatalogEntry }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
+      <span className="shrink-0 text-muted-foreground">{entry.size}</span>
+      <span className={cn("shrink-0", FIT_CLASS[entry.fit])}>
+        {FIT_LABEL[entry.fit]}
+      </span>
+      {entry.recommended ? (
+        <span className="shrink-0 rounded bg-primary/15 px-1.5 text-2xs font-medium text-primary">
+          Recommended
+        </span>
+      ) : null}
+      {entry.installed ? (
+        <span className="shrink-0 text-2xs text-muted-foreground">
+          Installed
+        </span>
+      ) : null}
+      {!entry.fitsDisk ? (
+        <span className="shrink-0 text-2xs text-destructive">
+          Needs disk space
+        </span>
+      ) : null}
+      {!entry.curated ? (
+        <span className="shrink-0 text-2xs text-muted-foreground">
+          Advanced
+        </span>
       ) : null}
     </div>
   );
 }
 
 function StatusLine({
+  displayModel,
   isConsuming,
-  isSharingElsewhere,
+  omitSharingVerb = false,
   pendingAction,
-  sharingCommunityLabel,
   status,
 }: {
+  displayModel?: string;
   isConsuming: boolean;
-  isSharingElsewhere: boolean;
+  omitSharingVerb?: boolean;
   pendingAction: "start" | "stop" | null;
-  sharingCommunityLabel: string;
   status: MeshNodeStatus | null;
 }) {
   if (pendingAction === "start") {
@@ -815,12 +804,10 @@ function StatusLine({
     return <p className="text-sm text-muted-foreground">Checking status…</p>;
   }
   const { state, health, modelId, modelName } = status;
-  const modelLabel = modelName ?? modelId ?? "";
+  const modelLabel = displayModel ?? modelName ?? modelId ?? "";
 
   if (state === "off") {
-    return (
-      <p className="text-sm text-muted-foreground">Not sharing right now.</p>
-    );
+    return null;
   }
   if (state === "starting") {
     const reason =
@@ -830,18 +817,6 @@ function StatusLine({
     return <p className="text-sm text-muted-foreground">{reason}</p>;
   }
   if (state === "running") {
-    if (isSharingElsewhere) {
-      return (
-        <p
-          className="text-sm text-muted-foreground"
-          data-testid="mesh-sharing-community"
-        >
-          Sharing{modelLabel ? ` ${modelLabel}` : ""} with{" "}
-          {sharingCommunityLabel}. Switch to that community to manage its
-          compute settings, or turn this off here to stop sharing.
-        </p>
-      );
-    }
     if (health.status === "failed") {
       return (
         <p className="text-sm text-destructive">
@@ -857,12 +832,10 @@ function StatusLine({
       );
     }
     return (
-      <p
-        className="text-sm text-muted-foreground"
-        data-testid="mesh-sharing-community"
-      >
-        Sharing{modelLabel ? ` ${modelLabel}` : ""} with {sharingCommunityLabel}{" "}
-        members.
+      <p className="text-sm text-muted-foreground">
+        {omitSharingVerb ? "" : "Sharing"}
+        {modelLabel ? `${omitSharingVerb ? "" : " "}${modelLabel}` : ""} with
+        relay members.
       </p>
     );
   }

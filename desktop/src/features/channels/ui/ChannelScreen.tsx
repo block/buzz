@@ -48,6 +48,7 @@ import {
   channelWindowThreadSummaries,
   type ChannelWindowThreadSummary,
 } from "@/features/messages/lib/channelWindowStore";
+import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import {
@@ -79,6 +80,7 @@ import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
+import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
@@ -98,7 +100,7 @@ export function ChannelScreen({
   const { goHome } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const {
-    markChannelRead,
+    clearChannelUnreadSource,
     markChannelUnread,
     getChannelReadAt,
     getMessageReadAt,
@@ -111,6 +113,7 @@ export function ChannelScreen({
     unfollowThread,
     isFollowingThread,
     isNotifiedForThread,
+    recordThreadInteraction,
     isThreadMuted,
     readStateVersion,
   } = useAppShell();
@@ -206,12 +209,11 @@ export function ChannelScreen({
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;
-  React.useEffect(() => {
-    if (!activeChannelId || activeChannel?.isMember === false) {
-      return;
-    }
-    markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
-  }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
+  useChannelOpenReadState(
+    activeChannelId,
+    activeChannel?.isMember,
+    activeReadAt,
+  );
   React.useEffect(() => {
     if (!activeChannelId) {
       setContextParentResolver(null);
@@ -261,7 +263,6 @@ export function ChannelScreen({
     resolvedMessages,
     threadReplyEvents,
   );
-
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -471,6 +472,7 @@ export function ChannelScreen({
     threadReplyTargetId,
     expandedThreadReplyIds,
     openThreadMessages: threadPanelData.visibleReplies,
+    clearChannelUnreadSource,
     getChannelReadAt,
     getMessageReadAt,
     markChannelUnread,
@@ -483,6 +485,8 @@ export function ChannelScreen({
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
     [editTargetId, timelineMessages],
   );
+  // Event id awaiting the empty-edit deletion confirmation.
+  const [emptyDeleteId, setEmptyDeleteId] = React.useState<string | null>(null);
   const {
     handleCancelEdit,
     handleCancelThreadReply,
@@ -504,8 +508,10 @@ export function ChannelScreen({
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
     markRevealedRepliesRead,
+    recordThreadInteraction,
     openThreadHeadId: effectiveOpenThreadHeadId,
     onOptimisticOpenThreadHeadIdChange: setOptimisticOpenThreadHeadId,
+    onRequestEmptyEditDelete: setEmptyDeleteId,
     sendMessageMutation,
     setExpandedThreadReplyIds,
     setEditTargetId,
@@ -683,7 +689,6 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
@@ -691,6 +696,7 @@ export function ChannelScreen({
       channelManagementOpen,
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
+  const displayedThreadAllMessages = threadPanelData.messages;
   const displayedThreadMessages = threadPanelData.visibleReplies;
   const displayedThreadReplyTargetMessage = threadPanelData.replyTargetMessage;
   const displayedThreadFirstUnreadReplyId = displayedThreadHeadMessage
@@ -800,6 +806,19 @@ export function ChannelScreen({
           onOpenChange={welcomeAgentCreate.setIsOpen}
           open={welcomeAgentCreate.isOpen}
           sendError={welcomeAgentCreate.error}
+        />
+        <DeleteMessageConfirmDialog
+          onConfirm={() => {
+            if (emptyDeleteId) {
+              setEditTargetId(null);
+              void handleDelete({ id: emptyDeleteId });
+            }
+            setEmptyDeleteId(null);
+          }}
+          onOpenChange={(open) => {
+            if (!open) setEmptyDeleteId(null);
+          }}
+          open={emptyDeleteId !== null}
         />
         <div
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
@@ -944,6 +963,7 @@ export function ChannelScreen({
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
+                  threadAllMessages={displayedThreadAllMessages}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
                   threadMessagesPending={threadRepliesQuery.isPending}

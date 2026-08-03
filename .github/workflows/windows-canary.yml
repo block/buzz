@@ -46,24 +46,9 @@ jobs:
         shell: bash
         run: rustup target add "$TARGET"
 
-      # Rust cache covering both the workspace sidecar build and the Tauri
-      # crate build. shared-key scoped to windows-canary-release so canary
-      # runs warm each other without colliding with CI's debug-profile key
-      # (CI windows job does clippy/check, not --release).
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: |
-            .
-            desktop/src-tauri
-          shared-key: windows-canary-release
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.14.1
-          # Disable setup-node's built-in cache: we manage the pnpm store cache
-          # explicitly below (restore before install, save after) to mirror the
-          # pattern used by ci.yml and to keep caching logic consistent across
-          # all three canary workflows.
           package-manager-cache: false
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
@@ -108,6 +93,40 @@ jobs:
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
 
+      - name: Resolve native toolchain identity
+        id: native_toolchain
+        shell: bash
+        run: echo "id=$(scripts/desktop-native-toolchain-id.sh windows)" >> "$GITHUB_OUTPUT"
+
+      # Compute this after cargo update so the key describes the graph that is
+      # actually compiled. The helper normalizes only Buzz Desktop's release
+      # version, allowing a canary to warm an otherwise identical tag build.
+      - name: Compute exact release cache key
+        id: rust_cache_key
+        shell: bash
+        env:
+          NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
+        run: |
+          KEY=$(scripts/desktop-release-cache-key.py \
+            --platform "$RUNNER_OS" \
+            --target x86_64-pc-windows-msvc \
+            --features default \
+            --native-inputs "$NATIVE_TOOLCHAIN_ID")
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "Release cache key: $KEY"
+
+      - name: Restore exact release Cargo cache
+        id: rust_cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: ${{ steps.rust_cache_key.outputs.key }}
+
       - name: Generate non-updating bundle config
         shell: bash
         run: |
@@ -151,6 +170,25 @@ jobs:
           path: ${{ steps.artifact.outputs.exe }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Measure release Cargo cache inputs
+        if: always()
+        shell: bash
+        run: du -sh ~/.cargo/registry ~/.cargo/git target desktop/src-tauri/target 2>/dev/null || true
+
+      # Only this trusted, main-bound canary writes the cache. Excluding bundle
+      # output prevents installers from entering it.
+      - name: Save exact release Cargo cache
+        if: steps.rust_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: ${{ steps.rust_cache_key.outputs.key }}
 
       - name: Save pnpm store cache
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
