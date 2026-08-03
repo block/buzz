@@ -39,9 +39,10 @@ export default {
       },
       fontFamily: {
         sans: [
+          '"Space Grotesk"',
           '"Inter Variable"',
           "Inter",
-          '"Avenir Next"',
+          '"PingFang SC"',
           '"Segoe UI"',
           "sans-serif",
         ],

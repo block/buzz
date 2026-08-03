@@ -14,6 +14,7 @@ import {
 } from "@/features/search/ui/SearchResultItem";
 import { SearchPromptPlaceholder } from "@/features/search/ui/SearchPromptPlaceholder";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
+import { type MsgKey, useI18n } from "@/shared/i18n";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
@@ -183,7 +184,8 @@ function getSearchHitChannelName(
 function getSearchHitContextLabel(
   hit: SearchHit,
   channelLookup: ReadonlyMap<string, Channel>,
-  channelLabels?: Record<string, string>,
+  channelLabels: Record<string, string> | undefined,
+  t: (key: MsgKey) => string,
 ): SearchHitContextLabel {
   const channel = hit.channelId ? channelLookup.get(hit.channelId) : null;
   const channelName = getSearchHitChannelName(
@@ -195,7 +197,7 @@ function getSearchHitContextLabel(
   if (channel?.channelType === "dm") {
     return {
       channelLabel: null,
-      text: "Direct message",
+      text: t("search.directMessage"),
     };
   }
 
@@ -204,10 +206,12 @@ function getSearchHitContextLabel(
   return {
     channelLabel: channelName,
     text: channelName
-      ? `${isThread ? "Thread" : "Message"} in`
+      ? isThread
+        ? t("search.threadIn")
+        : t("search.messageIn")
       : isThread
-        ? "Thread"
-        : "Message",
+        ? t("search.thread")
+        : t("search.message"),
   };
 }
 
@@ -227,20 +231,23 @@ function getResultSectionKey(result: SearchResult): SearchResultSectionKey {
   return "messages";
 }
 
-function getSectionTitle(sectionKey: SearchResultSectionKey) {
+function getSectionTitle(
+  sectionKey: SearchResultSectionKey,
+  t: (key: MsgKey) => string,
+) {
   switch (sectionKey) {
     case "channels":
-      return "Channels";
+      return t("search.channels");
     case "direct-messages":
-      return "Direct messages";
+      return t("search.directMessages");
     case "people":
-      return "People";
+      return t("search.users");
     case "agents":
-      return "Agents";
+      return t("search.agents");
     case "messages":
-      return "Most relevant";
+      return t("search.mostRelevant");
     case "actions":
-      return "Actions";
+      return t("search.actions");
   }
 }
 
@@ -268,7 +275,10 @@ function SearchHitContextLine({ label }: { label: SearchHitContextLabel }) {
   );
 }
 
-function groupSearchResults(results: SearchResult[]): SearchResultSection[] {
+function groupSearchResults(
+  results: SearchResult[],
+  t: (key: MsgKey) => string,
+): SearchResultSection[] {
   const resultsBySection = new Map<SearchResultSectionKey, SearchResult[]>();
 
   for (const result of results) {
@@ -289,7 +299,7 @@ function groupSearchResults(results: SearchResult[]): SearchResultSection[] {
       {
         key: sectionKey,
         results: sectionResults,
-        title: getSectionTitle(sectionKey),
+        title: getSectionTitle(sectionKey, t),
       },
     ];
   });
@@ -400,6 +410,7 @@ export function TopbarSearch({
   suggestionChannels,
   variant = "bar",
 }: TopbarSearchProps) {
+  const { t } = useI18n();
   const [isOpen, setIsOpen] = React.useState(false);
   const [selectedMenuIndex, setSelectedMenuIndex] = React.useState(0);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
@@ -434,7 +445,7 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "browse-channels",
-          title: "Browse channels",
+          title: t("search.browseChannels"),
         },
       });
     }
@@ -444,7 +455,7 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "create-channel",
-          title: "Create a new channel",
+          title: t("search.createChannel"),
         },
       });
     }
@@ -454,13 +465,13 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "create-agent",
-          title: "Create a new agent",
+          title: t("search.createAgent"),
         },
       });
     }
 
     return actions;
-  }, [onBrowseChannels, onCreateAgent, onCreateChannel]);
+  }, [onBrowseChannels, onCreateAgent, onCreateChannel, t]);
   const suggestionResults = React.useMemo(
     () => [...suggestedResults, ...suggestionActionResults],
     [suggestedResults, suggestionActionResults],
@@ -478,8 +489,8 @@ export function TopbarSearch({
     [currentPubkeyNormalized, results],
   );
   const searchResultSections = React.useMemo(
-    () => groupSearchResults(searchableResults),
-    [searchableResults],
+    () => groupSearchResults(searchableResults, t),
+    [searchableResults, t],
   );
   const groupedSearchResults = React.useMemo(
     () => searchResultSections.flatMap((section) => section.results),
@@ -639,7 +650,12 @@ export function TopbarSearch({
         : null;
     const messageContextLabel =
       result.kind === "message"
-        ? getSearchHitContextLabel(result.hit, channelLookup, channelLabels)
+        ? getSearchHitContextLabel(
+            result.hit,
+            channelLookup,
+            channelLabels,
+            t,
+          )
         : null;
     const title =
       result.kind === "channel"
@@ -771,11 +787,11 @@ export function TopbarSearch({
   const searchResultContent = isShowingSuggestions ? (
     suggestionResults.length === 0 ? (
       <div className="px-4 py-5 text-sm text-muted-foreground">
-        <p>No recent activity yet.</p>
+        <p>{t("search.noRecentActivity")}</p>
       </div>
     ) : (
       <div
-        aria-label="Recent activity"
+        aria-label={t("search.recentActivity")}
         className="max-h-96 overflow-y-auto p-1.5"
         role="listbox"
       >
@@ -787,7 +803,7 @@ export function TopbarSearch({
               {suggestedResults.length > 0 ? (
                 <div>
                   <div className={SEARCH_SECTION_TITLE_CLASS}>
-                    Recent activity
+                    {t("search.recentActivity")}
                   </div>
                   {suggestedResults.map((result) =>
                     renderSearchResultRow(result, resultIndex++),
@@ -796,7 +812,9 @@ export function TopbarSearch({
               ) : null}
               {suggestionActionResults.length > 0 ? (
                 <div>
-                  <div className={SEARCH_SECTION_TITLE_CLASS}>Actions</div>
+                  <div className={SEARCH_SECTION_TITLE_CLASS}>
+                    {t("search.actions")}
+                  </div>
                   {suggestionActionResults.map((result) =>
                     renderSearchResultRow(result, resultIndex++),
                   )}
@@ -815,7 +833,7 @@ export function TopbarSearch({
     </p>
   ) : searchableResults.length === 0 ? (
     <p className="px-4 py-5 text-sm text-muted-foreground">
-      No matches for <span className="font-semibold">{trimmedQuery}</span>.
+      {t("search.noMatchesFor", { query: trimmedQuery })}
     </p>
   ) : (
     <div className="max-h-96 overflow-y-auto p-1.5" role="listbox">
@@ -827,7 +845,7 @@ export function TopbarSearch({
     <div className={cn("relative", className)}>
       <Dialog open={isOpen} onOpenChange={handleSearchOpenChange}>
         <button
-          aria-label="Search everything"
+          aria-label={t("search.everything")}
           className={
             isIconVariant
               ? "group/search flex size-6 items-center justify-center rounded p-1 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring"
@@ -836,7 +854,7 @@ export function TopbarSearch({
           data-testid="open-search"
           onClick={openSearchDialog}
           ref={triggerRef}
-          title="Search everything"
+          title={t("search.everything")}
           type="button"
         >
           <Search
@@ -856,7 +874,7 @@ export function TopbarSearch({
                     : "text-sidebar-foreground/55",
                 )}
               >
-                {query || "Search everything"}
+                {query || t("search.everything")}
               </span>
               <kbd className="shrink-0 text-2xs text-sidebar-foreground/45">
                 &#x2318;K
@@ -878,7 +896,7 @@ export function TopbarSearch({
           }}
           showCloseButton={false}
         >
-          <DialogTitle className="sr-only">Search everything</DialogTitle>
+          <DialogTitle className="sr-only">{t("search.everything")}</DialogTitle>
           <div className="flex h-12 items-center gap-3 border-b border-border/70 px-4">
             <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="relative min-w-0 flex-1">
@@ -888,7 +906,7 @@ export function TopbarSearch({
                 </span>
               ) : null}
               <input
-                aria-label="Search everything"
+                aria-label={t("search.everything")}
                 autoCapitalize="none"
                 autoCorrect="off"
                 className="relative z-10 w-full min-w-0 bg-transparent text-base text-foreground outline-none"

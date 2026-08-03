@@ -37,6 +37,7 @@ import {
   useThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import { LanguageToggle, useI18n } from "@/shared/i18n";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -50,6 +51,8 @@ import {
   ACCENT_COLORS,
   isBuzzTheme,
   NEUTRAL_ACCENT,
+  SHELL_STYLES,
+  type ShellStyleId,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
 import {
@@ -418,6 +421,7 @@ const ACCENT_PICKER_TRANSITION = {
 };
 
 function ThemeSettingsCard() {
+  const { t } = useI18n();
   const {
     setTheme,
     selectedThemeName,
@@ -425,14 +429,16 @@ function ThemeSettingsCard() {
     isDark,
     accentColor,
     setAccentColor,
+    shellStyle,
+    setShellStyle,
     followSystem,
     setFollowSystem,
   } = useTheme();
 
-  // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
-  // so the accent picker is hidden while a Buzz theme is active. `themeName` is
-  // the effective theme, so this also covers System mode resolving to Buzz.
+  // Buzz themes use shell-style chrome (Raft / Persona5 / …). Free accent
+  // picker is hidden while Buzz is active; shell style picker shows instead.
   const accentPickerHidden = isBuzzTheme(themeName);
+  const shellPickerVisible = isBuzzTheme(themeName);
   const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
@@ -525,26 +531,50 @@ function ThemeSettingsCard() {
       data-testid="settings-theme"
     >
       <SettingsSectionHeader
-        title="Appearance"
-        description="Choose a theme for Buzz."
+        title={t("appearance.title")}
+        description={t("appearance.description")}
       />
+
+      <div className="mb-6 space-y-2" data-testid="settings-language">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">
+            {t("appearance.language.title")}
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            {t("appearance.language.description")}
+          </p>
+        </div>
+        <LanguageToggle variant="full" testId="settings-language-toggle" />
+      </div>
 
       {/* Mode selector: System / Light / Dark */}
       <div className="mb-4 flex gap-2">
         {(
           [
-            { mode: "system" as const, label: "System", Icon: SunMoon },
-            { mode: "light" as const, label: "Light", Icon: Sun },
-            { mode: "dark" as const, label: "Dark", Icon: Moon },
+            {
+              mode: "system" as const,
+              label: t("appearance.mode.system"),
+              Icon: SunMoon,
+            },
+            {
+              mode: "light" as const,
+              label: t("appearance.mode.light"),
+              Icon: Sun,
+            },
+            {
+              mode: "dark" as const,
+              label: t("appearance.mode.dark"),
+              Icon: Moon,
+            },
           ] as const
         ).map(({ mode, label, Icon }) => (
           <button
             aria-pressed={selectedMode === mode}
             className={cn(
-              "flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              "flex items-center gap-2 rounded-lg border-2 border-border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
               selectedMode === mode
-                ? "border-primary bg-primary/10 text-foreground"
-                : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
+                ? "border-primary bg-primary/15 text-foreground"
+                : "text-muted-foreground hover:border-foreground/50 hover:text-foreground",
             )}
             data-testid={`appearance-mode-${mode}`}
             key={mode}
@@ -622,7 +652,15 @@ function ThemeSettingsCard() {
         </div>
       </div>
 
-      {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
+      {/* Shell style picker — Buzz themes only (Raft / Persona5 / …). */}
+      {shellPickerVisible ? (
+        <ShellStylePickerContent
+          setShellStyle={setShellStyle}
+          shellStyle={shellStyle}
+        />
+      ) : null}
+
+      {/* Accent color picker — hidden for Buzz themes (shell style owns chrome).
           Reveal/hide with the translate-up + opacity fade defined by
           ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
           and just renders/unrenders. */}
@@ -737,6 +775,63 @@ function ThreadLayoutSetting() {
         </DropdownMenu>
       </SettingsOptionRow>
     </SettingsOptionGroup>
+  );
+}
+
+/** Shell style grid for Buzz chrome (Raft / Persona5 / multi-palette). */
+function ShellStylePickerContent({
+  shellStyle,
+  setShellStyle,
+}: {
+  shellStyle: ShellStyleId;
+  setShellStyle: (id: ShellStyleId) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="mb-6 shrink-0 px-1 pb-2 pt-1" data-testid="shell-style-picker">
+      <div className="mb-2">
+        <h3 className="text-sm font-medium text-foreground">
+          {t("appearance.shellStyle.title")}
+        </h3>
+        <p className="text-sm text-muted-foreground">
+          {t("appearance.shellStyle.description")}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2 p-1">
+        {SHELL_STYLES.map((style) => {
+          const active = shellStyle === style.id;
+          return (
+            <button
+              aria-pressed={active}
+              className={cn(
+                "flex min-w-[7.5rem] max-w-[10rem] flex-1 items-center gap-2 rounded-lg border-2 px-2.5 py-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                active
+                  ? "border-primary bg-primary/15 text-foreground"
+                  : "border-border text-muted-foreground hover:border-foreground/50 hover:text-foreground",
+              )}
+              data-testid={`shell-style-${style.id}`}
+              key={style.id}
+              onClick={() => setShellStyle(style.id)}
+              type="button"
+            >
+              <span
+                aria-hidden="true"
+                className="h-5 w-5 shrink-0 rounded-sm border border-border/60"
+                style={{ backgroundColor: style.swatch }}
+              />
+              <span className="min-w-0">
+                <span className="block truncate text-xs font-semibold text-foreground">
+                  {style.label}
+                </span>
+                <span className="block truncate text-2xs text-muted-foreground">
+                  {style.blurb}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

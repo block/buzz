@@ -8,6 +8,7 @@ import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
+import { I18nProvider } from "@/shared/i18n";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
@@ -76,17 +77,19 @@ function renderApp() {
       <CommunitiesProvider>
         <CommunityOnboardingProvider>
           <ThemeProvider defaultTheme="buzz">
-            <TooltipProvider delayDuration={300}>
-              <EmojiBurstProvider>
-                <PoofBurstProvider>
-                  <UpdaterProvider>
-                    <App />
-                    <NostrBindConsentDialog />
-                  </UpdaterProvider>
-                  <Toaster />
-                </PoofBurstProvider>
-              </EmojiBurstProvider>
-            </TooltipProvider>
+            <I18nProvider>
+              <TooltipProvider delayDuration={300}>
+                <EmojiBurstProvider>
+                  <PoofBurstProvider>
+                    <UpdaterProvider>
+                      <App />
+                      <NostrBindConsentDialog />
+                    </UpdaterProvider>
+                    <Toaster />
+                  </PoofBurstProvider>
+                </EmojiBurstProvider>
+              </TooltipProvider>
+            </I18nProvider>
           </ThemeProvider>
         </CommunityOnboardingProvider>
       </CommunitiesProvider>

@@ -12,6 +12,7 @@ import {
   resolveEnabled,
   useFeatureSnapshot,
 } from "@/shared/features/useFeatureEnabled";
+import { type MsgKey, useI18n } from "@/shared/i18n";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -49,11 +50,11 @@ type SettingsViewProps = SettingsPanelProps & {
 };
 
 const settingsNavGroups: Array<{
-  label: string;
+  labelKey: MsgKey;
   sections: SettingsSection[];
 }> = [
   {
-    label: "Personal",
+    labelKey: "settings.group.personal",
     sections: [
       "profile",
       "appearance",
@@ -65,21 +66,41 @@ const settingsNavGroups: Array<{
     ],
   },
   {
-    label: "Communities",
+    labelKey: "settings.group.communities",
     sections: ["hosted-communities", "channel-templates", "community-members"],
   },
   {
-    label: "App",
+    labelKey: "settings.group.app",
     sections: ["agents", "compute", "experimental", "mobile", "updates"],
   },
 ];
 
+const SETTINGS_SECTION_LABEL_KEYS: Record<SettingsSection, MsgKey> = {
+  appearance: "settings.section.appearance",
+  profile: "settings.section.profile",
+  notifications: "settings.section.notifications",
+  experimental: "settings.section.experimental",
+  agents: "settings.section.agents",
+  "channel-templates": "settings.section.channel-templates",
+  compute: "settings.section.compute",
+  shortcuts: "settings.section.shortcuts",
+  "hosted-communities": "settings.section.hosted-communities",
+  "community-members": "settings.section.community-members",
+  moderation: "settings.section.moderation",
+  "custom-emoji": "settings.section.custom-emoji",
+  "local-archive": "settings.section.local-archive",
+  mobile: "settings.section.mobile",
+  updates: "settings.section.updates",
+};
+
 function SettingsSectionButton({
   active,
+  label,
   onSelect,
   section,
 }: {
   active: boolean;
+  label: string;
   onSelect: (section: SettingsSection) => void;
   section: (typeof settingsSections)[number];
 }) {
@@ -92,7 +113,7 @@ function SettingsSectionButton({
         data-testid={`settings-nav-${section.value}`}
         isActive={active}
         onClick={() => onSelect(section.value)}
-        tooltip={section.label}
+        tooltip={label}
         type="button"
       >
         <Icon
@@ -103,7 +124,7 @@ function SettingsSectionButton({
               : "text-sidebar-foreground/70",
           )}
         />
-        <SidebarMenuLabel>{section.label}</SidebarMenuLabel>
+        <SidebarMenuLabel>{label}</SidebarMenuLabel>
       </SidebarMenuButton>
     </SidebarMenuItem>
   );
@@ -126,6 +147,7 @@ export function SettingsView({
   onSetSoundForSlot,
   section,
 }: SettingsViewProps) {
+  const { t } = useI18n();
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
@@ -226,11 +248,11 @@ export function SettingsView({
               <SidebarMenuButton
                 data-testid="settings-back-to-app"
                 onClick={onClose}
-                tooltip="Back to app"
+                tooltip={t("settings.backToApp")}
                 type="button"
               >
                 <ArrowLeft className="h-4 w-4" />
-                <span>Back to app</span>
+                <span>{t("settings.backToApp")}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
@@ -243,7 +265,7 @@ export function SettingsView({
               data-testid="community-access-loading"
             >
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Checking invite permissions…
+              {t("settings.checkingInvitePermissions")}
             </div>
           ) : null}
           {myMembershipQuery.isError ? (
@@ -253,7 +275,7 @@ export function SettingsView({
             >
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
-                Invite settings could not be checked.
+                {t("settings.inviteCheckFailed")}
               </div>
               <button
                 className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
@@ -261,7 +283,7 @@ export function SettingsView({
                 type="button"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                Try again
+                {t("settings.tryAgain")}
               </button>
             </div>
           ) : null}
@@ -271,27 +293,30 @@ export function SettingsView({
               data-testid="community-access-snapshot-missing"
             >
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              Invite settings are unavailable. Relay recovery may still be in
-              progress.
+              {t("settings.inviteUnavailable")}
             </div>
           ) : null}
-          {visibleNavGroups.map((group) => (
-            <SidebarGroup key={group.label}>
-              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu aria-label={`${group.label} settings sections`}>
-                  {group.sections.map((entry) => (
-                    <SettingsSectionButton
-                      active={entry.value === section}
-                      key={entry.value}
-                      onSelect={onSectionChange}
-                      section={entry}
-                    />
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
-          ))}
+          {visibleNavGroups.map((group) => {
+            const groupLabel = t(group.labelKey);
+            return (
+              <SidebarGroup key={group.labelKey}>
+                <SidebarGroupLabel>{groupLabel}</SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu aria-label={`${groupLabel} settings sections`}>
+                    {group.sections.map((entry) => (
+                      <SettingsSectionButton
+                        active={entry.value === section}
+                        key={entry.value}
+                        label={t(SETTINGS_SECTION_LABEL_KEYS[entry.value])}
+                        onSelect={onSectionChange}
+                        section={entry}
+                      />
+                    ))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            );
+          })}
         </SidebarContent>
 
         <SidebarFooter>
