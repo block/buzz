@@ -320,6 +320,15 @@ test("keeps main-app shortcuts from navigating the huddle room", async ({
     await expect.poll(() => page.url()).toBe(huddleUrl);
     await expect(page.getByTestId("settings-view")).toHaveCount(0);
   }
+
+  await page.evaluate(async (channelId) => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("deep-link-message", {
+      channelId,
+      messageId: "mock-general-welcome",
+      threadRootId: null,
+    });
+  }, HUDDLE_PARENT_ID);
+  await expect.poll(() => page.url()).toBe(huddleUrl);
 });
 
 test("speaks the first eligible agent reply with its participant identity", async ({

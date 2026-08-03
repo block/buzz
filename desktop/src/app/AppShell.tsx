@@ -643,7 +643,9 @@ export function AppShell() {
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-  useMessageDeepLinks();
+  // Dispatch `buzz://message` deep links only from the main window. The
+  // companion is dedicated to its active Huddle route.
+  useMessageDeepLinks(!isHuddleRoom);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],

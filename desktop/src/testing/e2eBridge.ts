@@ -1106,6 +1106,10 @@ declare global {
       command: string,
       payload?: Record<string, unknown>,
     ) => Promise<unknown>;
+    __BUZZ_E2E_EMIT_TAURI_EVENT__?: (
+      event: string,
+      payload: unknown,
+    ) => Promise<void>;
     __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
       members: MockHuddleMemberSeed[];
       transcriptionEnabled: boolean;
@@ -12522,6 +12526,8 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
+  window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
+    emit(event, payload);
   mockIPC(handleMockCommand, { shouldMockEvents: true });
   const tauriInternals = (
     window as typeof window & {
