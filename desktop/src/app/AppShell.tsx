@@ -101,7 +101,6 @@ const LazySettingsScreen = React.lazy(async () => {
   return { default: module.SettingsScreen };
 });
 const EMPTY_CHANNELS: Channel[] = [];
-
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
@@ -439,6 +438,7 @@ export function AppShell() {
       identityQuery.data?.pubkey,
       notificationSettings.settings,
       notificationSettings.setDesktopEnabled,
+      !isHuddleRoom,
       selectedView === "home" && !settingsOpen,
       getChannelReadAt,
       readStateVersion,
@@ -638,6 +638,7 @@ export function AppShell() {
     [openSearchHit],
   );
   useAppShellLifecycleEffects({
+    desktopBadgeEnabled: !isHuddleRoom,
     homeBadgeCountExcludingHighPriority,
     unreadChannelIds,
     unreadChannelNotificationCount,
@@ -725,11 +726,13 @@ export function AppShell() {
   });
   return (
     <PreventSleepProvider>
-      <AppShellTrayMenu
-        channels={channels}
-        goChannel={goChannel}
-        openCreateChannel={handleOpenCreateChannel}
-      />
+      {!isHuddleRoom ? (
+        <AppShellTrayMenu
+          channels={channels}
+          goChannel={goChannel}
+          openCreateChannel={handleOpenCreateChannel}
+        />
+      ) : null}
       <ChannelNavigationProvider channels={channels}>
         <AppShellProvider
           value={{

@@ -899,6 +899,7 @@ pub fn run() {
     app.run(move |app_handle, event| match event {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show_main_window(app_handle),
+        #[cfg(target_os = "macos")]
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { api, .. },
@@ -912,7 +913,6 @@ pub fn run() {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { .. },

@@ -4,12 +4,14 @@ import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { relayClient } from "@/shared/api/relayClient";
 
 type AppShellLifecycleEffectsOptions = {
+  desktopBadgeEnabled: boolean;
   homeBadgeCountExcludingHighPriority: number;
   unreadChannelIds: ReadonlySet<string>;
   unreadChannelNotificationCount: number;
 };
 
 export function useAppShellLifecycleEffects({
+  desktopBadgeEnabled,
   homeBadgeCountExcludingHighPriority,
   unreadChannelIds,
   unreadChannelNotificationCount,
@@ -64,6 +66,10 @@ export function useAppShellLifecycleEffects({
   }, []);
 
   React.useEffect(() => {
+    if (!desktopBadgeEnabled) {
+      return;
+    }
+
     const count =
       unreadChannelNotificationCount + homeBadgeCountExcludingHighPriority;
     void setDesktopAppBadge(
@@ -72,6 +78,7 @@ export function useAppShellLifecycleEffects({
         : { kind: unreadChannelIds.size ? "dot" : "none" },
     );
   }, [
+    desktopBadgeEnabled,
     homeBadgeCountExcludingHighPriority,
     unreadChannelIds,
     unreadChannelNotificationCount,
