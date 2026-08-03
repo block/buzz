@@ -5,12 +5,15 @@ import '../channels/channel_management_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'channel_messages_provider.dart';
+import 'channels_provider.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
 class SendMessage {
   final SignedEventRelay _signedEventRelay;
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
+  final Future<List<String>> Function(String channelId)
+  _fetchImplicitRecipients;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId) _completeLocalMessage;
@@ -20,6 +23,8 @@ class SendMessage {
     required SignedEventRelay signedEventRelay,
     required Future<List<ChannelMember>> Function(String channelId)
     fetchMembers,
+    required Future<List<String>> Function(String channelId)
+    fetchImplicitRecipients,
     required Map<String, UserProfile> Function() readUserCache,
     required void Function(String channelId, NostrEvent event) addLocalMessage,
     required void Function(String channelId, String eventId)
@@ -27,6 +32,7 @@ class SendMessage {
     required void Function(String channelId, String eventId) removeLocalMessage,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
+       _fetchImplicitRecipients = fetchImplicitRecipients,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
@@ -47,10 +53,15 @@ class SendMessage {
     List<String>? mentionPubkeys,
     List<List<String>> mediaTags = const [],
   }) async {
-    // Use explicitly passed pubkeys, or resolve @mentions against
-    // channel members to avoid matching the wrong user.
-    final resolvedMentions =
-        mentionPubkeys ?? await _resolveMentions(content, channelId);
+    // Use explicitly passed pubkeys, or resolve @mentions against channel
+    // members to avoid matching the wrong user. DMs also address every other
+    // participant implicitly, matching desktop behavior and allowing agent
+    // DMs (including multi-person group DMs) to work without visible @mentions.
+    final resolvedMentions = <String>[
+      ...?mentionPubkeys,
+      if (mentionPubkeys == null) ...await _resolveMentions(content, channelId),
+      ...await _fetchImplicitRecipients(channelId),
+    ];
     final authorPubkey = _signedEventRelay.pubkey;
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
@@ -59,7 +70,7 @@ class SendMessage {
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
       for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
+        if (seenMentions.add(pk.toLowerCase())) pk.toLowerCase(),
     ];
 
     final tags = <List<String>>[
@@ -169,6 +180,15 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     ),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
+    fetchImplicitRecipients: (channelId) async {
+      final channels = await ref.read(channelsProvider.future);
+      for (final channel in channels) {
+        if (channel.id == channelId) {
+          return channel.isDm ? channel.participantPubkeys : const [];
+        }
+      }
+      return const [];
+    },
     readUserCache: () => ref.read(userCacheProvider),
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)

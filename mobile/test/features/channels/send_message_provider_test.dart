@@ -19,6 +19,7 @@ void main() {
           nsec: nostr.Keys.generate().nsec,
         ),
         fetchMembers: (_) async => const [],
+        fetchImplicitRecipients: (_) async => const [],
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
@@ -52,6 +53,7 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       ),
       fetchMembers: (_) async => const [],
+      fetchImplicitRecipients: (_) async => const [],
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
       completeLocalMessage: (_, eventId) => completedIds.add(eventId),
@@ -66,9 +68,76 @@ void main() {
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
   });
+
+  test(
+    'adds DM participants as implicit recipients without @mentions',
+    () async {
+      final keys = nostr.Keys.generate();
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        fetchMembers: (_) async => const [],
+        fetchImplicitRecipients: (_) async => [
+          keys.public.toUpperCase(),
+          _agentPubkey.toUpperCase(),
+          _agentPubkey,
+          _humanPubkey,
+        ],
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(channelId: _channelId, content: 'status?');
+      await session.published;
+
+      expect(_pTags(session.event), [_agentPubkey, _humanPubkey]);
+
+      session.accept();
+      await result;
+    },
+  );
+
+  test('merges explicit mentions with implicit DM recipients', () async {
+    final session = _PendingPublishRelaySession();
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      fetchImplicitRecipients: (_) async => const [_agentPubkey],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'hello',
+      mentionPubkeys: const [_humanPubkey, _agentPubkey],
+    );
+    await session.published;
+
+    expect(_pTags(session.event), [_humanPubkey, _agentPubkey]);
+
+    session.accept();
+    await result;
+  });
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
+const _agentPubkey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const _humanPubkey =
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+List<String> _pTags(NostrEvent event) => [
+  for (final tag in event.tags)
+    if (tag.length >= 2 && tag[0] == 'p') tag[1],
+];
 
 class _PendingPublishRelaySession extends RelaySessionNotifier {
   final Completer<NostrEvent> _result = Completer<NostrEvent>();
