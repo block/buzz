@@ -46,16 +46,18 @@ export function CreateChannelFormFields({
   const selectedTemplate = form.templates.find(
     (template) => template.id === form.selectedTemplateId,
   );
-  const selectedTemplateAgentCount = selectedTemplate
-    ? selectedTemplate.agents.personas.length +
-      selectedTemplate.agents.teams.length
-    : 0;
+  const selectedTemplatePersonaCount =
+    selectedTemplate?.agents.personas.length ?? 0;
+  const selectedTemplateTeamCount = selectedTemplate?.agents.teams.length ?? 0;
   const selectedTemplateSummary = selectedTemplate
     ? [
-        selectedTemplate.visibility === "private" ? "Private" : "Open",
+        form.visibility === "private" ? "Private" : "Open",
         selectedTemplate.canvasTemplate ? "Canvas included" : null,
-        selectedTemplateAgentCount > 0
-          ? `${selectedTemplateAgentCount} ${selectedTemplateAgentCount === 1 ? "agent" : "agents"}`
+        selectedTemplatePersonaCount > 0
+          ? `${selectedTemplatePersonaCount} ${selectedTemplatePersonaCount === 1 ? "agent" : "agents"}`
+          : null,
+        selectedTemplateTeamCount > 0
+          ? `${selectedTemplateTeamCount} ${selectedTemplateTeamCount === 1 ? "team" : "teams"}`
           : null,
       ]
         .filter(Boolean)

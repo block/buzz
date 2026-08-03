@@ -1347,7 +1347,14 @@ test("create channel template selector matches the lifecycle controls", async ({
               backend: null,
             },
           ],
-          teams: [],
+          teams: [
+            {
+              teamId: "research-team",
+              runtime: null,
+              model: null,
+              backend: null,
+            },
+          ],
         },
         isBuiltin: false,
         createdAt: "2026-07-23T00:00:00Z",
@@ -1370,13 +1377,18 @@ test("create channel template selector matches the lifecycle controls", async ({
 
   await expect(templateControl).toHaveText("Project kickoff");
   await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
-    "Private · Canvas included · 1 agent",
+    "Private · Canvas included · 1 agent · 1 team",
   );
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
   await expect(page.getByTestId("create-channel-permissions")).toContainText(
     "Private",
+  );
+  await page.getByTestId("create-channel-permissions").click();
+  await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Open · Canvas included · 1 agent · 1 team",
   );
 });
 
