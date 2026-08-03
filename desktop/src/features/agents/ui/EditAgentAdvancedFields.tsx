@@ -10,10 +10,7 @@ import {
 import type { AgentPersona } from "@/shared/api/types";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
-import {
-  AGENT_PARALLELISM_HELP,
-  AGENT_PARALLELISM_PLACEHOLDER,
-} from "../lib/agentParallelism";
+import { EDIT_AGENT_PARALLELISM_HELP } from "../lib/agentParallelism";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -176,13 +173,13 @@ export function EditAgentAdvancedFields({
             id="edit-agent-parallelism"
             inputMode="numeric"
             onChange={(event) => onParallelismChange(event.target.value)}
-            placeholder={AGENT_PARALLELISM_PLACEHOLDER}
+            placeholder="Current value"
             type="text"
             value={parallelism}
           />
         </div>
         <p className="text-xs text-muted-foreground">
-          {AGENT_PARALLELISM_HELP}
+          {EDIT_AGENT_PARALLELISM_HELP}
         </p>
       </div>
 
