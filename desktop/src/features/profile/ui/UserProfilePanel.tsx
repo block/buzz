@@ -67,6 +67,8 @@ import {
   ProfileSummaryView,
 } from "@/features/profile/ui/UserProfilePanelSections";
 import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+import { AgentUsageFocusedView } from "@/features/agent-usage/ui/AgentUsageFocusedView";
+import { useUsageIngress } from "@/features/agent-usage/hooks";
 import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProfileAgentActions";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
@@ -160,17 +162,14 @@ export function UserProfilePanel({
   >(undefined);
 
   // Open the Edit Agent dialog when `requestOpenEditAgent(pubkey)` fires from
-  // a card or other non-panel surface (e.g. `ConfigNudgeCard`). Mirrors the
-  // `subscribeOpenCreateAgent` pattern in AgentsView.
+  // a card or other surface. Mirrors `subscribeOpenCreateAgent` in AgentsView.
   React.useEffect(() => {
     if (!pubkey) return;
-    // Consume any pending request that arrived before this panel mounted.
     const pending = consumePendingOpenEditAgent(pubkey);
     if (pending !== false) {
       setEditAgentFocus(pending === true ? undefined : pending);
       setEditAgentOpen(true);
     }
-    // Subscribe for events that arrive while the panel is mounted.
     return subscribeOpenEditAgent(pubkey, (focus) => {
       setEditAgentFocus(focus);
       setEditAgentOpen(true);
@@ -299,18 +298,14 @@ export function UserProfilePanel({
   const isBot =
     Boolean(relayAgent || managedAgent || resolvedPersona) || isAgentByOaOwner;
   const managedAgentOwner = useIsManagedAgent(isBot ? effectivePubkey : null);
-  // Does THIS desktop hold the agent's seckey (or is this an editable persona)?
-  // Gates edit (which needs the key) and grants owner access when managed locally.
+  // Does THIS desktop hold the agent's seckey (or editable persona)?
+  // Gates edit and grants owner access when managed locally.
   const isOwner = resolvedPersona ? true : managedAgentOwner;
-  // Is the viewer the agent's declared owner (NIP-OA `ownerPubkey == me`)? This
-  // is the right signal for viewing owner-scoped data (activity feed, memory):
-  // the relay routes and the client decrypts those frames with the owner's OWN
-  // key, so the agent's seckey is never needed. Computed here (before the gates
-  // that consume it) so visibility keys off declared ownership, not key custody.
+  // Is the viewer the declared NIP-OA owner? Right signal for owner-scoped
+  // data (activity, memory) — relay routes/decrypts with the owner's own key.
   const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
-  // The viewer may see owner-scoped data if they declared-own the agent OR they
-  // manage it locally (older agents may not advertise an owner pubkey). Every
-  // real boundary is server-side, so this only controls what UI we paint.
+  // Viewer sees owner-scoped data if declared-own OR manage locally.
+  // Real enforcement is server-side; this only controls which UI we paint.
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
 
   const activityAgent = React.useMemo(
@@ -325,9 +320,6 @@ export function UserProfilePanel({
       }),
     [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
   );
-  // Observer ingestion (frame decryption + derived active-turn liveness) is
-  // owner-global — mounted once in AppShell via useAgentObserverIngestion —
-  // covering both locally managed agents and declared-owned relay agents.
   const canEditAgent =
     isOwner === true &&
     (managedAgent !== undefined || resolvedPersona !== undefined);
@@ -342,6 +334,8 @@ export function UserProfilePanel({
     viewerIsOwner &&
     Boolean(effectivePubkey) &&
     canOpenAgentActivity(effectivePubkey);
+  const canViewUsage = viewerIsOwner && isBot && Boolean(effectivePubkey);
+  const usageIngressTrailing = useUsageIngress(effectivePubkey, canViewUsage);
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =
@@ -621,8 +615,7 @@ export function UserProfilePanel({
     [deletePersonaMutation.mutateAsync, onClose],
   );
 
-  // Count of managed-agent instances backed by the persona being deleted.
-  // Shown in the confirm dialog so the user knows what will be cascade-deleted.
+  // Count of instances backed by the persona being deleted (shown in confirm dialog).
   const personaDeleteInstanceCount = React.useMemo(
     () =>
       personaToDelete
@@ -791,6 +784,8 @@ export function UserProfilePanel({
           canInstantiateAgent={canInstantiateAgent}
           canOpenAgentLogs={canOpenAgentLogs}
           canViewActivity={canViewActivity}
+          canViewUsage={canViewUsage}
+          usageIngressTrailing={usageIngressTrailing}
           callerChannelId={callerChannelId}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
@@ -826,6 +821,7 @@ export function UserProfilePanel({
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}
           onOpenInstructions={() => setView("instructions")}
+          onOpenUsage={() => setView("usage")}
           onTabChange={setTab}
           onOpenDm={onOpenDm}
           onCreateCard={
@@ -854,6 +850,13 @@ export function UserProfilePanel({
         <MemoryFocusedView
           agentPubkey={effectivePubkey}
           viewerIsOwner={viewerIsOwner}
+        />
+      ) : null}
+      {view === "usage" && effectivePubkey ? (
+        <AgentUsageFocusedView
+          agentPubkey={effectivePubkey}
+          canViewUsage={canViewUsage}
+          onIneligible={() => setView("summary", { replace: true })}
         />
       ) : null}
       {view === "info" ? (
@@ -936,44 +939,42 @@ export function UserProfilePanel({
     />
   ) : null;
   const personaDialogs = (
-    <>
-      <UserProfilePersonaDialogs
-        cardMintTarget={cardMintTarget}
-        createError={
-          createPersonaMutation.error instanceof Error
-            ? createPersonaMutation.error
-            : null
-        }
-        instanceCount={personaDeleteInstanceCount}
-        isPending={
-          createPersonaMutation.isPending ||
-          updatePersonaMutation.isPending ||
-          updateManagedAgentMutation.isPending ||
-          createAgentMutation.isPending
-        }
-        linkedAgentPubkey={managedAgent?.pubkey ?? null}
-        personaDialogState={personaDialogState}
-        personaToDelete={personaToDelete}
-        personaToExportSnapshot={personaToExportSnapshot}
-        resolvedPersona={resolvedPersona}
-        runtimes={acpRuntimesQuery.data ?? []}
-        runtimesLoading={acpRuntimesQuery.isLoading}
-        updateError={
-          updatePersonaMutation.error instanceof Error
-            ? updatePersonaMutation.error
-            : null
-        }
-        onCloseCardMint={() => setCardMintTarget(null)}
-        onCloseDelete={() => setPersonaToDelete(null)}
-        onCloseDialog={() => setPersonaDialogState(null)}
-        onCloseExportSnapshot={() => setPersonaToExportSnapshot(null)}
-        onConfirmDelete={(selectedPersona) => {
-          void handleConfirmDeletePersona(selectedPersona);
-        }}
-        onExportSnapshot={setPersonaToExportSnapshot}
-        onSubmit={handleSubmitPersona}
-      />
-    </>
+    <UserProfilePersonaDialogs
+      cardMintTarget={cardMintTarget}
+      createError={
+        createPersonaMutation.error instanceof Error
+          ? createPersonaMutation.error
+          : null
+      }
+      instanceCount={personaDeleteInstanceCount}
+      isPending={
+        createPersonaMutation.isPending ||
+        updatePersonaMutation.isPending ||
+        updateManagedAgentMutation.isPending ||
+        createAgentMutation.isPending
+      }
+      linkedAgentPubkey={managedAgent?.pubkey ?? null}
+      personaDialogState={personaDialogState}
+      personaToDelete={personaToDelete}
+      personaToExportSnapshot={personaToExportSnapshot}
+      resolvedPersona={resolvedPersona}
+      runtimes={acpRuntimesQuery.data ?? []}
+      runtimesLoading={acpRuntimesQuery.isLoading}
+      updateError={
+        updatePersonaMutation.error instanceof Error
+          ? updatePersonaMutation.error
+          : null
+      }
+      onCloseCardMint={() => setCardMintTarget(null)}
+      onCloseDelete={() => setPersonaToDelete(null)}
+      onCloseDialog={() => setPersonaDialogState(null)}
+      onCloseExportSnapshot={() => setPersonaToExportSnapshot(null)}
+      onConfirmDelete={(selectedPersona) => {
+        void handleConfirmDeletePersona(selectedPersona);
+      }}
+      onExportSnapshot={setPersonaToExportSnapshot}
+      onSubmit={handleSubmitPersona}
+    />
   );
   return (
     <UserProfilePanelFrame
