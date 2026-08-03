@@ -507,6 +507,27 @@ test.describe("community rail", () => {
       );
     });
     await page.evaluate(() => {
+      const config = (
+        window as Window & {
+          __BUZZ_E2E__?: {
+            mock?: { channelsReadErrors?: (string | null)[] };
+          };
+        }
+      ).__BUZZ_E2E__;
+      if (!config) throw new Error("missing E2E config");
+      config.mock = {
+        ...config.mock,
+        channelsReadErrors: ["temporary channel read failure"],
+      };
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => window.__BUZZ_E2E__?.mock?.channelsReadErrors?.length ?? 0,
+        ),
+      )
+      .toBe(1);
+    await page.evaluate(() => {
       const testWindow = window as Window & {
         __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
         __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
@@ -567,27 +588,6 @@ test.describe("community rail", () => {
       )
       .toEqual({ kind: "channel", channelId: "general" });
 
-    await page.evaluate(() => {
-      const config = (
-        window as Window & {
-          __BUZZ_E2E__?: {
-            mock?: { channelsReadErrors?: (string | null)[] };
-          };
-        }
-      ).__BUZZ_E2E__;
-      if (!config) throw new Error("missing E2E config");
-      config.mock = {
-        ...config.mock,
-        channelsReadErrors: ["temporary channel read failure"],
-      };
-    });
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () => window.__BUZZ_E2E__?.mock?.channelsReadErrors?.length ?? 0,
-        ),
-      )
-      .toBe(1);
     const released = await page.evaluate(
       () =>
         (
