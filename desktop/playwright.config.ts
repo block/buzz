@@ -137,6 +137,7 @@ export default defineConfig({
         "**/inline-custom-harness.spec.ts",
         "**/where-to-run-config.spec.ts",
         "**/huddle-transcription.spec.ts",
+        "**/agent-numeric-tuning.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
