@@ -113,6 +113,7 @@ export function AppShell() {
     handleHuddleStarted,
     handleHuddleVisibilityChange,
     handleSidebarChannelSelect,
+    huddleBackingChannelIds,
     revealedHuddleChannelIds,
     isHuddleCompanionOpen,
     isHuddleDrawerOpen,
@@ -254,9 +255,13 @@ export function AppShell() {
       memberChannels.filter(
         (channel) =>
           channel.archivedAt === null &&
-          shouldShowSidebarChannel(channel, revealedHuddleChannelIds),
+          shouldShowSidebarChannel(
+            channel,
+            huddleBackingChannelIds,
+            revealedHuddleChannelIds,
+          ),
       ),
-    [memberChannels, revealedHuddleChannelIds],
+    [huddleBackingChannelIds, memberChannels, revealedHuddleChannelIds],
   );
   const hasRestoredCommunityDestinationRef = React.useRef(false);
   React.useEffect(() => {

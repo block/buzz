@@ -16,18 +16,22 @@ function channel(overrides = {}) {
 }
 
 test("ordinary channels stay visible without an explicit reveal", () => {
-  assert.equal(shouldShowSidebarChannel(channel(), new Set()), true);
+  assert.equal(shouldShowSidebarChannel(channel(), new Set(), new Set()), true);
 });
 
-test("huddle backing channels stay hidden by default", () => {
-  const staleHuddle = channel({
+test("tracked huddle backing channels stay hidden by default", () => {
+  const huddle = channel({
     id: "stale-huddle",
     name: "general huddle",
     ttlSeconds: 3_600,
   });
+  const huddleBackingChannelIds = new Set([huddle.id]);
 
-  assert.equal(isHuddleBackingChannel(staleHuddle), true);
-  assert.equal(shouldShowSidebarChannel(staleHuddle, new Set()), false);
+  assert.equal(isHuddleBackingChannel(huddle, huddleBackingChannelIds), true);
+  assert.equal(
+    shouldShowSidebarChannel(huddle, huddleBackingChannelIds, new Set()),
+    false,
+  );
 });
 
 test("an explicitly revealed huddle channel appears in the sidebar", () => {
@@ -37,12 +41,25 @@ test("an explicitly revealed huddle channel appears in the sidebar", () => {
     ttlSeconds: 3_600,
   });
 
-  assert.equal(shouldShowSidebarChannel(huddle, new Set([huddle.id])), true);
+  assert.equal(
+    shouldShowSidebarChannel(
+      huddle,
+      new Set([huddle.id]),
+      new Set([huddle.id]),
+    ),
+    true,
+  );
 });
 
-test("huddle-shaped names without the huddle TTL remain ordinary channels", () => {
-  const ordinaryChannel = channel({ name: "design huddle" });
+test("one-hour channels with huddle-shaped names remain ordinary", () => {
+  const ordinaryChannel = channel({
+    name: "design huddle",
+    ttlSeconds: 3_600,
+  });
 
-  assert.equal(isHuddleBackingChannel(ordinaryChannel), false);
-  assert.equal(shouldShowSidebarChannel(ordinaryChannel, new Set()), true);
+  assert.equal(isHuddleBackingChannel(ordinaryChannel, new Set()), false);
+  assert.equal(
+    shouldShowSidebarChannel(ordinaryChannel, new Set(), new Set()),
+    true,
+  );
 });

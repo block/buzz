@@ -33,6 +33,9 @@ export function useHuddlePresentation() {
   const [isHuddleStartPending, setIsHuddleStartPending] = React.useState(false);
   const [revealedHuddleChannelIds, setRevealedHuddleChannelIds] =
     React.useState<ReadonlySet<string>>(() => new Set());
+  const [huddleBackingChannelIds, setHuddleBackingChannelIds] = React.useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const activeHuddleChannelIdRef = React.useRef<string | null>(null);
   const huddleCompanionChannelIdRef = React.useRef<string | null>(null);
   const huddleCompanionOpenPromiseRef = React.useRef<Promise<void> | null>(
@@ -152,6 +155,17 @@ export function useHuddlePresentation() {
     },
     [],
   );
+  const trackHuddleBackingChannel = React.useCallback(
+    (ephemeralChannelId: string) => {
+      setHuddleBackingChannelIds((current) => {
+        if (current.has(ephemeralChannelId)) return current;
+        const next = new Set(current);
+        next.add(ephemeralChannelId);
+        return next;
+      });
+    },
+    [],
+  );
   const revealHuddleChannel = React.useCallback(
     (ephemeralChannelId: string) => {
       setRevealedHuddleChannelIds((current) => {
@@ -210,6 +224,7 @@ export function useHuddlePresentation() {
   const openHuddleCompanion = React.useCallback(
     (ephemeralChannelId: string) => {
       activeHuddleChannelIdRef.current = ephemeralChannelId;
+      trackHuddleBackingChannel(ephemeralChannelId);
       hideHuddleChannel(ephemeralChannelId);
       setIsHuddleDrawerOpen(false);
       setIsHuddleCompanionOpen(true);
@@ -233,7 +248,7 @@ export function useHuddlePresentation() {
       huddleCompanionOpenPromiseRef.current = openPromise;
       return openPromise;
     },
-    [hideHuddleChannel],
+    [hideHuddleChannel, trackHuddleBackingChannel],
   );
   const handleHuddleStarted = React.useCallback(
     async (ephemeralChannelId: string) => {
@@ -263,9 +278,10 @@ export function useHuddlePresentation() {
   const showHuddleInMainApp = React.useCallback(
     (ephemeralChannelId: string) => {
       activeHuddleChannelIdRef.current = ephemeralChannelId;
+      trackHuddleBackingChannel(ephemeralChannelId);
       viewHuddleChannel(ephemeralChannelId);
     },
-    [viewHuddleChannel],
+    [trackHuddleBackingChannel, viewHuddleChannel],
   );
   const handleSidebarChannelSelect = React.useCallback(
     (channelId: string) => {
@@ -327,10 +343,23 @@ export function useHuddlePresentation() {
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
+    void invoke<HuddleTranscriptRouteState>("get_huddle_state")
+      .then((state) => {
+        if (cancelled || !state.ephemeral_channel_id) return;
+        activeHuddleChannelIdRef.current = state.ephemeral_channel_id;
+        trackHuddleBackingChannel(state.ephemeral_channel_id);
+        if (state.parent_channel_id) {
+          activeHuddleParentChannelIdRef.current = state.parent_channel_id;
+        }
+      })
+      .catch(() => {
+        /* lifecycle events remain authoritative */
+      });
     listen<HuddleTranscriptRouteState>("huddle-state-changed", (event) => {
       if (cancelled) return;
       if (event.payload.ephemeral_channel_id) {
         activeHuddleChannelIdRef.current = event.payload.ephemeral_channel_id;
+        trackHuddleBackingChannel(event.payload.ephemeral_channel_id);
       }
       if (event.payload.parent_channel_id) {
         activeHuddleParentChannelIdRef.current =
@@ -366,7 +395,13 @@ export function useHuddlePresentation() {
       cancelled = true;
       unlisten?.();
     };
-  }, [hideHuddleChannel, isHuddleRoom, openHuddleCompanion, queryClient]);
+  }, [
+    hideHuddleChannel,
+    isHuddleRoom,
+    openHuddleCompanion,
+    queryClient,
+    trackHuddleBackingChannel,
+  ]);
 
   return {
     handleHuddleCompanionOpen,
@@ -375,6 +410,7 @@ export function useHuddlePresentation() {
     handleHuddleStarted,
     handleHuddleVisibilityChange,
     handleSidebarChannelSelect,
+    huddleBackingChannelIds,
     revealedHuddleChannelIds,
     isHuddleCompanionOpen,
     isHuddleDrawerOpen,

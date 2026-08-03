@@ -32,6 +32,7 @@ type HuddleAudioMirrorState = {
   audioDevices: AudioInputDevice[];
   selectedDeviceId: string;
   micGain: number;
+  voiceInputMode: VoiceInputMode;
 };
 
 type HuddleAudioCommand =
@@ -79,7 +80,7 @@ export function HuddleProvider({
   ownsAudioSession?: boolean;
   /** Keeps the main-app drawer suppressed while a new huddle is handed to its companion window. */
   onHuddleStartPendingChange?: (pending: boolean) => void;
-  /** Called after a newly created huddle has connected its local audio. */
+  /** Called after a huddle has connected its local audio. */
   onHuddleStarted?: (ephemeralChannelId: string) => void | Promise<void>;
   /** Reveals a huddle's temporary channel and navigates the main app to it. */
   onShowHuddleInMainApp?: (ephemeralChannelId: string) => void;
@@ -136,6 +137,9 @@ export function HuddleProvider({
   const micGain = ownsAudioSession
     ? localMicGain
     : (mirroredAudioState?.micGain ?? 1);
+  const effectiveVoiceInputMode = ownsAudioSession
+    ? voiceInputMode
+    : (mirroredAudioState?.voiceInputMode ?? voiceInputMode);
   const setSelectedDeviceId = React.useCallback(
     (deviceId: string) => {
       if (ownsAudioSession) {
@@ -249,6 +253,7 @@ export function HuddleProvider({
         audioDevices: previous?.audioDevices ?? [],
         selectedDeviceId: previous?.selectedDeviceId ?? "",
         micGain: previous?.micGain ?? 1,
+        voiceInputMode: previous?.voiceInputMode ?? voiceInputMode,
       }));
       // The companion never owns a MediaStream. Send the intended state, not
       // a toggle, so a delayed initial state response cannot invert the main
@@ -265,7 +270,7 @@ export function HuddleProvider({
       if (audioTrackRef.current) audioTrackRef.current.enabled = !next;
       return next;
     });
-  }, [mirroredAudioState?.isMuted, ownsAudioSession]);
+  }, [mirroredAudioState?.isMuted, ownsAudioSession, voiceInputMode]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -279,6 +284,7 @@ export function HuddleProvider({
           requestRetry = null;
         }
         setMirroredAudioState(event.payload);
+        setVoiceInputModeState(event.payload.voiceInputMode);
       }
     }).then((fn) => {
       if (cancelled) {
@@ -309,7 +315,7 @@ export function HuddleProvider({
       if (requestRetry !== null) window.clearInterval(requestRetry);
       unlisten?.();
     };
-  }, [ownsAudioSession]);
+  }, [ownsAudioSession, setVoiceInputModeState]);
 
   React.useEffect(() => {
     if (!ownsAudioSession) return;
@@ -320,6 +326,7 @@ export function HuddleProvider({
       audioDevices: localAudioDevices,
       selectedDeviceId: localSelectedDeviceId,
       micGain: localMicGain,
+      voiceInputMode,
     };
     void emit(HUDDLE_AUDIO_STATE_EVENT, state);
 
@@ -356,6 +363,7 @@ export function HuddleProvider({
         audioDevices: localAudioDevices,
         selectedDeviceId: localSelectedDeviceId,
         micGain: localMicGain,
+        voiceInputMode,
       } satisfies HuddleAudioMirrorState);
     }).then((fn) => {
       if (cancelled) fn();
@@ -376,6 +384,7 @@ export function HuddleProvider({
     setLocalMicGain,
     setLocalSelectedDeviceId,
     setVoiceInputModeState,
+    voiceInputMode,
   ]);
 
   /** Stop AudioWorklet and mic track. Best-effort on all steps. */
@@ -696,6 +705,13 @@ export function HuddleProvider({
           }
           throw e;
         }
+        try {
+          await onHuddleStarted?.(joinInfo.ephemeral_channel_id);
+        } catch (error) {
+          // Presentation failure must not disconnect a successfully joined
+          // huddle; the user can still open its companion from the main app.
+          console.error("Failed to present joined huddle:", error);
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (isRedundantHuddlePhaseError(msg)) {
@@ -714,7 +730,12 @@ export function HuddleProvider({
         busyRef.current = false;
       }
     },
-    [cleanupFailedStart, cleanupSupersededStart, connectAndSetupMedia],
+    [
+      cleanupFailedStart,
+      cleanupSupersededStart,
+      connectAndSetupMedia,
+      onHuddleStarted,
+    ],
   );
 
   // The main window owns the browser audio session and therefore the one TTS
@@ -847,6 +868,8 @@ export function HuddleProvider({
   // in-flight guard collapses duplicate disconnect events from failed dials.
   const audioReconnectInFlightRef = React.useRef(false);
   React.useEffect(() => {
+    if (!ownsAudioSession) return;
+
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     listen("huddle-audio-disconnected", () => {
@@ -893,7 +916,7 @@ export function HuddleProvider({
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [ownsAudioSession]);
 
   return (
     <HuddleContext.Provider
@@ -911,7 +934,7 @@ export function HuddleProvider({
         toggleMute,
         micLevel: ownsAudioSession ? micLevel : mirroredMicLevel,
         pttActive,
-        voiceInputMode,
+        voiceInputMode: effectiveVoiceInputMode,
         setVoiceInputMode,
         activeSpeakers,
         speakerLevels,
