@@ -128,6 +128,7 @@ export function CreateChannelFormFields({
 
       <ChannelTypeSettings
         disabled={isCreating}
+        label="Type"
         onOpenChange={form.setTypePopoverOpen}
         onTemporaryChange={form.setEphemeral}
         onTtlSecondsChange={form.setTtlSeconds}
@@ -143,13 +144,11 @@ export function CreateChannelFormFields({
           isCreating && "opacity-50",
         )}
       >
-        <span className="text-sm font-medium text-foreground">
-          Channel template
-        </span>
+        <span className="text-sm font-medium text-foreground">Template</span>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label={`Channel template: ${selectedTemplate?.name ?? "None"}`}
+              aria-label={`Template: ${selectedTemplate?.name ?? "None"}`}
               className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-channel-template"
               disabled={isCreating}
