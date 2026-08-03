@@ -4,10 +4,14 @@ import type { CancelManagedAgentTurnResult } from "@/shared/api/types";
 export async function cancelManagedAgentTurn(
   pubkey: string,
   channelId: string,
+  sessionId: string,
+  turnId: string,
 ): Promise<CancelManagedAgentTurnResult> {
   await sendAgentObserverControl(pubkey, {
     type: "cancel_turn",
     channelId,
+    sessionId,
+    turnId,
   });
   return { status: "sent" };
 }

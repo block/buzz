@@ -88,9 +88,7 @@ fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
 
 #[cfg(target_os = "macos")]
 fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
-    // The window remains transparent at runtime for vibrancy. Use an opaque
-    // native backing only across the first visible frames so the previous app
-    // cannot show through before WebKit has submitted its first surface.
+    // Use opaque native backing only for the first frames so the previous app cannot show through.
     if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
         eprintln!("buzz-desktop: failed to set initial window backing: {error}");
     }
@@ -735,6 +733,7 @@ pub fn run() {
             sign_out,
             decrypt_observer_event,
             build_observer_control_event,
+            read_numbat_findings,
             create_auth_event,
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,

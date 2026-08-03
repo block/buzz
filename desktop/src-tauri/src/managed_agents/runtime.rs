@@ -8,8 +8,8 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        spawn_key_refusal, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -33,7 +33,8 @@ pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
-type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
+mod env_config;
+pub(crate) use env_config::{build_respond_to_env, configure_runtime_cli};
 
 mod process;
 #[cfg(test)]
@@ -290,6 +291,7 @@ pub fn build_managed_agent_summary(
             command: cmd,
             args,
             env: Default::default(),
+            guardian_policy: crate::managed_agents::readiness::GuardianPermissionPolicy::Monitor,
         }
     });
     let effective_mcp_command = known_acp_runtime(&descriptor.command)
@@ -362,87 +364,6 @@ pub fn find_managed_agent_mut<'a>(
         .iter_mut()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))
-}
-
-/// Pure decision function for the inbound author gate env vars.
-///
-/// Returns the env vars to **set** and the env vars to **remove**. Removal is
-/// belt-and-suspenders: an inherited parent env var must not leak into a
-/// child agent and silently change its security posture.
-///
-/// The `owner_hex` argument is the current workspace owner pubkey. It's used
-/// as a fallback for legacy records (`auth_tag.is_none()`) — without it, the
-/// harness's owner cache stays empty and `owner-only` / `allowlist` modes
-/// drop everything.
-///
-/// Returns `Err(...)` if the record's allowlist fails validation. The harness
-/// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(
-    record: &ManagedAgentRecord,
-    owner_hex: Option<&str>,
-) -> Result<RespondToEnv, String> {
-    // Defensive re-validation: an on-disk record could have been hand-edited.
-    let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
-    if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
-        return Err(
-            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
-        );
-    }
-
-    let mut set: Vec<(&'static str, String)> = Vec::new();
-    let mut remove: Vec<&'static str> = Vec::new();
-
-    set.push((
-        "BUZZ_ACP_RESPOND_TO",
-        record.respond_to.as_str().to_string(),
-    ));
-
-    if record.respond_to == super::types::RespondTo::Allowlist {
-        set.push(("BUZZ_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
-    } else {
-        remove.push("BUZZ_ACP_RESPOND_TO_ALLOWLIST");
-    }
-
-    // Legacy fallback: agents created before NIP-OA lack `auth_tag`. Without
-    // it the harness can't resolve the owner, and owner-dependent gate modes
-    // would drop every event. Forwarding the workspace owner pubkey via
-    // BUZZ_ACP_AGENT_OWNER keeps those records functional. Modern records
-    // (`auth_tag = Some(...)`) use `BUZZ_AUTH_TAG` as before.
-    if record.auth_tag.is_none() {
-        if let Some(owner) = owner_hex {
-            set.push(("BUZZ_ACP_AGENT_OWNER", owner.to_string()));
-        } else {
-            remove.push("BUZZ_ACP_AGENT_OWNER");
-        }
-    } else {
-        remove.push("BUZZ_ACP_AGENT_OWNER");
-    }
-
-    Ok((set, remove))
-}
-
-pub(crate) fn configure_runtime_cli(
-    command: &mut std::process::Command,
-    runtime: Option<&KnownAcpRuntime>,
-) {
-    let Some(runtime) = runtime else {
-        return;
-    };
-    if runtime.id != "claude" {
-        return;
-    }
-    if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
-        // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
-        // passed directly to `CreateProcess` and cause EINVAL when the Claude
-        // adapter tries to spawn them (issue #2397). Skip setting
-        // `CLAUDE_CODE_EXECUTABLE` for shim paths so the adapter falls back to
-        // its own PATH lookup and finds the real binary instead.
-        // Non-Windows: `.cmd`/`.bat` are valid executables and must be assigned.
-        if should_skip_claude_executable(&cli_path, cfg!(windows)) {
-            return;
-        }
-        command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
-    }
 }
 
 /// Spawn an agent process without holding any locks on records or runtimes.
@@ -578,6 +499,7 @@ pub fn spawn_agent_child(
     }
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    command.env("BUZZ_MANAGED_AGENT_PUBKEY", &record.pubkey);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
@@ -590,9 +512,35 @@ pub fn spawn_agent_child(
             command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
+    // Codex's Chrome extension broker is owned by the Codex host and is not
+    // exposed through ACP. Give Buzz-managed Codex sessions an independent,
+    // isolated browser boundary via the official Playwright MCP server instead.
+    // Pin the package version so agent startup cannot silently change behavior.
+    if known_acp_runtime(effective_command).is_some_and(|runtime| runtime.id == "codex") {
+        if let Some(npx) = resolve_command("npx") {
+            command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", npx);
+            command.env(
+                "BUZZ_ACP_BROWSER_MCP_ARGS",
+                r#"["--yes","@playwright/mcp@0.0.78","--browser","chrome","--isolated"]"#,
+            );
+        } else {
+            command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", "");
+            command.env("BUZZ_ACP_BROWSER_MCP_ARGS", "[]");
+        }
+    } else {
+        command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", "");
+        command.env("BUZZ_ACP_BROWSER_MCP_ARGS", "[]");
+    }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
+    if let Some(runtime) = runtime_meta {
+        crate::commands::numbat_findings::prepare_numbat_monitoring_async(
+            app.clone(),
+            runtime.id.to_string(),
+            record.pubkey.clone(),
+        );
+    }
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
@@ -857,9 +805,16 @@ pub fn spawn_agent_child(
     // applied. Writing it last lets user-provided values win over every Buzz-set env
     // written above — reserved keys were already stripped from descriptor.env so they
     // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
+    // Managed agents are monitor-first, while the layered descriptor may
+    // explicitly select lockdown. Resolve it at the spawn boundary so an
+    // absent setting never inherits an unsafe ambient parent value.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    // Guardian policy is a security boundary. Stamp the resolved value after
+    // the general environment so ambient or layered data cannot overwrite it
+    // at the process boundary.
+    apply_guardian_permission_env(&mut command, descriptor.guardian_policy);
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
@@ -958,6 +913,13 @@ pub fn spawn_agent_child(
     })
 }
 
+fn apply_guardian_permission_env(
+    command: &mut std::process::Command,
+    policy: crate::managed_agents::readiness::GuardianPermissionPolicy,
+) {
+    command.env("BUZZ_ACP_PERMISSION_MODE", policy.as_env_value());
+}
+
 fn child_rust_log_filter() -> String {
     match std::env::var("RUST_LOG") {
         Ok(existing) if existing.contains("buzz_acp") => existing,
@@ -1022,6 +984,9 @@ pub fn start_managed_agent_process(
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())
 }
+
+#[cfg(test)]
+mod guardian_policy_tests;
 
 #[cfg(test)]
 mod tests;
