@@ -115,13 +115,45 @@ void main() {
     },
   );
 
+  test(
+    'pending local edit survives manager rebuild and older relay state',
+    () async {
+      final firstRelay = _FakeRelaySession();
+      final first = manager(firstRelay, _RecordingSignedEventRelay());
+      await first.initialize();
+      first.setSortModeFor('channels', ChannelSortMode.recent);
+      first.dispose();
+
+      final secondRelay = _FakeRelaySession()
+        ..historyEvents = [
+          event({'dms': 'recent'}, 100),
+        ];
+      final signed = _RecordingSignedEventRelay();
+      final second = manager(secondRelay, signed);
+      await second.initialize();
+
+      expect(second.store.groups, {'channels': ChannelSortMode.recent});
+      final submitted = await signed.submitted.future.timeout(
+        const Duration(seconds: 1),
+      );
+      final payload =
+          jsonDecode(crypto.decrypt(submitted.content)) as Map<String, dynamic>;
+      expect(payload['groups'], {'channels': 'recent'});
+      second.dispose();
+    },
+  );
+
   test('newer remote event cancels pending local whole-blob write', () async {
     final relay = _FakeRelaySession();
     final signed = _RecordingSignedEventRelay();
     final subject = manager(relay, signed);
     await subject.initialize();
     subject.setSortModeFor('channels', ChannelSortMode.recent);
-    relay.emit(event({'dms': 'recent'}, 200));
+    relay.emit(
+      event({
+        'dms': 'recent',
+      }, DateTime.now().millisecondsSinceEpoch ~/ 1000 + 1),
+    );
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(subject.store.groups, {'dms': ChannelSortMode.recent});
     expect(signed.submitted.isCompleted, isFalse);

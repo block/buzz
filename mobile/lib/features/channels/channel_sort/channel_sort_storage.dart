@@ -103,6 +103,31 @@ List<Channel> sortChannelsForList(
   return sorted;
 }
 
+class ChannelSortSyncState {
+  final int updatedAt;
+  final String eventId;
+  final bool hasPendingLocalChanges;
+
+  const ChannelSortSyncState({
+    this.updatedAt = 0,
+    this.eventId = '',
+    this.hasPendingLocalChanges = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'updatedAt': updatedAt,
+    'eventId': eventId,
+    'hasPendingLocalChanges': hasPendingLocalChanges,
+  };
+
+  factory ChannelSortSyncState.fromJson(Map<String, dynamic> json) =>
+      ChannelSortSyncState(
+        updatedAt: json['updatedAt'] is int ? json['updatedAt'] as int : 0,
+        eventId: json['eventId'] is String ? json['eventId'] as String : '',
+        hasPendingLocalChanges: json['hasPendingLocalChanges'] == true,
+      );
+}
+
 class ChannelSortStorage {
   final SharedPreferences _prefs;
 
@@ -148,4 +173,31 @@ class ChannelSortStorage {
       jsonEncode(store.toJson()),
     );
   }
+
+  ChannelSortSyncState readSyncState(String pubkey, String relayUrl) {
+    final raw = _prefs.getString(_syncStateKey(pubkey, relayUrl));
+    if (raw == null || raw.isEmpty) return const ChannelSortSyncState();
+    try {
+      final parsed = jsonDecode(raw);
+      return parsed is Map<String, dynamic>
+          ? ChannelSortSyncState.fromJson(parsed)
+          : const ChannelSortSyncState();
+    } catch (_) {
+      return const ChannelSortSyncState();
+    }
+  }
+
+  void writeSyncState(
+    String pubkey,
+    String relayUrl,
+    ChannelSortSyncState state,
+  ) {
+    _prefs.setString(
+      _syncStateKey(pubkey, relayUrl),
+      jsonEncode(state.toJson()),
+    );
+  }
+
+  String _syncStateKey(String pubkey, String relayUrl) =>
+      '${channelSortKey(pubkey, relayUrl)}:sync';
 }

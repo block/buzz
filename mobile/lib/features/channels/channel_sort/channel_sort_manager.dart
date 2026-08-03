@@ -46,6 +46,7 @@ class ChannelSortManager {
   final Duration _publishDelay;
 
   ChannelSortStore _store;
+  ChannelSortSyncState _syncState;
   Timer? _publishDebounce;
   Timer? _startupRetryTimer;
   int _startupRetryAttempt = 0;
@@ -75,7 +76,11 @@ class ChannelSortManager {
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
        _publishDelay = publishDelay,
-       _store = ChannelSortStorage(prefs).read(pubkey, relayUrl);
+       _store = ChannelSortStorage(prefs).read(pubkey, relayUrl),
+       _syncState = ChannelSortStorage(prefs).readSyncState(pubkey, relayUrl) {
+    _lastRemoteCreatedAt = _syncState.updatedAt;
+    _lastRemoteEventId = _syncState.eventId;
+  }
 
   ChannelSortStore get store => _store;
   ChannelSortMode sortModeFor(String groupKey) =>
@@ -102,7 +107,8 @@ class ChannelSortManager {
       return;
     }
     _startupRetryAttempt = 0;
-    if (!firstFetch && !secondFetch && _store.groups.isNotEmpty) {
+    if (_syncState.hasPendingLocalChanges ||
+        (!firstFetch && !secondFetch && _store.groups.isNotEmpty)) {
       _schedulePublish();
     }
   }
@@ -137,6 +143,11 @@ class ChannelSortManager {
     _store = liveSectionIds == null
         ? updated
         : stripOrphanedSectionModes(updated, liveSectionIds);
+    _syncState = ChannelSortSyncState(
+      updatedAt: max(currentUnixSeconds(), _syncState.updatedAt + 1),
+      eventId: _syncState.eventId,
+      hasPendingLocalChanges: true,
+    );
     _generation++;
     _persist();
     _schedulePublish();
@@ -200,6 +211,10 @@ class ChannelSortManager {
 
   void _applyRemote(NostrEvent event) {
     if (event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds) return;
+    if (_syncState.hasPendingLocalChanges &&
+        event.createdAt < _syncState.updatedAt) {
+      return;
+    }
     final isNewer =
         event.createdAt > _lastRemoteCreatedAt ||
         (event.createdAt == _lastRemoteCreatedAt &&
@@ -211,6 +226,10 @@ class ChannelSortManager {
       final incoming = ChannelSortStore.fromJson(parsed);
       _lastRemoteCreatedAt = event.createdAt;
       _lastRemoteEventId = event.id;
+      _syncState = ChannelSortSyncState(
+        updatedAt: event.createdAt,
+        eventId: event.id,
+      );
       _publishDebounce?.cancel();
       _publishDebounce = null;
       _store = incoming;
@@ -262,12 +281,20 @@ class ChannelSortManager {
       if (_disposed || _generation != generationAtStart) return;
       _lastRemoteCreatedAt = createdAt;
       _lastRemoteEventId = submittedEventId ?? '';
+      _syncState = ChannelSortSyncState(
+        updatedAt: createdAt,
+        eventId: _lastRemoteEventId,
+      );
+      _persist();
     } catch (error) {
       debugPrint('[ChannelSortManager] publish failed: $error');
     }
   }
 
-  void _persist() => _storage.write(pubkey, relayUrl, _store);
+  void _persist() {
+    _storage.write(pubkey, relayUrl, _store);
+    _storage.writeSyncState(pubkey, relayUrl, _syncState);
+  }
 
   void dispose() {
     if (_disposed) return;
