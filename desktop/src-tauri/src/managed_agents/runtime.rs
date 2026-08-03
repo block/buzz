@@ -8,10 +8,18 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        spawn_key_refusal, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentRuntimeLifecycle, ManagedAgentSummary,
     },
     util::now_iso,
+};
+
+mod adapter;
+#[cfg(test)]
+use adapter::is_bundled_sibling;
+use adapter::{
+    resolve_canonical_bundled_buzz_agent, resolve_canonical_bundled_executable,
+    validate_managed_adapter_descriptor,
 };
 
 mod path;
@@ -30,45 +38,28 @@ mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
-mod sweep;
-pub(crate) use sweep::sweep_untracked_bundle_harnesses;
-
-type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
+mod environment;
+pub(crate) use environment::{
+    acp_turn_limits_log_line, build_respond_to_env, configure_managed_acp_environment,
+    configure_runtime_cli, managed_runtime_feature_gates, ManagedRuntimeLaunchMode,
+};
+#[cfg(test)]
+pub(crate) use environment::{
+    configure_managed_acp_turn_environment, configure_rollout_gate_environment,
+    effective_acp_turn_limits, ManagedRuntimeFeatureGates,
+};
 
 mod process;
 #[cfg(test)]
-use process::{
-    buzz_marker_entry, name_matches_interpreter, name_matches_known_binary,
-    terminate_runtime_receipt_with, valid_agent_runtime_receipt_with,
-};
+pub(crate) use process::process_is_running;
 pub(crate) use process::{
-    current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
-    terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    adopt_schema_v2_runtime, current_instance_id, legacy_migration_gate, pair_lock_is_held,
+    select_rollout_launch_mode, stop_verified_legacy_runtime, terminate_process,
+    verify_runtime_lock_proof, LegacyMigrationGate,
 };
 
-mod orphan_sweep;
-#[cfg(target_os = "macos")]
-use orphan_sweep::proc_pidinfo;
-pub(crate) use orphan_sweep::{
-    sweep_orphaned_agent_processes, sweep_system_agent_processes,
-    sweep_system_agent_processes_with_grace,
-};
-#[cfg(target_os = "macos")]
-use orphan_sweep::{BSDInfo, PROC_PIDTBSDINFO};
-#[cfg(unix)]
-use process::resolve_pgids_and_kill;
-
-mod instance_reaper;
-pub(crate) use instance_reaper::reap_dead_instance_agents;
-#[cfg(test)]
-use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
-
-// Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
-
-mod lifecycle;
-#[cfg(test)]
-use lifecycle::kill_stale_tracked_processes_with;
-pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
+mod migration;
+pub use migration::clear_legacy_runtime_pids;
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
@@ -169,20 +160,28 @@ pub fn build_managed_agent_summary(
         };
         (status, None, String::new())
     } else {
-        let persisted_pid = record.runtime_pid.filter(|pid| process_is_running(*pid));
         if let Some(runtime) = pair_runtime {
             (
-                "running".to_string(),
-                Some(runtime.child.id()),
-                runtime.log_path.display().to_string(),
-            )
-        } else if let Some(pid) = persisted_pid {
-            (
-                "running".to_string(),
-                Some(pid),
-                managed_agent_log_path(app, &record.pubkey)?
-                    .display()
-                    .to_string(),
+                match runtime.lifecycle {
+                    ManagedAgentRuntimeLifecycle::Failed => "failed",
+                    ManagedAgentRuntimeLifecycle::LegacyRuntimeActive => "legacy_runtime_active",
+                    ManagedAgentRuntimeLifecycle::ManualLegacyStopRequired => {
+                        "manual_legacy_stop_required"
+                    }
+                    _ => "running",
+                }
+                .to_string(),
+                Some(runtime.pid()),
+                runtime
+                    .log_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| {
+                        pair_key
+                            .as_ref()
+                            .and_then(|key| super::managed_agent_runtime_log_path(app, key).ok())
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default()
+                    }),
             )
         } else {
             (
@@ -259,17 +258,30 @@ pub fn build_managed_agent_summary(
     });
     let restart_diff = crate::managed_agents::spawn_snapshot::eligible_restart_diff(
         persona_orphaned,
-        tracked_spawn.as_ref().map(|(runtime, current)| {
-            crate::managed_agents::spawn_snapshot::TrackedSpawnState {
-                stamped: &runtime.spawn_config,
+        tracked_spawn.as_ref().and_then(|(runtime, current)| {
+            let process = runtime.process.as_ref()?;
+            Some(crate::managed_agents::spawn_snapshot::TrackedSpawnState {
+                stamped: &process.spawn_config,
                 current,
-                stamped_availability: runtime.adapter_availability.as_ref(),
+                stamped_availability: process.adapter_availability.as_ref(),
                 current_availability: super::adapter_availability_cached(),
-            }
+            })
         }),
     );
-    // One vector is the whole truth: badge on ⟺ there is a diff to show.
-    let needs_restart = !restart_diff.is_empty();
+    // Active durable work defers configuration replacement until the runtime
+    // is idle: a restart would kill running jobs and abandon a live
+    // assignment. Availability drift is already folded into restart_diff.
+    let has_active_jobs = pair_runtime.is_some_and(|runtime| !runtime.active_jobs.is_empty());
+    let active_assignment = pair_runtime
+        .and_then(|runtime| runtime.active_assignment.as_ref())
+        .map(|assignment| assignment.state);
+    let needs_restart = restart_eligible(
+        has_active_jobs,
+        active_assignment,
+        persona_orphaned,
+        !restart_diff.is_empty(),
+        false,
+    );
 
     // Resolve the effective harness via the single typed descriptor — same resolver
     // as spawn, so the UI reflects the persona's current harness (or explicit pin).
@@ -343,6 +355,24 @@ pub fn build_managed_agent_summary(
     })
 }
 
+/// Pure predicate: should the "Restart required" badge fire?
+///
+/// Active durable work defers configuration replacement until the runtime is
+/// idle. An orphaned linked instance can never be restarted successfully.
+fn restart_eligible(
+    has_active_jobs: bool,
+    active_assignment: Option<buzz_runtime_pkg::protocol::AssignmentState>,
+    persona_orphaned: bool,
+    hash_drift: bool,
+    availability_drift: bool,
+) -> bool {
+    let assignment_is_nonterminal = active_assignment.is_some_and(|state| !state.is_terminal());
+    !has_active_jobs
+        && !assignment_is_nonterminal
+        && !persona_orphaned
+        && (hash_drift || availability_drift)
+}
+
 pub fn find_managed_agent_mut<'a>(
     records: &'a mut [ManagedAgentRecord],
     pubkey: &str,
@@ -351,87 +381,6 @@ pub fn find_managed_agent_mut<'a>(
         .iter_mut()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))
-}
-
-/// Pure decision function for the inbound author gate env vars.
-///
-/// Returns the env vars to **set** and the env vars to **remove**. Removal is
-/// belt-and-suspenders: an inherited parent env var must not leak into a
-/// child agent and silently change its security posture.
-///
-/// The `owner_hex` argument is the current workspace owner pubkey. It's used
-/// as a fallback for legacy records (`auth_tag.is_none()`) — without it, the
-/// harness's owner cache stays empty and `owner-only` / `allowlist` modes
-/// drop everything.
-///
-/// Returns `Err(...)` if the record's allowlist fails validation. The harness
-/// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(
-    record: &ManagedAgentRecord,
-    owner_hex: Option<&str>,
-) -> Result<RespondToEnv, String> {
-    // Defensive re-validation: an on-disk record could have been hand-edited.
-    let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
-    if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
-        return Err(
-            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
-        );
-    }
-
-    let mut set: Vec<(&'static str, String)> = Vec::new();
-    let mut remove: Vec<&'static str> = Vec::new();
-
-    set.push((
-        "BUZZ_ACP_RESPOND_TO",
-        record.respond_to.as_str().to_string(),
-    ));
-
-    if record.respond_to == super::types::RespondTo::Allowlist {
-        set.push(("BUZZ_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
-    } else {
-        remove.push("BUZZ_ACP_RESPOND_TO_ALLOWLIST");
-    }
-
-    // Legacy fallback: agents created before NIP-OA lack `auth_tag`. Without
-    // it the harness can't resolve the owner, and owner-dependent gate modes
-    // would drop every event. Forwarding the workspace owner pubkey via
-    // BUZZ_ACP_AGENT_OWNER keeps those records functional. Modern records
-    // (`auth_tag = Some(...)`) use `BUZZ_AUTH_TAG` as before.
-    if record.auth_tag.is_none() {
-        if let Some(owner) = owner_hex {
-            set.push(("BUZZ_ACP_AGENT_OWNER", owner.to_string()));
-        } else {
-            remove.push("BUZZ_ACP_AGENT_OWNER");
-        }
-    } else {
-        remove.push("BUZZ_ACP_AGENT_OWNER");
-    }
-
-    Ok((set, remove))
-}
-
-pub(crate) fn configure_runtime_cli(
-    command: &mut std::process::Command,
-    runtime: Option<&KnownAcpRuntime>,
-) {
-    let Some(runtime) = runtime else {
-        return;
-    };
-    if runtime.id != "claude" {
-        return;
-    }
-    if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
-        // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
-        // passed directly to `CreateProcess` and cause EINVAL when the Claude
-        // adapter tries to spawn them (issue #2397). Skip setting
-        // `CLAUDE_CODE_EXECUTABLE` for shim paths so the adapter falls back to
-        // its own PATH lookup and finds the real binary instead.
-        // Non-Windows: `.cmd`/`.bat` are valid executables and must be assigned.
-        if should_skip_claude_executable(&cli_path, cfg!(windows)) {
-            return;
-        }
-        command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
-    }
 }
 
 /// Spawn an agent process without holding any locks on records or runtimes.
@@ -446,11 +395,13 @@ pub fn spawn_agent_child(
     relay_url: &str,
     lazy: bool,
     owner_hex: Option<&str>,
+    launch_mode: ManagedRuntimeLaunchMode,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    let runtime_lock_path = super::managed_agent_runtime_lock_path(app, &runtime_key)?;
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
     // override wins. `agent_args` and `mcp_command` are pure derivations of the
@@ -496,6 +447,7 @@ pub fn spawn_agent_child(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    validate_managed_adapter_descriptor(effective_command, agent_args)?;
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -507,6 +459,7 @@ pub fn spawn_agent_child(
             now_iso()
         ),
     )?;
+    append_log_marker(&log_path, &acp_turn_limits_log_line(record))?;
 
     let stdout = open_log_file(&log_path)?;
     let stderr = stdout
@@ -515,25 +468,19 @@ pub fn spawn_agent_child(
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
     let effective_mcp_command = known_acp_runtime(effective_command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("");
-    let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
-        None
-    } else {
-        match resolve_command(effective_mcp_command) {
-            Some(path) => Some(path),
-            None => {
-                eprintln!(
-                    "buzz-desktop: mcp_command {effective_mcp_command:?} not found, skipping"
-                );
-                None
-            }
-        }
-    };
-    // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(effective_command)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| effective_command.clone());
+        .and_then(|runtime| runtime.mcp_command)
+        .filter(|command| *command == "buzz-dev-mcp")
+        .ok_or_else(|| {
+            "unsupported_managed_adapter: durable managed mode requires the canonical bundled buzz-dev-mcp executable"
+                .to_string()
+        })?;
+    let resolved_mcp_command = Some(resolve_canonical_bundled_executable(
+        effective_mcp_command,
+        "buzz-dev-mcp",
+    )?);
+    let resolved_agent_command = resolve_canonical_bundled_buzz_agent()?
+        .display()
+        .to_string();
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
@@ -703,22 +650,9 @@ pub fn spawn_agent_child(
             );
         }
     }
-    // Only emit BUZZ_ACP_IDLE_TIMEOUT when the user has explicitly set an
-    // override. When unset, the buzz-acp harness applies its own default
-    // (see `DEFAULT_IDLE_TIMEOUT_SECS` in crates/buzz-acp/src/config.rs),
-    // which is the single source of truth. The previously-emitted
-    // `BUZZ_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
-    // agent to the desktop's stale default (320s), bypassing harness bumps.
-    if let Some(idle) = record.idle_timeout_seconds {
-        command.env("BUZZ_ACP_IDLE_TIMEOUT", idle.to_string());
-    }
-
-    if let Some(max_dur) = record.max_turn_duration_seconds {
-        command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
-    }
-    command.env("BUZZ_ACP_AGENTS", record.parallelism.to_string());
-    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
-    command.env("BUZZ_ACP_DEDUP", "queue");
+    // Managed ACP controls are applied after user environment layering below.
+    // This prevents ambient or persisted legacy timeout values from defeating
+    // harness defaults and protects the pair-scoped exclusivity lock path.
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
             if std::env::var(key).is_err() {
@@ -844,12 +778,19 @@ pub fn spawn_agent_child(
     // `descriptor.env` is the fully-layered result from `resolve_effective_harness_descriptor`:
     // baked floor → runtime metadata → definition env (harness author defaults) →
     // global → live persona → per-agent, with reserved-key and malformed-key filtering
-    // applied. Writing it last lets user-provided values win over every Buzz-set env
-    // written above — reserved keys were already stripped from descriptor.env so they
-    // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
+    // applied. Runtime-owned ACP timeout, queue, and lock controls are reapplied
+    // immediately below so persisted or ambient values cannot weaken them.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    configure_managed_acp_environment(
+        app,
+        &mut command,
+        record,
+        &runtime_key,
+        &runtime_lock_path,
+        launch_mode,
+    )?;
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
@@ -866,7 +807,7 @@ pub fn spawn_agent_child(
         }
     }
 
-    // Stamp desktop ownership and an unpredictable harness-generation identity.
+    // Stamp a non-authoritative diagnostic origin plus the observer-frame nonce.
     let start_nonce = uuid::Uuid::new_v4().simple().to_string();
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
@@ -890,10 +831,21 @@ pub fn spawn_agent_child(
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
+
+    // A durable harness is a separate session/process-group leader. Desktop
+    // may disconnect or exit without owning its lifetime.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        // SAFETY: setsid is async-signal-safe and does not access parent memory.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     // Windows: suppress the harness console window. Without this a bare
     // terminal pops for buzz-acp.exe and lingers (the app itself sets
@@ -902,7 +854,8 @@ pub fn spawn_agent_child(
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
 
     let child = command.spawn().map_err(|error| {
@@ -929,8 +882,8 @@ pub fn spawn_agent_child(
 
     // Receipt persistence belongs to the caller's atomic register transition.
 
-    // Windows: assign the harness to a Job Object so its whole tree dies with
-    // the handle. The Unix process-group equivalent is set above.
+    // Windows: retain a non-killing Job Object only as connected-session tree
+    // identity. Runtime lifetime remains independent of the Desktop handle.
     #[cfg(windows)]
     return Ok(super::process_lifecycle::finish_spawn(
         child,
@@ -975,45 +928,101 @@ pub fn start_managed_agent_process(
         )
     };
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)?;
-    if let Some(runtime) = runtimes.get_mut(&key) {
-        if runtime
-            .child
-            .try_wait()
-            .map_err(|error| format!("failed to inspect running process: {error}"))?
-            .is_none()
+    if let Some(runtime) = runtimes.get(&key) {
+        if runtime.is_legacy()
+            && runtime.legacy_receipt.as_ref().is_some_and(|receipt| {
+                buzz_runtime_pkg::process_matches_marker(receipt.pid, &receipt.process_start_marker)
+            })
         {
             return Ok(());
         }
-
+        if runtime
+            .controller
+            .as_ref()
+            .is_some_and(|controller| tauri::async_runtime::block_on(controller.status()).is_ok())
+        {
+            return Ok(());
+        }
         runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(app, &key);
     }
 
-    // Scalar PIDs are migration-only and never establish pair liveness.
-    record.runtime_pid = None;
+    let preferred_launch_mode = managed_runtime_feature_gates().launch_mode();
+    let receipt_path = super::managed_agent_runtime_receipt_path(app, &key)?;
+    let had_v2_receipt = receipt_path.exists();
+    if had_v2_receipt {
+        if let Ok(runtime) =
+            super::runtime_commands::connect_runtime_receipt(app, &key, None, false)
+        {
+            runtimes.insert(key, runtime);
+            return Ok(());
+        }
+        if pair_lock_is_held(app, &key)? {
+            return Err(
+                "recovering: runtime pair lock is held but receipt is not adoptable".into(),
+            );
+        }
+        if matches!(
+            preferred_launch_mode,
+            ManagedRuntimeLaunchMode::LegacyPhase0
+        ) {
+            return Err("durable runtime recovery required; refusing schema-v1 fallback".into());
+        }
+        super::quarantine_agent_runtime_receipt_path(&receipt_path)?;
+    }
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
-    let now = now_iso();
-    let receipt = super::ManagedAgentRuntimeReceipt {
-        key: key.clone(),
-        pid: process.child.id(),
-        desktop_instance_id: current_instance_id(app),
-        started_at: now.clone(),
+    let durable_store_exists = super::managed_agent_runtime_state_path(app, &key)?
+        .join("runtime.sqlite3")
+        .exists();
+    let needs_phase_zero_decision = !matches!(
+        preferred_launch_mode,
+        ManagedRuntimeLaunchMode::LegacyPhase0
+    ) && !had_v2_receipt
+        && !durable_store_exists;
+    let (proof_exists, migration_gate) = if needs_phase_zero_decision {
+        (
+            super::managed_agent_legacy_runtime_receipt_path(app, &key)?.exists(),
+            legacy_migration_gate(app, &key, record.runtime_pid)?,
+        )
+    } else {
+        (false, LegacyMigrationGate::Clear)
     };
-    if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
-        let _ = terminate_process(process.child.id());
-        let _ = process.child.wait();
-        return Err(error);
+    let launch_mode = match process::select_rollout_launch_mode(
+        preferred_launch_mode,
+        had_v2_receipt || durable_store_exists,
+        proof_exists,
+        migration_gate,
+    ) {
+        Ok(mode) => mode,
+        Err(LegacyMigrationGate::LegacyRuntimeActive) => {
+            return Err("legacy_runtime_active".into());
+        }
+        Err(LegacyMigrationGate::ManualLegacyStopRequired) => {
+            return Err("manual_legacy_stop_required".into());
+        }
+        Err(LegacyMigrationGate::Clear) => unreachable!("clear migration gate is not blocking"),
+    };
+    if matches!(launch_mode, ManagedRuntimeLaunchMode::LegacyPhase0) && durable_store_exists {
+        return Err("durable runtime state exists; refusing schema-v1 fallback".into());
     }
 
+    let process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex, launch_mode)?;
+    let runtime = match launch_mode {
+        ManagedRuntimeLaunchMode::LegacyPhase0 => {
+            super::runtime_commands::connect_legacy_runtime_receipt(app, &key, process)?
+        }
+        ManagedRuntimeLaunchMode::DurableV2 { .. } => {
+            super::runtime_commands::connect_runtime_receipt(app, &key, Some(process), true)?
+        }
+    };
+    record.runtime_pid = runtime.is_legacy().then(|| runtime.pid());
+    let now = now_iso();
     record.updated_at = now.clone();
     record.last_started_at = Some(now);
     record.last_stopped_at = None;
     record.last_exit_code = None;
     record.last_error = None;
     record.last_error_code = None;
-
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
+    runtimes.insert(key, runtime);
     Ok(())
 }
 

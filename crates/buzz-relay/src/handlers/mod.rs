@@ -1,3 +1,5 @@
+/// Atomic public agent-job admission and canonical lifecycle projection.
+pub mod agent_jobs;
 /// NIP-42 authentication handler.
 pub mod auth;
 /// Subscription close (CLOSE) handler.

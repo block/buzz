@@ -2,37 +2,91 @@ import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 
 export type AgentCommunityAvailability =
   | "Here"
+  | "Starting"
+  | "Listening"
   | "Waking"
+  | "Recovering"
+  | "Legacy runtime active"
+  | "Manual stop required"
   | "Needs setup on this device"
-  | "Unavailable";
+  | "Failed"
+  | "Stopped";
+
+export type ManagedAgentRuntimePresentation = {
+  label: AgentCommunityAvailability;
+  detail: string | null;
+  variant: "default" | "secondary" | "warning" | "destructive";
+};
+const RUNTIME_PRESENTATION: Record<
+  ManagedAgentRuntimeStatus["lifecycle"],
+  ManagedAgentRuntimePresentation
+> = {
+  starting: {
+    label: "Starting",
+    detail: "Launching the persistent runtime.",
+    variant: "secondary",
+  },
+  listening: {
+    label: "Listening",
+    detail: "The runtime is connected and opening its workspace.",
+    variant: "secondary",
+  },
+  waking: {
+    label: "Waking",
+    detail: "The agent is reconnecting.",
+    variant: "secondary",
+  },
+  ready: { label: "Here", detail: null, variant: "default" },
+  recovering: {
+    label: "Recovering",
+    detail: "Restoring durable inbox, assignment, and job state.",
+    variant: "warning",
+  },
+  legacy_runtime_active: {
+    label: "Legacy runtime active",
+    detail: "Stop the legacy runtime before starting the persistent runtime.",
+    variant: "warning",
+  },
+  manual_legacy_stop_required: {
+    label: "Manual stop required",
+    detail:
+      "This older runtime cannot be verified safely. Stop it manually before restarting.",
+    variant: "destructive",
+  },
+  failed: {
+    label: "Failed",
+    detail: "Could not connect",
+    variant: "destructive",
+  },
+  stopped: { label: "Stopped", detail: "Stopped by you", variant: "secondary" },
+};
+
+export function managedAgentRuntimePresentation(
+  runtime: ManagedAgentRuntimeStatus,
+): ManagedAgentRuntimePresentation {
+  if (!runtime.localSetup) {
+    return {
+      label: "Needs setup on this device",
+      detail: "Set up this agent on this device to start it.",
+      variant: "secondary",
+    };
+  }
+  const presentation = RUNTIME_PRESENTATION[runtime.lifecycle];
+  return runtime.lifecycle === "failed" && runtime.error
+    ? { ...presentation, detail: runtime.error }
+    : presentation;
+}
 
 export function agentCommunityAvailability(
   runtime: ManagedAgentRuntimeStatus,
 ): AgentCommunityAvailability {
-  if (!runtime.localSetup) return "Needs setup on this device";
-
-  switch (runtime.lifecycle) {
-    case "starting":
-    case "listening":
-    case "waking":
-      return "Waking";
-    case "ready":
-      return "Here";
-    case "failed":
-    case "stopped":
-      return "Unavailable";
-  }
+  return managedAgentRuntimePresentation(runtime).label;
 }
 
 export function agentCommunityStatusDetail(
   runtime: ManagedAgentRuntimeStatus,
 ): string | null {
-  if (!runtime.localSetup)
-    return "Set up this agent on this device to start it.";
-  if (runtime.lifecycle === "stopped") return "Stopped by you";
-  if (runtime.lifecycle === "failed")
-    return runtime.error ?? "Could not connect";
-  return null;
+  return managedAgentRuntimePresentation(runtime).detail;
 }
 
 export function managedAgentRuntimeKey(

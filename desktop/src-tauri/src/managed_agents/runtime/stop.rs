@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 
 use super::{
-    append_log_marker, current_instance_id, now_iso, process_belongs_to_us,
-    process_has_buzz_marker, process_is_running, terminate_process, ManagedAgentPairRuntime,
+    append_log_marker, now_iso, terminate_process, LegacyMigrationGate, ManagedAgentPairRuntime,
     ManagedAgentRecord, ManagedAgentRuntimeKey,
 };
 
@@ -30,15 +29,11 @@ pub(crate) fn managed_agent_runtime_relay_urls<T>(
         .collect()
 }
 
-/// Stop the single tracked runtime pair at `key`, if present.
-///
-/// Terminates the child, records the exit code, removes the pair receipt,
-/// and appends a stop marker to the pair log. On teardown failure the
-/// runtime is reinserted so the pair stays visible and stoppable instead of
-/// becoming an invisible orphan. Touches no other pair for the agent and
-/// does no record-level stop bookkeeping — callers own that.
+/// Stop the single tracked schema-v2 runtime pair through its authenticated,
+/// generation-fenced controller. A PID signal is only a bounded fallback after
+/// revalidating the process-start marker from the authenticated receipt.
 fn stop_managed_agent_pair(
-    app: &AppHandle,
+    _app: &AppHandle,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     key: &ManagedAgentRuntimeKey,
@@ -46,30 +41,67 @@ fn stop_managed_agent_pair(
     let Some(mut runtime) = runtimes.remove(key) else {
         return Ok(());
     };
-    let result = (|| -> Result<(), String> {
-        #[cfg(unix)]
-        terminate_process(runtime.child.id())?;
-        #[cfg(windows)]
-        match runtime.job.take() {
-            Some(job) => drop(job),
-            None => runtime
-                .child
-                .kill()
-                .map_err(|error| format!("failed to kill agent process: {error}"))?,
+    if runtime.is_legacy() {
+        let receipt = runtime
+            .legacy_receipt
+            .as_ref()
+            .expect("legacy runtime has schema-v1 receipt");
+        if runtime
+            .process
+            .as_ref()
+            .is_none_or(|process| process.child.id() != receipt.pid)
+            || !buzz_runtime_pkg::process_matches_marker(receipt.pid, &receipt.process_start_marker)
+        {
+            runtimes.insert(key.clone(), runtime);
+            return Err("legacy runtime identity cannot be verified; refusing PID signal".into());
         }
-        #[cfg(not(any(unix, windows)))]
-        runtime
-            .child
-            .kill()
-            .map_err(|error| format!("failed to kill agent process: {error}"))?;
-        let status = runtime
-            .child
-            .wait()
-            .map_err(|error| format!("failed to wait for agent shutdown: {error}"))?;
-        record.last_exit_code = status.code();
-        super::super::remove_agent_runtime_receipt(app, key);
+        if let Err(error) = terminate_process(receipt.pid) {
+            runtimes.insert(key.clone(), runtime);
+            return Err(error);
+        }
+        if let Some(process) = runtime.process.as_mut() {
+            let _ = process.child.wait();
+        }
+    } else {
+        let controller = runtime
+            .controller
+            .as_ref()
+            .ok_or_else(|| "runtime has no authenticated controller".to_string())?;
+        if let Err(error) = tauri::async_runtime::block_on(controller.shutdown()) {
+            runtimes.insert(key.clone(), runtime);
+            return Err(format!(
+                "generation-fenced runtime shutdown failed: {error}"
+            ));
+        }
+        let receipt = runtime
+            .receipt
+            .as_ref()
+            .expect("authenticated controller has a schema-v2 receipt");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if buzz_runtime_pkg::process_start_marker(receipt.pid).is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if let Ok(marker) = buzz_runtime_pkg::process_start_marker(receipt.pid) {
+            if marker != receipt.process_start_marker {
+                runtimes.insert(key.clone(), runtime);
+                return Err(
+                    "runtime PID was reused during shutdown; refusing cleanup signal".into(),
+                );
+            }
+            if let Err(error) = terminate_process(receipt.pid) {
+                runtimes.insert(key.clone(), runtime);
+                return Err(error);
+            }
+        }
+        let _ = super::super::quarantine_agent_runtime_receipt_path(&runtime.receipt_path);
+    }
+    record.last_exit_code = None;
+    if let Some(log_path) = runtime.log_path() {
         if let Err(error) = append_log_marker(
-            &runtime.log_path,
+            log_path,
             &format!(
                 "=== stopped {} ({}) at {} ===",
                 record.name,
@@ -82,30 +114,14 @@ fn stop_managed_agent_pair(
                 record.pubkey, key.relay_url
             );
         }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        // Keep failed teardown visible/manageable instead of orphaning it.
-        runtimes.insert(key.clone(), runtime);
-        return Err(error);
     }
     Ok(())
 }
 
-/// Terminate a legacy scalar-PID child (pre-pair records) and remove the
-/// agent-scoped pid file. Pair receipts are restored separately.
-fn stop_legacy_scalar_pid(app: &AppHandle, record: &mut ManagedAgentRecord) -> Result<(), String> {
-    if let Some(pid) = record.runtime_pid.take() {
-        if process_is_running(pid)
-            && process_belongs_to_us(pid)
-            && process_has_buzz_marker(pid, &current_instance_id(app))
-        {
-            terminate_process(pid)?;
-        }
+fn clear_legacy_scalar_pid(record: &mut ManagedAgentRecord) {
+    if record.runtime_pid.take().is_some() {
         record.updated_at = now_iso();
     }
-    super::super::remove_agent_pid_file(app, &record.pubkey);
-    Ok(())
 }
 
 /// Stop the runtime pair this record resolves to for the active workspace
@@ -128,7 +144,6 @@ pub fn stop_managed_agent_workspace_pair(
         Some(pair_key) if runtimes.contains_key(&pair_key) => {
             stop_managed_agent_pair(app, record, runtimes, &pair_key)?;
             state.clear_agent_session_cache(&pair_key);
-            super::super::remove_agent_pid_file(app, &record.pubkey);
             let now = now_iso();
             record.runtime_pid = None;
             record.updated_at = now.clone();
@@ -137,13 +152,29 @@ pub fn stop_managed_agent_workspace_pair(
             record.last_error_code = None;
         }
         Some(pair_key) => {
-            // No tracked pair here — a pubkey-wide cache clear would disturb
-            // live pairs in other communities, so stay pair-scoped.
-            stop_legacy_scalar_pid(app, record)?;
-            state.clear_agent_session_cache(&pair_key);
+            let receipt_path = super::super::managed_agent_runtime_receipt_path(app, &pair_key)?;
+            if receipt_path.exists() {
+                let runtime = super::super::runtime_commands::connect_runtime_receipt(
+                    app, &pair_key, None, false,
+                )?;
+                runtimes.insert(pair_key.clone(), runtime);
+                stop_managed_agent_pair(app, record, runtimes, &pair_key)?;
+                state.clear_agent_session_cache(&pair_key);
+            } else {
+                match super::legacy_migration_gate(app, &pair_key, record.runtime_pid)? {
+                    LegacyMigrationGate::LegacyRuntimeActive => {
+                        return Err("legacy_runtime_active".into());
+                    }
+                    LegacyMigrationGate::ManualLegacyStopRequired => {
+                        return Err("manual_legacy_stop_required".into());
+                    }
+                    LegacyMigrationGate::Clear => clear_legacy_scalar_pid(record),
+                }
+                state.clear_agent_session_cache(&pair_key);
+            }
         }
         None => {
-            stop_legacy_scalar_pid(app, record)?;
+            clear_legacy_scalar_pid(record);
             state.clear_agent_session_caches(&record.pubkey);
         }
     }
@@ -157,7 +188,7 @@ pub fn stop_managed_agent_process(
 ) -> Result<(), String> {
     let keys = managed_agent_runtime_keys(runtimes, &record.pubkey);
     if keys.is_empty() {
-        return stop_legacy_scalar_pid(app, record);
+        return stop_managed_agent_workspace_pair(app, record, runtimes);
     }
 
     let mut errors = Vec::new();
@@ -173,7 +204,6 @@ pub fn stop_managed_agent_process(
     record.last_stopped_at = Some(now);
     record.last_error = None;
     record.last_error_code = None;
-    super::super::remove_agent_pid_file(app, &record.pubkey);
 
     if errors.is_empty() {
         Ok(())

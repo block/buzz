@@ -4,15 +4,14 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
+        build_managed_agent_summary, clear_legacy_runtime_pids, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
         load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        stop_managed_agent_process, stop_managed_agent_workspace_pair, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -530,18 +529,14 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(&app)?;
-        let mut runtimes = state
+        let runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app, &records)?;
-        }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
         }
 
         let personas = load_personas(&app).unwrap_or_default();
@@ -612,19 +607,12 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(&app)?;
-        let mut runtimes = state
-            .managed_agent_processes
-            .lock()
-            .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
-        }
+
         if let Some(persona_id) = requested_persona_id.as_deref() {
             let personas = load_personas(&app)?;
             ensure_persona_is_active(&personas, persona_id)?;
@@ -683,18 +671,14 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(&app)?;
-        let mut runtimes = state
+        let runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app, &records)?;
-        }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
         }
 
         // Guard against a duplicate pubkey appearing between phase 1 and phase 3
@@ -1088,18 +1072,10 @@ pub async fn start_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(&app)?;
-        let mut runtimes = state
-            .managed_agent_processes
-            .lock()
-            .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app, &records)?;
-        }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
         }
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
@@ -1230,13 +1206,9 @@ pub async fn stop_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app, &records)?;
-        }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
         }
 
         {
@@ -1292,16 +1264,9 @@ pub async fn delete_managed_agent(
                 .lock()
                 .map_err(|error| error.to_string())?;
 
-            let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-                &mut records,
-                &mut runtimes,
-                &current_instance_id(&app),
-            );
+            let sync_changed = clear_legacy_runtime_pids(&mut records);
             if sync_changed {
                 save_managed_agents(&app, &records)?;
-            }
-            for pubkey in &exited_pubkeys {
-                state.clear_agent_session_caches(pubkey);
             }
 
             // Guard: reject deletion of deployed remote agents unless explicitly forced.

@@ -20,17 +20,31 @@ const runtime = (overrides = {}) => ({
   ...overrides,
 });
 
-test("projects every backend lifecycle to the four product labels", () => {
-  assert.equal(agentCommunityAvailability(runtime()), "Here");
-  for (const lifecycle of ["starting", "listening", "waking"]) {
-    assert.equal(agentCommunityAvailability(runtime({ lifecycle })), "Waking");
+test("projects every persistent-runtime lifecycle without hiding migration states", () => {
+  const labels = {
+    starting: "Starting",
+    listening: "Listening",
+    waking: "Waking",
+    ready: "Here",
+    recovering: "Recovering",
+    legacy_runtime_active: "Legacy runtime active",
+    manual_legacy_stop_required: "Manual stop required",
+    failed: "Failed",
+    stopped: "Stopped",
+  };
+  for (const [lifecycle, label] of Object.entries(labels)) {
+    assert.equal(agentCommunityAvailability(runtime({ lifecycle })), label);
   }
-  for (const lifecycle of ["failed", "stopped"]) {
-    assert.equal(
-      agentCommunityAvailability(runtime({ lifecycle })),
-      "Unavailable",
-    );
-  }
+  assert.match(
+    agentCommunityStatusDetail(runtime({ lifecycle: "legacy_runtime_active" })),
+    /Stop the legacy runtime/,
+  );
+  assert.match(
+    agentCommunityStatusDetail(
+      runtime({ lifecycle: "manual_legacy_stop_required" }),
+    ),
+    /cannot be verified safely/,
+  );
 });
 
 test("backend-authoritative local setup takes precedence", () => {

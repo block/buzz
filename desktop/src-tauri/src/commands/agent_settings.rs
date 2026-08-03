@@ -4,9 +4,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, find_managed_agent_mut,
-        load_managed_agents, load_personas, save_managed_agents, sync_managed_agent_processes,
-        ManagedAgentSummary,
+        build_managed_agent_summary, clear_legacy_runtime_pids, find_managed_agent_mut,
+        load_managed_agents, load_personas, save_managed_agents, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -31,18 +30,14 @@ pub async fn set_managed_agent_start_on_app_launch(
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(&app)?;
-        let mut runtimes = state
+        let runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app, &records)?;
-        }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
         }
 
         {
@@ -82,18 +77,14 @@ pub async fn set_managed_agent_auto_restart(
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(&app)?;
-        let mut runtimes = state
+        let runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app, &records)?;
-        }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
         }
 
         {

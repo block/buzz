@@ -10,6 +10,7 @@ members = [
     "crates/buzz-search",
     "crates/buzz-audit",
     "crates/buzz-acp",
+    "crates/buzz-runtime",
     "crates/buzz-agent",
     "crates/sprig",
     "crates/buzz-test-client",
@@ -54,6 +55,7 @@ tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip"
 sqlx = { version = "0.9", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
 ] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Redis
 redis        = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
@@ -78,6 +80,7 @@ iroh = { version = "1.0.0-rc.0", default-features = false, features = ["tls-ring
 serde_json  = "1"
 serde_yaml  = "0.9"
 evalexpr    = "11"
+fs2         = "0.4"
 cron        = "0.16"
 # Observability
 tracing                     = "0.1"
@@ -109,6 +112,7 @@ base64    = "0.22"
 
 # Randomness
 rand = "0.10"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 subtle = "2.6"
 zeroize = "1.8"
 
@@ -143,6 +147,7 @@ buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
+buzz-runtime = { path = "crates/buzz-runtime" }
 
 # CI profile — builds the relay for desktop e2e. Dependencies keep full
 # release optimization (warm from main's cache; they carry the runtime hot

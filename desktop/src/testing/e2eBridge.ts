@@ -14,7 +14,13 @@ import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
+import type {
+  ChannelTemplate,
+  ManagedAgentActiveAssignment,
+  ManagedAgentActiveJob,
+  ManagedAgentRuntimeStatus,
+  RelayEvent,
+} from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -100,7 +106,10 @@ export type MockManagedAgentSeed = {
 type MockManagedAgentRuntimeSeed = {
   pubkey: string;
   relayUrl: string;
-  lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
+  lifecycle?: ManagedAgentRuntimeStatus["lifecycle"];
+  pid?: number | null;
+  activeAssignment?: ManagedAgentActiveAssignment | null;
+  activeJob?: ManagedAgentActiveJob | null;
 };
 
 type MockRelayAgentSeed = {
@@ -908,21 +917,7 @@ type MockManagedAgent = RawManagedAgent & {
 
 // Mirrors the Rust `ManagedAgentRuntimeStatus` camelCase wire shape for the
 // pair-scoped lifecycle commands.
-type MockManagedAgentRuntimeRow = {
-  pubkey: string;
-  relayUrl: string;
-  localSetup: boolean;
-  lifecycle:
-    | "starting"
-    | "listening"
-    | "waking"
-    | "ready"
-    | "failed"
-    | "stopped";
-  pid: number | null;
-  error: string | null;
-  logPath: string | null;
-};
+type MockManagedAgentRuntimeRow = ManagedAgentRuntimeStatus;
 
 type WsHandler = (message: unknown) => void;
 const GLOBAL_MOCK_SUBSCRIPTION = "*";
@@ -1118,6 +1113,9 @@ declare global {
     __BUZZ_E2E_EMIT_TAURI_EVENT__?: (
       event: string,
       payload: unknown,
+    ) => Promise<void>;
+    __BUZZ_E2E_SET_MOCK_MANAGED_AGENT_RUNTIME__?: (
+      runtime: MockManagedAgentRuntimeRow,
     ) => Promise<void>;
     __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
       members: MockHuddleMemberSeed[];
@@ -2251,9 +2249,11 @@ function resetMockManagedAgents(config?: E2eConfig) {
       relayUrl: seed.relayUrl,
       localSetup: true,
       lifecycle: seed.lifecycle ?? "ready",
-      pid: seed.lifecycle === "stopped" ? null : 43000,
+      pid: seed.pid ?? (seed.lifecycle === "stopped" ? null : 43000),
       error: null,
       logPath: null,
+      activeAssignment: seed.activeAssignment ?? null,
+      activeJob: seed.activeJob ?? null,
     }),
   );
 
@@ -9948,6 +9948,22 @@ export function maybeInstallE2eTauriMocks() {
     refreshMockHuddleMembership(config);
     persistMockHuddle();
     await emitMockHuddleState();
+  };
+  window.__BUZZ_E2E_SET_MOCK_MANAGED_AGENT_RUNTIME__ = async (runtime) => {
+    const index = mockManagedAgentRuntimes.findIndex(
+      (candidate) =>
+        candidate.pubkey === runtime.pubkey &&
+        candidate.relayUrl === runtime.relayUrl,
+    );
+    const next = structuredClone(runtime);
+    if (index === -1) {
+      mockManagedAgentRuntimes.push(next);
+    } else {
+      mockManagedAgentRuntimes[index] = next;
+    }
+    await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+      queryKey: ["managed-agent-runtimes"],
+    });
   };
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
     channelName,

@@ -21,19 +21,21 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_JOB_ACCEPTED, KIND_JOB_CANCEL, KIND_JOB_ERROR,
+    KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -312,8 +314,17 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_GIT_STATUS_MERGED
         | KIND_GIT_STATUS_CLOSED
         | KIND_GIT_STATUS_DRAFT => Ok(Scope::MessagesWrite),
-        // Command kinds — DM management, workflows, approvals
-        KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
+        // Durable public agent-job collaboration events are channel-scoped
+        // message writes; lifecycle authority is enforced transactionally.
+        KIND_JOB_REQUEST
+        | KIND_JOB_ACCEPTED
+        | KIND_JOB_PROGRESS
+        | KIND_JOB_RESULT
+        | KIND_JOB_CANCEL
+        | KIND_JOB_ERROR
+        | KIND_DM_OPEN
+        | KIND_DM_ADD_MEMBER
+        | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
@@ -496,6 +507,14 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_NIP29_DELETE_EVENT
             | KIND_NIP29_DELETE_GROUP
             | KIND_NIP29_LEAVE_REQUEST
+            // Public job requests and lifecycle events are collaboration
+            // objects inside one exact NIP-29 channel.
+            | KIND_JOB_REQUEST
+            | KIND_JOB_ACCEPTED
+            | KIND_JOB_PROGRESS
+            | KIND_JOB_RESULT
+            | KIND_JOB_CANCEL
+            | KIND_JOB_ERROR
             // Huddle lifecycle events + guidelines
             | KIND_HUDDLE_STARTED
             | KIND_HUDDLE_PARTICIPANT_JOINED
@@ -2154,7 +2173,18 @@ async fn ingest_event_inner(
             || kind_u32 == KIND_STREAM_MESSAGE_EDIT
             || kind_u32 == KIND_NIP29_EDIT_METADATA
             || kind_u32 == KIND_NIP29_DELETE_EVENT
-            || kind_u32 == KIND_NIP29_DELETE_GROUP;
+            || kind_u32 == KIND_NIP29_DELETE_GROUP
+            // Job admission rechecks target registration, requester authority,
+            // and both channel bindings inside its persistence transaction.
+            || matches!(
+                kind_u32,
+                KIND_JOB_REQUEST
+                    | KIND_JOB_ACCEPTED
+                    | KIND_JOB_PROGRESS
+                    | KIND_JOB_RESULT
+                    | KIND_JOB_CANCEL
+                    | KIND_JOB_ERROR
+            );
         if !skip_membership {
             // Spec AuthCheck (line 794): emit the verdict at the actual
             // call site. claimed_community comes from the event's h tag
@@ -2593,6 +2623,67 @@ async fn ingest_event_inner(
             event_id: event_id_hex,
             accepted: true,
             message: String::new(),
+        });
+    }
+
+    if matches!(
+        kind_u32,
+        KIND_JOB_REQUEST
+            | KIND_JOB_ACCEPTED
+            | KIND_JOB_PROGRESS
+            | KIND_JOB_RESULT
+            | KIND_JOB_CANCEL
+            | KIND_JOB_ERROR
+    ) {
+        let outcome =
+            super::agent_jobs::persist_agent_job_event(&state.db, tenant.community(), &event)
+                .await
+                .map_err(|error| match error {
+                    super::agent_jobs::AgentJobAdmissionError::Rejected(reason) => {
+                        IngestError::Rejected(format!("invalid: {reason}"))
+                    }
+                    super::agent_jobs::AgentJobAdmissionError::Internal(reason) => {
+                        IngestError::Internal(format!("error: {reason}"))
+                    }
+                })?;
+        let channel = channel_id.expect("job kinds require a validated h tag");
+        let (stored_event, was_inserted) = match outcome {
+            super::agent_jobs::AgentJobPersistOutcome::Inserted(stored) => (Some(stored), true),
+            super::agent_jobs::AgentJobPersistOutcome::Replay => (None, false),
+        };
+        let action = if was_inserted {
+            TraceAction::WriteInsert {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                channel: channel_label(channel),
+                claimed_community: claimed_community_from_event(&event),
+            }
+        } else {
+            TraceAction::WriteDuplicate {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                channel: channel_label(channel),
+                claimed_community: claimed_community_from_event(&event),
+            }
+        };
+        emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+        if let Some(stored) = stored_event {
+            dispatch_persistent_event(
+                tenant,
+                state,
+                &stored,
+                kind_u32,
+                &auth.pubkey().to_hex(),
+                threaded_visibility.clone(),
+            )
+            .await;
+        }
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: if was_inserted {
+                String::new()
+            } else {
+                "duplicate:".into()
+            },
         });
     }
 
@@ -4785,5 +4876,25 @@ mod tests {
             counts.get(&("ws".to_owned(), "invalid".to_owned())),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn agent_job_kinds_are_channel_scoped_message_writes() {
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_JOB_REQUEST,
+            KIND_JOB_ACCEPTED,
+            KIND_JOB_PROGRESS,
+            KIND_JOB_RESULT,
+            KIND_JOB_CANCEL,
+            KIND_JOB_ERROR,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).expect("job kind admitted"),
+                Scope::MessagesWrite
+            );
+            assert!(requires_h_channel_scope(kind));
+            assert!(!is_global_only_kind(kind));
+        }
     }
 }

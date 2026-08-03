@@ -96,6 +96,12 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
+  KIND_JOB_REQUEST, // 43001 — durable job request
+  KIND_JOB_ACCEPTED, // 43002 — agent accepted the job
+  KIND_JOB_PROGRESS, // 43003 — monotonic progress update
+  KIND_JOB_RESULT, // 43004 — successful terminal result
+  KIND_JOB_CANCEL, // 43005 — requester cancellation
+  KIND_JOB_ERROR, // 43006 — failed/cancelled/lost terminal result
   KIND_HUDDLE_STARTED, // 48100 — visible huddle session card
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay

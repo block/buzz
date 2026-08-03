@@ -8,6 +8,10 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -132,6 +136,17 @@ fn build_initialize_params() -> serde_json::Value {
     })
 }
 
+/// Assignment projection boundary around an ACP permission request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PermissionBoundary {
+    Requested { gate_id: String },
+    Cleared,
+}
+
+type PermissionBoundaryFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub(crate) type PermissionBoundaryHook =
+    Arc<dyn Fn(PermissionBoundary) -> PermissionBoundaryFuture + Send + Sync>;
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -139,6 +154,12 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
+    /// Crash-safe owner of the adapter and every process it creates on Windows.
+    ///
+    /// Durable LH runners are launched by the runtime supervisor, not by this
+    /// adapter, and live in independent named Job Objects.
+    #[cfg(windows)]
+    adapter_job: buzz_runtime::windows_job::WindowsJobObject,
     /// Write end of the agent's stdin pipe.
     stdin: ChildStdin,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
@@ -158,6 +179,9 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// Optional durable assignment projector. The hook acknowledges committed
+    /// state before permission handling crosses the request/response boundary.
+    permission_boundary_hook: Option<PermissionBoundaryHook>,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -198,6 +222,14 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the agent advertised `agentCapabilities.sessionCapabilities.resume`.
+    ///
+    /// ACP requires clients to gate `session/resume` on this capability.
+    session_resume_supported: bool,
+    /// Whether the agent advertised `agentCapabilities.loadSession: true`.
+    ///
+    /// ACP requires clients to gate `session/load` on this capability.
+    session_load_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -413,30 +445,55 @@ fn build_client_capabilities() -> serde_json::Value {
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
-    /// `Drop` only calls `start_kill()` (sends SIGKILL but doesn't reap).
-    /// Call this when you need guaranteed cleanup — e.g., in `run_models`
-    /// before process exit.
-    pub async fn shutdown(&mut self) {
-        // Kill the entire process group when possible. The child was spawned
-        // with process_group(0), so its PID == its PGID. Killing the group
-        // ensures subprocesses (MCP servers, tool processes) are cleaned up
-        // rather than orphaned to init.
-        //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
-        match self.child.id() {
-            Some(pid) if kill_process_group(pid) => {}
-            _ => {
-                let _ = self.child.start_kill();
+    /// On Windows this does not return until the adapter Job Object is proven
+    /// empty or the five-second verification deadline expires.
+    pub async fn shutdown(&mut self) -> Result<(), AcpError> {
+        const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut cleanup_error = None;
+
+        #[cfg(windows)]
+        if let Err(error) = self
+            .adapter_job
+            .terminate_and_wait_empty(SHUTDOWN_TIMEOUT)
+            .await
+        {
+            tracing::warn!(%error, "adapter Job Object cleanup was not verified");
+            cleanup_error = Some(error);
+        }
+
+        #[cfg(not(windows))]
+        {
+            // The child is a process-group leader on Unix. Other non-Windows
+            // targets retain the direct-child fallback.
+            match self.child.id() {
+                Some(pid) if kill_process_group(pid) => {}
+                _ => {
+                    if let Err(error) = self.child.start_kill() {
+                        cleanup_error = Some(error);
+                    }
+                }
             }
         }
-        // Bounded wait: if the child doesn't exit within 5s after SIGKILL,
-        // give up and let Drop/OS handle it. An unbounded wait here would
-        // wedge the harness during respawn or shutdown if a child is stuck.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait()).await {
+
+        match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
-            Err(_) => tracing::warn!("child did not exit within 5s after SIGKILL — abandoning"),
+            Ok(Err(error)) => {
+                tracing::debug!("child wait error after kill: {error}");
+                cleanup_error.get_or_insert(error);
+            }
+            Err(_) => {
+                tracing::warn!("child did not exit within 5s after tree termination");
+                cleanup_error.get_or_insert_with(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "adapter child was not reaped before the shutdown deadline",
+                    )
+                });
+            }
+        }
+        match cleanup_error {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
         }
     }
 
@@ -519,11 +576,21 @@ impl AcpClient {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        // Suppress the console window that Windows otherwise allocates for every
-        // console-subsystem child process spawned from a GUI/non-console parent.
+        // Windows children start suspended, enter their own kill-on-close Job
+        // Object, and only then execute. This closes the spawn/assignment race.
+        #[cfg(windows)]
+        let adapter_job = buzz_runtime::windows_job::WindowsJobObject::create_kill_on_close()?;
         configure_no_window(&mut cmd);
 
         let mut child = cmd.spawn()?;
+        #[cfg(windows)]
+        {
+            if let Err(error) = adapter_job.assign_spawned_child_and_resume(&child) {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error.into());
+            }
+        }
 
         let stdin = child
             .stdin
@@ -536,11 +603,14 @@ impl AcpClient {
 
         Ok(Self {
             child,
+            #[cfg(windows)]
+            adapter_job,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            permission_boundary_hook: None,
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -548,6 +618,8 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            session_resume_supported: false,
+            session_load_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -557,6 +629,11 @@ impl AcpClient {
     pub fn set_observer(&mut self, observer: Option<ObserverHandle>, agent_index: usize) {
         self.observer = observer;
         self.observer_agent_index = Some(agent_index);
+    }
+
+    /// Attach the durable assignment permission-state projector for this turn.
+    pub(crate) fn set_permission_boundary_hook(&mut self, hook: Option<PermissionBoundaryHook>) {
+        self.permission_boundary_hook = hook;
     }
 
     /// Update metadata that will be attached to subsequent raw wire events.
@@ -602,6 +679,16 @@ impl AcpClient {
         let result = self.send_request("initialize", params).await?;
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        self.session_resume_supported =
+            match result.pointer("/agentCapabilities/sessionCapabilities/resume") {
+                Some(serde_json::Value::Object(_)) => true,
+                Some(serde_json::Value::Bool(supported)) => *supported,
+                _ => false,
+            };
+        self.session_load_supported = result
+            .pointer("/agentCapabilities/loadSession")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
@@ -687,6 +774,68 @@ impl AcpClient {
             .session_new_full(cwd, mcp_servers, system_prompt, session_title)
             .await?
             .session_id)
+    }
+
+    /// Resume a previously persisted ACP session without transcript replay.
+    ///
+    /// Returns a protocol error without writing to the adapter unless
+    /// `agentCapabilities.sessionCapabilities.resume` was advertised.
+    pub async fn session_resume(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<serde_json::Value, AcpError> {
+        if !self.session_resume_supported {
+            return Err(AcpError::Protocol(
+                "session/resume requested without advertised capability".into(),
+            ));
+        }
+        self.send_request(
+            "session/resume",
+            serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd,
+                "mcpServers": mcp_servers,
+            }),
+        )
+        .await
+    }
+
+    /// Load a previously persisted ACP session, allowing transcript replay.
+    ///
+    /// Returns a protocol error without writing to the adapter unless
+    /// `agentCapabilities.loadSession: true` was advertised.
+    pub async fn session_load(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<serde_json::Value, AcpError> {
+        if !self.session_load_supported {
+            return Err(AcpError::Protocol(
+                "session/load requested without advertised capability".into(),
+            ));
+        }
+        self.send_request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd,
+                "mcpServers": mcp_servers,
+            }),
+        )
+        .await
+    }
+
+    /// Whether `session/resume` is available for persisted session recovery.
+    pub fn session_resume_supported(&self) -> bool {
+        self.session_resume_supported
+    }
+
+    /// Whether `session/load` is available for persisted session recovery.
+    pub fn session_load_supported(&self) -> bool {
+        self.session_load_supported
     }
 
     /// Send Goose's custom system-prompt request after `session/new`.
@@ -1006,16 +1155,24 @@ impl AcpClient {
         // Step 1: respond to any pending permission request with "cancelled",
         // but only if we haven't already responded (guards against double-response race).
         if let Some(perm_id) = self.pending_permission_id.clone() {
-            if !self.permission_responded {
+            let response_result = if self.permission_responded {
+                Ok(())
+            } else {
                 let response = permission_response_cancelled(&perm_id);
-                self.write_ndjson(&response).await?;
-                tracing::debug!(
-                    target: "acp::cancel",
-                    "responded cancelled to pending permission id={perm_id}"
-                );
-            }
+                let result = self.write_ndjson(&response).await;
+                if result.is_ok() {
+                    tracing::debug!(
+                        target: "acp::cancel",
+                        "responded cancelled to pending permission id={perm_id}"
+                    );
+                }
+                result
+            };
             self.pending_permission_id = None;
             self.permission_responded = false;
+            self.notify_permission_boundary(PermissionBoundary::Cleared)
+                .await;
+            response_result?;
         }
 
         // Step 2: send session/cancel notification (no id)
@@ -1880,15 +2037,32 @@ impl AcpClient {
     /// The request `id` is stored as `serde_json::Value` to support both numeric
     /// and string IDs per JSON-RPC 2.0.
     async fn handle_permission_request(&mut self, msg: &serde_json::Value) -> Result<(), AcpError> {
-        // Extract id as a Value — JSON-RPC 2.0 allows both numeric and string IDs.
         let id = msg
             .get("id")
             .cloned()
             .ok_or_else(|| AcpError::Protocol("permission request missing id".into()))?;
+        let gate_id = permission_gate_id(&id);
 
-        // Store pending permission id so cancel_with_cleanup can respond to it.
+        self.notify_permission_boundary(PermissionBoundary::Requested { gate_id })
+            .await;
+        let result = self.respond_permission_request(msg, id).await;
+        self.notify_permission_boundary(PermissionBoundary::Cleared)
+            .await;
+        result
+    }
+
+    async fn notify_permission_boundary(&self, boundary: PermissionBoundary) {
+        if let Some(hook) = &self.permission_boundary_hook {
+            hook(boundary).await;
+        }
+    }
+
+    async fn respond_permission_request(
+        &mut self,
+        msg: &serde_json::Value,
+        id: serde_json::Value,
+    ) -> Result<(), AcpError> {
         self.pending_permission_id = Some(id.clone());
-        // Mark as not yet responded — guards against double-response race.
         self.permission_responded = false;
 
         let options = msg["params"]["options"]
@@ -1901,13 +2075,11 @@ impl AcpClient {
             options.len()
         );
 
-        // Find allow_once by kind — NEVER hardcode optionId.
         let allow_once = options
             .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
-
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
+            .find(|opt| opt.get("kind").and_then(|kind| kind.as_str()) == Some("allow_once"));
+        let response = if let Some(option) = allow_once {
+            let option_id = option["optionId"]
                 .as_str()
                 .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
             tracing::info!(
@@ -1916,40 +2088,22 @@ impl AcpClient {
             );
             permission_response_selected(&id, option_id)
         } else {
-            // No allow_once — fall back to reject_once.
             tracing::warn!(
                 target: "acp::permission",
                 "no allow_once option found in permission request id={id}, falling back to reject_once"
             );
             let reject = options
                 .iter()
-                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-            if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
-                permission_response_selected(&id, option_id)
-            } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
-            }
+                .find(|opt| opt.get("kind").and_then(|kind| kind.as_str()) == Some("reject_once"))
+                .ok_or_else(|| {
+                    AcpError::Protocol(
+                        "no suitable permission option found (neither allow_once nor reject_once)"
+                            .into(),
+                    )
+                })?;
+            permission_response_selected(&id, reject["optionId"].as_str().unwrap_or("reject"))
         };
 
-        // Write the response first, then mark as responded.
-        //
-        // Previous ordering (flag-before-write) was intended to guard against a
-        // double-response if a timeout fires between write and flag-set. However,
-        // the deadlock risk is worse: if write_ndjson fails (e.g. WriteTimeout),
-        // the flag would be true but no response was actually sent. Then
-        // cancel_with_cleanup would see permission_responded=true, skip sending
-        // the cancelled outcome, and the agent would hang waiting for a reply
-        // that never arrives — a guaranteed deadlock.
-        //
-        // The correct fix: set the flag AFTER a successful write. The double-
-        // response window (between write completion and flag-set) is negligibly
-        // small and bounded by a single memory store; the deadlock window was
-        // unbounded.
         self.write_ndjson(&response).await?;
         self.permission_responded = true;
         self.pending_permission_id = None;
@@ -2026,6 +2180,12 @@ fn steer_prompt_blocks(prompt_blocks: &[&str]) -> Vec<serde_json::Value> {
         .iter()
         .map(|text| serde_json::json!({ "type": "text", "text": text }))
         .collect()
+}
+
+fn permission_gate_id(id: &serde_json::Value) -> String {
+    id.as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// Build a JSON-RPC permission response with `outcome: "selected"`.
@@ -2200,17 +2360,19 @@ pub fn model_in_catalog(
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
-        // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
-        // Kill the process group when possible so subprocesses don't leak.
-        // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
+        // Drop cannot await, so Windows relies on kill-on-close and also asks
+        // the Job Object to terminate immediately. It never targets a numeric
+        // PID. Callers still use shutdown() for bounded empty-tree proof.
+        #[cfg(windows)]
+        let _ = self.adapter_job.terminate();
+
+        #[cfg(not(windows))]
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
                 let _ = self.child.start_kill();
             }
         }
-        // Non-blocking reap attempt — prevents zombie accumulation in the
-        // common case where SIGKILL takes effect before Drop returns.
         let _ = self.child.try_wait();
     }
 }
@@ -2232,9 +2394,9 @@ fn kill_process_group(pid: u32) -> bool {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
 }
 
-/// Fallback for non-Unix: process-group kill not available.
-/// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
+/// Fallback for platforms without Unix process groups or Windows Job Objects.
+/// Returns `false` so the caller falls back to its owned child handle.
+#[cfg(not(any(unix, windows)))]
 fn kill_process_group(_pid: u32) -> bool {
     false
 }
@@ -2244,10 +2406,10 @@ fn kill_process_group(_pid: u32) -> bool {
 /// No-op on non-Windows platforms.
 fn configure_no_window(cmd: &mut tokio::process::Command) {
     #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    buzz_runtime::windows_job::WindowsJobObject::prepare_command(
+        cmd,
+        buzz_runtime::windows_job::CREATE_NO_WINDOW,
+    );
     #[cfg(not(windows))]
     let _ = cmd;
 }
@@ -2573,6 +2735,15 @@ mod tests {
         });
         assert_eq!(response["id"], "perm-req-001");
         assert!(response["id"].is_string());
+    }
+
+    #[test]
+    fn permission_gate_id_is_stable_for_string_and_numeric_json_rpc_ids() {
+        assert_eq!(
+            permission_gate_id(&serde_json::json!("approval-7")),
+            "approval-7"
+        );
+        assert_eq!(permission_gate_id(&serde_json::json!(7)), "7");
     }
 
     #[test]
@@ -2922,7 +3093,7 @@ mod tests {
             .await
             .unwrap_or_else(|| panic!("child produced no output for {var}"))
             .expect("child stdout was not readable");
-        client.shutdown().await;
+        let _ = client.shutdown().await;
         std::fs::remove_dir_all(&dir).expect("remove env probe dir");
         observed
     }
@@ -3995,6 +4166,96 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn initialize_records_session_recovery_capabilities() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        assert!(client.session_resume_supported());
+        assert!(client.session_load_supported());
+    }
+
+    #[tokio::test]
+    async fn session_resume_uses_acp_wire_contract() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        let result = client
+            .session_resume("persisted", "/tmp", vec![])
+            .await
+            .expect("resume should succeed");
+        let request = &result["_receivedRequest"];
+        assert_eq!(request["method"], "session/resume");
+        assert_eq!(request["params"]["sessionId"], "persisted");
+        assert_eq!(request["params"]["cwd"], "/tmp");
+        assert_eq!(request["params"]["mcpServers"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn session_load_uses_acp_wire_contract() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        let result = client
+            .session_load("persisted", "/tmp", vec![])
+            .await
+            .expect("load should succeed");
+        let request = &result["_receivedRequest"];
+        assert_eq!(request["method"], "session/load");
+        assert_eq!(request["params"]["sessionId"], "persisted");
+        assert_eq!(request["params"]["cwd"], "/tmp");
+        assert_eq!(request["params"]["mcpServers"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn unsupported_session_recovery_is_rejected_before_write() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        assert!(matches!(
+            client.session_resume("persisted", "/tmp", vec![]).await,
+            Err(AcpError::Protocol(_))
+        ));
+        assert!(matches!(
+            client.session_load("persisted", "/tmp", vec![]).await,
+            Err(AcpError::Protocol(_))
+        ));
+    }
+
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the
     /// wire are an `_session/steering` request carrying `sessionId` and
     /// `prompt`, and carrying **no** `expectedRunId` (the adapters reject
@@ -4609,6 +4870,45 @@ mod tests {
         assert!(
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
+        );
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn explicit_shutdown_kills_adapter_descendant_and_verifies_empty_job() {
+        let args = vec![
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            "start \"\" /B ping.exe -t 127.0.0.1 >NUL & more".to_owned(),
+        ];
+        let mut client = AcpClient::spawn("cmd.exe", &args, &[], false)
+            .await
+            .expect("spawn governed adapter");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while client
+            .adapter_job
+            .active_process_count()
+            .expect("query adapter job")
+            < 2
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "adapter descendant did not inherit Job Object"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        client
+            .shutdown()
+            .await
+            .expect("adapter tree cleanup must be verified");
+        assert_eq!(
+            client
+                .adapter_job
+                .active_process_count()
+                .expect("query adapter job after shutdown"),
+            0,
+            "shutdown acknowledged before the adapter tree was empty"
         );
     }
 }

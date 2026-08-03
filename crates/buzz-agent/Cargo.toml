@@ -47,6 +47,9 @@ webbrowser = "1"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
+[target.'cfg(windows)'.dependencies]
+buzz-runtime = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

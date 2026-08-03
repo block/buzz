@@ -72,6 +72,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
+        // Canonical agent-job projections (NIP-98 auth + participant scope)
+        .route("/jobs", get(api::jobs::list_jobs))
+        .route("/jobs/{job_id}", get(api::jobs::get_job))
         .route(
             "/operator/communities",
             get(api::operator::list_owned_communities).post(api::operator::provision_community),

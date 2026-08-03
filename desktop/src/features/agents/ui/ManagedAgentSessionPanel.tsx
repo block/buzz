@@ -8,8 +8,12 @@ import {
 } from "lucide-react";
 
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { useManagedAgentRuntimeStatus } from "@/features/agents/managedAgentRuntimeHooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { ManagedAgent } from "@/shared/api/types";
+import type {
+  ManagedAgent,
+  ManagedAgentRuntimeStatus,
+} from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -19,6 +23,7 @@ import {
   type AgentSessionTranscriptEmptyState,
 } from "./AgentSessionTranscriptList";
 import { RawEventRail } from "./RawEventRail";
+import { ManagedAgentRuntimeSummary } from "./ManagedAgentRuntimeSummary";
 import type {
   ConnectionState,
   ObserverEvent,
@@ -42,6 +47,7 @@ import { buildTranscriptState } from "./agentSessionTranscript";
 type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
     avatarUrl?: string | null;
+    relayUrl?: string | null;
   };
   autoTail?: boolean;
   channelId?: string | null;
@@ -77,6 +83,7 @@ export function ManagedAgentSessionPanel({
   transcriptOverride,
 }: ManagedAgentSessionPanelProps) {
   const hasObserver = isManagedAgentActive(agent);
+  const runtime = useManagedAgentRuntimeStatus(agent.pubkey, agent.relayUrl);
   // Always read from the store — archived frames are ingested regardless of
   // live status and must be renderable for idle agents with channel history.
   // The `hasObserver` flag still gates the relay subscription (via the
@@ -143,6 +150,13 @@ export function ManagedAgentSessionPanel({
           eventCount={displayEvents.length}
           hasObserver={hasObserver}
           latestSessionId={latestSessionId}
+          runtime={runtime}
+        />
+      ) : null}
+      {!showHeader && runtime ? (
+        <ManagedAgentRuntimeSummary
+          className="mb-3 border-b border-border/60 pb-3"
+          runtime={runtime}
         />
       ) : null}
 
@@ -175,32 +189,42 @@ function SessionHeader({
   eventCount,
   hasObserver,
   latestSessionId,
+  runtime,
 }: {
   connectionState: ConnectionState;
   eventCount: number;
   hasObserver: boolean;
   latestSessionId: string | null | undefined;
+  runtime: ManagedAgentRuntimeStatus | undefined;
 }) {
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold tracking-tight">
-            Live ACP session
-          </h3>
-          <ObserverStatusBadge state={connectionState} />
+    <div className="space-y-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold tracking-tight">
+              Live ACP session
+            </h3>
+            <ObserverStatusBadge state={connectionState} />
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {hasObserver
+              ? latestSessionId
+                ? `Session ${shorten(latestSessionId)}`
+                : "Waiting for the next agent turn."
+              : "Restart this local agent to attach the observer feed."}
+          </p>
         </div>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {hasObserver
-            ? latestSessionId
-              ? `Session ${shorten(latestSessionId)}`
-              : "Waiting for the next agent turn."
-            : "Restart this local agent to attach the observer feed."}
-        </p>
+        <Badge className="w-fit font-mono" variant="outline">
+          {eventCount} event{eventCount === 1 ? "" : "s"}
+        </Badge>
       </div>
-      <Badge className="w-fit font-mono" variant="outline">
-        {eventCount} event{eventCount === 1 ? "" : "s"}
-      </Badge>
+      {runtime ? (
+        <ManagedAgentRuntimeSummary
+          className="border-t border-border/60 pt-3"
+          runtime={runtime}
+        />
+      ) : null}
     </div>
   );
 }

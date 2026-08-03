@@ -1,3 +1,5 @@
+import type { AgentJobView } from "./lib/agentJobProjection";
+
 export type TimelineReaction = {
   emoji: string;
   /** Custom (image) emoji URL from the reaction's NIP-30 `emoji` tag, if any. */
@@ -49,4 +51,5 @@ export type TimelineMessage = {
   kind?: number;
   tags?: string[][];
   reactions?: TimelineReaction[];
+  jobView?: AgentJobView;
 };

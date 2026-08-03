@@ -244,8 +244,9 @@ impl RunCtx<'_> {
             }
 
             let mut tools = self.mcp.tools();
-            // Inject the built-in load_skill tool when skills are available.
-            if !self.skills.is_empty() {
+            // Managed runs expose exactly the authenticated MCP manifest. The
+            // in-process skill loader is a standalone-only capability.
+            if !self.cfg.managed_profile && !self.skills.is_empty() {
                 tools.push(builtin::load_skill_def());
             }
             round = round.saturating_add(1);
@@ -505,8 +506,9 @@ impl RunCtx<'_> {
             }
             emit_pending(self.wire, self.session_id, call).await;
 
-            // Built-in load_skill: execute inline, no MCP round-trip.
-            if call.name == builtin::LOAD_SKILL_TOOL {
+            // Built-in load_skill is standalone-only. Managed runs must route
+            // every model-visible tool through their authenticated MCP.
+            if !self.cfg.managed_profile && call.name == builtin::LOAD_SKILL_TOOL {
                 emit_in_progress(self.wire, self.session_id, call).await;
                 let mut result = builtin::call_load_skill(&call.arguments, self.skills).await;
                 result.provider_id = call.provider_id.clone();

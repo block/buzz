@@ -100,6 +100,7 @@ impl Harness {
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "8")
             .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2");
+        cmd.env_remove("BUZZ_RUNTIME_RECEIPT");
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -179,6 +180,36 @@ async fn init_session(h: &mut Harness, cwd: &str) -> String {
     let _ = h.recv().await;
     h.send("session/new", json!({"cwd": cwd, "mcpServers": []}))
         .await;
+    let r = h
+        .recv_until(|v| v.get("result").is_some() || v.get("error").is_some())
+        .await;
+    r["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned()
+}
+
+async fn init_session_with_mcp(h: &mut Harness, cwd: &str) -> String {
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    h.send(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    h.send(
+        "session/new",
+        json!({
+            "cwd": cwd,
+            "mcpServers": [{
+                "name": "managed",
+                "command": fake_mcp,
+                "args": [],
+                "env": [],
+            }]
+        }),
+    )
+    .await;
     let r = h
         .recv_until(|v| v.get("result").is_some() || v.get("error").is_some())
         .await;
@@ -565,10 +596,120 @@ async fn load_skill_tool_returns_body() {
         "expected at least 2 LLM requests, got {}",
         reqs.len()
     );
+    let standalone_tools: Vec<&str> = reqs[0]["tools"]
+        .as_array()
+        .expect("standalone request tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(
+        standalone_tools.contains(&"load_skill"),
+        "standalone skill sessions must retain load_skill: {standalone_tools:?}"
+    );
     let round2_str = serde_json::to_string(&reqs[1]).unwrap();
     assert!(
         round2_str.contains("SKILL_BODY_CONTENT_99"),
         "load_skill result must contain skill body in round 2 request.\nGot: {round2_str}"
     );
+    h.shutdown().await;
+}
+
+/// A managed receipt selects the MCP-only tool profile. Skill files are not
+/// discovered, and even an unadvertised direct `load_skill` call fails closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_profile_exposes_only_mcp_tools_and_skips_skill_files() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cwd = tempfile::TempDir::new().unwrap();
+
+    let global_skill = home.path().join(".agents/skills/global-secret");
+    std::fs::create_dir_all(&global_skill).unwrap();
+    std::fs::write(
+        global_skill.join("SKILL.md"),
+        "---\nname: global-secret\ndescription: must not be discovered\n---\nGLOBAL_SKILL_SECRET_73\n",
+    )
+    .unwrap();
+
+    let project_skill = cwd.path().join(".agents/skills/project-skill");
+    std::fs::create_dir_all(&project_skill).unwrap();
+    std::fs::write(
+        project_skill.join("SKILL.md"),
+        "---\nname: project-skill\ndescription: standalone only\n---\nPROJECT_SKILL_BODY_91\n",
+    )
+    .unwrap();
+
+    let load_skill_call = json!({
+        "id": "cc-managed-ls", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": "tc-managed-ls", "type": "function",
+                    "function": {
+                        "name": "load_skill",
+                        "arguments": "{\"name\":\"project-skill\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let llm = spawn_capturing_llm(vec![load_skill_call, openai_text("done")]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("HOME", home.path().to_str().unwrap()),
+            (
+                "BUZZ_RUNTIME_RECEIPT",
+                "/authenticated/runtime-receipt.json",
+            ),
+        ],
+    )
+    .await;
+    let sid = init_session_with_mcp(&mut h, cwd.path().to_str().unwrap()).await;
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"inspect managed tools"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+
+    let requests = llm.captured.lock().await;
+    assert!(
+        requests.len() >= 2,
+        "expected the rejected direct call to produce a second request"
+    );
+    let managed_tools: Vec<&str> = requests[0]["tools"]
+        .as_array()
+        .expect("managed request tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert_eq!(
+        managed_tools,
+        vec!["managed__tool_0"],
+        "managed buzz-agent must expose exactly the MCP-provided manifest"
+    );
+
+    let first_request = serde_json::to_string(&requests[0]).unwrap();
+    assert!(
+        !first_request.contains("global-secret")
+            && !first_request.contains("GLOBAL_SKILL_SECRET_73")
+            && !first_request.contains("project-skill"),
+        "managed session must not discover skill files: {first_request}"
+    );
+    let second_request = serde_json::to_string(&requests[1]).unwrap();
+    assert!(
+        second_request.contains("unknown tool: load_skill"),
+        "direct managed load_skill call must fail closed: {second_request}"
+    );
+    assert!(
+        !second_request.contains("GLOBAL_SKILL_SECRET_73")
+            && !second_request.contains("PROJECT_SKILL_BODY_91"),
+        "managed load_skill rejection must not read a skill body: {second_request}"
+    );
+    drop(requests);
     h.shutdown().await;
 }

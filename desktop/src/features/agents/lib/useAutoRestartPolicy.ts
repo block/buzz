@@ -5,8 +5,12 @@ import {
   managedAgentsQueryKey,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
-import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import {
+  clearActiveTurnsForAgentOnStop,
+  useManagedAgentRuntimesQuery,
+} from "@/features/agents/managedAgentRuntimeHooks";
+import {
+  listManagedAgentRuntimes,
   startManagedAgent,
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
@@ -16,6 +20,7 @@ import { getAgentObserverSnapshot } from "../observerRelayStore";
 import { getAgentWorkingState } from "../agentWorkingSignal";
 import {
   decideAutoRestart,
+  isNonterminalAssignmentState,
   nextEdgeState,
   type AutoRestartEdgeState,
 } from "./autoRestartPolicy";
@@ -37,6 +42,7 @@ const POLICY_TICK_MS = 15_000;
 export function useAutoRestartPolicy() {
   const queryClient = useQueryClient();
   const agents: ManagedAgent[] | undefined = useManagedAgentsQuery().data;
+  const runtimes = useManagedAgentRuntimesQuery().data;
   const edgesRef = React.useRef(new Map<string, AutoRestartEdgeState>());
   const inFlightRef = React.useRef(new Set<string>());
   const [, setTick] = React.useState(0);
@@ -64,6 +70,12 @@ export function useAutoRestartPolicy() {
 
       const working = getAgentWorkingState(agent.pubkey);
       const observer = getAgentObserverSnapshot(agent.pubkey, true);
+      const activeAssignmentState =
+        runtimes?.find(
+          (runtime) =>
+            runtime.pubkey.toLowerCase() === agent.pubkey.toLowerCase() &&
+            isNonterminalAssignmentState(runtime.activeAssignment?.state),
+        )?.activeAssignment?.state ?? null;
 
       const decision = decideAutoRestart({
         autoRestartEnabled: agent.autoRestartOnConfigChange,
@@ -71,6 +83,7 @@ export function useAutoRestartPolicy() {
         working: working.working,
         workingSource: working.source,
         connected: observer.connectionState === "open",
+        activeAssignmentState,
         isLocalBackend: agent.backend.type === "local",
         isRunning,
         edgeConsumed: edge.consumed,
@@ -98,14 +111,23 @@ export function useAutoRestartPolicy() {
 
       void (async () => {
         try {
-          // Pre-fire re-fetch: shrink the stale-decision window to ~0.
+          // Refresh authenticated runtime facts before the summary so its
+          // config-drift predicate sees current durable work.
+          const freshRuntimes = await listManagedAgentRuntimes();
+          const freshAssignmentState =
+            freshRuntimes.find(
+              (runtime) =>
+                runtime.pubkey.toLowerCase() === agent.pubkey.toLowerCase() &&
+                isNonterminalAssignmentState(runtime.activeAssignment?.state),
+            )?.activeAssignment?.state ?? null;
           const fresh = await listManagedAgents();
           const current = fresh.find((a) => a.pubkey === agent.pubkey);
           if (
             !current?.needsRestart ||
             !current.autoRestartOnConfigChange ||
             current.status !== "running" ||
-            getAgentWorkingState(agent.pubkey).source !== "none"
+            getAgentWorkingState(agent.pubkey).source !== "none" ||
+            isNonterminalAssignmentState(freshAssignmentState)
           ) {
             return;
           }

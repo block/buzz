@@ -18,6 +18,7 @@ import {
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { AgentJobView } from "@/features/messages/lib/agentJobProjection";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
 import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanelLayout";
@@ -72,6 +73,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onCancelEdit?: () => void;
   onCancelReply: () => void;
   onClose: () => void;
+  onCancelJob?: (job: AgentJobView) => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditLastOwnMessage?: () => boolean;
@@ -206,6 +208,7 @@ export function MessageThreadPanel({
   onCancelEdit,
   onCancelReply,
   onClose,
+  onCancelJob,
   onDelete,
   onEdit,
   onEditLastOwnMessage,
@@ -582,10 +585,9 @@ export function MessageThreadPanel({
                 channelId={channelId}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-                isFollowingThread={isFollowingThread}
-                isUnread={isMessageUnreadById?.(threadHead.id)}
-                layoutVariant="thread-reply"
                 message={threadHead}
+                onCancelJob={onCancelJob}
+                layoutVariant="thread-reply"
                 onDelete={
                   onDelete &&
                   canManageMessageForCurrentUser(
@@ -736,6 +738,7 @@ export function MessageThreadPanel({
                         isUnread={isMessageUnreadById?.(entry.message.id)}
                         layoutVariant="thread-reply"
                         message={entry.message}
+                        onCancelJob={onCancelJob}
                         onCollapseDepthGuide={handleCollapseDepthGuide}
                         onCollapseDepthGuideHoverChange={
                           handleCollapseBranchHoverChange

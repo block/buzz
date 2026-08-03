@@ -21,7 +21,7 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-async fn enforce_http_admission(
+pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,

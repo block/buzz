@@ -10,6 +10,12 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod collaboration;
+mod managed;
+mod managed_files;
+mod managed_git;
+mod managed_instructions;
+mod managed_jobs;
 mod paths;
 mod read_file;
 mod rg;
@@ -142,6 +148,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    let managed_receipt_present = std::env::var_os("BUZZ_RUNTIME_RECEIPT").is_some();
+
+    // A managed capability can only run the authenticated MCP personality. Do
+    // not let multicall aliases turn the same binary into a CLI or executable
+    // surface when a runtime receipt has been injected.
+    if managed_receipt_present
+        && matches!(
+            cmd.as_str(),
+            "rg" | "tree" | "git-credential-nostr" | "git-sign-nostr" | "buzz"
+        )
+    {
+        return Err(std::io::Error::other(
+            "multicall personalities are unavailable in managed mode",
+        )
+        .into());
+    }
 
     // Multicall dispatch — sync personalities exit before any runtime is built.
     // No tracing, no tokio, no allocations beyond argv parsing.
@@ -177,12 +199,35 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cwd = std::env::current_dir()?;
+    if let Some(receipt_path) = std::env::var_os("BUZZ_RUNTIME_RECEIPT") {
+        // Receipt presence is a fail-closed selection gate. Authentication
+        // failure must never expose the normal developer router.
+        let runtime = authenticate_managed(Path::new(&receipt_path)).await?;
+        let managed = managed::ManagedMcp::new(cwd, runtime)
+            .map_err(|_| std::io::Error::other("managed workspace initialization failed"))?;
+        let service = managed.serve(stdio()).await?;
+        service.waiting().await?;
+        return Ok(());
+    }
+
     let shim = shim::Shim::install()?;
     let state = Arc::new(shell::SharedState::new(cwd, shim)?);
 
     let service = DevMcp::new(state).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+async fn authenticate_managed(
+    receipt_path: &Path,
+) -> Result<buzz_runtime::RuntimeClient, std::io::Error> {
+    buzz_runtime::RuntimeClient::from_receipt(receipt_path, buzz_runtime::Capability::Model)
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "managed runtime receipt authentication failed",
+            )
+        })
 }
 
 /// Suppress the console window that Windows otherwise allocates for every
@@ -210,4 +255,37 @@ pub(crate) fn configure_no_window_async(cmd: &mut tokio::process::Command) {
     }
     #[cfg(not(windows))]
     let _ = cmd;
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+
+    #[test]
+    fn normal_manifest_is_unchanged() {
+        let names = DevMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "_PostCompact",
+                "_Stop",
+                "read_file",
+                "shell",
+                "str_replace",
+                "todo",
+                "view_image",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_managed_receipt_fails_closed() {
+        let receipt = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(receipt.path(), b"{}").unwrap();
+        assert!(authenticate_managed(receipt.path()).await.is_err());
+    }
 }

@@ -1,11 +1,8 @@
 use tauri::Manager;
 
 use crate::app_state::AppState;
-use crate::managed_agents::{
-    self, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
-    sync_managed_agent_processes, BackendKind,
-};
-use crate::{prevent_sleep, util};
+use crate::managed_agents::{self, load_managed_agents, BackendKind};
+use crate::prevent_sleep;
 
 pub(crate) fn is_restart_request(code: Option<i32>) -> bool {
     code == Some(tauri::RESTART_EXIT_CODE)
@@ -21,9 +18,7 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         prevent_sleep::release(&app.state::<AppState>().prevent_sleep);
         app.state::<crate::terminal_runtime::TerminalSessions>()
             .shutdown_all();
-        if let Err(error) = shutdown_managed_agents(app) {
-            eprintln!("buzz-desktop: failed to stop managed agents: {error}");
-        }
+        disconnect_managed_agent_controllers(app);
         #[cfg(feature = "mesh-llm")]
         shutdown_mesh_runtime(app);
     }
@@ -44,7 +39,7 @@ pub(crate) fn install_signal_handler(
         if !shutdown_done.swap(true, Ordering::SeqCst) {
             app.state::<crate::terminal_runtime::TerminalSessions>()
                 .shutdown_all();
-            let _ = shutdown_managed_agents(&app);
+            disconnect_managed_agent_controllers(&app);
             #[cfg(feature = "mesh-llm")]
             shutdown_mesh_runtime(&app);
         }
@@ -96,9 +91,9 @@ pub(crate) fn relaunch_after_mesh_shutdown(app: &tauri::AppHandle) -> ! {
 
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 pub(crate) fn hard_exit_after_mesh_shutdown() -> ! {
-    // SAFETY: all Buzz-managed subprocesses and the embedded Mesh runtime have
-    // been stopped. `_exit` intentionally skips only process-global C++
-    // destructors and buffered stdio; no application state remains observable.
+    // SAFETY: Desktop-owned resources and the embedded Mesh runtime have
+    // been stopped. Durable managed runtimes are deliberately detached and
+    // do not own handles whose destructors are required here.
     unsafe { libc::_exit(0) }
 }
 
@@ -122,149 +117,91 @@ pub(crate) fn shutdown_mesh_runtime(app: &tauri::AppHandle) {
     }
 }
 
-pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
+/// Drop Desktop's local schema-v2 control handles without stopping durable
+/// runtimes. A Phase-0 schema-v1 harness remains Desktop-owned and is stopped
+/// only when its tracked child and anti-PID-reuse marker still agree.
+pub(crate) fn disconnect_managed_agent_controllers(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    let _restore_transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let (mut changed, _exited) = sync_managed_agent_processes(
-        &mut records,
-        &mut runtimes,
-        &managed_agents::current_instance_id(app),
-    );
-    changed |= kill_stale_tracked_processes(
-        &mut records,
-        &runtimes,
-        &managed_agents::current_instance_id(app),
-    );
-
-    // Stop all tracked agents. Send SIGTERM to all process
-    // groups first, then wait for exits in parallel to avoid serial 1s waits.
-    struct AgentToStop {
-        idx: usize,
-        pid: u32,
-        runtime: Option<managed_agents::ManagedAgentPairRuntime>,
-    }
-
-    let mut to_stop: Vec<AgentToStop> = Vec::new();
-    for (idx, record) in records.iter().enumerate() {
-        if record.backend != BackendKind::Local {
-            continue;
-        }
-        // Drain every tracked pair for this record, not just the first — an
-        // agent can run one harness per community, and each pair gets the
-        // graceful SIGTERM → 2s wait → SIGKILL fan-out with a stop log
-        // marker, instead of falling through to the orphan sweep's 200ms
-        // grace below.
-        for key in managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey) {
-            let runtime = runtimes.remove(&key);
-            let Some(pid) = runtime
-                .as_ref()
-                .map(|rt| rt.child.id())
-                .or(record.runtime_pid)
-            else {
+    let Ok(_transition) = state.managed_agent_runtime_transition.lock() else {
+        return;
+    };
+    if let Ok(mut runtimes) = state.managed_agent_processes.lock() {
+        for runtime in runtimes.values_mut().filter(|runtime| runtime.is_legacy()) {
+            let Some(receipt) = runtime.legacy_receipt.as_ref() else {
                 continue;
             };
-            to_stop.push(AgentToStop { idx, pid, runtime });
-        }
-    }
-
-    if !to_stop.is_empty() {
-        changed = true;
-
-        // Fan-out: send SIGTERM to all process groups at once.
-        #[cfg(unix)]
-        for agent in &to_stop {
-            let pgid = -(agent.pid as i32);
-            unsafe {
-                libc::kill(pgid, libc::SIGTERM);
-            }
-        }
-
-        // Wait up to 2s for all to exit, checking in a polling loop.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if to_stop
-                .iter()
-                .all(|a| !managed_agents::process_is_running(a.pid))
+            let tracked_child_matches = runtime
+                .process
+                .as_ref()
+                .is_some_and(|process| process.child.id() == receipt.pid);
+            if tracked_child_matches
+                && buzz_runtime_pkg::process_matches_marker(
+                    receipt.pid,
+                    &receipt.process_start_marker,
+                )
             {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-
-        // Fan-out: SIGKILL any survivors.
-        #[cfg(unix)]
-        for agent in &to_stop {
-            if managed_agents::process_is_running(agent.pid) {
-                let pgid = -(agent.pid as i32);
-                unsafe {
-                    libc::kill(pgid, libc::SIGKILL);
+                let _ = managed_agents::terminate_process(receipt.pid);
+                if let Some(process) = runtime.process.as_mut() {
+                    let _ = process.child.wait();
                 }
             }
         }
+        runtimes.clear();
+    };
+}
 
-        // Reap children and update records.
-        for mut agent in to_stop {
-            if let Some(ref mut rt) = agent.runtime {
-                // Best-effort reap — don’t block shutdown if the child is stuck
-                // in uninterruptible sleep. The zombie will be cleaned up when
-                // our process exits and launchd reaps it.
-                let _ = rt.child.try_wait();
-                // Write log marker (best-effort).
-                let record = &records[agent.idx];
-                let _ = managed_agents::append_log_marker(
-                    &rt.log_path,
-                    &format!(
-                        "=== stopped {} ({}) at {} ===",
-                        record.name,
-                        record.pubkey,
-                        util::now_iso()
-                    ),
-                );
+pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
+    // Consequential shutdown (sign-out/delete/update) is explicit and routes
+    // every pair through the authenticated generation-fenced control path.
+    // Ordinary app exit calls `disconnect_managed_agent_controllers` instead.
+    let records = load_managed_agents(app)?;
+    let mut targets = {
+        let state = app.state::<AppState>();
+        let runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
+        runtimes.keys().cloned().collect::<Vec<_>>()
+    };
+    for (_, receipt) in managed_agents::read_all_schema_v2_runtime_receipts(app) {
+        let Ok(key) =
+            managed_agents::ManagedAgentRuntimeKey::new(receipt.key.pubkey, &receipt.key.relay_url)
+        else {
+            continue;
+        };
+        if !targets.contains(&key) {
+            targets.push(key);
+        }
+    }
+    for record in records
+        .iter()
+        .filter(|record| record.backend == BackendKind::Local)
+    {
+        if let Some(key) = managed_agents::workspace_pair_key(app, record) {
+            if !targets.contains(&key) {
+                targets.push(key);
             }
-            let record = &mut records[agent.idx];
-            record.runtime_pid = None;
-            record.last_stopped_at = Some(util::now_iso());
-            record.updated_at = util::now_iso();
-            record.last_exit_code = None;
-            record.last_error = None;
         }
     }
 
-    // Final sweep: kill any orphaned agent processes we have PID file receipts
-    // for that escaped process-group kills or weren't tracked in records.
-    // All tracked PIDs have already been killed above, so pass an empty skip list.
-    managed_agents::sweep_orphaned_agent_processes(app, &[]);
-
-    // System-wide sweep: agent workers (goose, buzz-agent, etc.) are spawned
-    // in their own process groups by buzz-acp, so group-kills above only
-    // reach the harness, not the workers. Scan all user processes and kill any
-    // known agent binaries that are still running.
-    managed_agents::sweep_system_agent_processes(&managed_agents::current_instance_id(app), &[]);
-
-    // Dead-instance reaping: find agents belonging to Buzz instances
-    // whose desktop process is no longer running and reap them.
-    managed_agents::reap_dead_instance_agents(&managed_agents::current_instance_id(app), &[]);
-
-    if changed {
-        save_managed_agents(app, &records)?;
+    let mut errors = Vec::new();
+    for key in targets {
+        if let Err(error) = managed_agents::stop_managed_agent_runtime(
+            key.pubkey.clone(),
+            key.relay_url.clone(),
+            app.clone(),
+        ) {
+            errors.push(format!("{} on {}: {error}", key.pubkey, key.relay_url));
+        }
     }
-
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to stop one or more authenticated managed runtimes: {}",
+            errors.join("; ")
+        ))
+    }
 }
 
 #[cfg(test)]

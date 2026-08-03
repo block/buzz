@@ -131,7 +131,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main());
+        .block_on(async_main())?;
     Ok(())
 }
 
@@ -160,7 +160,7 @@ async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 }
 
-async fn async_main() {
+async fn async_main() -> Result<(), AgentError> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
@@ -186,10 +186,36 @@ async fn async_main() {
     {
         tracing::error!("io: reader: {e}");
     }
-    for session in app.sessions.lock().await.values() {
-        let _ = session.cancel_tx.send(true);
+    let registries = {
+        let mut sessions = app.sessions.lock().await;
+        for session in sessions.values() {
+            let _ = session.cancel_tx.send(true);
+        }
+        let mut registries: Vec<Arc<McpRegistry>> = Vec::new();
+        for (_, session) in sessions.drain() {
+            if !registries
+                .iter()
+                .any(|registry| Arc::ptr_eq(registry, &session.mcp))
+            {
+                registries.push(session.mcp);
+            }
+        }
+        registries
+    };
+    let mut cleanup_error = None;
+    for registry in registries {
+        if let Err(error) = registry.shutdown().await {
+            tracing::error!(%error, "MCP shutdown did not verify an empty process tree");
+            if cleanup_error.is_none() {
+                cleanup_error = Some(error);
+            }
+        }
     }
     let _ = writer.await;
+    match cleanup_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 async fn read_loop<R: tokio::io::AsyncBufRead + Unpin>(
@@ -363,7 +389,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         }
     }
     let (hints_text, skills) = if app.cfg.hints_enabled {
-        hints::build_hints_section(std::path::Path::new(&p.cwd))
+        hints::build_hints_section(std::path::Path::new(&p.cwd), !app.cfg.managed_profile)
     } else {
         (String::new(), Vec::new())
     };

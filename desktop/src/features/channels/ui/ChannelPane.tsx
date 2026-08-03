@@ -23,6 +23,7 @@ import {
   hasOtherDmParticipant,
 } from "@/features/channels/lib/dmHuddleMembers";
 import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
+import { cancelAgentJobFromTimeline } from "@/features/messages/lib/cancelAgentJobFromTimeline";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
@@ -673,6 +674,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}
             unreadCount={unreadCount}
+            onCancelJob={cancelAgentJobFromTimeline}
             onDelete={onDelete}
             onEdit={onEdit}
             onMarkUnread={onMarkUnread}
@@ -863,6 +865,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onAutoSubmitComplete={handleAutoSubmitComplete}
                 onCancelEdit={onCancelEdit}
                 onCancelReply={onCancelThreadReply}
+                onCancelJob={cancelAgentJobFromTimeline}
                 onClose={onCloseThread}
                 onDelete={onDelete}
                 onEdit={onEdit}

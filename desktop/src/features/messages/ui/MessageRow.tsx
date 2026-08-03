@@ -10,6 +10,8 @@ import {
 import type { TimelineMessage } from "@/features/messages/types";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
+import { AgentJobCard } from "@/features/agents/ui/AgentJobCard";
+import type { AgentJobView } from "@/features/messages/lib/agentJobProjection";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -88,6 +90,7 @@ export const MessageRow = React.memo(
     onMarkUnread,
     onMarkRead,
     onToggleReaction,
+    onCancelJob,
     onReply,
     onEntranceComplete,
     playEntrance = false,
@@ -136,6 +139,7 @@ export const MessageRow = React.memo(
       emoji: string,
       remove: boolean,
     ) => Promise<void>;
+    onCancelJob?: (job: AgentJobView) => void;
     onReply?: (message: TimelineMessage) => void;
     onUnfollowThread?: (message: TimelineMessage) => void;
     onEntranceComplete?: (messageId: string) => void;
@@ -309,6 +313,9 @@ export const MessageRow = React.memo(
       message.tags?.find((tag) => tag[0] === name)?.[1];
 
     const renderBody = () => {
+      if (message.jobView) {
+        return <AgentJobCard job={message.jobView} onCancel={onCancelJob} />;
+      }
       switch (message.kind) {
         case KIND_STREAM_MESSAGE_DIFF:
           return (
@@ -858,6 +865,14 @@ export const MessageRow = React.memo(
     // checks made every row re-render on every streamed event in an open
     // thread (see messageRowEquality.ts).
     reactionsEqual(prev.message.reactions, next.message.reactions) &&
+    prev.message.jobView?.state === next.message.jobView?.state &&
+    prev.message.jobView?.summary === next.message.jobView?.summary &&
+    prev.message.jobView?.progressSeq === next.message.jobView?.progressSeq &&
+    prev.message.jobView?.publicationFailed ===
+      next.message.jobView?.publicationFailed &&
+    prev.message.jobView?.finishedAt === next.message.jobView?.finishedAt &&
+    prev.message.jobView?.artifacts.length ===
+      next.message.jobView?.artifacts.length &&
     tagsEqual(prev.message.tags, next.message.tags) &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
@@ -889,6 +904,7 @@ export const MessageRow = React.memo(
     prev.onCollapseDescendants === next.onCollapseDescendants &&
     prev.onCollapseDescendantsHoverChange ===
       next.onCollapseDescendantsHoverChange &&
+    prev.onCancelJob === next.onCancelJob &&
     prev.onEntranceComplete === next.onEntranceComplete &&
     prev.playEntrance === next.playEntrance &&
     prev.profiles === next.profiles &&

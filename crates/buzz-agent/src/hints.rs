@@ -216,13 +216,21 @@ fn discover_skills_impl(cwd: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
     skills
 }
 
-pub fn build_hints_section(cwd: &Path) -> (String, Vec<SkillEntry>) {
-    build_hints_section_impl(cwd, home_dir().as_deref())
+pub fn build_hints_section(cwd: &Path, discover_skills: bool) -> (String, Vec<SkillEntry>) {
+    build_hints_section_impl(cwd, home_dir().as_deref(), discover_skills)
 }
 
-fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> (String, Vec<SkillEntry>) {
+fn build_hints_section_impl(
+    cwd: &Path,
+    home: Option<&Path>,
+    discover_skills: bool,
+) -> (String, Vec<SkillEntry>) {
     let hints_text = load_hint_files_impl(cwd, home);
-    let skills = discover_skills_impl(cwd, home);
+    let skills = if discover_skills {
+        discover_skills_impl(cwd, home)
+    } else {
+        Vec::new()
+    };
 
     if hints_text.is_empty() && skills.is_empty() {
         return (String::new(), skills);
@@ -436,7 +444,7 @@ mod tests {
     #[test]
     fn build_hints_section_empty() {
         let tmp = TempDir::new().unwrap();
-        let (result, skills) = build_hints_section_impl(tmp.path(), None);
+        let (result, skills) = build_hints_section_impl(tmp.path(), None, true);
         assert_eq!(result, "");
         assert!(skills.is_empty());
     }
@@ -456,7 +464,7 @@ mod tests {
         )
         .unwrap();
 
-        let (result, skills) = build_hints_section_impl(cwd, None);
+        let (result, skills) = build_hints_section_impl(cwd, None, true);
 
         assert!(
             result.contains("# Additional Instructions"),

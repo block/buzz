@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import type { AgentJobView } from "@/features/messages/lib/agentJobProjection";
 import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import type { buildVideoReviewContextForMessage } from "@/features/messages/lib/videoReviewContext";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
@@ -75,6 +76,7 @@ type MessageRowItemProps = {
   isUnread?: boolean;
   playEntrance?: boolean;
   onEntranceComplete?: (messageId: string) => void;
+  onCancelJob?: (job: AgentJobView) => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
@@ -107,6 +109,7 @@ export function MessageRowItem({
   isUnread,
   playEntrance = false,
   onEntranceComplete,
+  onCancelJob,
   onDelete,
   onEdit,
   onMarkUnread,
@@ -159,6 +162,7 @@ export function MessageRowItem({
           onEntranceComplete={onEntranceComplete}
           message={message}
           onDelete={canDelete}
+          onCancelJob={onCancelJob}
           onEdit={canEdit}
           onFollowThread={
             followThreadById ? () => followThreadById(message.id) : undefined
@@ -213,6 +217,7 @@ export function MessageRowItem({
         message={message}
         onDelete={canDelete}
         onEdit={canEdit}
+        onCancelJob={onCancelJob}
         onMarkRead={onMarkRead}
         onMarkUnread={onMarkUnread}
         onToggleReaction={onToggleReaction}

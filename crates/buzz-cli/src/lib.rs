@@ -90,6 +90,10 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
+    /// Schema-v2 managed-runtime receipt used for authenticated local job log access.
+    #[arg(long, env = "BUZZ_RUNTIME_RECEIPT", hide_env_values = true)]
+    runtime_receipt: Option<std::path::PathBuf>,
+
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
@@ -177,6 +181,9 @@ enum Cmd {
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
+    /// Start, inspect, stop, and read logs for durable agent jobs
+    #[command(subcommand)]
+    Jobs(JobsCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -1792,6 +1799,66 @@ pub enum PackCmd {
     },
 }
 
+/// Subcommands for durable agent jobs.
+#[derive(Subcommand)]
+pub enum JobsCmd {
+    /// Publish a durable job request to an agent
+    Start {
+        /// Target agent pubkey (hex or npub)
+        #[arg(long)]
+        agent: String,
+        /// Channel carrying the public job lifecycle
+        #[arg(long)]
+        channel: Uuid,
+        /// Operator-approved absolute working directory
+        #[arg(long)]
+        cwd: String,
+        /// Human-readable job summary
+        #[arg(long)]
+        summary: String,
+        /// Job driver (schema 1 supports only `lh`)
+        #[arg(long, default_value = "lh", value_parser = ["lh"])]
+        driver: String,
+        /// Driver arguments; must follow `--`
+        #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+        argv: Vec<String>,
+    },
+    /// Reconstruct one job's latest public state
+    Status {
+        /// Durable job UUID
+        job_id: Uuid,
+    },
+    /// List durable jobs from the public signed event chain
+    List {
+        /// Filter by target agent pubkey (hex or npub)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Filter by channel
+        #[arg(long)]
+        channel: Option<Uuid>,
+        /// Filter by latest state
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Publish a cancellation request for a durable job
+    #[command(alias = "cancel")]
+    Stop {
+        /// Durable job UUID
+        job_id: Uuid,
+        /// Human-readable cancellation reason
+        #[arg(long, default_value = "Stopped by requester")]
+        reason: String,
+    },
+    /// Read authenticated local raw logs or bounded public progress summaries
+    Logs {
+        /// Durable job UUID
+        job_id: Uuid,
+        /// Number of trailing lines (maximum 1,000)
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=1000))]
+        lines: u16,
+    },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -1934,6 +2001,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
+    // Same-host raw job logs need no relay signing identity. If the receipt is
+    // absent or local authentication fails, continue through normal relay auth
+    // and reconstruct bounded summaries from the indexed signed event chain.
+    if let Cmd::Jobs(JobsCmd::Logs { job_id, lines }) = &cli.command {
+        if let Some(receipt) = cli.runtime_receipt.as_deref() {
+            if commands::jobs::cmd_local_logs(receipt, *job_id, *lines)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
@@ -1972,6 +2053,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Jobs(sub) => commands::jobs::dispatch(sub, &client).await,
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
@@ -2078,6 +2160,69 @@ mod tests {
     }
 
     #[test]
+    fn jobs_start_requires_argv_after_double_dash() {
+        let base = [
+            "buzz",
+            "--private-key",
+            "01",
+            "jobs",
+            "start",
+            "--agent",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--channel",
+            "12345678-1234-4234-8234-123456789abc",
+            "--cwd",
+            "/workspace",
+            "--summary",
+            "Run governed repair",
+        ];
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["lockdown", "run"])).is_err(),
+            "job argv must be separated from CLI options by --"
+        );
+        let parsed = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--", "lockdown", "run", "--issue", "JAC-575"]),
+        )
+        .expect("valid jobs start");
+        match parsed.command {
+            Cmd::Jobs(JobsCmd::Start { driver, argv, .. }) => {
+                assert_eq!(driver, "lh");
+                assert_eq!(argv, ["lockdown", "run", "--issue", "JAC-575"]);
+            }
+            _ => panic!("expected jobs start"),
+        }
+    }
+
+    #[test]
+    fn jobs_subcommands_parse_stable_shapes() {
+        let job = "12345678-1234-4234-8234-123456789abc";
+        for args in [
+            vec!["buzz", "jobs", "status", job],
+            vec!["buzz", "jobs", "list", "--state", "running"],
+            vec!["buzz", "jobs", "stop", job, "--reason", "stop"],
+            vec!["buzz", "jobs", "logs", job, "--lines", "200"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        assert!(Cli::try_parse_from(["buzz", "jobs", "logs", job, "--lines", "1001"]).is_err());
+        assert!(
+            Cli::try_parse_from(["buzz", "jobs", "cancel", job]).is_ok(),
+            "cancel remains a compatibility alias for stop"
+        );
+    }
+
+    #[test]
+    fn jobs_stop_is_the_canonical_command_name() {
+        let job = "12345678-1234-4234-8234-123456789abc";
+        let parsed = Cli::try_parse_from(["buzz", "jobs", "stop", job]).expect("jobs stop parses");
+        assert!(matches!(
+            parsed.command,
+            Cmd::Jobs(JobsCmd::Stop { job_id, .. })
+                if job_id == Uuid::parse_str(job).unwrap()
+        ));
+    }
+    #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
@@ -2087,6 +2232,7 @@ mod tests {
             "emoji",
             "feed",
             "issues",
+            "jobs",
             "media",
             "mem",
             "messages",
@@ -2267,6 +2413,10 @@ mod tests {
             names(&cmd, "issues"),
             vec!["create", "get", "list", "status"]
         );
+        assert_eq!(
+            names(&cmd, "jobs"),
+            vec!["list", "logs", "start", "status", "stop"]
+        );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
@@ -2295,6 +2445,7 @@ mod tests {
             ("emoji", 5),
             ("feed", 1),
             ("issues", 4),
+            ("jobs", 5),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
