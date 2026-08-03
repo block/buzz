@@ -31,8 +31,7 @@ pub struct RuntimeFileConfigSubset {
     pub provider: Option<String>,
     /// Model set in the harness config file, if any.
     pub model: Option<String>,
-    /// Flat credential env keys found in the harness config file's `extra` map
-    /// (e.g. `DATABRICKS_HOST`).  Only non-empty values are included.
+    /// Flat credential env keys in the harness config file's `extra` map (e.g. `DATABRICKS_HOST`); only non-empty values included.
     pub satisfied_env_keys: Vec<String>,
 }
 

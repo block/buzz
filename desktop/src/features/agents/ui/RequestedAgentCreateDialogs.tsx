@@ -55,7 +55,13 @@ export function RequestedAgentCreateDialogs() {
             personas.handleSubmit(input, intent, backendIntent, targetChannel)
           }
           runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimesLoading={personas.acpRuntimesQuery.isLoading}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
         />
       ) : null}
       {personas.createdAgent ? (
