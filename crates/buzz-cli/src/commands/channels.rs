@@ -279,8 +279,13 @@ pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(),
     Ok(())
 }
 
+fn select_channel_uuid(channel_uuid: Option<Uuid>) -> Uuid {
+    channel_uuid.unwrap_or_else(Uuid::new_v4)
+}
+
 pub async fn cmd_create_channel(
     client: &BuzzClient,
+    channel_uuid: Option<Uuid>,
     name: &str,
     channel_type: &str,
     visibility: &str,
@@ -306,7 +311,7 @@ pub async fn cmd_create_channel(
 
     let ttl = ttl.map(validate_ttl_seconds).transpose()?;
 
-    let channel_uuid = Uuid::new_v4();
+    let channel_uuid = select_channel_uuid(channel_uuid);
 
     let vis = match visibility {
         "open" => buzz_sdk::Visibility::Open,
@@ -654,6 +659,7 @@ async fn build_roster_resolution(
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_create_channel_from_template(
     client: &BuzzClient,
+    channel_uuid: Option<Uuid>,
     name: &str,
     template_name: &str,
     templates_file: Option<&str>,
@@ -696,7 +702,7 @@ pub async fn cmd_create_channel_from_template(
 
     let resolved = build_roster_resolution(client, &owner, &template.agents).await?;
 
-    let channel_uuid = Uuid::new_v4();
+    let channel_uuid = select_channel_uuid(channel_uuid);
     let vis = match visibility {
         "open" => buzz_sdk::Visibility::Open,
         "private" => buzz_sdk::Visibility::Private,
@@ -1086,6 +1092,7 @@ pub async fn dispatch(
             limit,
         } => cmd_search_channels(client, &query, exact, include_archived, limit).await,
         ChannelsCmd::Create {
+            channel,
             name,
             channel_type,
             visibility,
@@ -1097,6 +1104,7 @@ pub async fn dispatch(
             if let Some(template_name) = template {
                 cmd_create_channel_from_template(
                     client,
+                    channel,
                     &name,
                     &template_name,
                     templates_file.as_deref(),
@@ -1115,6 +1123,7 @@ pub async fn dispatch(
                     visibility.ok_or_else(|| CliError::Usage("--visibility is required".into()))?;
                 cmd_create_channel(
                     client,
+                    channel,
                     &name,
                     &channel_type.to_string(),
                     &visibility.to_string(),
@@ -1178,15 +1187,31 @@ mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
         finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        select_channel_uuid, validate_ttl_seconds, ArchivedExclusion, ChannelSummary,
+        ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
     use serde_json::json;
+    use uuid::Uuid;
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
         json!({ "tags": tags })
+    }
+
+    #[test]
+    fn select_channel_uuid_preserves_an_explicit_uuid() {
+        let explicit = Uuid::parse_str("11111111-2222-4333-8444-555555555555")
+            .expect("test channel UUID is valid");
+
+        assert_eq!(select_channel_uuid(Some(explicit)), explicit);
+    }
+
+    #[test]
+    fn select_channel_uuid_defaults_to_uuid_v4() {
+        let generated = select_channel_uuid(None);
+
+        assert_eq!(generated.get_version_num(), 4);
     }
 
     #[test]

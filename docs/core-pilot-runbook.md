@@ -7,11 +7,14 @@ MNPI, PII, attachments, or Azure deployment. The frozen scorecard in
 
 ## Prerequisites
 
-Use Windows with Docker Desktop running and WSL available. In WSL, build the
-five required release binaries exactly once:
+Use Windows with Docker Desktop running, Docker Compose v2.24.4 or newer, and
+WSL available. Keep at least 40 GiB free on the Windows host before the first
+native/release build; the WSL virtual disk can grow by roughly 27 GiB, and host
+exhaustion can remount its ext4 filesystem read-only. In WSL, build the five
+required release binaries exactly once:
 
 ```bash
-cd /home/blake/src/buzz-core-core-pilot
+cd ~/src/buzz-core
 . ./bin/activate-hermit
 cargo build --release \
   -p buzz-relay \
@@ -30,8 +33,11 @@ The scripts never build or install software. Run the deterministic bootstrap:
 ./scripts/core-pilot-bootstrap.sh
 ```
 
-Bootstrap starts only Postgres, Redis, MinIO, and MinIO initialization; runs
-migrations; generates four stable keypairs once; closes relay membership;
+Bootstrap starts only Postgres, Redis, MinIO, and MinIO initialization through
+the Core Compose lock. Its four images are immutable-digest pinned and every
+published backing-service port is bound to `127.0.0.1`; PostgreSQL uses host
+port `15432` to avoid collisions with a Windows PostgreSQL service. Bootstrap runs
+migrations, generates four stable keypairs once, closes relay membership,
 creates the `Core Banker`, `Core Research Partner`, and `Synthetic Non-Owner`
 profiles; and creates/reuses the private `core-research` and `core-control`
 channels. It writes restrictive files to `~/.config/core-buzz` and
@@ -53,6 +59,156 @@ Do not paste any secret into chat or a shell command. Do not rename, remove, or
 manually regenerate the `CORE_*` identity records. The scripts allowlist and
 parse the records without sourcing them or printing their values.
 
+## Move the pilot to a new VM
+
+Do not copy a development worktree as the migration mechanism. A worktree's
+`.git` file points back to Git metadata elsewhere on the source VM, and build
+outputs, dependency directories, logs, PID markers, and Docker data are neither
+portable nor part of the pilot state. The supported transfer has two payloads:
+an incremental Git bundle and a GPG-symmetric encrypted identity/channel record.
+`SHA256SUMS` accompanies them so copy corruption can be detected.
+
+On the source VM, stop the pilot, require a clean committed checkout, and create
+the transfer under the WSL home directory. The destination path must be absolute,
+outside the repository, and nonexistent. Do not create it first, and do not use
+`/mnt/c`: DrvFS permission mapping may be too permissive for private-state checks.
+
+```bash
+cd ~/src/buzz-core
+./scripts/core-pilot-stop.sh
+git status --short
+transfer="$HOME/core-pilot-transfer-$(date +%Y%m%d-%H%M%S)"
+./scripts/core-pilot-export.sh --output "$transfer"
+(cd "$transfer" && sha256sum --check --strict SHA256SUMS)
+printf 'Record separately — expected source commit: %s\n' "$(git rev-parse HEAD)"
+printf 'Record separately — expected bundle SHA-256: %s\n' \
+  "$(sha256sum "$transfer/core-pilot.bundle" | awk '{print $1}')"
+```
+
+GPG requests the symmetric passphrase through pinentry. Use a strong unique
+passphrase and keep it separate from the transfer. Never put it in an argument or
+environment variable. For controlled automation, both scripts accept
+`--passphrase-fd N` for an already-open descriptor numbered 3 or higher.
+
+Export fails if `agent.env` or `channels.env` is absent. That means no portable
+pilot identity exists yet; do not invent placeholder state. For a source-only
+move, create a transfer directory containing the committed branch bundle, its
+exact source commit, and checksums, then let bootstrap create the first
+identities on the new VM. There is no prior identity or channel continuity to
+preserve in that case. Record the printed expected source commit separately
+from the copied payload; it is the trusted value to compare on the new VM.
+
+```bash
+cd ~/src/buzz-core
+base=b7bb15122e8a2053b545dc2210afc167f6c7a626
+transfer="$HOME/core-pilot-source-transfer-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$transfer"
+test -z "$(git status --porcelain --untracked-files=no)"
+git merge-base --is-ancestor "$base" HEAD
+git rev-parse HEAD > "$transfer/SOURCE_COMMIT"
+git bundle create "$transfer/core-pilot.bundle" HEAD "^$base"
+git bundle verify "$transfer/core-pilot.bundle"
+(cd "$transfer" && sha256sum core-pilot.bundle SOURCE_COMMIT > SHA256SUMS)
+(cd "$transfer" && sha256sum --check --strict SHA256SUMS)
+printf 'Record separately — expected source commit: %s\n' "$(cat "$transfer/SOURCE_COMMIT")"
+printf 'Record separately — expected bundle SHA-256: %s\n' \
+  "$(sha256sum "$transfer/core-pilot.bundle" | awk '{print $1}')"
+```
+
+After export completes, the encrypted directory may be copied through Windows
+Explorer from `\\wsl.localhost\<distribution>\home\<wsl-user>\...` to the secure
+transport. On the new VM, copy the complete directory into the new WSL user's
+home, then restore restrictive permissions. Before fetching or building bundle
+code, compare its digest and `HEAD` with the two values recorded separately on
+the source VM. A co-located `SHA256SUMS` detects copy damage but is not proof of
+provenance.
+
+```bash
+transfer="$HOME/core-pilot-transfer"
+chmod 700 "$transfer"
+find "$transfer" -maxdepth 1 -type f -exec chmod 600 {} +
+(cd "$transfer" && sha256sum --check --strict SHA256SUMS)
+test "$(sha256sum "$transfer/core-pilot.bundle" | awk '{print $1}')" = \
+  '<expected-bundle-sha256-from-source-VM>'
+test "$(git bundle list-heads "$transfer/core-pilot.bundle" HEAD | awk '{print $1}')" = \
+  '<expected-source-commit-from-source-VM>'
+```
+
+For a source-only transfer, also compare `SOURCE_COMMIT` with the value recorded
+separately on the source VM before using the bundle:
+
+```bash
+test "$(cat "$transfer/SOURCE_COMMIT")" = '<expected-source-commit-from-source-VM>'
+```
+
+Create a fresh public checkout and make the bundle prerequisite available. The
+default prerequisite is commit
+`b7bb15122e8a2053b545dc2210afc167f6c7a626`; it is also recorded in both the
+bundle header and encrypted metadata. A normal full clone of `block/buzz`
+contains it. Fetch the incremental `HEAD` into a new local branch:
+
+```bash
+git clone https://github.com/block/buzz.git ~/src/buzz-core
+cd ~/src/buzz-core
+git cat-file -e b7bb15122e8a2053b545dc2210afc167f6c7a626^{commit}
+git bundle verify "$transfer/core-pilot.bundle"
+git fetch "$transfer/core-pilot.bundle" HEAD:refs/heads/core-pilot-restored
+git switch core-pilot-restored
+if test -f "$transfer/SOURCE_COMMIT"; then
+  test "$(git rev-parse HEAD)" = "$(cat "$transfer/SOURCE_COMMIT")"
+fi
+```
+
+Build fresh dependencies and release binaries; do not transfer `target`,
+`node_modules`, Hermit caches, release binaries, Docker volumes, uploaded media,
+or message history:
+
+```bash
+. ./bin/activate-hermit
+cargo build --release \
+  -p buzz-relay \
+  -p buzz-admin \
+  -p buzz-cli \
+  -p buzz-acp \
+  -p buzz-agent
+```
+
+Import private state only when `core-pilot-state.gpg` exists, and only after
+checking out the bundle commit. Import verifies the bundle
+prerequisite and tip, exact source commit, reviewed-prompt hash, artifact
+checksums, schema, identity fields, and channel UUIDs before it writes anything.
+It creates current-user-owned mode-0600 `agent.env` and `channels.env`, leaves
+the OpenAI key empty, is safe to repeat before the destination credential is
+filled, and refuses to replace different existing state. Once the local API key
+is populated, a repeat import deliberately refuses rather than overwriting it.
+
+```bash
+if test -f "$transfer/core-pilot-state.gpg"; then
+  ./scripts/core-pilot-import.sh --source "$transfer"
+fi
+./scripts/core-pilot-bootstrap.sh
+```
+
+Bootstrap reconstructs fresh Postgres/Redis/MinIO state, relay membership,
+profiles, channels using the imported UUIDs, and channel memberships. It does
+not restore messages, media, logs, processes, or Docker data. Stop and investigate
+instead of deleting anything if the new VM already has Buzz Docker volumes or
+different pilot state.
+
+Before retiring the old VM, compare only the non-secret public keys and channel
+UUIDs, enter the OpenAI credential locally with the editor procedure above, then
+run preflight/start and the synthetic scope checks. Keep the old VM and encrypted
+transfer until the restored identities, both exact channel UUIDs, relay/channel
+memberships, Desktop connection, and restart behavior are verified.
+
+Install Buzz Desktop fresh on the destination Windows VM; do not copy the
+installed executable directory from the old VM. Use the same approved release
+from <https://github.com/block/buzz/releases>, verify its digest and scan it with
+the destination's Windows Security policy, then install it. Before using the
+helper below, confirm that both `%LOCALAPPDATA%\Buzz\buzz-desktop.exe` and
+`%LOCALAPPDATA%\Buzz\buzz.exe` exist. The source tree, bundle, and Linux release
+build do not install these Windows files.
+
 ## Start and connect
 
 From WSL at the repository root, run:
@@ -64,8 +220,8 @@ From WSL at the repository root, run:
 
 Preflight validates all five binaries, exact model/publishing restrictions,
 stable identity/channel bindings, the reviewed prompt hash, secret-file
-metadata, and the OpenAI credential gate. Start runs only
-`docker compose up -d postgres redis minio minio-init`, verifies the relay, and
+metadata, and the OpenAI credential gate. Start runs only the four locked
+services through the Core Compose override, verifies the relay, and
 does not report ready until one eager agent pool is initialized, ACP is
 connected, at least two memberships are discovered, only `core-research` is
 subscribed, and online presence is published.
@@ -79,15 +235,18 @@ tail -n 100 ~/.local/state/core-buzz/relay.log
 tail -n 100 ~/.local/state/core-buzz/acp.log
 ```
 
-Verify and launch the already-installed signed Buzz Desktop from Windows
-PowerShell using the checked-in helper. It targets the installed
+Verify and launch the already-installed, digest- and Defender-checked Buzz
+Desktop from Windows PowerShell using the checked-in helper. It targets the installed
 `buzz-desktop.exe`, verifies both Desktop and CLI installation files, refuses
 an existing single-instance process, and confirms the new process remains
 running before it clears the banker environment and opens the Core Lab link:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  "\\wsl.localhost\Ubuntu\home\blake\src\buzz-core-core-pilot\scripts\core-pilot-desktop.ps1"
+$Distro = 'Ubuntu'
+$WslUser = (wsl.exe -d $Distro -- whoami).Trim()
+$Script = "\\wsl.localhost\$Distro\home\$WslUser\src\buzz-core\scripts\core-pilot-desktop.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script `
+  -WslDistribution $Distro
 ```
 
 In the Desktop add-community screen, confirm the prefilled relay and the name

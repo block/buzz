@@ -1,0 +1,21 @@
+# Core's local pilot uses immutable infrastructure images and loopback-only
+# published ports. Keep this as an override of the upstream development stack.
+services:
+  postgres:
+    image: postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    ports: !override
+      - "127.0.0.1:15432:5432"
+
+  redis:
+    image: redis@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    ports: !override
+      - "127.0.0.1:6379:6379"
+
+  minio:
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    ports: !override
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  minio-init:
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727

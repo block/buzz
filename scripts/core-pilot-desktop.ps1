@@ -1,3 +1,9 @@
+param(
+  [ValidateNotNullOrEmpty()]
+  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$')]
+  [string]$WslDistribution = 'Ubuntu'
+)
+
 $ErrorActionPreference = 'Stop'
 
 Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:3000/_readiness' | Out-Null
@@ -14,7 +20,7 @@ if (Get-Process -Name 'buzz-desktop' -ErrorAction SilentlyContinue) {
   throw 'Close the existing buzz-desktop process, then run this script again.'
 }
 
-$banker = (& wsl.exe -d Ubuntu -- bash -lc `
+$banker = (& wsl.exe -d $WslDistribution -- bash -lc `
   'awk -F= ''$1=="CORE_BANKER_PRIVATE_KEY" {printf "%s",$2}'' "$HOME/.config/core-buzz/agent.env"').Trim()
 if ([string]::IsNullOrWhiteSpace($banker)) {
   throw 'Core banker identity is unavailable.'

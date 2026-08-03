@@ -143,7 +143,28 @@ Add reviewed, non-secret assets for launching and evaluating the pilot.
 6. Test launch/preflight behavior through observable exit codes/output and
    controlled temporary inputs. Do not test prose by grepping exact text.
 
-### Task 5: Whole-branch integration and local launch
+### Task 5: Make the pilot portable between VMs
+
+1. Add an optional explicit UUID to `buzz channels create`; keep UUID v4
+   generation as the default. Bootstrap must honor imported channel UUIDs and
+   fail closed if an existing name or UUID maps to a different channel.
+2. Add export/import scripts that produce two artifacts: a verified incremental
+   Git bundle for the Core branch and a GPG-symmetric encrypted, versioned state
+   record. The private state contains only the four stable identity keypairs,
+   both channel UUIDs, source commit, and reviewed-prompt hash.
+3. Explicitly exclude the OpenAI credential, generated pilot configuration,
+   logs, PID markers, Docker volumes, uploaded media, message history, build
+   outputs, package caches, and dependency directories.
+4. Import must reject unknown or duplicate fields, malformed identities or
+   UUIDs, source-commit or prompt-hash mismatches, unsafe paths, symlinks,
+   permissive destination state, and attempts to overwrite different existing
+   identities. Re-importing identical state must be safe.
+5. Document the clean-VM sequence: clone the public base, fetch the incremental
+   bundle, build dependencies and release binaries, import private state,
+   bootstrap fresh containers, add the OpenAI credential locally, and verify
+   identities/channel UUIDs before retiring the old VM.
+
+### Task 6: Whole-branch integration and local launch
 
 1. Run focused tests after each task, then repository formatting and the full
    relevant unit/CI gates under Hermit.

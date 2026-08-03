@@ -53,7 +53,11 @@ elif (exec 3<>/dev/tcp/127.0.0.1/3000) 2>/dev/null; then
 fi
 
 cd "$PILOT_REPO_ROOT"
-docker compose up -d postgres redis minio minio-init
+compose_lock="$PILOT_REPO_ROOT/config/core-pilot/docker-compose.lock.yml"
+[[ -f "$compose_lock" && ! -L "$compose_lock" ]] \
+  || { pilot_die 'Core Docker Compose lock is missing or unsafe'; exit 1; }
+docker compose -f "$PILOT_REPO_ROOT/docker-compose.yml" -f "$compose_lock" \
+  up -d postgres redis minio minio-init
 
 relay_log="$PILOT_STATE_DIR/relay.log"
 acp_log="$PILOT_STATE_DIR/acp.log"

@@ -53,6 +53,8 @@ make_fixture() {
   cp "$repo_root/scripts/core-pilot-start.sh" "$fixture/scripts/"
   cp "$repo_root/scripts/core-pilot-stop.sh" "$fixture/scripts/"
   cp "$repo_root/scripts/core-pilot-lib.sh" "$fixture/scripts/"
+  cp "$repo_root/docker-compose.yml" "$fixture/"
+  cp "$repo_root/config/core-pilot/docker-compose.lock.yml" "$fixture/config/core-pilot/"
   cp "$repo_root/config/core-pilot/core-research-partner.md" "$fixture/config/core-pilot/"
   cp "$repo_root/config/core-pilot/core-pilot.env.example" "$fixture/pilot.env"
   sed -i "s/$template_channel/$pilot_channel/; s/$template_owner/$pilot_owner/" "$fixture/pilot.env"
@@ -157,6 +159,17 @@ assert_success "valid preflight accepts the constrained pilot" \
   pilot "$fixture/scripts/core-pilot-preflight.sh"
 [[ "$ASSERT_OUTPUT" != *SENTINEL_OPENAI_SECRET* && "$ASSERT_OUTPUT" != *"$valid_nostr_secret"* ]] \
   || fail "valid preflight must not print secrets"
+
+sed -i \
+  -e 's/^CORE_AGENT_PUBLIC_KEY=.*/CORE_AGENT_PUBLIC_KEY=e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13/' \
+  -e 's/^CORE_NON_OWNER_PUBLIC_KEY=.*/CORE_NON_OWNER_PUBLIC_KEY=f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9/' \
+  "$pilot_secrets"
+assert_failure_without_secret "swapped pilot public/private identity pairs are rejected" SENTINEL_OPENAI_SECRET \
+  pilot "$fixture/scripts/core-pilot-preflight.sh"
+sed -i \
+  -e 's/^CORE_AGENT_PUBLIC_KEY=.*/CORE_AGENT_PUBLIC_KEY=f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9/' \
+  -e 's/^CORE_NON_OWNER_PUBLIC_KEY=.*/CORE_NON_OWNER_PUBLIC_KEY=e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13/' \
+  "$pilot_secrets"
 
 cp "$fixture/config/core-pilot/core-research-partner.md" "$fixture/alternate-prompt.md"
 sed -i 's#BUZZ_ACP_SYSTEM_PROMPT_FILE=.*#BUZZ_ACP_SYSTEM_PROMPT_FILE=alternate-prompt.md#' "$fixture/pilot.env"
@@ -324,8 +337,9 @@ grep -q '^agent_model=gpt-5.6-terra$' "$fixture/acp.env" \
   || fail "ACP must launch eager with the exact model and stable agent identity"
 assert_success "repeat start is idempotent" pilot "$fixture/scripts/core-pilot-start.sh" > /dev/null
 
+expected_compose_call="compose -f $fixture/docker-compose.yml -f $fixture/config/core-pilot/docker-compose.lock.yml up -d postgres redis minio minio-init"
 if [[ "$(wc -l < "$fixture/docker.calls")" -eq 1 ]] \
-  && [[ "$(cat "$fixture/docker.calls")" == "compose up -d postgres redis minio minio-init" ]]; then
+  && [[ "$(cat "$fixture/docker.calls")" == "$expected_compose_call" ]]; then
   pass "start uses only the approved compose services once"
 else
   fail "start must use only the approved compose services once"

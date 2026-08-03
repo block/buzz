@@ -70,11 +70,25 @@ pilot_validate_nostr_key "${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}"
 pilot_validate_nostr_key "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}"
 pilot_validate_nostr_key "${PILOT_ENV[CORE_AGENT_PRIVATE_KEY]}"
 pilot_validate_nostr_key "${PILOT_ENV[CORE_NON_OWNER_PRIVATE_KEY]}"
+pilot_validate_identity_role_separation PILOT_ENV
+pilot_validate_identity_keypairs PILOT_ENV
+
+desired_research_channel=
+desired_second_channel=
+if [[ -e "$PILOT_CHANNELS_FILE" || -L "$PILOT_CHANNELS_FILE" ]]; then
+  pilot_load_channels
+  desired_research_channel="${PILOT_CHANNELS[CORE_RESEARCH_CHANNEL_ID],,}"
+  desired_second_channel="${PILOT_CHANNELS[CORE_SECOND_CHANNEL_ID],,}"
+fi
 
 command -v docker >/dev/null 2>&1 || { pilot_die 'Docker is required to bootstrap the pilot'; exit 1; }
 command -v jq >/dev/null 2>&1 || { pilot_die 'jq is required to bootstrap the pilot'; exit 1; }
+compose_lock="$PILOT_REPO_ROOT/config/core-pilot/docker-compose.lock.yml"
+[[ -f "$compose_lock" && ! -L "$compose_lock" ]] \
+  || { pilot_die 'Core Docker Compose lock is missing or unsafe'; exit 1; }
 cd "$PILOT_REPO_ROOT"
-docker compose up -d postgres redis minio minio-init
+docker compose -f "$PILOT_REPO_ROOT/docker-compose.yml" -f "$compose_lock" \
+  up -d postgres redis minio minio-init
 for container in buzz-postgres buzz-redis buzz-minio; do
   healthy=false
   for _ in $(seq 1 60); do
@@ -91,7 +105,7 @@ run_admin() {
   (
     pilot_clear_environment
     export PATH="$PILOT_BIN_DIR:/usr/bin:/bin"
-    export DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:5432/buzz
+    export DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:15432/buzz
     export REDIS_URL=redis://127.0.0.1:6379
     export RELAY_URL=ws://127.0.0.1:3000
     export BUZZ_RELAY_PRIVATE_KEY="${PILOT_ENV[CORE_RELAY_PRIVATE_KEY]}"
@@ -117,7 +131,7 @@ if ! relay_ready; then
     pilot_clear_environment
     export PATH="$PILOT_BIN_DIR:/usr/bin:/bin"
     export RUST_LOG=buzz_relay=info
-    export DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:5432/buzz
+    export DATABASE_URL=postgres://buzz:buzz_dev@127.0.0.1:15432/buzz
     export REDIS_URL=redis://127.0.0.1:6379
     export RELAY_URL=ws://127.0.0.1:3000
     export BUZZ_BIND_ADDR=127.0.0.1:3000
@@ -159,22 +173,44 @@ buzz_as "${PILOT_ENV[CORE_AGENT_PRIVATE_KEY]}" users set-profile --name 'Core Re
 buzz_as "${PILOT_ENV[CORE_NON_OWNER_PRIVATE_KEY]}" users set-profile --name 'Synthetic Non-Owner' >/dev/null
 
 find_or_create_channel() {
-  local name="$1" description="$2" matches count result
+  local name="$1" description="$2" desired_id="${3:-}" matches count result existing_id by_id created_id
+  local -a create_args
   matches="$(buzz_as "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" channels search --query "$name" --exact)"
   count="$(jq -er 'length' <<< "$matches")" || return 1
   case "$count" in
     0)
-      result="$(buzz_as "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" channels create \
-        --name "$name" --type stream --visibility private --description "$description")"
-      jq -er 'select(.accepted == true) | .channel_id' <<< "$result"
+      create_args=(channels create --name "$name" --type stream --visibility private --description "$description")
+      if [[ -n "$desired_id" ]]; then
+        by_id="$(buzz_as "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" channels get --channel "$desired_id")" || return 1
+        jq -e '. == null' >/dev/null <<< "$by_id" \
+          || { pilot_die "channel name/UUID conflict for $name"; return 1; }
+        create_args+=(--channel "$desired_id")
+      fi
+      result="$(buzz_as "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" "${create_args[@]}")"
+      created_id="$(jq -er 'select(.accepted == true) | .channel_id' <<< "$result")" || return 1
+      [[ -z "$desired_id" || "$created_id" == "$desired_id" ]] \
+        || { pilot_die "channel name/UUID conflict for $name"; return 1; }
+      printf '%s\n' "$created_id"
       ;;
-    1) jq -er '.[0].channel_id' <<< "$matches" ;;
+    1)
+      existing_id="$(jq -er '.[0].channel_id' <<< "$matches")" || return 1
+      if [[ -n "$desired_id" ]]; then
+        [[ "$existing_id" == "$desired_id" ]] \
+          || { pilot_die "channel name/UUID conflict for $name"; return 1; }
+        by_id="$(buzz_as "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" channels get --channel "$desired_id")" || return 1
+        jq -e --arg id "$desired_id" --arg name "$name" \
+          '. != null and .channel_id == $id and ((.name // "") | ascii_downcase) == ($name | ascii_downcase)' \
+          >/dev/null <<< "$by_id" \
+          || { pilot_die "channel name/UUID conflict for $name"; return 1; }
+      fi
+      printf '%s\n' "$existing_id"
+      ;;
     *) pilot_die "multiple exact channel matches for $name"; return 1 ;;
   esac
 }
 
-research_channel="$(find_or_create_channel core-research 'Core public/synthetic research pilot')"
-second_channel="$(find_or_create_channel core-control 'Synthetic second-channel scope control')"
+research_channel="$(find_or_create_channel core-research 'Core public/synthetic research pilot' "$desired_research_channel")"
+second_channel="$(find_or_create_channel core-control 'Synthetic second-channel scope control' "$desired_second_channel")"
 [[ "$research_channel" != "$second_channel" ]] || { pilot_die 'pilot channels must be distinct'; exit 1; }
 for channel in "$research_channel" "$second_channel"; do
   buzz_as "${PILOT_ENV[CORE_BANKER_PRIVATE_KEY]}" channels add-member --channel "$channel" \
