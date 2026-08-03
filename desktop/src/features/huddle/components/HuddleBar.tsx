@@ -4,6 +4,7 @@ import {
   Bot,
   Captions,
   MessageSquareText,
+  PictureInPicture2,
   PhoneOff,
   SmilePlus,
 } from "lucide-react";
@@ -31,7 +32,9 @@ import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
+import { VoiceOverlayBridge } from "./VoiceOverlayBridge";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { voiceOverlayMediaSnapshot } from "../lib/voiceOverlayProtocol";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
 type HuddleState = {
@@ -504,14 +507,14 @@ export function HuddleBar({
       if (backendClean) {
         setState(null);
       } else {
-        locallyLeavingChannelRef.current = null;
-        stateGenerationRef.current += 1;
+        throw new Error("Could not leave the huddle cleanly.");
       }
       // If cleanup failed, keep the bar visible so the user can retry.
     } catch (e) {
       locallyLeavingChannelRef.current = null;
       stateGenerationRef.current += 1;
       console.error("Failed to leave huddle:", e);
+      throw e;
     } finally {
       setIsLeaving(false);
     }
@@ -529,6 +532,18 @@ export function HuddleBar({
       const message = e instanceof Error ? e.message : String(e);
       setTranscriptError(`Transcript failed: ${message}`);
       console.error("Failed to toggle huddle transcript:", e);
+      throw e;
+    }
+  }
+
+  async function handleToggleTts() {
+    try {
+      await invoke("set_tts_enabled", { enabled: !ttsEnabled });
+      const nextState = await invoke<HuddleState>("get_huddle_state");
+      setState(nextState);
+    } catch (error) {
+      console.error("Failed to toggle TTS:", error);
+      throw error;
     }
   }
 
@@ -547,6 +562,31 @@ export function HuddleBar({
         className,
       )}
     >
+      <VoiceOverlayBridge
+        snapshot={voiceOverlayMediaSnapshot({
+          version: 1,
+          phase: isDrawerClosing ? "idle" : barState.phase,
+          participantCount: barState.participants.length,
+          agentCount: barState.agent_pubkeys.length,
+          ttsEnabled,
+          transcriptionEnabled,
+          isLeaving,
+          error: huddleError,
+          isMuted,
+          micConnected,
+          micLevel,
+          pttActive,
+          voiceInputMode,
+        })}
+        onLeave={handleLeave}
+        onSetVoiceInputMode={setVoiceInputMode}
+        onShowMain={() =>
+          invoke("voice_overlay_window", { action: "show_main" })
+        }
+        onToggleMute={() => setIsMuted((muted) => !muted)}
+        onToggleTranscription={handleToggleTranscript}
+        onToggleTts={handleToggleTts}
+      />
       <div className="flex min-w-0 items-center gap-3 overflow-hidden">
         {/* Error banner */}
         {huddleError && (
@@ -649,19 +689,31 @@ export function HuddleBar({
               aecMissing && !headphonesHintDismissed && !isDrawerClosing
             }
             onHeadphonesHintDismiss={() => setHeadphonesHintDismissed(true)}
-            onToggleTts={async () => {
-              try {
-                await invoke("set_tts_enabled", { enabled: !ttsEnabled });
-                const s = await invoke<HuddleState>("get_huddle_state");
-                setState(s);
-              } catch (e) {
-                console.error("Failed to toggle TTS:", e);
-              }
-            }}
+            onToggleTts={() => void handleToggleTts().catch(() => {})}
             outputDevices={outputDevices}
             selectedOutputDevice={selectedOutputDevice}
             onSelectOutputDevice={setSelectedOutputDevice}
           />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label="Open floating voice controls"
+                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                onClick={() =>
+                  void invoke("voice_overlay_window", { action: "open" })
+                }
+                size="icon"
+                type="button"
+                variant="secondary"
+              >
+                <PictureInPicture2 className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="buzz-huddle-tooltip" side="top">
+              Float voice controls
+            </TooltipContent>
+          </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -761,7 +813,7 @@ export function HuddleBar({
                 }
                 aria-pressed={transcriptionEnabled}
                 className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                onClick={() => void handleToggleTranscript()}
+                onClick={() => void handleToggleTranscript().catch(() => {})}
                 size="icon"
                 type="button"
                 variant="ghost"
@@ -800,7 +852,7 @@ export function HuddleBar({
               className="h-12 gap-2 px-4"
               disabled={isLeaving}
               aria-busy={isLeaving}
-              onClick={() => void handleLeave()}
+              onClick={() => void handleLeave().catch(() => {})}
               size="sm"
               variant="destructive"
             >

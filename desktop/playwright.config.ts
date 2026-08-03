@@ -135,6 +135,7 @@ export default defineConfig({
         "**/inline-custom-harness.spec.ts",
         "**/where-to-run-config.spec.ts",
         "**/huddle-transcription.spec.ts",
+        "**/voice-overlay.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

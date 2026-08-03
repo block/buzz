@@ -1093,9 +1093,14 @@ declare global {
       command: string,
       payload?: Record<string, unknown>,
     ) => Promise<unknown>;
+    __BUZZ_E2E_EMIT_TAURI_EVENT__?: (
+      event: string,
+      payload?: unknown,
+    ) => Promise<void>;
     __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
       members: MockHuddleMemberSeed[];
       transcriptionEnabled: boolean;
+      phase?: "active" | "idle";
     }) => Promise<void>;
     __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
     /** Replace an existing feed item by id (or push if not found) and fire the updated event. */
@@ -2972,7 +2977,7 @@ let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
 
 type MockHuddleState = {
-  phase: "active";
+  phase: "active" | "idle";
   parent_channel_id: string;
   ephemeral_channel_id: string;
   participants: string[];
@@ -9635,16 +9640,21 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
+  window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = async (event, payload) => {
+    await emit(event, payload);
+  };
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
   window.__BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__ = async ({
     members,
     transcriptionEnabled,
+    phase,
   }) => {
     if (!mockHuddle) {
       throw new Error("No mock huddle is configured.");
     }
     mockHuddle.members = structuredClone(members);
     mockHuddle.state.transcription_enabled = transcriptionEnabled;
+    if (phase) mockHuddle.state.phase = phase;
     refreshMockHuddleMembership();
     persistMockHuddle();
     await emitMockHuddleState();
@@ -9954,6 +9964,8 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
+      case "voice_overlay_window":
+        return null;
       case "get_huddle_state": {
         const snapshot = mockHuddle ? structuredClone(mockHuddle.state) : null;
         const delayMs = activeConfig?.mock?.huddleStateReadDelayMs ?? 0;
