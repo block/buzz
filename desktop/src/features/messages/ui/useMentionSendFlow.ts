@@ -542,7 +542,7 @@ export function useMentionSendFlow({
               [...draft.savedSpoileredAttachmentUrls],
             );
           }
-        } catch {
+        } catch (error) {
           // Only restore the composer content if the user is still on the
           // channel that originated the send.
           if (draft.capturedChannelId === channelIdRef.current) {
@@ -554,6 +554,14 @@ export function useMentionSendFlow({
               new Set(draft.savedSpoileredAttachmentUrls),
             );
           }
+
+          // A relay rejection or publish timeout must never look like a
+          // successful send. Keep a visible, durable-in-view receipt alongside
+          // the restored draft so the user can retry deliberately.
+          const message =
+            error instanceof Error ? error.message : "Failed to send message.";
+          setNonMemberPromptError(message);
+          toast.error(message);
         }
       } finally {
         isCompleteSendPendingRef.current = false;

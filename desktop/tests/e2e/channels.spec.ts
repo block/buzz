@@ -972,6 +972,28 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
     .toBeNull();
 });
 
+test("shows a relay failure and restores the draft in an existing DM", async ({
+  page,
+}) => {
+  const sendError = "Mock existing DM publish failed.";
+  const message = "@Fizz please inspect this";
+  await installMockBridge(page, {
+    sendMessageErrors: [sendError],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill(message);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByText(sendError).first()).toBeVisible();
+  await expect(input).toContainText(message);
+  await expect(
+    page.getByTestId("message-timeline").getByText(message, { exact: true }),
+  ).toHaveCount(0);
+});
+
 test("drops an expanded DM after the first message fails", async ({ page }) => {
   const retryMessage = "Retry without the agent";
   const sendError = "Mock first DM send failed.";
