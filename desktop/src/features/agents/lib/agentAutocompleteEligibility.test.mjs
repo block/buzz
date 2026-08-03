@@ -6,6 +6,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
+  isAgentIdentityOwnedByCurrentUser,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -186,6 +187,40 @@ test("isAgentIdentityInManagedList: keeps an owner-linked member identity for it
       },
       new Set(),
       CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("isAgentIdentityOwnedByCurrentUser: matches only the current owner's verified agent identity", () => {
+  assert.equal(
+    isAgentIdentityOwnedByCurrentUser(
+      {
+        isAgent: true,
+        ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+      },
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityOwnedByCurrentUser(
+      { isAgent: true, ownerPubkey: OTHER_OWNER_PUBKEY },
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  assert.equal(
+    isAgentIdentityOwnedByCurrentUser(
+      { isAgent: false, ownerPubkey: CURRENT_PUBKEY },
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  assert.equal(
+    isAgentIdentityOwnedByCurrentUser(
+      { isAgent: true, ownerPubkey: CURRENT_PUBKEY },
+      null,
     ),
     false,
   );

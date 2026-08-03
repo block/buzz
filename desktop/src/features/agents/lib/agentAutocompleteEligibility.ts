@@ -66,14 +66,27 @@ export function isAgentIdentityInManagedList(
 ) {
   const isOwnedByCurrentUser = Boolean(
     candidate.isMember === true &&
-      candidate.ownerPubkey &&
-      currentPubkey &&
-      normalizePubkey(candidate.ownerPubkey) === normalizePubkey(currentPubkey),
+      isAgentIdentityOwnedByCurrentUser(candidate, currentPubkey),
   );
   return (
     candidate.isAgent !== true ||
     managedAgentPubkeys.has(normalizePubkey(candidate.pubkey)) ||
     isOwnedByCurrentUser
+  );
+}
+
+export function isAgentIdentityOwnedByCurrentUser(
+  candidate: {
+    isAgent?: boolean;
+    ownerPubkey?: string | null;
+  },
+  currentPubkey?: string | null,
+) {
+  return Boolean(
+    candidate.isAgent === true &&
+      candidate.ownerPubkey &&
+      currentPubkey &&
+      normalizePubkey(candidate.ownerPubkey) === normalizePubkey(currentPubkey),
   );
 }
 

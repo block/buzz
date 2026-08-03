@@ -10,6 +10,7 @@ import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
   isAgentIdentityInManagedList,
+  isAgentIdentityOwnedByCurrentUser,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
@@ -282,7 +283,8 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys) &&
+          !isAgentIdentityOwnedByCurrentUser(candidate, currentPubkey))
       ) {
         return;
       }

@@ -3323,6 +3323,63 @@ test("members sidebar can invite and remove managed agents", async ({
   await expectMembersTriggerCount(page, initialMemberCount);
 });
 
+test("members sidebar can invite a verified viewer-owned relay agent", async ({
+  page,
+}) => {
+  const ownedAgentPubkey = "b".repeat(64);
+  const foreignAgentPubkey = "c".repeat(64);
+
+  await installMockBridge(page, {
+    managedAgents: [],
+    searchProfiles: [
+      {
+        pubkey: ownedAgentPubkey,
+        displayName: "Sats Codex R",
+        ownerPubkey: MOCK_IDENTITY_PUBKEY,
+        isAgent: true,
+      },
+      {
+        pubkey: foreignAgentPubkey,
+        displayName: "Sats Foreign",
+        ownerPubkey: "feedface".repeat(8),
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("Sats");
+
+  const ownedResult = page.getByTestId(
+    `channel-user-search-result-${ownedAgentPubkey}`,
+  );
+  await expect(ownedResult).toBeVisible();
+  await expect(ownedResult).toContainText("managed by you");
+  await expect(
+    page.getByTestId(`channel-user-search-result-${foreignAgentPubkey}`),
+  ).toHaveCount(0);
+
+  const commandsBeforeAdd = await readCommandPayloadLog(page);
+  await ownedResult.click();
+
+  await expect(
+    page.getByTestId(`sidebar-member-${ownedAgentPubkey}`),
+  ).toContainText("Sats Codex R");
+  expect(
+    (await readCommandPayloadLog(page)).slice(commandsBeforeAdd.length),
+  ).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        command: "add_channel_members",
+        payload: expect.objectContaining({
+          pubkeys: [ownedAgentPubkey],
+          role: "bot",
+        }),
+      }),
+    ]),
+  );
+});
+
 test("members sidebar pages add-member search beyond the first 50 people", async ({
   page,
 }) => {
