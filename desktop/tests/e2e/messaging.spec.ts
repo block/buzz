@@ -109,7 +109,72 @@ test.beforeEach(async ({ page }, testInfo) => {
         ],
       }
     : undefined;
-  await installMockBridge(page, mock);
+  await installMockBridge(page, mock, {
+    seedPreviewFeatures: !testInfo.title.includes("dictation experiment"),
+  });
+});
+
+test("voice dictation stays behind the dictation experiment", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  await page.evaluate(() => {
+    let dictationStarts = 0;
+    window.addEventListener("buzz:dictation-key-down", () => {
+      dictationStarts += 1;
+    });
+    (
+      window as typeof window & { __BUZZ_DICTATION_STARTS__?: () => number }
+    ).__BUZZ_DICTATION_STARTS__ = () => dictationStarts;
+  });
+
+  const dispatchDictationShortcut = () =>
+    page.evaluate(() => {
+      const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          ctrlKey: !isMac,
+          key: "d",
+          metaKey: isMac,
+        }),
+      );
+      window.dispatchEvent(
+        new KeyboardEvent("keyup", {
+          bubbles: true,
+          ctrlKey: !isMac,
+          key: "d",
+          metaKey: isMac,
+        }),
+      );
+    });
+  const getDictationStarts = () =>
+    page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __BUZZ_DICTATION_STARTS__?: () => number;
+          }
+        ).__BUZZ_DICTATION_STARTS__?.() ?? 0,
+    );
+
+  await page.getByTestId("message-input").click();
+  await dispatchDictationShortcut();
+  await expect.poll(getDictationStarts).toBe(0);
+
+  await openSettings(page, "experimental");
+  const dictationToggle = page.getByTestId("feature-toggle-voiceDictation");
+  await expect(dictationToggle).not.toBeChecked();
+  await dictationToggle.click();
+  await expect(dictationToggle).toBeChecked();
+
+  await page.getByTestId("settings-back-to-app").click();
+  await expect(page.getByTestId("message-input")).toBeVisible();
+  await page.getByTestId("message-input").click();
+  await dispatchDictationShortcut();
+  await expect.poll(getDictationStarts).toBe(1);
 });
 
 test("agent owner label identifies the agent and owner", async ({ page }) => {
