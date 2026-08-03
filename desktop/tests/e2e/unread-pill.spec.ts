@@ -198,9 +198,12 @@ test.describe("unread pill & divider", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
-    // The unread indicator only renders on inactive channels, so it appears
-    // once general is no longer the active channel.
-    await expect(page.getByTestId("channel-unread-general")).toBeVisible();
+    // Forced channel unread uses channel-name emphasis, not the thread dot.
+    await expect(page.getByTestId("channel-general")).toHaveCSS(
+      "font-weight",
+      "600",
+    );
+    await expect(page.getByTestId("channel-unread-dot-general")).toHaveCount(0);
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
