@@ -317,24 +317,25 @@ pub async fn process_video_upload(
     let (sha256_hex, file_size, first_bytes) = {
         use tokio_util::io::StreamReader;
 
-        // Convert axum::Error stream to std::io::Error stream for StreamReader.
-        // Box::pin is required because StreamReader needs a pinned stream.
-        // Belt-and-suspenders body-limit detection: axum wraps LengthLimitError
-        // in its error chain but doesn't expose the inner type for downcasting.
-        // We check multiple Display strings so that if axum changes the wording,
-        // at least one pattern still matches. test_body_limit_error_detection
-        // will catch a regression if ALL patterns break.
+        // Convert axum::Error stream to std::io::Error stream for StreamReader,
+        // preserving the error class in the io::ErrorKind so the read loop
+        // below can answer with the right status:
+        //   - idle-deadline trip (typed tower-http TimeoutError in the source
+        //     chain) -> TimedOut -> RequestBodyTimeout / 408
+        //   - body-limit breach -> WriteZero -> FileTooLarge / 413
+        //   - anything else -> Other -> Io / 500
+        // Limit detection is belt-and-suspenders by Display string because
+        // axum wraps LengthLimitError without exposing the inner type for
+        // downcasting (see classify_body_error + test_body_limit_error_detection).
         let mapped = futures_util::StreamExt::map(body_stream, |r| {
-            r.map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("length limit")
-                    || msg.contains("body limit")
-                    || msg.contains("LengthLimitError")
-                {
-                    std::io::Error::new(std::io::ErrorKind::WriteZero, msg)
-                } else {
-                    std::io::Error::other(e)
+            r.map_err(|e| match crate::error::classify_body_error(&e) {
+                crate::error::BodyErrorKind::IdleTimeout => {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, e)
                 }
+                crate::error::BodyErrorKind::LengthLimit => {
+                    std::io::Error::new(std::io::ErrorKind::WriteZero, e)
+                }
+                crate::error::BodyErrorKind::Other => std::io::Error::other(e),
             })
         });
         let mut reader = StreamReader::new(Box::pin(mapped));
@@ -356,6 +357,11 @@ pub async fn process_video_upload(
             use tokio::io::AsyncReadExt;
             let n = match reader.read(&mut buf).await {
                 Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    // Idle deadline fired — the client stopped sending bytes.
+                    // 408, never 500: this is not a storage failure.
+                    return Err(MediaError::RequestBodyTimeout);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WriteZero => {
                     // Body limit exceeded — return 413 instead of 500.
                     // `total` is bytes received before the cutoff — honest, not exact.
@@ -685,30 +691,78 @@ mod tests {
 
     #[test]
     fn test_body_limit_error_detection() {
-        // Verify that body-limit errors are mapped to WriteZero (which
-        // process_video_upload converts to FileTooLarge / 413).
-        // Must match the detection logic in process_video_upload exactly.
-        let detect = |msg: &str| -> std::io::ErrorKind {
-            if msg.contains("length limit")
-                || msg.contains("body limit")
-                || msg.contains("LengthLimitError")
-            {
-                std::io::ErrorKind::WriteZero
-            } else {
-                std::io::ErrorKind::Other
-            }
-        };
+        // Body-limit errors must classify as LengthLimit (which the upload
+        // paths convert to FileTooLarge / 413). Belt-and-suspenders by
+        // Display string because axum wraps LengthLimitError without
+        // exposing the type; if ALL patterns break this test catches it.
+        use crate::error::{classify_body_error, BodyErrorKind};
 
-        // All known patterns should trigger WriteZero.
+        let error = |msg: &str| std::io::Error::other(msg.to_string());
+
+        // All known patterns should classify as LengthLimit.
         assert_eq!(
-            detect("length limit exceeded"),
-            std::io::ErrorKind::WriteZero
+            classify_body_error(&error("length limit exceeded")),
+            BodyErrorKind::LengthLimit
         );
-        assert_eq!(detect("body limit exceeded"), std::io::ErrorKind::WriteZero);
-        assert_eq!(detect("LengthLimitError"), std::io::ErrorKind::WriteZero);
+        assert_eq!(
+            classify_body_error(&error("body limit exceeded")),
+            BodyErrorKind::LengthLimit
+        );
+        assert_eq!(
+            classify_body_error(&error("LengthLimitError")),
+            BodyErrorKind::LengthLimit
+        );
 
-        // Non-limit errors should remain as Other.
-        assert_eq!(detect("connection reset"), std::io::ErrorKind::Other);
+        // Non-limit errors should remain Other.
+        assert_eq!(
+            classify_body_error(&error("connection reset")),
+            BodyErrorKind::Other
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_body_error_detects_real_tower_http_timeout_by_type() {
+        // Drive a genuine tower_http::timeout::TimeoutBody over a body that
+        // never produces a frame, so the classified error is the real typed
+        // TimeoutError — not a hand-rolled stand-in — wrapped the way axum
+        // wraps body errors in production.
+        use crate::error::{classify_body_error, BodyErrorKind};
+        use http_body_util::BodyExt;
+
+        struct PendingBody;
+        impl http_body::Body for PendingBody {
+            type Data = Bytes;
+            type Error = std::convert::Infallible;
+            fn poll_frame(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+                std::task::Poll::Pending
+            }
+        }
+
+        // TimeoutBody pins a tokio Sleep and is never Unpin; Box::pin gives
+        // an Unpin handle that still implements Body, so BodyExt::frame works.
+        let mut body = Box::pin(tower_http::timeout::TimeoutBody::new(
+            std::time::Duration::from_millis(5),
+            PendingBody,
+        ));
+        let timeout_error = body
+            .frame()
+            .await
+            .expect("timeout should produce a frame result")
+            .expect_err("withheld body must error, not yield data");
+
+        let wrapped = axum::Error::new(timeout_error);
+        assert_eq!(
+            classify_body_error(&wrapped),
+            BodyErrorKind::IdleTimeout,
+            "typed TimeoutError must classify as IdleTimeout through the axum::Error wrapping"
+        );
+
+        // Control: an unrelated wrapped error must NOT classify as a timeout.
+        let other = axum::Error::new(std::io::Error::other("connection reset"));
+        assert_eq!(classify_body_error(&other), BodyErrorKind::Other);
     }
 
     #[test]
