@@ -2950,6 +2950,7 @@ const ZERO_SERVING_USAGE: MockServingUsage = {
 const mockMeshState: {
   admitted: boolean;
   models: Array<{ id: string; name: string | null }>;
+  activeModel: { id: string; name: string | null } | null;
   denyReason: string;
   nodeState: "off" | "running";
   nodeMode: "serve" | "client" | null;
@@ -2957,6 +2958,7 @@ const mockMeshState: {
 } = {
   admitted: true,
   models: [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }],
+  activeModel: null,
   denyReason: "not a relay member",
   nodeState: "off",
   nodeMode: null,
@@ -2966,6 +2968,7 @@ const mockMeshState: {
 function resetMockMesh() {
   mockMeshState.admitted = true;
   mockMeshState.models = [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }];
+  mockMeshState.activeModel = null;
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
@@ -9908,22 +9911,32 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
   };
+  const meshModelName = (modelId: string) => {
+    const basename = modelId.split("/").at(-1) ?? modelId;
+    return basename
+      .replace(/-(?:Instruct|GGUF)(?:-|:|$).*/, "")
+      .replace(/:.*/, "")
+      .replaceAll("-", " ");
+  };
   const meshNodeStatus = (
     state: "off" | "running",
     mode: "serve" | "client" | null,
-  ) => ({
-    state,
-    mode,
-    health: { status: "ok" as const, reason: null },
-    apiBaseUrl: state === "running" ? "http://127.0.0.1:9337/v1" : null,
-    consoleUrl: null,
-    modelId: mockMeshState.models[0]?.id ?? null,
-    modelName: mockMeshState.models[0]?.name ?? null,
-    inviteToken: state === "running" ? "mock-endpoint-addr" : null,
-    endpointId: state === "running" ? "mock-endpoint-id" : null,
-    deviceId: state === "running" ? "mock-endpoint-id" : null,
-    deviceName: state === "running" ? "Mock desktop" : null,
-  });
+  ) => {
+    const model = mockMeshState.activeModel ?? mockMeshState.models[0] ?? null;
+    return {
+      state,
+      mode,
+      health: { status: "ok" as const, reason: null },
+      apiBaseUrl: state === "running" ? "http://127.0.0.1:9337/v1" : null,
+      consoleUrl: null,
+      modelId: model?.id ?? null,
+      modelName: model?.name ?? null,
+      inviteToken: state === "running" ? "mock-endpoint-addr" : null,
+      endpointId: state === "running" ? "mock-endpoint-id" : null,
+      deviceId: state === "running" ? "mock-endpoint-id" : null,
+      deviceName: state === "running" ? "Mock desktop" : null,
+    };
+  };
   let mockImportedVoices: Array<{
     key: string;
     displayName: string;
@@ -10300,10 +10313,15 @@ export function maybeInstallE2eTauriMocks() {
         return mockMeshState.servingUsage;
       case "mesh_start_node": {
         const req = (
-          payload as { request?: { mode?: "serve" | "client" } } | null
+          payload as {
+            request?: { mode?: "serve" | "client"; modelId?: string };
+          } | null
         )?.request;
         mockMeshState.nodeState = "running";
         mockMeshState.nodeMode = req?.mode ?? "serve";
+        mockMeshState.activeModel = req?.modelId
+          ? { id: req.modelId, name: meshModelName(req.modelId) }
+          : (mockMeshState.models[0] ?? null);
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       }
       case "mesh_stop_node":
@@ -10317,6 +10335,7 @@ export function maybeInstallE2eTauriMocks() {
         }
         mockMeshState.nodeState = "off";
         mockMeshState.nodeMode = null;
+        mockMeshState.activeModel = null;
         return meshNodeStatus("off", null);
       case "get_identity": {
         const isLost =
