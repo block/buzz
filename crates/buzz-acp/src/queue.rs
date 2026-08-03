@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::DedupMode;
+use crate::pending_store::{PendingStore, StoredPendingEvent};
 
 /// Maximum events queued per channel before oldest events are dropped.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
@@ -168,6 +169,7 @@ pub struct EventQueue {
     /// Must be strictly greater than `max_turn_duration` so a turn running to
     /// the hard cap returns via `mark_complete` before the backstop fires.
     in_flight_deadline: Duration,
+    pending_store: Option<PendingStore>,
 }
 
 impl EventQueue {
@@ -189,7 +191,32 @@ impl EventQueue {
             cancel_reasons: HashMap::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
+            pending_store: None,
         }
+    }
+
+    /// Attach durable pending-work storage and restore unfinished events.
+    pub(crate) fn with_pending_store(mut self, store: PendingStore) -> Self {
+        for stored in store.restored() {
+            self.queues
+                .entry(stored.channel_id)
+                .or_default()
+                .push_back(QueuedEvent {
+                    channel_id: stored.channel_id,
+                    event: stored.event,
+                    received_at: Instant::now(),
+                    prompt_tag: stored.prompt_tag,
+                });
+        }
+        if !self.queues.is_empty() {
+            tracing::warn!(
+                events = self.queues.values().map(VecDeque::len).sum::<usize>(),
+                channels = self.queues.len(),
+                "restored unfinished work from durable pending journal"
+            );
+        }
+        self.pending_store = Some(store);
+        self
     }
 
     /// Set the in-flight backstop deadline from the configured max turn
@@ -237,18 +264,64 @@ impl EventQueue {
             );
             return false;
         }
+        if let Some(store) = self.pending_store.as_mut() {
+            if let Err(error) = store.record(StoredPendingEvent {
+                channel_id: event.channel_id,
+                event: event.event.clone(),
+                prompt_tag: event.prompt_tag.clone(),
+                accepted_at_nanos: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .min(u64::MAX as u128) as u64,
+            }) {
+                tracing::error!(
+                    channel_id = %event.channel_id,
+                    event_id = %event.event.id,
+                    %error,
+                    "refusing to acknowledge event because durable queue write failed"
+                );
+                return false;
+            }
+        }
         let queue = self.queues.entry(event.channel_id).or_default();
         // Enforce per-channel depth cap: drop oldest to make room.
-        if queue.len() >= MAX_PENDING_PER_CHANNEL {
-            queue.pop_front();
+        let dropped_id = if queue.len() >= MAX_PENDING_PER_CHANNEL {
+            let dropped = queue.pop_front().map(|event| event.event.id.to_hex());
             tracing::warn!(
                 channel_id = %event.channel_id,
                 limit = MAX_PENDING_PER_CHANNEL,
                 "queue depth cap reached — dropped oldest event"
             );
-        }
+            dropped
+        } else {
+            None
+        };
         queue.push_back(event);
+        if let Some(dropped_id) = dropped_id {
+            self.remove_pending_ids([dropped_id]);
+        }
         true
+    }
+
+    /// Permanently finish every event represented by a completed/dead batch.
+    pub fn finish_batch(&mut self, batch: &FlushBatch) {
+        let ids = batch
+            .events
+            .iter()
+            .chain(batch.cancelled_events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect::<Vec<_>>();
+        self.remove_pending_ids(ids);
+    }
+
+    fn remove_pending_ids(&mut self, ids: impl IntoIterator<Item = String>) {
+        let ids = ids.into_iter().collect::<Vec<_>>();
+        if let Some(store) = self.pending_store.as_mut() {
+            if let Err(error) = store.remove(ids.iter().map(String::as_str)) {
+                tracing::error!(%error, "failed to remove completed events from durable pending journal");
+            }
+        }
     }
 
     /// Try to flush the next batch.
@@ -472,27 +545,30 @@ impl EventQueue {
             "requeueing failed batch with backoff"
         );
 
-        let queue = self.queues.entry(channel_id).or_default();
-        // Push to front in reverse order so original order is preserved.
-        for be in batch.events.into_iter().rev() {
-            queue.push_front(QueuedEvent {
-                channel_id,
-                event: be.event,
-                prompt_tag: be.prompt_tag,
-                received_at: be.received_at, // preserve original timestamp (#46)
-            });
+        let mut dropped_ids = Vec::new();
+        {
+            let queue = self.queues.entry(channel_id).or_default();
+            // Push to front in reverse order so original order is preserved.
+            for be in batch.events.into_iter().rev() {
+                queue.push_front(QueuedEvent {
+                    channel_id,
+                    event: be.event,
+                    prompt_tag: be.prompt_tag,
+                    received_at: be.received_at, // preserve original timestamp (#46)
+                });
+            }
+            while queue.len() > MAX_PENDING_PER_CHANNEL {
+                if let Some(dropped) = queue.pop_back() {
+                    dropped_ids.push(dropped.event.id.to_hex());
+                }
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "requeue overflow — dropped oldest event to enforce cap"
+                );
+            }
         }
-        // Enforce per-channel cap: trim oldest (back) events if requeue pushed
-        // the queue over the limit. Without this, repeated requeue+push cycles
-        // can grow the queue unboundedly.
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "requeue overflow — dropped oldest event to enforce cap"
-            );
-        }
+        self.remove_pending_ids(dropped_ids);
         self.retry_after.insert(channel_id, Instant::now() + delay);
         None
     }
@@ -507,25 +583,30 @@ impl EventQueue {
     /// caller must call `mark_complete` separately.
     pub fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
         let channel_id = batch.channel_id;
-        let queue = self.queues.entry(channel_id).or_default();
-        // Push to front in reverse order so original order is preserved.
-        for be in batch.events.into_iter().rev() {
-            queue.push_front(QueuedEvent {
-                channel_id,
-                event: be.event,
-                prompt_tag: be.prompt_tag,
-                received_at: be.received_at,
-            });
+        let mut dropped_ids = Vec::new();
+        {
+            let queue = self.queues.entry(channel_id).or_default();
+            // Push to front in reverse order so original order is preserved.
+            for be in batch.events.into_iter().rev() {
+                queue.push_front(QueuedEvent {
+                    channel_id,
+                    event: be.event,
+                    prompt_tag: be.prompt_tag,
+                    received_at: be.received_at,
+                });
+            }
+            while queue.len() > MAX_PENDING_PER_CHANNEL {
+                if let Some(dropped) = queue.pop_back() {
+                    dropped_ids.push(dropped.event.id.to_hex());
+                }
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "requeue_preserve overflow — dropped newest event to enforce cap"
+                );
+            }
         }
-        // Enforce per-channel cap: trim newest (back) events if over limit.
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "requeue_preserve overflow — dropped newest event to enforce cap"
-            );
-        }
+        self.remove_pending_ids(dropped_ids);
     }
 
     /// Requeue a cancelled batch so its events appear as `cancelled_events`
@@ -628,6 +709,15 @@ impl EventQueue {
         self.queues.len()
     }
 
+    /// Event IDs restored at startup, used to restore the visible seen marker.
+    pub(crate) fn pending_event_ids(&self) -> Vec<String> {
+        self.queues
+            .values()
+            .flatten()
+            .map(|event| event.event.id.to_hex())
+            .collect()
+    }
+
     /// Number of queued events for a specific channel. Test-only.
     #[cfg(test)]
     pub fn queued_event_count(&self, channel_id: &Uuid) -> usize {
@@ -656,16 +746,21 @@ impl EventQueue {
     /// Returns the event IDs of dropped events so the caller can clean up
     /// any reactions (👀) that were added at queue-push time.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
-        let ids = self
+        let mut ids: Vec<String> = self
             .queues
             .remove(&channel_id)
             .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
             .unwrap_or_default();
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
-        self.cancelled_batches.remove(&channel_id);
+        if let Some(cancelled) = self.cancelled_batches.remove(&channel_id) {
+            ids.extend(cancelled.into_iter().map(|event| event.event.id.to_hex()));
+        }
         self.cancel_reasons.remove(&channel_id);
-        self.withheld_native_steer.remove(&channel_id);
+        if let Some(withheld) = self.withheld_native_steer.remove(&channel_id) {
+            ids.extend(withheld.into_iter().map(|event| event.event.id.to_hex()));
+        }
+        self.remove_pending_ids(ids.iter().cloned());
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -755,16 +850,22 @@ impl EventQueue {
         // Push to FRONT so original `received_at` keeps the event at the head
         // of the channel's queue. Per-channel cap is enforced below in case
         // a flood of events arrived during the ack window.
-        let queue = self.queues.entry(channel_id).or_default();
-        queue.push_front(qe);
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "release_native_steer overflow — dropped newest event to enforce cap"
-            );
+        let mut dropped_ids = Vec::new();
+        {
+            let queue = self.queues.entry(channel_id).or_default();
+            queue.push_front(qe);
+            while queue.len() > MAX_PENDING_PER_CHANNEL {
+                if let Some(dropped) = queue.pop_back() {
+                    dropped_ids.push(dropped.event.id.to_hex());
+                }
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "release_native_steer overflow — dropped newest event to enforce cap"
+                );
+            }
         }
+        self.remove_pending_ids(dropped_ids);
     }
 
     /// Drop a specific event by id from both the side table and the main
@@ -780,6 +881,7 @@ impl EventQueue {
                 self.withheld_native_steer.remove(&channel_id);
             }
         }
+        self.remove_pending_ids([event_id.to_string()]);
         if let Some(q) = self.queues.get_mut(&channel_id) {
             q.retain(|qe| qe.event.id.to_hex() != event_id);
             if q.is_empty() {
@@ -806,18 +908,24 @@ impl EventQueue {
             return;
         };
         let n = entries.len();
-        let queue = self.queues.entry(channel_id).or_default();
-        for qe in entries.into_iter().rev() {
-            queue.push_front(qe);
+        let mut dropped_ids = Vec::new();
+        {
+            let queue = self.queues.entry(channel_id).or_default();
+            for qe in entries.into_iter().rev() {
+                queue.push_front(qe);
+            }
+            while queue.len() > MAX_PENDING_PER_CHANNEL {
+                if let Some(dropped) = queue.pop_back() {
+                    dropped_ids.push(dropped.event.id.to_hex());
+                }
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "withheld-steer recovery overflow — dropped newest event to enforce cap"
+                );
+            }
         }
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "withheld-steer recovery overflow — dropped newest event to enforce cap"
-            );
-        }
+        self.remove_pending_ids(dropped_ids);
         tracing::warn!(
             channel_id = %channel_id,
             recovered = n,
@@ -5391,4 +5499,41 @@ mod tests {
             "unresolved metadata must not render a Description field; got: {prompt}"
         );
     }
+}
+#[test]
+fn accepted_event_survives_queue_recreation_until_finished() {
+    let dir = std::env::temp_dir().join(format!("buzz-acp-queue-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create tempdir");
+    let path = dir.join("pending.json");
+    let channel_id = Uuid::new_v4();
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "survive restart")
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign event");
+    let queued = QueuedEvent {
+        channel_id,
+        event,
+        received_at: Instant::now(),
+        prompt_tag: "test".into(),
+    };
+    let event_id = queued.event.id.to_hex();
+
+    let store = PendingStore::open_path(path.clone()).expect("open store");
+    let mut before = EventQueue::new(DedupMode::Queue).with_pending_store(store);
+    assert!(before.push(queued));
+    let in_flight = before.flush_next().expect("dispatch before restart");
+    assert_eq!(in_flight.events[0].event.id.to_hex(), event_id);
+    drop(before);
+
+    let store = PendingStore::open_path(path.clone()).expect("reopen store");
+    let mut after = EventQueue::new(DedupMode::Queue).with_pending_store(store);
+    let recovered = after.flush_next().expect("restore after restart");
+    assert_eq!(recovered.events[0].event.id.to_hex(), event_id);
+    after.finish_batch(&recovered);
+    drop(after);
+
+    let store = PendingStore::open_path(path).expect("final reopen");
+    let mut final_queue = EventQueue::new(DedupMode::Queue).with_pending_store(store);
+    assert!(final_queue.flush_next().is_none());
+    drop(final_queue);
+    std::fs::remove_dir_all(dir).expect("remove tempdir");
 }
