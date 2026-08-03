@@ -3360,6 +3360,18 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Match only the deterministic provider rejection emitted when an endpoint
+/// cannot accept image input. False positives are especially costly here
+/// because this classification dead-letters the batch instead of retrying it.
+fn is_unsupported_image_input_error(error: &acp::AcpError) -> bool {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("400 bad request")
+        && message.contains("image input is not supported for this endpoint")
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3480,6 +3492,22 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(e) if is_unsupported_image_input_error(e)
+            ) {
+                // A provider that rejects image input will deterministically
+                // reject the same session history again. Do not consume the
+                // channel's retry budget or block later text events behind it.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — endpoint does not support image input"
+                );
+                result.agent.state.invalidate_channel(&batch.channel_id);
+                let content = "⚠️ I couldn't process the last request because the selected model does not support image input. The conversation session was reset; please re-send without the image or choose an image-capable model."
+                    .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -7429,6 +7457,37 @@ mod error_outcome_emission_tests {
         );
     }
 
+    // ── unsupported image-input classification ─────────────────────────────
+
+    #[test]
+    fn unsupported_image_input_error_requires_exact_400_signature() {
+        let matching = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Internal error: llm: (databricks-glm-5-2) 400 Bad Request: Image input is not supported for this endpoint: databricks-glm-5-2."
+                .to_string(),
+        };
+        assert!(is_unsupported_image_input_error(&matching));
+
+        let unrelated_400 = acp::AcpError::AgentError {
+            code: -32000,
+            message: "llm: 400 Bad Request: invalid image dimensions".to_string(),
+        };
+        assert!(!is_unsupported_image_input_error(&unrelated_400));
+
+        let wrong_status = acp::AcpError::AgentError {
+            code: -32000,
+            message:
+                "llm: 422 Unprocessable Entity: Image input is not supported for this endpoint"
+                    .to_string(),
+        };
+        assert!(!is_unsupported_image_input_error(&wrong_status));
+
+        let transport = acp::AcpError::Io(std::io::Error::other(
+            "400 Bad Request: Image input is not supported for this endpoint",
+        ));
+        assert!(!is_unsupported_image_input_error(&transport));
+    }
+
     // ── auth error dead-letter behavior ────────────────────────────────────
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
@@ -7515,6 +7574,110 @@ mod error_outcome_emission_tests {
             0,
             "auth error must dead-letter immediately — no events should be pending"
         );
+    }
+
+    #[tokio::test]
+    async fn unsupported_image_error_invalidates_session_and_releases_later_text() {
+        let keys = nostr::Keys::generate();
+        let failed_event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "image request")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let later_event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "later text")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event: failed_event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        let batch = queue
+            .flush_next()
+            .expect("failed image request must enter the in-flight state");
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event: later_event.clone(),
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        assert!(
+            queue.flush_next().is_none(),
+            "later text must remain blocked while the failed batch is in flight"
+        );
+
+        let image_error = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Internal error: llm: (databricks-glm-5-2) 400 Bad Request: Image input is not supported for this endpoint: databricks-glm-5-2."
+                .to_string(),
+        };
+
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "poisoned-session".to_string());
+        agent.state.turn_counts.insert(channel_id, 3);
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(image_error),
+            batch: Some(batch),
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        assert!(
+            !pool.has_session_for(channel_id),
+            "deterministically poisoned session must be invalidated"
+        );
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            1,
+            "failed image batch must be dead-lettered while later text remains"
+        );
+        let next = queue
+            .flush_next()
+            .expect("later text must be immediately flushable without retry backoff");
+        assert_eq!(next.events.len(), 1);
+        assert_eq!(next.events[0].event.id, later_event.id);
     }
 
     /// A non-auth application error (e.g. usage credits) must still follow the
