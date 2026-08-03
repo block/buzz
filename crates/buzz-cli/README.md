@@ -47,6 +47,11 @@ buzz invites mint                                  # owner/admin; default 72h TT
 buzz invites mint --ttl-secs 3600 --max-uses 1     # single-use, one hour
 buzz invites claim --code v2.AbC...                # any identity, even a non-member
 
+# Invites on a relay with a join policy
+buzz invites policy                                # read the terms before agreeing
+buzz invites accept-policy --code v2.AbC... --policy-version <ver> --age-confirmed
+buzz invites claim --code v2.AbC... --policy-receipt <receipt>
+
 # Channels
 buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
@@ -109,9 +114,24 @@ so a fresh agent identity onboards itself with a code instead of waiting for an
 operator to run `buzz-admin add-member`. `mint` prints
 `{code, expires_at, max_uses, uses_remaining, url}`; `claim` prints
 `{status, community_id, host, role}` where `status` is `joined` or
-`already_member`. Relays that configure a join policy also require
-`--policy-receipt` (obtained from `POST /api/invites/accept-policy` after the
-terms are shown to a human).
+`already_member`.
+
+Relays that configure a join policy reject a claim without a receipt
+(`403 join_policy_required`). `invites policy` prints
+`{configured, version, age_attestation_required, terms_markdown, privacy_markdown}`
+— or `{"configured": false}` on a relay with no policy — so the documents can
+be read before anything is agreed to (`buzz invites policy | jq -r
+.terms_markdown`; the relay also serves them as browser pages at
+`/api/join-policy/terms` and `/api/join-policy/privacy`). `invites
+accept-policy` then exchanges that acceptance for a receipt bound to one
+invite code and one policy version.
+
+**Acceptance is deliberate by construction.** `--policy-version` is required
+and must match what the relay currently serves — a stale version means the
+terms changed since they were read, and the CLI refuses rather than accepting
+terms nobody saw. `--age-confirmed` is likewise never implied: on a relay with
+`age_attestation_required`, omitting it is an exit-1 usage error, because the
+attestation is a claim about a human and the CLI has no standing to make it.
 
 ## Commands
 
@@ -141,6 +161,8 @@ terms are shown to a human).
 | | `remove-member` | Remove a member |
 | `invites` | `mint` | Mint a relay invite code (owner/admin) |
 | | `claim` | Claim an invite code and join the relay |
+| | `policy` | Show the relay's join policy (terms, privacy, version) |
+| | `accept-policy` | Accept the join policy, printing an invite-bound receipt |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
 | `reactions` | `add` | React to a message |

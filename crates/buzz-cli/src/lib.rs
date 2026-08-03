@@ -1920,9 +1920,30 @@ pub enum InvitesCmd {
         #[arg(long)]
         code: String,
         /// Join-policy acceptance receipt, required only on relays that
-        /// configure terms of service (from `POST /api/invites/accept-policy`)
+        /// configure terms of service (from `buzz invites accept-policy`)
         #[arg(long)]
         policy_receipt: Option<String>,
+    },
+    /// Show the relay's join policy (terms, privacy, version)
+    #[command(
+        after_help = "Examples:\n  buzz invites policy\n  buzz invites policy | jq -r .terms_markdown\n\nPrints {configured, version, age_attestation_required, terms_markdown, privacy_markdown},\nor {\"configured\":false} when the relay has no join policy. The same documents are\nalso served as browser pages at /api/join-policy/terms and /api/join-policy/privacy."
+    )]
+    Policy,
+    /// Accept the relay's join policy and print an invite-bound receipt
+    #[command(
+        after_help = "Examples:\n  buzz invites policy                      # read the terms first\n  buzz invites accept-policy --code v2.AbC... --policy-version <VERSION>\n  buzz invites accept-policy --code v2.AbC... --policy-version <VERSION> --age-confirmed\n\nPrints {receipt}; pass it to `buzz invites claim --policy-receipt <RECEIPT>`.\n--policy-version is never inferred and --age-confirmed is never implied:\nacceptance is an assertion about a human, so the CLI will not make it for you."
+    )]
+    AcceptPolicy {
+        /// The invite code the receipt will be bound to
+        #[arg(long)]
+        code: String,
+        /// The exact policy version being accepted, from `buzz invites policy`
+        #[arg(long)]
+        policy_version: String,
+        /// Attest that you meet the relay's minimum age requirement — only
+        /// pass this when a human has read the policy and it is true
+        #[arg(long)]
+        age_confirmed: bool,
     },
 }
 

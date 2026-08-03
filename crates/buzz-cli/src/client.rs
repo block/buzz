@@ -761,6 +761,45 @@ impl BuzzClient {
         self.handle_response(resp).await
     }
 
+    /// POST a JSON body to a public, unauthenticated relay endpoint, returning
+    /// the raw JSON body.
+    ///
+    /// No NIP-98 `Authorization` and no `x-auth-tag`: the only caller today is
+    /// `POST /api/invites/accept-policy`, which the relay serves without auth
+    /// because the receipt it returns is bound to the invite code and the
+    /// policy version, not to a pubkey — signing it would prove nothing the
+    /// subsequent `POST /api/invites/claim` does not already prove.
+    ///
+    /// The standard retry policy applies. That is safe here because the
+    /// receipt is a deterministic MAC over `(code, policy_version)`: a retry
+    /// returns the byte-identical receipt rather than issuing a second one.
+    pub async fn post_public(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("body serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            async move {
+                let resp = self
+                    .http
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .send()
+                    .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
+    }
+
     /// Execute a one-shot query via the HTTP bridge.
     /// `filter` is a Nostr filter object (will be wrapped in an array).
     /// Returns the raw JSON response (array of events).
