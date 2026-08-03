@@ -42,7 +42,11 @@ import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageAgentOwner } from "./MessageAgentOwner";
-import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
+import {
+  MessageAuthorText,
+  MessageHeaderRow,
+  MessageMetaSeparator,
+} from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -443,7 +447,6 @@ export const MessageRow = React.memo(
           className="opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100"
           createdAt={message.createdAt}
           hideDayPeriod
-          time={message.time}
         />
       </div>
     );
@@ -542,10 +545,28 @@ export const MessageRow = React.memo(
 
     const inlineMetadataNode = (
       <div className="flex shrink-0 items-baseline gap-2 text-xs">
-        <MessageTimestamp createdAt={message.createdAt} time={message.time} />
+        <MessageTimestamp createdAt={message.createdAt} />
         {statusMetadataNode}
       </div>
     );
+
+    const personaNode =
+      message.personaDisplayName &&
+      message.personaDisplayName !== message.author ? (
+        <span className="text-xs text-muted-foreground">
+          {message.personaDisplayName}
+        </span>
+      ) : null;
+
+    // Divider-separated, in order. The author name is deliberately not in this
+    // list: "Alice 9:53 AM" reads as a name followed by a time, while the
+    // metadata segments after it are unrelated facts that run together without
+    // one.
+    const headerMetadataNodes = [
+      { key: "owner", node: agentOwnerNode },
+      { key: "timestamp", node: inlineMetadataNode },
+      { key: "persona", node: personaNode },
+    ].filter((slot) => slot.node !== null);
 
     const continuationMetadataNode =
       isDisplayedAsContinuation && statusMetadataNode ? (
@@ -572,14 +593,22 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
-        {agentOwnerNode}
-        {inlineMetadataNode}
-        {message.personaDisplayName &&
-        message.personaDisplayName !== message.author ? (
-          <span className="text-xs text-muted-foreground">
-            {message.personaDisplayName}
-          </span>
-        ) : null}
+        {headerMetadataNodes.map(({ key, node }, index) =>
+          index === 0 ? (
+            <React.Fragment key={key}>{node}</React.Fragment>
+          ) : (
+            // The divider is grouped with the segment it precedes so the two wrap
+            // together — as loose siblings in a flex-wrap row, a divider can end
+            // up alone at the start of the second line.
+            <span
+              className="inline-flex min-w-0 items-baseline gap-x-1.5"
+              key={key}
+            >
+              <MessageMetaSeparator />
+              {node}
+            </span>
+          ),
+        )}
       </MessageHeaderRow>
     );
     const bodyContainerClass = isDisplayedAsContinuation
@@ -846,7 +875,10 @@ export const MessageRow = React.memo(
     prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
-    prev.message.time === next.message.time &&
+    // The header timestamp and the hover gutter both derive from createdAt, so
+    // that is the prop to compare. (`time` tracked it correctly — it is the same
+    // value formatted — but no longer names what this row reads.)
+    prev.message.createdAt === next.message.createdAt &&
     prev.message.depth === next.message.depth &&
     prev.message.kind === next.message.kind &&
     prev.message.pending === next.message.pending &&

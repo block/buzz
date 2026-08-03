@@ -2,7 +2,7 @@ import * as React from "react";
 import { VList } from "virtua";
 import type { VListHandle } from "virtua";
 
-import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
+import { formatDayGroupLabel } from "@/shared/lib/datetime";
 import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
 import {
   buildTimelineDayGroups,
@@ -330,13 +330,13 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
           data-day-label={
             group.headingTimestamp === null
               ? undefined
-              : formatDayHeading(group.headingTimestamp)
+              : formatDayGroupLabel(group.headingTimestamp)
           }
           data-testid="message-timeline-day-group"
           key={group.key}
         >
           {group.headingTimestamp === null ? null : (
-            <DayDivider label={formatDayHeading(group.headingTimestamp)} />
+            <DayDivider label={formatDayGroupLabel(group.headingTimestamp)} />
           )}
           {group.items.map((item) => (
             <TimelineRowShell item={item} key={getTimelineItemKey(item)}>
@@ -593,7 +593,7 @@ function VirtualizedTimelineRows({
               return <div key={virtualizedItemKey(item)}>{item.content}</div>;
             }
             if (item.kind === "day-divider") {
-              const dayLabel = formatDayHeading(item.headingTimestamp);
+              const dayLabel = formatDayGroupLabel(item.headingTimestamp);
               return (
                 <div
                   // The sticky pill needs travel room, but its containing block
