@@ -783,6 +783,7 @@ pub fn run() {
             download_file,
             fetch_media_bytes,
             copy_image_to_clipboard,
+            read_clipboard_image,
             copy_text_to_clipboard,
             fetch_snapshot_bytes,
             relay_requires_membership,
