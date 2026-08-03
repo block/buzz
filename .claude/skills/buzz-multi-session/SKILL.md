@@ -381,11 +381,26 @@ the messages.** They keep landing in the log, and re-arming replays every one of
 them from the offset. Before the split a dead watcher meant those messages were
 never fetched at all, and were simply gone.
 
-One hypothesis is already ruled out, so do not spend time on it: bash ignores
-SIGURG by default (verified on Darwin 25), so a bare SIGURG to the watcher cannot
-produce 144 on its own. Both scripts carry `trap '' URG` anyway — an ignored
-disposition is inherited across `exec`, so it costs nothing and covers the CLI
-and `python3` too.
+**Read the watcher's exit code before theorising:**
+
+| Exit | Meaning |
+|------|---------|
+| `143` | 128+15, SIGTERM. Someone stopped it — a `TaskStop`, a `kill`, a shell going away. Normal. |
+| `144` | 128+16, SIGURG. It died on its own. **Treat this as a bug and report it**, with the receiver's `.err` file and the fact that reception continued. |
+
+That distinction is worth the two lines: 143 was confirmed by deliberately
+SIGTERMing a live Monitor watcher, which is what ruled out "the harness reaped
+it" and "someone stopped it" as explanations for the 144s. Whatever produces 144
+is a distinct mechanism, and it arrives without warning.
+
+One hypothesis is already ruled out, so do not spend time on it either: bash
+ignores SIGURG by default (verified on Darwin 25), so a bare SIGURG to the
+watcher cannot produce 144 on its own. Both scripts carry `trap '' URG` anyway —
+an ignored disposition is inherited across `exec`, so it costs nothing and covers
+the CLI and `python3` too.
+
+Either way the response is the same, which is the point of the split: run
+`status` and re-arm. Nothing was lost.
 
 ### If the Monitor dies — the resumption rule
 
