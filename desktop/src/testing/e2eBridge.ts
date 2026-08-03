@@ -12,6 +12,7 @@ import {
 
 import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
+import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
@@ -8075,8 +8076,10 @@ async function handleCreateManagedAgent(
     args.input.respondTo !== undefined
       ? (args.input.respondToAllowlist ?? [])
       : (linkedPersona?.respond_to_allowlist ?? []);
-  const mintParallelism =
-    args.input.parallelism ?? linkedPersona?.parallelism ?? 1;
+  const mintParallelism = resolveAgentParallelism(
+    args.input.parallelism,
+    linkedPersona?.parallelism,
+  );
   const personaAvatarUrl =
     args.input.personaId === undefined
       ? null

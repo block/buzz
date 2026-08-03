@@ -4,6 +4,10 @@ import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import {
+  AGENT_PARALLELISM_HELP,
+  AGENT_PARALLELISM_PLACEHOLDER,
+} from "../lib/agentParallelism";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import {
   CARD_MINT_KEY_ANNOTATIONS,
@@ -83,7 +87,7 @@ export function PersonaAdvancedFields({
           >
             <Input
               className={cn(
-                "h-8 px-0 py-0 leading-6",
+                "h-8 px-0 py-0 leading-6 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
                 PERSONA_FIELD_CONTROL_CLASS,
               )}
               disabled={disabled}
@@ -97,13 +101,13 @@ export function PersonaAdvancedFields({
                   parallelism: event.target.value,
                 })
               }
-              placeholder="1"
+              placeholder={AGENT_PARALLELISM_PLACEHOLDER}
               type="number"
               value={behaviorDraft.parallelism}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            How many conversations each running instance handles at once (1–32).
+            {AGENT_PARALLELISM_HELP}
           </p>
         </div>
       </div>
