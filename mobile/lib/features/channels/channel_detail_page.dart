@@ -136,31 +136,34 @@ class ChannelDetailPage extends HookConsumerWidget {
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
     final channelsNotifier = ref.read(channelsProvider.notifier);
-    final initialChannelReadAtRef = useRef<int?>(null);
-    final initialOrdinaryUnreadMessageIdsRef = useRef<Set<String>>(const {});
+    final initialOldestOrdinaryUnreadMessageIdRef = useRef<String?>(null);
     final initialForcedUnreadMessageIdsRef = useRef<Set<String>>(const {});
     final didCaptureInitialReadAt = useRef(false);
     if (readState.isReady && !didCaptureInitialReadAt.value) {
       final channelReadAt = readState.effectiveTimestamp(channel.id);
-      initialChannelReadAtRef.value = channelReadAt;
-      initialOrdinaryUnreadMessageIdsRef.value = {
+      final ordinaryUnreadEvents = [
         for (final event
             in channelsNotifier
                     .observedUnreadEventsByChannel[channel.id]
                     ?.values ??
                 const <ObservedUnreadEvent>[])
-          if (event.createdAt >
-              (observedUnreadEventReadAt(
-                    event,
-                    channelReadAt,
-                    (rootId) =>
-                        readState.effectiveTimestamp(threadContextKey(rootId)),
-                    (messageId) =>
-                        readState.effectiveTimestamp(msgContextKey(messageId)),
-                  ) ??
-                  0))
-            event.id,
-      };
+          if (event.rootId == null &&
+              event.createdAt >
+                  (observedUnreadEventReadAt(
+                        event,
+                        channelReadAt,
+                        (rootId) => readState.effectiveTimestamp(
+                          threadContextKey(rootId),
+                        ),
+                        (messageId) => readState.effectiveTimestamp(
+                          msgContextKey(messageId),
+                        ),
+                      ) ??
+                      0))
+            event,
+      ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      initialOldestOrdinaryUnreadMessageIdRef.value =
+          ordinaryUnreadEvents.firstOrNull?.id;
       initialForcedUnreadMessageIdsRef.value = {
         for (final entry in readState.forcedUnreadContexts.entries)
           if (entry.value == channel.id && entry.key.startsWith('msg:'))
@@ -168,9 +171,8 @@ class ChannelDetailPage extends HookConsumerWidget {
       };
       didCaptureInitialReadAt.value = true;
     }
-    final initialChannelReadAt = initialChannelReadAtRef.value;
-    final initialOrdinaryUnreadMessageIds =
-        initialOrdinaryUnreadMessageIdsRef.value;
+    final initialOldestOrdinaryUnreadMessageId =
+        initialOldestOrdinaryUnreadMessageIdRef.value;
     final initialForcedUnreadMessageIds =
         initialForcedUnreadMessageIdsRef.value;
     final currentPubkey = ref
@@ -252,6 +254,7 @@ class ChannelDetailPage extends HookConsumerWidget {
         final eventIds = {
           ?initialMessageId,
           ?initialThreadRootId,
+          ?initialOldestOrdinaryUnreadMessageId,
           ...initialForcedUnreadMessageIds,
         };
         if (eventIds.isEmpty) return null;
@@ -263,6 +266,7 @@ class ChannelDetailPage extends HookConsumerWidget {
         channel.id,
         initialMessageId,
         initialThreadRootId,
+        initialOldestOrdinaryUnreadMessageId,
         initialForcedUnreadMessageIds,
       ],
     );
@@ -431,20 +435,17 @@ class ChannelDetailPage extends HookConsumerWidget {
                               allMessages: messages,
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
-                              initialChannelReadAt: initialChannelReadAt,
-                              initialOrdinaryUnreadMessageIds:
-                                  initialOrdinaryUnreadMessageIds,
+                              initialOldestOrdinaryUnreadMessageId:
+                                  initialOldestOrdinaryUnreadMessageId,
                               initialForcedUnreadMessageIds:
                                   initialForcedUnreadMessageIds,
-                              isInitialChannelForcedUnread: readState
-                                  .isForcedUnread(channel.id),
                               hasInitialUnread:
                                   readState.isReady &&
                                   (readState.isForcedUnread(channel.id) ||
                                       initialForcedUnreadMessageIds
                                           .isNotEmpty ||
-                                      initialOrdinaryUnreadMessageIds
-                                          .isNotEmpty),
+                                      initialOldestOrdinaryUnreadMessageId !=
+                                          null),
                               channelId: channel.id,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,

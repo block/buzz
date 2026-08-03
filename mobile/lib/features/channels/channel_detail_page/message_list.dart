@@ -5,10 +5,8 @@ class _MessageList extends HookConsumerWidget {
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
-  final int? initialChannelReadAt;
-  final Set<String> initialOrdinaryUnreadMessageIds;
+  final String? initialOldestOrdinaryUnreadMessageId;
   final Set<String> initialForcedUnreadMessageIds;
-  final bool isInitialChannelForcedUnread;
   final bool hasInitialUnread;
   final String channelId;
   final String? currentPubkey;
@@ -22,10 +20,8 @@ class _MessageList extends HookConsumerWidget {
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
-    required this.initialChannelReadAt,
-    required this.initialOrdinaryUnreadMessageIds,
+    required this.initialOldestOrdinaryUnreadMessageId,
     required this.initialForcedUnreadMessageIds,
-    required this.isInitialChannelForcedUnread,
     required this.hasInitialUnread,
     required this.channelId,
     required this.currentPubkey,
@@ -56,6 +52,7 @@ class _MessageList extends HookConsumerWidget {
     final detachedWhileUnreadShown = useRef(false);
     final oldestUnreadMessageId = useState<String?>(null);
     final unreadBoundaryLoadFailed = useState(false);
+    final unreadBoundaryFetchCount = useRef(0);
     final hasUnreadDeepLink =
         initialMessageId != null || initialThreadRootId != null;
     final notifier = ref.read(channelMessagesProvider(channelId).notifier);
@@ -70,11 +67,28 @@ class _MessageList extends HookConsumerWidget {
           return null;
         }
 
-        final readAt = initialChannelReadAt;
-        final oldestLoadedAt = entries.first.message.createdAt;
-        final hasCrossedReadBoundary =
-            readAt != null && oldestLoadedAt <= readAt;
-        if (!hasCrossedReadBoundary && !notifier.reachedOldest) {
+        final hasLoadedOrdinaryTarget =
+            initialOldestOrdinaryUnreadMessageId != null &&
+            entries.any(
+              (entry) =>
+                  entry.message.id == initialOldestOrdinaryUnreadMessageId,
+            );
+        final hasLoadedForcedTarget = entries.any(
+          (entry) => initialForcedUnreadMessageIds.contains(entry.message.id),
+        );
+        final hasKnownTarget =
+            initialOldestOrdinaryUnreadMessageId != null ||
+            initialForcedUnreadMessageIds.isNotEmpty;
+        final hasLoadedKnownTarget =
+            hasLoadedOrdinaryTarget || hasLoadedForcedTarget;
+        if (hasKnownTarget &&
+            !hasLoadedKnownTarget &&
+            !notifier.reachedOldest) {
+          if (unreadBoundaryFetchCount.value >= 4) {
+            unreadBoundaryLoadFailed.value = true;
+            return null;
+          }
+          unreadBoundaryFetchCount.value += 1;
           var cancelled = false;
           unawaited(
             Future<void>(() async {
@@ -90,9 +104,7 @@ class _MessageList extends HookConsumerWidget {
         final ordinaryUnread = entries
             .where(
               (entry) =>
-                  initialOrdinaryUnreadMessageIds.contains(entry.message.id) ||
-                  (isInitialChannelForcedUnread &&
-                      (readAt == null || entry.message.createdAt > readAt)),
+                  entry.message.id == initialOldestOrdinaryUnreadMessageId,
             )
             .map((entry) => entry.message)
             .firstOrNull;
@@ -105,20 +117,14 @@ class _MessageList extends HookConsumerWidget {
             .firstOrNull;
         final candidates = [ordinaryUnread, forcedUnread].nonNulls.toList()
           ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-        oldestUnreadMessageId.value =
-            candidates.firstOrNull?.id ??
-            (readAt == null && initialOrdinaryUnreadMessageIds.isEmpty
-                ? entries.first.message.id
-                : null);
+        oldestUnreadMessageId.value = candidates.firstOrNull?.id;
         return null;
       },
       [
         hasInitialUnread,
         hasUnreadDeepLink,
-        initialChannelReadAt,
-        initialOrdinaryUnreadMessageIds,
+        initialOldestOrdinaryUnreadMessageId,
         initialForcedUnreadMessageIds,
-        isInitialChannelForcedUnread,
         entries.length,
         notifier.reachedOldest,
         unreadBoundaryLoadFailed.value,
