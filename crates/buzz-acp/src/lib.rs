@@ -2148,9 +2148,9 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
+                                // Resolve channel type fail-closed for the author gate.
+                                // Allowlist remains owner/sibling-only in DMs, while
+                                // Anyone deliberately admits relay-delivered authors.
                                 let is_dm =
                                     is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
