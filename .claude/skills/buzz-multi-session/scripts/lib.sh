@@ -85,6 +85,16 @@ resolve_bin() {
   local name="$1" var="$2" found root cand
   found="${!var:-}"
   if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+  # ~/.buzz/config outranks PATH deliberately. A configured path is a decision;
+  # PATH is ambient, and on a machine with Buzz Desktop installed it resolves to
+  # the app's bundled CLI, which lags the relay's features. That shadowing is
+  # invisible and produces a wrong-but-plausible failure: the script reports the
+  # feature missing, which is true of the binary it picked and false of the one
+  # the user configured. Config also lets a session coordinating worktrees of
+  # some *other* repo find binaries that live in a Buzz checkout.
+  if found=$(config_get "$var") && [ -n "$found" ]; then
+    printf '%s' "$found"; return 0
+  fi
   if found=$(command -v "$name" 2>/dev/null); then printf '%s' "$found"; return 0; fi
   if root=$(git rev-parse --show-toplevel 2>/dev/null); then
     for cand in "$root/target/release/$name" "$root/target/debug/$name"; do
@@ -276,12 +286,18 @@ diagnose_relay() {   # $1 exit code, $2 stderr, $3 pubkey, $4 relay
     pubkey : $3
     relay  : $4
 
-  Two ways to fix it, in order of preference:
-    1. Put an invite code where every session can read it:
-         printf 'BUZZ_INVITE_CODE=%s\\n' "<code>" >> $CONFIG_FILE && chmod 600 $CONFIG_FILE
-       Then re-run buzz-connect.sh — each session claims it and enrols itself.
-    2. Ask the relay operator to run, once, for the pubkey above:
-         buzz-admin add-member --pubkey $3 --role member
+  ASK THE USER FOR EXACTLY THIS, IN THESE WORDS, AND NOTHING ELSE:
+
+    "In Buzz Desktop: Invite to community -> Copy link. Paste it here."
+
+  When they paste it, run:
+    buzz-connect.sh --invite "<what they pasted>"
+
+  Do not offer alternatives, do not present options, and do not reason about
+  other routes. In particular do not propose 'buzz-admin add-member': it writes
+  to the relay's Postgres directly, so it does nothing from a machine that is
+  not the relay host, and it is the operator's call regardless. One ask, one
+  paste, then this is solved for every session on this machine forever.
 EOF
       return 0 ;;
   esac

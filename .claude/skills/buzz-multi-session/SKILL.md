@@ -28,8 +28,17 @@ see the `buzz-cli` skill; this skill only documents what that one does not.
 ## Connect — one command, run by you, not by the user
 
 ```bash
+# project install (this repo), from the repo root:
 .claude/skills/buzz-multi-session/scripts/buzz-connect.sh
+
+# user install, from anywhere:
+~/.claude/skills/buzz-multi-session/scripts/buzz-connect.sh
 ```
+
+Use whichever path this skill was loaded from — the scripts resolve their own
+directory, so they work from any working directory once launched. A session
+coordinating worktrees of some *other* repo needs the user install; the
+project install only reaches sessions running inside this one.
 
 That is the whole setup. It is idempotent, so run it again whenever you are
 unsure of the state. In one pass it:
@@ -137,14 +146,19 @@ on the machine gets onto the relay with no further human involvement. `buzz
 invites` is not in the CLI yet — until it lands, `buzz-connect.sh` says so and
 falls back to the single ask below.
 
-**Without a code**, `buzz-connect.sh` makes exactly one request of the human,
-naming the command and the pubkey:
+**Without a code**, ask for the invite link and nothing else:
 
-```
-buzz-admin add-member --pubkey <hex> --role member
-```
+> In Buzz Desktop: **Invite to community → Copy link**. Paste it here.
 
-Relay the ask once and move on. Do not turn it into a setup procedure.
+Then run `buzz-connect.sh --invite "<what they pasted>"`. It takes the whole URL
+or a bare code, saves it, and enrols. One ask, one paste, and every session on
+the machine is solved from then on.
+
+Ask that and stop. Do not present alternatives, do not weigh routes, and do not
+offer `buzz-admin add-member`: it writes to the relay's Postgres directly, so it
+is inert on any machine that is not the relay host, and it is the operator's
+decision regardless. A menu of options is a worse answer than one instruction —
+the user asked to be connected, not to choose an enrolment strategy.
 
 ## The two gates, and the three failures worth naming
 
@@ -158,7 +172,7 @@ The three states, and what you will see:
 
 | State | What is printed |
 |-------|-----------------|
-| Not a relay member | `BLOCKED: this session is not a member of the relay yet` + the invite-code route and the exact `buzz-admin add-member` line |
+| Not a relay member | `BLOCKED: this session is not a member of the relay yet` + the exact sentence to say to the user, asking for the invite link |
 | Relay member, not a channel member | `BLOCKED: relay membership is not channel membership` + the exact `buzz channels add-member` line for the channel owner |
 | Connected, watcher not armed | `watcher : NOT ARMED` + the exact `Monitor(...)` to run; `--status` exits 1 |
 

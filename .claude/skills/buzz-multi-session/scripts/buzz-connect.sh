@@ -34,19 +34,40 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 STATUS_ONLY=0
 SAY_HELLO=1
 CHANNEL_ARG=""
+INVITE_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --channel) CHANNEL_ARG="${2:-}"; shift ;;
+    --invite) INVITE_ARG="${2:-}"; shift ;;
     --status) STATUS_ONLY=1; SAY_HELLO=0 ;;
     --quiet-hello) SAY_HELLO=0 ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
-    *) die "usage: $0 [--channel <uuid-or-name>] [--status] [--quiet-hello]" ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+    *) die "usage: $0 [--channel <uuid-or-name>] [--invite <link-or-code>] [--status] [--quiet-hello]" ;;
   esac
   shift
 done
 
 check_config_perms
 require_buzz
+
+# --- 0. an invite handed in by the user --------------------------------------
+# What a human has is whatever "Invite to community → Copy link" put on their
+# clipboard: a whole URL. Asking them to strip the code out of it by hand is the
+# kind of step that makes this developer-only, so take either form, and persist
+# it so this is the last time anyone is asked.
+if [ -n "$INVITE_ARG" ]; then
+  code=${INVITE_ARG##*/invite/}     # URL → code; a bare code is unchanged
+  code=${code%%[?#]*}               # drop any query string or fragment
+  code=$(printf '%s' "$code" | tr -d '[:space:]')
+  case "$code" in
+    ""|*[!A-Za-z0-9._~-]*)
+      die "that does not look like an invite code or link.
+  Expected the whole link from Buzz Desktop → Invite to community → Copy link,
+  e.g. https://relay.example/invite/v2.abc123 — or just the code after /invite/." ;;
+  esac
+  config_set BUZZ_INVITE_CODE "$code"
+  echo "invite   : saved to $CONFIG_FILE — every future session enrols itself"
+fi
 
 # --- 1-3. identity -----------------------------------------------------------
 IDENT=$("$HERE/buzz-session.sh" resolve) || exit 1
@@ -57,6 +78,16 @@ IDFILE=$(printf '%s' "$IDENT" | cut -f4)
 load_identity "$IDFILE" || die "could not load identity $IDFILE"
 RELAY="${BUZZ_RELAY_URL:-http://localhost:3000}"
 export RUST_LOG="${RUST_LOG:-error}"
+
+# The published name says what kind of member this is, not just which one. In a
+# channel listing a bare "spec-kit-arch-governance-init" is indistinguishable
+# from a human; "Claude Code (spec-kit-arch-governance-init)" tells a reader at
+# a glance that it is an agent session and which terminal to go find. Override
+# the prefix with BUZZ_PROFILE_PREFIX, or set it empty for the bare name.
+PROFILE_PREFIX=$(setting BUZZ_PROFILE_PREFIX "Claude Code")
+if [ -n "$PROFILE_PREFIX" ]; then
+  SESSION_DISPLAY="$PROFILE_PREFIX ($SESSION_DISPLAY)"
+fi
 
 printf 'session  : %s\nidentity : %s\npubkey   : %s\nrelay    : %s\n' \
   "$SESSION_DISPLAY" "$SESSION_NAME" "$PUBKEY" "$RELAY"
