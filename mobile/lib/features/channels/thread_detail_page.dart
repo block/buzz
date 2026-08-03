@@ -810,6 +810,8 @@ class _ThreadMessage extends ConsumerWidget {
                                     switch (deliveryState) {
                                       LocalMessageDeliveryState.sending =>
                                         'Sending…',
+                                      LocalMessageDeliveryState.unconfirmed =>
+                                        'Unconfirmed',
                                       LocalMessageDeliveryState.sent => 'Sent',
                                       LocalMessageDeliveryState.failed =>
                                         'Failed',

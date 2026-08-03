@@ -22,6 +22,7 @@ void main() {
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
+        unconfirmLocalMessage: (_, _) {},
         failLocalMessage: (_, eventId) => failedIds.add(eventId),
       );
 
@@ -55,6 +56,7 @@ void main() {
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
       completeLocalMessage: (_, eventId) => completedIds.add(eventId),
+      unconfirmLocalMessage: (_, _) {},
       failLocalMessage: (_, eventId) => failedIds.add(eventId),
     );
 
@@ -80,6 +82,7 @@ void main() {
         readUserCache: () => const {},
         addLocalMessage: (_, _) {},
         completeLocalMessage: (_, _) {},
+        unconfirmLocalMessage: (_, _) {},
         failLocalMessage: (_, _) {},
       );
 
@@ -119,6 +122,7 @@ void main() {
         readUserCache: () => const {},
         addLocalMessage: (_, _) {},
         completeLocalMessage: (_, _) {},
+        unconfirmLocalMessage: (_, _) {},
         failLocalMessage: (_, _) {},
       );
 
@@ -159,6 +163,7 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    void Function(EventDeliveryState state)? onDeliveryState,
   }) {
     this.event = event;
     _published.complete();

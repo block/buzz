@@ -61,17 +61,22 @@ class _ClosedRetry {
   _ClosedRetry({required this.subscription, required this.generation});
 }
 
+enum EventDeliveryState { unconfirmed, sent, failed }
+
 class _PendingEvent {
   final NostrEvent event;
   final Completer<NostrEvent> completer;
   final Duration acknowledgementTimeout;
+  final void Function(EventDeliveryState state)? onDeliveryState;
   Timer? timeout;
   bool dispatched = false;
+  bool recoveryAttempted = false;
 
   _PendingEvent({
     required this.event,
     required this.completer,
     required this.acknowledgementTimeout,
+    this.onDeliveryState,
   });
 }
 
@@ -119,6 +124,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   static const _replayBatchSize = 8;
   static const _replayInterBatchDelay = Duration(milliseconds: 50);
   static const _maxRecentDeliveryKeys = 5000;
+  @visibleForTesting
+  static int debugRecentDeliveryKeyLimit = _maxRecentDeliveryKeys;
 
   RelaySocket? _socket;
   final Map<String, _HistorySubscription> _historySubscriptions = {};
@@ -140,6 +147,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final Map<Object, String> _visibleChannelsByOwner = {};
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
+  bool _unconfirmedRecoveryInFlight = false;
 
   @override
   SessionState build() {
@@ -304,6 +312,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    void Function(EventDeliveryState state)? onDeliveryState,
   }) {
     final existing = _pendingEvents[event.id];
     if (existing != null) return existing.completer.future;
@@ -314,6 +323,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       event: event,
       completer: completer,
       acknowledgementTimeout: timeout,
+      onDeliveryState: onDeliveryState,
     );
 
     _dispatchPending(event.id);
@@ -769,6 +779,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     pending.timeout?.cancel();
 
     if (accepted) {
+      pending.onDeliveryState?.call(EventDeliveryState.sent);
       // We don't have the full event here; create a minimal placeholder.
       // Command kinds (e.g. 41010, 30620, 46020) return "response:{...}" in
       // the OK message — preserve it in `content` so callers can parse it.
@@ -786,6 +797,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         );
       }
     } else {
+      pending.onDeliveryState?.call(EventDeliveryState.failed);
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
           Exception(message.isNotEmpty ? message : 'Event rejected'),
@@ -832,7 +844,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   }
 
   void _rememberDeliveryKey(String key) {
-    if (_recentDeliveryKeys.length >= _maxRecentDeliveryKeys) {
+    if (_recentDeliveryKeys.length >= debugRecentDeliveryKeyLimit) {
       final oldest = _recentDeliveryOrder.removeFirst();
       _recentDeliveryKeys.remove(oldest);
     }
@@ -863,27 +875,36 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       return;
     }
     pending.timeout = Timer(pending.acknowledgementTimeout, () {
-      final timedOut = _pendingEvents.remove(eventId);
-      if (timedOut != null && !timedOut.completer.isCompleted) {
-        timedOut.completer.completeError(
-          TimeoutException(
-            'Event $eventId not acknowledged within '
-            '${timedOut.acknowledgementTimeout}',
-          ),
-        );
+      if (pending.recoveryAttempted || _pendingEvents[eventId] != pending) {
+        return;
       }
+      pending.recoveryAttempted = true;
+      pending.onDeliveryState?.call(EventDeliveryState.unconfirmed);
+      unawaited(_recoverUnconfirmedPublishes());
     });
-    if (_socket?.send(['EVENT', pending.event.toJson()]) ?? false) {
-      pending.dispatched = true;
-    } else {
+    final socket = _socket;
+    if (socket == null) {
       pending.timeout?.cancel();
       pending.timeout = null;
+      return;
     }
+    socket.send(['EVENT', pending.event.toJson()]);
+    pending.dispatched = true;
   }
 
   void _drainPendingEvents() {
     for (final eventId in _pendingEvents.keys.toList()) {
       _dispatchPending(eventId);
+    }
+  }
+
+  Future<void> _recoverUnconfirmedPublishes() async {
+    if (_unconfirmedRecoveryInFlight || _disposed || _paused) return;
+    _unconfirmedRecoveryInFlight = true;
+    try {
+      await reconnect();
+    } finally {
+      _unconfirmedRecoveryInFlight = false;
     }
   }
 
@@ -953,6 +974,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _rejectAllPending(Object? error) {
     for (final entry in _pendingEvents.values) {
       entry.timeout?.cancel();
+      entry.onDeliveryState?.call(EventDeliveryState.failed);
       if (!entry.completer.isCompleted) {
         entry.completer.completeError(error ?? Exception('Connection lost'));
       }

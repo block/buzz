@@ -2,7 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 
-enum LocalMessageDeliveryState { sending, sent, failed }
+enum LocalMessageDeliveryState { sending, unconfirmed, sent, failed }
 
 /// Delivery state for locally signed messages. This is deliberately separate
 /// from the event map so a confirmed message can remain visibly `sent` while a
@@ -21,6 +21,9 @@ class LocalMessageDeliveryStatesNotifier
 
   void markSent(String eventId) =>
       _set(eventId, LocalMessageDeliveryState.sent);
+
+  void markUnconfirmed(String eventId) =>
+      _set(eventId, LocalMessageDeliveryState.unconfirmed);
 
   void markFailed(String eventId) =>
       _set(eventId, LocalMessageDeliveryState.failed);

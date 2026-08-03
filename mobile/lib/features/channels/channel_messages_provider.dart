@@ -338,6 +338,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .markFailed(eventId);
   }
 
+  /// Keeps an ambiguous relay submission visible while the session recovers
+  /// the original signed event on a replacement connection.
+  void unconfirmLocalMessage(String eventId) {
+    ref
+        .read(localMessageDeliveryStatesProvider(channelId).notifier)
+        .markUnconfirmed(eventId);
+  }
+
   /// Removes a local row when a caller explicitly abandons it. Publish
   /// failures use [failLocalMessage] instead so the sender can retry.
   void removeLocalMessage(String eventId) {

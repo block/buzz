@@ -767,8 +767,10 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    void Function(EventDeliveryState state)? onDeliveryState,
   }) async {
     publishedEvents.add(event);
+    onDeliveryState?.call(EventDeliveryState.sent);
     return event;
   }
 

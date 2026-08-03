@@ -433,75 +433,19 @@ void main() {
   });
 
   test(
-    'resume reconnects a stale connected session after a long pause',
-    () async {
-      final sockets = <_ControlledRelaySocket>[];
-      final keychain = nostr.Keys.generate();
-      var now = DateTime(2026, 8, 2, 12);
-      final session = RelaySessionNotifier(
-        now: () => now,
-        socketFactory: _controlledSocketFactory(sockets),
-      );
-      final container = _authenticatedContainer(session, keychain.nsec);
-      addTearDown(container.dispose);
-      await container.read(authProvider.future);
-      final subscription = container.listen(relaySessionProvider, (_, _) {});
-      addTearDown(subscription.close);
-      await Future<void>.delayed(Duration.zero);
-      sockets.single.connectSuccessfully();
-
-      session.onAppPaused();
-      now = now.add(const Duration(minutes: 5));
-      session.onAppResumed();
-      await Future<void>.delayed(Duration.zero);
-
-      expect(sockets, hasLength(2));
-      expect(sockets.first.disposeCalls, 1);
-      expect(session.state.status, SessionStatus.reconnecting);
-    },
-  );
-
-  test(
-    'resume preserves a connected session within the background grace period',
-    () async {
-      final sockets = <_ControlledRelaySocket>[];
-      final keychain = nostr.Keys.generate();
-      var now = DateTime(2026, 8, 2, 12);
-      final session = RelaySessionNotifier(
-        now: () => now,
-        socketFactory: _controlledSocketFactory(sockets),
-      );
-      final container = _authenticatedContainer(session, keychain.nsec);
-      addTearDown(container.dispose);
-      await container.read(authProvider.future);
-      final subscription = container.listen(relaySessionProvider, (_, _) {});
-      addTearDown(subscription.close);
-      await Future<void>.delayed(Duration.zero);
-      sockets.single.connectSuccessfully();
-
-      session.onAppPaused();
-      now = now.add(const Duration(seconds: 4));
-      session.onAppResumed();
-      await Future<void>.delayed(Duration.zero);
-
-      expect(sockets, hasLength(1));
-      expect(sockets.single.disposeCalls, 0);
-      expect(session.state.status, SessionStatus.connected);
-    },
-  );
-
-  test(
     'queues a disconnected publish and dispatches it exactly once on reconnect',
     () async {
       final session = RelaySessionNotifier();
       final container = ProviderContainer(
-        overrides: [relaySessionProvider.overrideWith(() => session)],
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          authProvider.overrideWith(() => _FakeAuthNotifier()),
+        ],
       );
       addTearDown(container.dispose);
       container.read(relaySessionProvider);
-      final subscription = container.listen(relaySessionProvider, (_, _) {});
-      addTearDown(subscription.close);
-      await Future<void>.delayed(Duration.zero);
+      await container.read(authProvider.future);
+      await pumpEventQueue();
 
       final firstSocket = _testSocket();
       session.debugAttachSocketForTest(firstSocket);
@@ -512,7 +456,7 @@ void main() {
 
       final replacementSocket = _testSocket();
       session.debugAttachSocketForTest(replacementSocket);
-      session.debugHandleConnected();
+      await session.debugHandleConnected();
 
       expect(replacementSocket.sentPayloads, hasLength(1));
       expect(replacementSocket.sentPayloads.single.first, 'EVENT');
@@ -526,31 +470,34 @@ void main() {
   test(
     'replays a dispatched ACK-lost event after a background interval beyond its acknowledgement timeout',
     () async {
-      final session = RelaySessionNotifier();
-      final container = ProviderContainer(
-        overrides: [relaySessionProvider.overrideWith(() => session)],
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final session = RelaySessionNotifier(
+        socketFactory: _controlledSocketFactory(sockets),
       );
+      final container = _authenticatedContainer(session, keychain.nsec);
       addTearDown(container.dispose);
       container.read(relaySessionProvider);
       final subscription = container.listen(relaySessionProvider, (_, _) {});
       addTearDown(subscription.close);
       await Future<void>.delayed(Duration.zero);
 
+      await container.read(authProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
       final event = _event();
-      final disconnectedSocket = _testSocket();
-      session.debugAttachSocketForTest(disconnectedSocket);
-      session.debugHandleDisconnected();
       final publish = session.publish(event);
-      final firstSocket = _testSocket();
-      session.debugAttachSocketForTest(firstSocket);
-      session.debugHandleConnected();
+      final firstSocket = sockets.single;
       expect(firstSocket.sentPayloads, hasLength(1));
 
-      session.debugPauseNow();
+      session.onAppPaused();
       await Future<void>.delayed(const Duration(seconds: 9));
-      final replacementSocket = _testSocket();
-      session.debugAttachSocketForTest(replacementSocket);
-      session.debugHandleConnected();
+      session.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(2));
+      final replacementSocket = sockets.last;
+      replacementSocket.connectSuccessfully();
+      await Future<void>.delayed(Duration.zero);
 
       expect(replacementSocket.sentPayloads, hasLength(1));
       expect(
@@ -585,6 +532,7 @@ void main() {
     expect(sockets.last.sentPayloads, isEmpty);
 
     sockets.last.connectSuccessfully();
+    await Future<void>.delayed(Duration.zero);
     expect(sockets.last.sentPayloads, hasLength(1));
     expect((sockets.last.sentPayloads.single[1] as Map)['id'], event.id);
     session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
@@ -613,6 +561,7 @@ void main() {
     expect(sockets.last.sentPayloads, isEmpty);
 
     sockets.last.connectSuccessfully();
+    await Future<void>.delayed(Duration.zero);
     expect(sockets.last.sentPayloads, hasLength(1));
     expect((sockets.last.sentPayloads.single[1] as Map)['id'], event.id);
     session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
@@ -660,18 +609,25 @@ void main() {
   test(
     'reconnect cancels an in-flight history request so it can be retried',
     () async {
-      final session = RelaySessionNotifier();
-      final container = ProviderContainer(
-        overrides: [relaySessionProvider.overrideWith(() => session)],
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final session = RelaySessionNotifier(
+        socketFactory: _controlledSocketFactory(sockets),
       );
+      final container = _authenticatedContainer(session, keychain.nsec);
       addTearDown(container.dispose);
-      container.read(relaySessionProvider);
+      await container.read(authProvider.future);
       final subscription = container.listen(relaySessionProvider, (_, _) {});
       addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
       final first = session.fetchHistory(const NostrFilter(kinds: [39002]));
       final firstExpectation = expectLater(first, throwsException);
-      session.debugHandleDisconnected();
+      await session.reconnect();
       await firstExpectation;
+      expect(sockets, hasLength(2));
+      sockets.last.connectSuccessfully();
+      await Future<void>.delayed(Duration.zero);
 
       final retry = session.fetchHistory(const NostrFilter(kinds: [39002]));
       session.debugHandleMessage(['EOSE', 'h-2']);
@@ -1455,9 +1411,8 @@ class _ControlledRelaySocket extends RelaySocket {
   }
 
   @override
-  bool send(List<dynamic> payload) {
+  void send(List<dynamic> payload) {
     sentPayloads.add(payload);
-    return true;
   }
 
   void connectSuccessfully() => _connected();

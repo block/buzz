@@ -285,6 +285,7 @@ class _DeliveryStateRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final label = switch (state) {
       LocalMessageDeliveryState.sending => 'Sending…',
+      LocalMessageDeliveryState.unconfirmed => 'Unconfirmed',
       LocalMessageDeliveryState.sent => 'Sent',
       LocalMessageDeliveryState.failed => 'Failed',
     };

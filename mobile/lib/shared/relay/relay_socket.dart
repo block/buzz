@@ -3,7 +3,6 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
@@ -31,13 +30,6 @@ Exception classifyRelayAuthFailure(String message) {
 }
 
 class RelaySocket {
-  /// Exercises the WebSocket's native ping/pong liveness detection, so an iOS
-  /// backgrounded connection cannot remain logically connected forever.
-  static const pingInterval = Duration(seconds: 30);
-
-  @visibleForTesting
-  static Duration debugPingInterval = pingInterval;
-
   final String _wsUrl;
   final String? _nsec;
   final void Function(List<dynamic> message) _onMessage;
@@ -52,7 +44,6 @@ class RelaySocket {
   String? _pendingAuthEventId;
 
   SocketState get state => _state;
-  bool get isConnected => _state == SocketState.connected && _channel != null;
 
   RelaySocket({
     required String wsUrl,
@@ -72,10 +63,7 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
-      _channel = IOWebSocketChannel.connect(
-        Uri.parse(_wsUrl),
-        pingInterval: debugPingInterval,
-      );
+      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
       await _channel!.ready;
     } catch (e) {
       _state = SocketState.disconnected;
@@ -129,21 +117,8 @@ class RelaySocket {
   }
 
   /// Send a raw JSON array over the websocket.
-  bool send(List<dynamic> payload) {
-    final channel = _channel;
-    // NIP-42 sends AUTH while the socket is authenticating. Session-level
-    // publish dispatch remains gated on authenticated connection.
-    if (_state == SocketState.disconnected ||
-        _state == SocketState.connecting ||
-        channel == null) {
-      return false;
-    }
-    try {
-      channel.sink.add(jsonEncode(payload));
-      return true;
-    } catch (_) {
-      return false;
-    }
+  void send(List<dynamic> payload) {
+    _channel?.sink.add(jsonEncode(payload));
   }
 
   /// Gracefully close the connection.

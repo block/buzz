@@ -32,6 +32,7 @@ class SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     void Function(NostrEvent event)? onSigned,
+    void Function(EventDeliveryState state)? onDeliveryState,
   }) async {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) {
@@ -54,6 +55,6 @@ class SignedEventRelay {
 
     final nostrEvent = NostrEvent.fromJson(event.toMap());
     onSigned?.call(nostrEvent);
-    return _session.publish(nostrEvent);
+    return _session.publish(nostrEvent, onDeliveryState: onDeliveryState);
   }
 }
