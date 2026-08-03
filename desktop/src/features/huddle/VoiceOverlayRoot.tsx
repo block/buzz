@@ -18,9 +18,13 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
   type VoiceOverlayAction,
+  type VoiceOverlayActionInput,
   type VoiceOverlayMediaState,
   type VoiceOverlayPhase,
+  createVoiceOverlayActionTracker,
+  parseVoiceOverlayActionResult,
   VOICE_OVERLAY_ACTION_EVENT,
+  VOICE_OVERLAY_ACTION_RESULT_EVENT,
   VOICE_OVERLAY_READY_EVENT,
   VOICE_OVERLAY_STATE_EVENT,
   voiceOverlayMediaSnapshot,
@@ -83,6 +87,23 @@ export function VoiceOverlayRoot() {
   const [transportError, setTransportError] = React.useState<string | null>(
     null,
   );
+  const [actionPending, setActionPending] = React.useState(false);
+  const actionPendingRef = React.useRef(false);
+  const actionTrackerRef = React.useRef<ReturnType<
+    typeof createVoiceOverlayActionTracker
+  > | null>(null);
+  if (!actionTrackerRef.current) {
+    actionTrackerRef.current = createVoiceOverlayActionTracker({
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (timerId) => window.clearTimeout(timerId),
+      onSlow: () => setTransportError("Voice action is still working…"),
+      onExpired: () => {
+        actionPendingRef.current = false;
+        setActionPending(false);
+        setTransportError("Voice controls did not respond.");
+      },
+    });
+  }
 
   const refreshNativeState = React.useCallback(async () => {
     const state = await invoke<NativeHuddleState>("get_huddle_state");
@@ -91,11 +112,20 @@ export function VoiceOverlayRoot() {
   }, []);
 
   const dispatchAction = React.useCallback(
-    async (action: VoiceOverlayAction) => {
+    async (action: VoiceOverlayActionInput) => {
+      if (actionPendingRef.current) return;
+      actionPendingRef.current = true;
+      setActionPending(true);
+      const requestId = crypto.randomUUID();
+      const message = { ...action, requestId } as VoiceOverlayAction;
+      actionTrackerRef.current?.start(requestId);
+      setTransportError(null);
       try {
-        await sendMainAction(action);
-        setTransportError(null);
+        await sendMainAction(message);
       } catch {
+        actionTrackerRef.current?.settle(requestId);
+        actionPendingRef.current = false;
+        setActionPending(false);
         setTransportError("Voice controls could not reach the main window.");
       }
     },
@@ -112,13 +142,28 @@ export function VoiceOverlayRoot() {
     let disposed = false;
     const cleanups: Array<() => void> = [];
 
-    void refreshNativeState().catch(() => {
-      if (!disposed) {
-        setTransportError("Voice state is unavailable.");
-      }
-    });
-
     void (async () => {
+      const unlistenActionResult = await listen(
+        VOICE_OVERLAY_ACTION_RESULT_EVENT,
+        (event) => {
+          if (disposed) return;
+          const result = parseVoiceOverlayActionResult(event.payload);
+          if (!result || !actionTrackerRef.current?.settle(result.requestId)) {
+            return;
+          }
+          actionPendingRef.current = false;
+          setActionPending(false);
+          setTransportError(
+            result.ok ? null : `Voice action failed: ${result.error}`,
+          );
+        },
+      );
+      if (disposed) {
+        unlistenActionResult();
+        return;
+      }
+      cleanups.push(() => void unlistenActionResult());
+
       const unlistenNative = await listen<NativeHuddleState>(
         "huddle-state-changed",
         (event) => {
@@ -126,7 +171,6 @@ export function VoiceOverlayRoot() {
             setSnapshot((current) =>
               snapshotFromNativeState(event.payload, current),
             );
-            setTransportError(null);
           }
         },
       );
@@ -141,7 +185,6 @@ export function VoiceOverlayRoot() {
         (event) => {
           if (!disposed && event.payload.version === 1) {
             setSnapshot(voiceOverlayMediaSnapshot(event.payload));
-            setTransportError(null);
           }
         },
       );
@@ -150,6 +193,12 @@ export function VoiceOverlayRoot() {
         return;
       }
       cleanups.push(() => void unlistenOwner());
+
+      try {
+        await refreshNativeState();
+      } catch {
+        if (!disposed) setTransportError("Voice state is unavailable.");
+      }
 
       await emitTo("main", VOICE_OVERLAY_READY_EVENT);
     })().catch(() => {
@@ -161,6 +210,8 @@ export function VoiceOverlayRoot() {
     return () => {
       disposed = true;
       for (const cleanup of cleanups) cleanup();
+      actionTrackerRef.current?.dispose();
+      actionPendingRef.current = false;
     };
   }, [refreshNativeState]);
 
@@ -217,7 +268,7 @@ export function VoiceOverlayRoot() {
                 !snapshot.isMuted &&
                 "ring-2 ring-green-500",
             )}
-            disabled={!snapshot.micConnected || !isActive}
+            disabled={actionPending || !snapshot.micConnected || !isActive}
             onClick={() =>
               void dispatchAction({ version: 1, type: "toggle_mute" })
             }
@@ -242,7 +293,7 @@ export function VoiceOverlayRoot() {
             aria-label={isPtt ? "Use voice activity" : "Use push to talk"}
             aria-pressed={isPtt}
             className="h-11 w-11 rounded-full"
-            disabled={!isActive}
+            disabled={actionPending || !isActive}
             onClick={() =>
               void dispatchAction({
                 version: 1,
@@ -264,7 +315,7 @@ export function VoiceOverlayRoot() {
             }
             aria-pressed={snapshot.transcriptionEnabled}
             className="h-11 w-11 rounded-full"
-            disabled={!isActive}
+            disabled={actionPending || !isActive}
             onClick={() =>
               void dispatchAction({
                 version: 1,
@@ -283,7 +334,7 @@ export function VoiceOverlayRoot() {
             }
             aria-pressed={!snapshot.ttsEnabled}
             className="h-11 w-11 rounded-full"
-            disabled={!isActive}
+            disabled={actionPending || !isActive}
             onClick={() =>
               void dispatchAction({ version: 1, type: "toggle_tts" })
             }
@@ -300,7 +351,7 @@ export function VoiceOverlayRoot() {
           <Button
             aria-label="Leave huddle"
             className="h-11 w-11 rounded-full"
-            disabled={!isActive || snapshot.isLeaving}
+            disabled={actionPending || !isActive || snapshot.isLeaving}
             onClick={() => void dispatchAction({ version: 1, type: "leave" })}
             size="icon"
             variant="destructive"

@@ -36,6 +36,85 @@ test("renders a compact controller for the active huddle", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("clears the floating controller when the huddle becomes idle", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+  });
+
+  await page.goto("/#/voice-overlay");
+  const overlay = page.getByTestId("voice-overlay");
+  await expect(overlay.getByText("1 participant · 0 agents")).toBeVisible();
+
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?.({
+      members: [{ pubkey: "test-participant", role: "member" }],
+      transcriptionEnabled: false,
+      phase: "idle",
+    });
+  });
+
+  await expect(overlay.getByText("No active huddle")).toBeVisible();
+  await expect(
+    overlay.getByRole("button", { name: "Leave huddle" }),
+  ).toBeDisabled();
+});
+
+test("shows a matching action failure and ignores an unrelated result", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window.crypto, "randomUUID", {
+      configurable: true,
+      value: () => "00000000-0000-4000-8000-000000000001",
+    });
+  });
+  await installMockBridge(page, {
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+  });
+
+  await page.goto("/#/voice-overlay");
+  const overlay = page.getByTestId("voice-overlay");
+  await overlay.getByRole("button", { name: "Start transcript" }).click();
+
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.(
+      "buzz://voice-overlay/action-result",
+      {
+        version: 1,
+        requestId: "unrelated-request",
+        ok: false,
+        error: "Wrong request",
+      },
+    );
+  });
+  await expect(overlay.getByRole("alert")).toHaveCount(0);
+
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.(
+      "buzz://voice-overlay/action-result",
+      {
+        version: 1,
+        requestId: "00000000-0000-4000-8000-000000000001",
+        ok: false,
+        error: "Transcript failed",
+      },
+    );
+  });
+  await expect(overlay.getByRole("alert")).toHaveText(
+    "Voice action failed: Transcript failed",
+  );
+});
+
 test("routes typed overlay actions through the main huddle owner", async ({
   page,
 }) => {
@@ -55,7 +134,11 @@ test("routes typed overlay actions through the main huddle owner", async ({
   await page.evaluate(async () => {
     await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.(
       "buzz://voice-overlay/action",
-      { version: 1, type: "toggle_transcription" },
+      {
+        version: 1,
+        requestId: "e2e-toggle-transcription",
+        type: "toggle_transcription",
+      },
     );
   });
   await expect

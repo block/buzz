@@ -507,14 +507,14 @@ export function HuddleBar({
       if (backendClean) {
         setState(null);
       } else {
-        locallyLeavingChannelRef.current = null;
-        stateGenerationRef.current += 1;
+        throw new Error("Could not leave the huddle cleanly.");
       }
       // If cleanup failed, keep the bar visible so the user can retry.
     } catch (e) {
       locallyLeavingChannelRef.current = null;
       stateGenerationRef.current += 1;
       console.error("Failed to leave huddle:", e);
+      throw e;
     } finally {
       setIsLeaving(false);
     }
@@ -532,6 +532,7 @@ export function HuddleBar({
       const message = e instanceof Error ? e.message : String(e);
       setTranscriptError(`Transcript failed: ${message}`);
       console.error("Failed to toggle huddle transcript:", e);
+      throw e;
     }
   }
 
@@ -542,6 +543,7 @@ export function HuddleBar({
       setState(nextState);
     } catch (error) {
       console.error("Failed to toggle TTS:", error);
+      throw error;
     }
   }
 
@@ -563,7 +565,7 @@ export function HuddleBar({
       <VoiceOverlayBridge
         snapshot={voiceOverlayMediaSnapshot({
           version: 1,
-          phase: barState.phase,
+          phase: isDrawerClosing ? "idle" : barState.phase,
           participantCount: barState.participants.length,
           agentCount: barState.agent_pubkeys.length,
           ttsEnabled,
@@ -687,7 +689,7 @@ export function HuddleBar({
               aecMissing && !headphonesHintDismissed && !isDrawerClosing
             }
             onHeadphonesHintDismiss={() => setHeadphonesHintDismissed(true)}
-            onToggleTts={handleToggleTts}
+            onToggleTts={() => void handleToggleTts().catch(() => {})}
             outputDevices={outputDevices}
             selectedOutputDevice={selectedOutputDevice}
             onSelectOutputDevice={setSelectedOutputDevice}
@@ -811,7 +813,7 @@ export function HuddleBar({
                 }
                 aria-pressed={transcriptionEnabled}
                 className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                onClick={() => void handleToggleTranscript()}
+                onClick={() => void handleToggleTranscript().catch(() => {})}
                 size="icon"
                 type="button"
                 variant="ghost"
@@ -850,7 +852,7 @@ export function HuddleBar({
               className="h-12 gap-2 px-4"
               disabled={isLeaving}
               aria-busy={isLeaving}
-              onClick={() => void handleLeave()}
+              onClick={() => void handleLeave().catch(() => {})}
               size="sm"
               variant="destructive"
             >

@@ -3,9 +3,11 @@ import * as React from "react";
 
 import {
   parseVoiceOverlayAction,
+  runVoiceOverlayAction,
   type VoiceInputMode,
   type VoiceOverlayMediaState,
   VOICE_OVERLAY_ACTION_EVENT,
+  VOICE_OVERLAY_ACTION_RESULT_EVENT,
   VOICE_OVERLAY_READY_EVENT,
   VOICE_OVERLAY_STATE_EVENT,
   VOICE_OVERLAY_WINDOW_LABEL,
@@ -60,6 +62,19 @@ export function VoiceOverlayBridge({
     });
   }, []);
 
+  const publishActionResult = React.useCallback(
+    (result: Awaited<ReturnType<typeof runVoiceOverlayAction>>) => {
+      void emitTo(
+        VOICE_OVERLAY_WINDOW_LABEL,
+        VOICE_OVERLAY_ACTION_RESULT_EVENT,
+        result,
+      ).catch(() => {
+        // The floating controller may have closed while the action completed.
+      });
+    },
+    [],
+  );
+
   React.useEffect(() => {
     publishSnapshot(snapshot);
   }, [publishSnapshot, snapshot]);
@@ -80,27 +95,10 @@ export function VoiceOverlayBridge({
       const action = parseVoiceOverlayAction(event.payload);
       if (!action) return;
 
-      const handlers = handlersRef.current;
-      switch (action.type) {
-        case "toggle_mute":
-          void handlers.onToggleMute();
-          break;
-        case "set_voice_input_mode":
-          void handlers.onSetVoiceInputMode(action.mode);
-          break;
-        case "toggle_transcription":
-          void handlers.onToggleTranscription();
-          break;
-        case "toggle_tts":
-          void handlers.onToggleTts();
-          break;
-        case "leave":
-          void handlers.onLeave();
-          break;
-        case "show_main":
-          void handlers.onShowMain();
-          break;
-      }
+      void (async () => {
+        const result = await runVoiceOverlayAction(action, handlersRef.current);
+        publishActionResult(result);
+      })();
     }).then((unlisten) => {
       if (disposed) void unlisten();
       else cleanups.push(() => void unlisten());
@@ -110,7 +108,7 @@ export function VoiceOverlayBridge({
       disposed = true;
       for (const cleanup of cleanups) cleanup();
     };
-  }, [publishSnapshot]);
+  }, [publishActionResult, publishSnapshot]);
 
   return null;
 }
