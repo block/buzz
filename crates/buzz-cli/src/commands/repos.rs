@@ -627,6 +627,28 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         }
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+        ReposCmd::Status { id } => {
+            let announcement = current_repo(client, &id).await?;
+            crate::commands::repo_sync::cmd_status(client, &announcement).await
+        }
+        ReposCmd::ImportMain { id, commit } => {
+            let announcement = current_repo(client, &id).await?;
+            crate::commands::repo_sync::cmd_import_main(client, &announcement, &commit).await
+        }
+        ReposCmd::MirrorMain {
+            id,
+            commit,
+            expected_buzz_main,
+        } => {
+            let announcement = current_repo(client, &id).await?;
+            crate::commands::repo_sync::cmd_mirror_main(
+                client,
+                &announcement,
+                &commit,
+                &expected_buzz_main,
+            )
+            .await
+        }
         ReposCmd::Bind { id, channel } => cmd_bind_repo(client, &id, &channel).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,

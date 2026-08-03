@@ -1156,6 +1156,33 @@ pub enum ReposCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Compare GitHub and Buzz `main` without changing either remote.
+    Status {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+    },
+    /// Initialize Buzz `main` from the exact current GitHub `main` commit.
+    ImportMain {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Exact 40-hex commit required at GitHub `main`.
+        #[arg(long)]
+        commit: String,
+    },
+    /// Fast-forward Buzz `main` to the exact current GitHub `main` commit.
+    MirrorMain {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Exact 40-hex commit required at GitHub `main`.
+        #[arg(long)]
+        commit: String,
+        /// Exact previously observed Buzz `main` commit used as the push lease.
+        #[arg(long)]
+        expected_buzz_main: String,
+    },
     /// Bind (or rebind) one of your repositories to a channel.
     ///
     /// The `buzz-channel` tag on the announcement is the git ACL: the relay
@@ -2076,6 +2103,35 @@ mod tests {
     }
 
     #[test]
+    fn repo_sync_commands_parse_direct_flags() {
+        let commit = "a".repeat(40);
+        let expected = "b".repeat(40);
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "repos",
+            "mirror-main",
+            "--id",
+            "repo",
+            "--commit",
+            &commit,
+            "--expected-buzz-main",
+            &expected,
+        ])
+        .expect("mirror-main flags should parse");
+        let Cmd::Repos(ReposCmd::MirrorMain {
+            id,
+            commit: parsed_commit,
+            expected_buzz_main,
+        }) = cli.command
+        else {
+            panic!("expected repos mirror-main");
+        };
+        assert_eq!(id, "repo");
+        assert_eq!(parsed_commit, commit);
+        assert_eq!(expected_buzz_main, expected);
+    }
+
+    #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
@@ -2223,7 +2279,16 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec![
+                "bind",
+                "create",
+                "get",
+                "import-main",
+                "list",
+                "mirror-main",
+                "protect",
+                "status"
+            ]
         );
         let repos = cmd
             .get_subcommands()
@@ -2286,7 +2351,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 8),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

@@ -580,6 +580,11 @@ impl BuzzClient {
             .and_then(|slice| slice.get(1).cloned())
     }
 
+    /// Canonical NIP-OA tag passed to the git credential helper, if configured.
+    pub(crate) fn auth_tag_json(&self) -> Option<&str> {
+        self.auth_tag_json.as_deref()
+    }
+
     /// Sign an event builder, injecting the NIP-OA auth tag if configured.
     ///
     /// All event creation should go through this method to ensure consistent

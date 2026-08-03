@@ -90,6 +90,11 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# One-way GitHub main -> Buzz main synchronization
+buzz repos status --id my-repo
+buzz repos import-main --id my-repo --commit <exact-40-hex-GitHub-main>
+buzz repos mirror-main --id my-repo --commit <exact-40-hex-GitHub-main> --expected-buzz-main <exact-40-hex-old-Buzz-main>
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
@@ -107,8 +112,9 @@ Buzz and GitHub have deliberately narrow roles:
 - The GitHub PR is a thin adapter for CI, protected-main checks, and merge.
 - The commit on GitHub's merged `main` is the shipped-code truth.
 
-Buzz is not a Git remote. Use one canonical GitHub remote (`origin`) and one
-GitHub branch for both the Buzz PR metadata and the thin GitHub PR.
+GitHub remains the final ref authority. Buzz may carry the exact one-way `main`
+mirror managed by the commands above; use one canonical GitHub remote (`origin`)
+and one GitHub branch for both Buzz PR metadata and the thin GitHub PR.
 
 The recipe below uses the intended issue `--channel`/`--external-id` and PR
 `--channel`/`--issue`/`--external-id` flags. Choose opaque, stable external IDs
