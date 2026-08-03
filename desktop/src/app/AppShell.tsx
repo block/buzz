@@ -87,7 +87,7 @@ import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
-import type { ChannelVisibility, SearchHit } from "@/shared/api/types";
+import type { Channel, ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
@@ -100,6 +100,7 @@ const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
 });
+const EMPTY_CHANNELS: Channel[] = [];
 
 export function AppShell() {
   useWebviewZoomShortcuts();
@@ -330,6 +331,7 @@ export function AppShell() {
     handleThreadReplyDesktopNotification,
   } = useAppShellDesktopNotifications({
     channels,
+    enabled: !isHuddleRoom,
     goChannel,
     goHome,
     notificationSettings: notificationSettings.settings,
@@ -363,19 +365,23 @@ export function AppShell() {
     mutedRootIds,
     muteThread,
     unmuteThread,
-  } = useUnreadChannels(sidebarChannels, activeChannel, {
-    pubkey: identityQuery.data?.pubkey,
-    relayClient,
-    relayUrl: communitiesHook.activeCommunity?.relayUrl,
-    currentPubkey: identityQuery.data?.pubkey,
-    mutedChannelIds,
-    notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
-    onChannelMessage: handleChannelNotification,
-    onDmMessage: handleDmNotification,
-    onLiveMention: refetchHomeFeedFromLiveSignal,
-    onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
-    followedRootIds,
-  });
+  } = useUnreadChannels(
+    isHuddleRoom ? EMPTY_CHANNELS : sidebarChannels,
+    isHuddleRoom ? null : activeChannel,
+    {
+      pubkey: identityQuery.data?.pubkey,
+      relayClient,
+      relayUrl: communitiesHook.activeCommunity?.relayUrl,
+      currentPubkey: identityQuery.data?.pubkey,
+      mutedChannelIds,
+      notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
+      onChannelMessage: handleChannelNotification,
+      onDmMessage: handleDmNotification,
+      onLiveMention: refetchHomeFeedFromLiveSignal,
+      onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
+      followedRootIds,
+    },
+  );
 
   const getThreadReadAt = React.useCallback(
     (rootId: string, channelId?: string | null) => {

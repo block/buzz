@@ -69,9 +69,9 @@ use mesh_llm_stubs::*;
 use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
 use shutdown::{is_restart_request, shut_down_app};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
-use tauri::{Emitter, Manager, RunEvent};
 #[cfg(target_os = "macos")]
-use tauri::{Listener, WindowEvent};
+use tauri::Listener;
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
@@ -899,7 +899,6 @@ pub fn run() {
     app.run(move |app_handle, event| match event {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show_main_window(app_handle),
-        #[cfg(target_os = "macos")]
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { api, .. },

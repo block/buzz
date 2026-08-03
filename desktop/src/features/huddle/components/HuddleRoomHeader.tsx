@@ -19,6 +19,7 @@ type HuddleRosterState = {
   participants: string[];
   agent_pubkeys: string[];
   agent_voice_settings: Record<string, HuddleAgentVoiceSettings>;
+  ephemeral_channel_id: string | null;
 };
 
 function isVisible(state: HuddleRosterState | null) {
@@ -42,6 +43,34 @@ export function HuddleRoomHeader() {
     }
     return levels;
   }, [currentPubkey, isMuted, micConnected, micLevel, speakerLevels]);
+  const handleRemoveAgent = React.useCallback(
+    async (pubkey: string) => {
+      if (!state?.ephemeral_channel_id) return;
+      if (!window.confirm("Remove this agent from the huddle?")) return;
+      try {
+        await invoke("remove_channel_member", {
+          channelId: state.ephemeral_channel_id,
+          pubkey,
+        });
+        setState((current) =>
+          current
+            ? {
+                ...current,
+                participants: current.participants.filter(
+                  (member) => member !== pubkey,
+                ),
+                agent_pubkeys: current.agent_pubkeys.filter(
+                  (agent) => agent !== pubkey,
+                ),
+              }
+            : current,
+        );
+      } catch (error) {
+        console.error("Failed to remove agent from huddle:", error);
+      }
+    },
+    [state?.ephemeral_channel_id],
+  );
 
   React.useEffect(() => {
     let disposed = false;
@@ -78,6 +107,7 @@ export function HuddleRoomHeader() {
         agentPubkeys={state.agent_pubkeys}
         agentVoiceSettings={state.agent_voice_settings}
         appearance="room"
+        onRemoveAgent={handleRemoveAgent}
         participants={state.participants}
         selfProfile={{
           avatarUrl:
