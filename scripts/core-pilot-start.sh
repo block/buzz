@@ -36,6 +36,14 @@ pilot_acp_ready() {
       && discovered_line < subscribed_line && subscribed_line < presence_line ))
 }
 
+pilot_clap_bool() {
+  case "$1" in
+    1) printf 'true' ;;
+    0) printf 'false' ;;
+    *) return 1 ;;
+  esac
+}
+
 if pilot_relay_ready && pilot_acp_ready; then
   printf 'Core pilot is already running.\n'
   exit 0
@@ -62,6 +70,10 @@ docker compose -f "$PILOT_REPO_ROOT/docker-compose.yml" -f "$compose_lock" \
 relay_log="$PILOT_STATE_DIR/relay.log"
 acp_log="$PILOT_STATE_DIR/acp.log"
 pilot_path="$PILOT_BIN_DIR:/usr/bin:/bin"
+acp_no_base_prompt="$(pilot_clap_bool "${PILOT_ENV[BUZZ_ACP_NO_BASE_PROMPT]}")" \
+  || { pilot_die 'invalid ACP no-base-prompt boolean'; exit 1; }
+acp_no_memory="$(pilot_clap_bool "${PILOT_ENV[BUZZ_ACP_NO_MEMORY]}")" \
+  || { pilot_die 'invalid ACP no-memory boolean'; exit 1; }
 
 (
   trap '' HUP
@@ -127,8 +139,8 @@ fi
   export BUZZ_AGENT_NO_HINTS="${PILOT_ENV[BUZZ_AGENT_NO_HINTS]}"
   export BUZZ_AGENT_REQUIRE_REPLY="${PILOT_ENV[BUZZ_AGENT_REQUIRE_REPLY]}"
   export BUZZ_ACP_SYSTEM_PROMPT_FILE="${PILOT_ENV[BUZZ_ACP_SYSTEM_PROMPT_FILE]}"
-  export BUZZ_ACP_NO_BASE_PROMPT="${PILOT_ENV[BUZZ_ACP_NO_BASE_PROMPT]}"
-  export BUZZ_ACP_NO_MEMORY="${PILOT_ENV[BUZZ_ACP_NO_MEMORY]}"
+  export BUZZ_ACP_NO_BASE_PROMPT="$acp_no_base_prompt"
+  export BUZZ_ACP_NO_MEMORY="$acp_no_memory"
   export BUZZ_ACP_AGENT_COMMAND="${PILOT_ENV[BUZZ_ACP_AGENT_COMMAND]}"
   export BUZZ_ACP_AGENT_ARGS="${PILOT_ENV[BUZZ_ACP_AGENT_ARGS]}"
   export BUZZ_ACP_MODEL="${PILOT_ENV[BUZZ_ACP_MODEL]}"
