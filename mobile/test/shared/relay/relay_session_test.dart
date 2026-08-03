@@ -429,6 +429,56 @@ void main() {
   });
 
   test(
+    'reconnect cancels an in-flight history request so it can be retried',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      final first = session.fetchHistory(const NostrFilter(kinds: [39002]));
+      final firstExpectation = expectLater(first, throwsException);
+      session.debugHandleDisconnected();
+      await firstExpectation;
+
+      final retry = session.fetchHistory(const NostrFilter(kinds: [39002]));
+      session.debugHandleMessage(['EOSE', 'h-2']);
+      await expectLater(retry, completion(isEmpty));
+    },
+  );
+
+  test('flushes mixed-age buffered events before a disconnect', () async {
+    final session = RelaySessionNotifier();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+    final delivered = <String>[];
+    const filter = NostrFilter(kinds: EventKind.channelEventKinds, limit: 50);
+    final subscribe = session.subscribe(
+      filter,
+      (event) => delivered.add(event.id),
+    );
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+
+    session.debugHandleMessage(['EVENT', 'l-1', _eventWithId('old').toJson()]);
+    session.debugHandleMessage(['EVENT', 'l-1', _eventWithId('new').toJson()]);
+    session.debugFlushEventBuffer();
+    session.debugHandleDisconnected();
+
+    expect(delivered, ['event-old', 'event-new']);
+    unsubscribe();
+  });
+
+  test(
     'retains recent delivery keys across a bounded dedup rollover',
     () async {
       RelaySessionNotifier.debugRecentDeliveryKeyLimit = 3;

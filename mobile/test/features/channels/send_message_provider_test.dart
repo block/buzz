@@ -105,6 +105,42 @@ void main() {
       await result;
     },
   );
+
+  test(
+    'non-DM send bypasses channel loading when explicit mentions are known',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) => throw StateError('channel list is unavailable'),
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        failLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'ordinary channel message',
+        mentionPubkeys: const ['known-member'],
+      );
+      await session.published;
+      expect(
+        session.event.tags,
+        contains(
+          predicate<List<dynamic>>(
+            (tag) =>
+                tag.length == 2 && tag[0] == 'p' && tag[1] == 'known-member',
+          ),
+        ),
+      );
+      session.accept();
+      await result;
+    },
+  );
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
