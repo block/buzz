@@ -355,8 +355,11 @@ PopupMenuItem<String> _sortMenuItem({
   ),
 );
 
-List<PopupMenuEntry<String>> _sortMenuItems(ChannelSortMode current) => [
-  const PopupMenuDivider(),
+List<PopupMenuEntry<String>> _sortMenuItems(
+  ChannelSortMode current, {
+  bool showDivider = true,
+}) => [
+  if (showDivider) const PopupMenuDivider(),
   _sortMenuItem(
     value: _kSortRecentMenuValue,
     label: 'Sort: Recent',
@@ -557,10 +560,10 @@ class _SectionHeader extends StatelessWidget {
               Builder(
                 builder: (buttonContext) => IconButton(
                   key: ValueKey('sort-menu-$label'),
-                  tooltip: 'Sort $label',
+                  tooltip: '$label options',
                   visualDensity: VisualDensity.compact,
                   icon: Icon(
-                    LucideIcons.arrowUpDown,
+                    LucideIcons.ellipsisVertical,
                     size: _kChannelIconSize,
                     color: sectionColor,
                   ),
@@ -579,7 +582,7 @@ class _SectionHeader extends StatelessWidget {
                         side: BorderSide(color: context.colors.outline),
                       ),
                       surfaceKey: ValueKey('sort-popover-$label'),
-                      items: _sortMenuItems(mode),
+                      items: _sortMenuItems(mode, showDivider: false),
                     );
                     if (value == _kSortRecentMenuValue) {
                       onSortModeChange?.call(ChannelSortMode.recent);
