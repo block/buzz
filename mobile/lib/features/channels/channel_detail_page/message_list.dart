@@ -27,6 +27,7 @@ class _MessageList extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
+    final scrollOffsetController = useMemoized(ScrollOffsetController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final isLoadingOlder = useState(false);
     final isAtLatest = useState(true);
@@ -179,10 +180,55 @@ class _MessageList extends HookConsumerWidget {
       previousLatestEntryId.value = latestEntryId;
       if (previous == null ||
           latestEntryId == null ||
-          previous == latestEntryId ||
-          !isAtLatest.value) {
+          previous == latestEntryId) {
         return null;
       }
+
+      if (!followsLatest.value) {
+        final previousIndex = reversedIndexOf(previous);
+        final previousPosition = itemPositionsListener.itemPositions.value
+            .where((position) => position.index == 0)
+            .firstOrNull;
+        if (previousIndex == null ||
+            previousIndex == 0 ||
+            previousPosition == null) {
+          return null;
+        }
+        final previousLeadingEdge = previousPosition.itemLeadingEdge;
+
+        void preservePreviousPosition() {
+          final currentPosition = itemPositionsListener.itemPositions.value
+              .where((position) => position.index == previousIndex)
+              .firstOrNull;
+          final viewportHeight = context.size?.height;
+          if (currentPosition == null || viewportHeight == null) return;
+
+          itemPositionsListener.itemPositions.removeListener(
+            preservePreviousPosition,
+          );
+          if (!context.mounted || followsLatest.value) return;
+
+          final offset =
+              (currentPosition.itemLeadingEdge - previousLeadingEdge) *
+              viewportHeight;
+          if (offset.abs() < 0.5) return;
+          unawaited(
+            scrollOffsetController.animateScroll(
+              offset: offset,
+              duration: const Duration(milliseconds: 1),
+            ),
+          );
+        }
+
+        itemPositionsListener.itemPositions.addListener(
+          preservePreviousPosition,
+        );
+        return () => itemPositionsListener.itemPositions.removeListener(
+          preservePreviousPosition,
+        );
+      }
+
+      if (!isAtLatest.value) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) scrollToLatest();
       });
@@ -250,6 +296,7 @@ class _MessageList extends HookConsumerWidget {
             child: ScrollablePositionedList.builder(
               key: const ValueKey('channel-message-list'),
               itemScrollController: itemScrollController,
+              scrollOffsetController: scrollOffsetController,
               itemPositionsListener: itemPositionsListener,
               reverse: true,
               padding: EdgeInsets.only(

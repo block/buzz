@@ -5,11 +5,12 @@ const _dynamicIslandCloseDuration = Duration(milliseconds: 340);
 const _dynamicIslandEaseOut = Cubic(0.16, 1, 0.3, 1);
 
 class _DynamicIslandQrScannerPortal extends HookWidget {
-  const _DynamicIslandQrScannerPortal();
+  const _DynamicIslandQrScannerPortal({this.cameraBuilder});
+
+  final PairingQrScannerCameraBuilder? cameraBuilder;
 
   @override
   Widget build(BuildContext context) {
-    final controller = useMemoized(MobileScannerController.new);
     final animation = useAnimationController(
       duration: _dynamicIslandOpenDuration,
       reverseDuration: _dynamicIslandCloseDuration,
@@ -29,9 +30,8 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
 
       return () {
         unawaited(_setDynamicIslandScannerStatusBarHidden(false));
-        unawaited(controller.dispose());
       };
-    }, [animation, controller, reduceMotion]);
+    }, [animation, reduceMotion]);
 
     Future<void> finish(String? result) async {
       canPop.value = true;
@@ -60,15 +60,10 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
       }
     }
 
-    void handleDetection(BarcodeCapture capture) {
+    void handleDetection(String value) {
       if (isClosing.value || hasHandledResult.value) {
         return;
       }
-      final value = _firstScannedValue(capture);
-      if (value == null) {
-        return;
-      }
-
       hasHandledResult.value = true;
       unawaited(_performDynamicIslandQrScanSuccessHaptic());
       unawaited(finish(value));
@@ -140,8 +135,8 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                                   Opacity(
                                     opacity: scannerOpacity,
                                     child: _QrScannerCamera(
-                                      controller: controller,
                                       onDetect: handleDetection,
+                                      cameraBuilder: cameraBuilder,
                                     ),
                                   ),
                                 IgnorePointer(

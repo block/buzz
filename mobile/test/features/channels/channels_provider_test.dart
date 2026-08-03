@@ -1,6 +1,10 @@
+import 'dart:async';
+
+import 'package:buzz/shared/notifications/notifications.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -17,6 +21,8 @@ import 'package:buzz/shared/relay/relay.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   const myPk = 'me';
 
   test(
@@ -79,6 +85,52 @@ void main() {
 
     final channels = container.read(channelsProvider).value!;
     expect(channels.single.lastMessageAt?.millisecondsSinceEpoch, 20 * 1000);
+  });
+
+  test('reconnect replay stays silent until the replacement EOSE', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final bridge = _RecordingNotificationBridge();
+    final container = _buildContainer(
+      session: session,
+      overrides: [
+        notificationSettingsProvider.overrideWith(
+          () => _StaticNotificationSettings(),
+        ),
+        androidNotificationBridgeProvider.overrideWithValue(bridge),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(bridge.dispose);
+    await container.read(channelsProvider.future);
+
+    session.emit(_messageEvent(id: 'before-reconnect', createdAt: 10));
+    await Future<void>.delayed(Duration.zero);
+    expect(bridge.eventIds, ['before-reconnect']);
+
+    session.setStatus(SessionStatus.reconnecting);
+    session.emit(_messageEvent(id: 'replayed-old-sub', createdAt: 11));
+    await Future<void>.delayed(Duration.zero);
+    expect(bridge.eventIds, ['before-reconnect']);
+
+    final replacementEose = Completer<void>();
+    session.subscriptionGates.add(replacementEose);
+    session.setStatus(SessionStatus.connected);
+    await _waitUntil(() => session.subscribeCallCount >= 2);
+
+    session.emit(_messageEvent(id: 'before-eose', createdAt: 12));
+    await Future<void>.delayed(Duration.zero);
+    expect(bridge.eventIds, ['before-reconnect']);
+
+    replacementEose.complete();
+    await _waitUntil(() => session.unsubscribeCount >= 1);
+    await Future<void>.delayed(Duration.zero);
+    session.emit(_messageEvent(id: 'after-eose', createdAt: 13));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(bridge.eventIds, ['before-reconnect', 'after-eose']);
   });
 
   test('ephemeral (TTL) channels appear in the list', () async {
@@ -412,13 +464,17 @@ NostrEvent _meta({
   sig: 'sig',
 );
 
-ProviderContainer _buildContainer({required _FakeRelaySession session}) {
+ProviderContainer _buildContainer({
+  required _FakeRelaySession session,
+  List<Override> overrides = const [],
+}) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       myPubkeyProvider.overrideWithValue('me'),
+      ...overrides,
     ],
   );
 }
@@ -441,7 +497,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> subscribeFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  final List<Completer<void>> subscriptionGates = [];
   int unsubscribeCount = 0;
+  int subscribeCallCount = 0;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -483,8 +541,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    subscribeCallCount++;
     subscribeFilters.add(filter);
     _listeners.add(onEvent);
+    if (subscriptionGates.isNotEmpty) {
+      await subscriptionGates.removeAt(0).future;
+    }
     return () {
       unsubscribeCount++;
       subscribeFilters.remove(filter);
@@ -502,6 +564,55 @@ class _FakeRelaySession extends RelaySessionNotifier {
       listener(event);
     }
   }
+}
+
+class _StaticNotificationSettings extends NotificationSettingsNotifier {
+  @override
+  NotificationSettingsState build() => const NotificationSettingsState(
+    alertsEnabled: true,
+    priorityEnabled: true,
+    activityEnabled: true,
+    permission: AndroidNotificationPermission.granted,
+    priorityChannelEnabled: true,
+    activityChannelEnabled: true,
+  );
+}
+
+class _RecordingNotificationBridge extends AndroidNotificationBridge {
+  final List<String> eventIds = [];
+
+  @override
+  Future<void> show({
+    required int id,
+    required String channel,
+    required String title,
+    required String body,
+    required String route,
+  }) async {
+    final parsed = Uri.parse(route);
+    eventIds.add(parsed.queryParameters['id']!);
+  }
+}
+
+NostrEvent _messageEvent({required String id, required int createdAt}) =>
+    NostrEvent(
+      id: id,
+      pubkey: 'alice',
+      createdAt: createdAt,
+      kind: EventKind.streamMessageV2,
+      tags: const [
+        ['h', _channelA],
+      ],
+      content: 'message',
+      sig: 'sig',
+    );
+
+Future<void> _waitUntil(bool Function() condition) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (condition()) return;
+    await Future<void>.delayed(Duration.zero);
+  }
+  fail('condition was not reached');
 }
 
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {

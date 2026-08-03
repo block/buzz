@@ -19,7 +19,9 @@ dependencies:
   http: ^1.4.0
   flutter_secure_storage: ^10.0.0
   flutter_svg: ^2.2.4
-  mobile_scanner: ^7.0.0
+  # Open-source ZXing-C++ decoding via Dart FFI; does not package ML Kit or
+  # Firebase libraries into the Android app.
+  flutter_zxing: ^2.3.0
   shared_preferences: ^2.5.5
   web_socket_channel: ^3.0.1
   connectivity_plus: ^7.0.0

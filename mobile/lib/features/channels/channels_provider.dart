@@ -8,6 +8,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
+import '../notifications/live_notification_dispatcher.dart';
+import '../profile/user_cache_provider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart' show channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
@@ -41,6 +43,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final Map<String, int> _latestObservedByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
+  final Set<String> _notificationReadyChannelIds = {};
   Set<String> _participatedRootIds = {};
   Set<String> _authoredRootIds = {};
   String? _threadInterestPubkey;
@@ -64,7 +67,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final waitingForInitialConnection =
         sessionState.status != SessionStatus.connected;
     ref.listen(relaySessionProvider, (previous, next) {
-      if (next.status != SessionStatus.connected) return;
+      if (next.status != SessionStatus.connected) {
+        _notificationReadyChannelIds.clear();
+        return;
+      }
       if (waitingForInitialConnection &&
           !_hasLoaded &&
           !connected.isCompleted) {
@@ -439,7 +445,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final subscriptions = await Future.wait(
       channelIds.map((channelId) async {
         try {
-          return await session.subscribe(
+          final unsubscribe = await session.subscribe(
             NostrFilter(
               kinds: EventKind.channelEventKinds,
               tags: {
@@ -449,6 +455,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             ),
             _handleLiveEvent,
           );
+          // RelaySession flushes replay callbacks before subscribe() resolves
+          // at EOSE. Only arrivals after this point may surface notifications.
+          if (subscriptionVersion == _subscriptionVersion &&
+              ref.read(relaySessionProvider).status ==
+                  SessionStatus.connected) {
+            _notificationReadyChannelIds.add(channelId);
+          }
+          return unsubscribe;
         } catch (error) {
           debugPrint(
             '[ChannelsNotifier] live subscription failed for $channelId: $error',
@@ -568,6 +582,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     final myPk = ref.read(myPubkeyProvider);
     final mutedChannelIds = _mutedChannelIds();
+    Channel? notificationChannel;
 
     state = state.whenData((channels) {
       final idx = channels.indexWhere((c) => c.id == channelId);
@@ -593,6 +608,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             channelId: channel.id,
           )) {
         _recordUnreadEvent(channel, event, myPk);
+        if (_notificationReadyChannelIds.contains(channelId)) {
+          notificationChannel = channel;
+        }
         final eventTime = DateTime.fromMillisecondsSinceEpoch(
           event.createdAt * 1000,
           isUtc: true,
@@ -605,6 +623,45 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
       return updated;
     });
+
+    final channel = notificationChannel;
+    if (channel != null && myPk != null) {
+      unawaited(
+        ref
+            .read(liveNotificationDispatcherProvider)
+            .dispatch(
+              event: event,
+              channel: channel,
+              myPubkey: myPk,
+              senderName: _notificationSenderName(channel, event.pubkey),
+              participatedRootIds: _participatedRootIds,
+              followedRootIds: _followedRootIds(),
+              authoredRootIds: _authoredRootIds,
+              mutedChannelIds: mutedChannelIds,
+            ),
+      );
+    }
+  }
+
+  String? _notificationSenderName(Channel channel, String pubkey) {
+    final normalizedPubkey = pubkey.toLowerCase();
+    final cachedName = ref
+        .read(userCacheProvider)[normalizedPubkey]
+        ?.displayName
+        ?.trim();
+    if (cachedName?.isNotEmpty == true) return cachedName;
+
+    if (!channel.isDm) return null;
+    final participantIndex = channel.participantPubkeys.indexWhere(
+      (participantPubkey) =>
+          participantPubkey.toLowerCase() == normalizedPubkey,
+    );
+    if (participantIndex < 0 ||
+        participantIndex >= channel.participants.length) {
+      return null;
+    }
+    final participantName = channel.participants[participantIndex].trim();
+    return participantName.isEmpty ? null : participantName;
   }
 
   Set<String> _mutedChannelIds() => {
@@ -734,6 +791,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   void _clearLiveSubscriptions() {
     _subscriptionVersion++;
+    _notificationReadyChannelIds.clear();
     for (final unsubscribe in _unsubscribers) {
       unsubscribe();
     }

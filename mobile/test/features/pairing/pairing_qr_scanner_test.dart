@@ -1,30 +1,18 @@
-import 'dart:async';
-
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 
 const _qrScannerPlatformChannel = MethodChannel('buzz/qr_scanner');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final defaultScannerPlatform = MobileScannerPlatform.instance;
-  late _FakeMobileScannerPlatform fakeScannerPlatform;
 
-  setUp(() {
-    fakeScannerPlatform = _FakeMobileScannerPlatform();
-    MobileScannerPlatform.instance = fakeScannerPlatform;
-  });
-
-  tearDown(() async {
+  tearDown(() {
     debugDefaultTargetPlatformOverride = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_qrScannerPlatformChannel, null);
-    await fakeScannerPlatform.dispose();
-    MobileScannerPlatform.instance = defaultScannerPlatform;
   });
 
   group('DynamicIslandQrScannerGeometry', () {
@@ -93,6 +81,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: FallbackPairingQrScanner(
+          cameraBuilder: _fakeCameraBuilder,
           appSurface: const ColoredBox(
             color: Colors.white,
             child: Center(child: Text('Current app surface')),
@@ -121,6 +110,35 @@ void main() {
     expect(tester.getRect(sheet).top, 0);
   });
 
+  testWidgets('fallback returns the decoded QR value once', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(375, 667));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    ValueChanged<String>? detect;
+    String? scannedValue;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: FallbackPairingQrScanner(
+          cameraBuilder: (onDetected) {
+            detect = onDetected;
+            return const ColoredBox(color: Colors.black);
+          },
+          appSurface: const ColoredBox(color: Colors.white),
+          onClosed: (value) {
+            scannedValue = value;
+          },
+        ),
+      ),
+    );
+
+    detect!('nostrpair://example');
+    detect!('nostrpair://ignored');
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(scannedValue, 'nostrpair://example');
+  });
+
   testWidgets(
     'portal route opens from the island and an outside tap reverses it closed',
     (tester) async {
@@ -147,7 +165,10 @@ void main() {
             child: Builder(
               builder: (context) => TextButton(
                 onPressed: () async {
-                  await showDynamicIslandPairingQrScanner(context);
+                  await showDynamicIslandPairingQrScanner(
+                    context,
+                    cameraBuilder: _fakeCameraBuilder,
+                  );
                   scannerClosed = true;
                 },
                 child: const Text('Open scanner'),
@@ -209,7 +230,10 @@ void main() {
         home: Builder(
           builder: (context) => TextButton(
             onPressed: () async {
-              await showDynamicIslandPairingQrScanner(context);
+              await showDynamicIslandPairingQrScanner(
+                context,
+                cameraBuilder: _fakeCameraBuilder,
+              );
               scannerClosed = true;
             },
             child: const Text('Open scanner'),
@@ -236,42 +260,5 @@ void main() {
   });
 }
 
-class _FakeMobileScannerPlatform extends MobileScannerPlatform {
-  final _barcodes = StreamController<BarcodeCapture?>.broadcast();
-  var _isDisposed = false;
-
-  @override
-  Stream<BarcodeCapture?> get barcodesStream => _barcodes.stream;
-
-  @override
-  Stream<TorchState> get torchStateStream =>
-      Stream.value(TorchState.unavailable);
-
-  @override
-  Stream<double> get zoomScaleStateStream => Stream.value(1);
-
-  @override
-  Future<MobileScannerViewAttributes> start(StartOptions startOptions) async {
-    return const MobileScannerViewAttributes(
-      cameraDirection: CameraFacing.back,
-      currentTorchMode: TorchState.unavailable,
-      size: Size(200, 200),
-      numberOfCameras: 1,
-    );
-  }
-
-  @override
-  Widget buildCameraView() => const SizedBox.expand();
-
-  @override
-  Future<void> stop() async {}
-
-  @override
-  Future<void> dispose() async {
-    if (_isDisposed) {
-      return;
-    }
-    _isDisposed = true;
-    await _barcodes.close();
-  }
-}
+Widget _fakeCameraBuilder(ValueChanged<String> _) =>
+    const ColoredBox(color: Colors.black);

@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:app_badge_plus/app_badge_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -15,6 +18,7 @@ import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
+import 'shared/notifications/notifications.dart';
 import 'shared/relay/relay.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
@@ -60,6 +64,34 @@ class App extends HookConsumerWidget {
     // Start listening for buzz:// links immediately (even pre-auth) so a
     // cold-start link survives until the authenticated UI can dispatch it.
     ref.watch(pendingDeepLinkProvider);
+    final notificationBridge =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? ref.watch(androidNotificationBridgeProvider)
+        : null;
+    useEffect(() {
+      final bridge = notificationBridge;
+      if (bridge == null) return null;
+
+      void dispatchRoute(String route) {
+        final uri = Uri.tryParse(route);
+        if (uri == null) {
+          debugPrint('notification: ignoring invalid route: $route');
+          return;
+        }
+        ref.read(pendingDeepLinkProvider.notifier).handleUri(uri);
+      }
+
+      final subscription = bridge.notificationTaps.listen(dispatchRoute);
+      unawaited(() async {
+        try {
+          final route = await bridge.getInitialRoute();
+          if (route != null) dispatchRoute(route);
+        } catch (error) {
+          debugPrint('notification: initial route unavailable: $error');
+        }
+      }());
+      return subscription.cancel;
+    }, [notificationBridge]);
 
     void applyBadge(UnreadBadgeState state) {
       if (state.highPriorityCount > 0) {

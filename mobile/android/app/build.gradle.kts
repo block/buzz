@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.artifacts.result.UnresolvedDependencyResult
 
 plugins {
     id("com.android.application")
@@ -130,6 +131,135 @@ dependencies {
     androidTestImplementation(kotlin("test"))
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
+}
+
+// QR scanning must stay independent of ML Kit and Firebase ML. This rule is
+// evaluated for every resolved Android configuration, including transitive
+// dependencies pulled in by Flutter plugins.
+val forbiddenQrDependencyPrefixes =
+    listOf(
+        "com.google.mlkit:",
+        "com.google.firebase:firebase-ml",
+        "com.google.android.odml:",
+    )
+val isForbiddenQrDependency = { group: String?, name: String ->
+    val coordinate = "$group:$name".lowercase()
+    val isPlayServicesScanner =
+        group == "com.google.android.gms" &&
+            (name.lowercase().contains("mlkit") || name == "play-services-code-scanner")
+    isPlayServicesScanner || forbiddenQrDependencyPrefixes.any(coordinate::startsWith)
+}
+
+configurations.configureEach {
+    resolutionStrategy.eachDependency {
+        val coordinate = "${requested.group}:${requested.name}".lowercase()
+        if (isForbiddenQrDependency(requested.group, requested.name)) {
+            throw GradleException(
+                "Forbidden Google ML/Firebase ML Android dependency: $coordinate. " +
+                    "Pairing QR scanning must use the ZXing-C++ FFI implementation.",
+            )
+        }
+    }
+}
+
+val checkQrDependencyPolicy by tasks.registering {
+    group = "verification"
+    description = "Resolves the packaged Android runtime and rejects ML Kit/Firebase ML artifacts."
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        checkQrDependencyPolicy.configure {
+            doLast {
+                // The component graph carries every transitive module
+                // coordinate without forcing Gradle to choose among each
+                // Android plugin's artifact-type subvariants.
+                val components =
+                    variant.runtimeConfiguration.incoming.resolutionResult.allComponents
+                val forbidden =
+                    components.mapNotNull { it.moduleVersion }.filter {
+                        isForbiddenQrDependency(it.group, it.name)
+                    }
+                if (forbidden.isNotEmpty()) {
+                    throw GradleException(
+                        "Forbidden Google ML/Firebase ML Android dependencies: " +
+                            forbidden.sortedBy { it.toString() }.joinToString(", "),
+                    )
+                }
+                logger.lifecycle(
+                    "QR dependency policy passed for ${variant.name}: " +
+                        "${components.size} resolved components inspected.",
+                )
+            }
+        }
+    }
+}
+
+tasks.named("check").configure {
+    dependsOn(checkQrDependencyPolicy)
+}
+
+tasks.withType<Test>().configureEach {
+    systemProperty("buzz.android.appProjectDir", projectDir.absolutePath)
+}
+
+// CI consumes this canonical manifest instead of scraping Gradle's
+// human-readable dependency report. Keep every installable app variant in the
+// list so a variant-specific Google SDK dependency cannot bypass the APK gate.
+val buzzRuntimeClasspathNames =
+    listOf(
+        "debugRuntimeClasspath",
+        "profileRuntimeClasspath",
+        "releaseRuntimeClasspath",
+    )
+val buzzRuntimeDependencyManifest =
+    layout.buildDirectory.file("reports/buzz-runtime-dependencies.tsv")
+
+tasks.register("writeBuzzRuntimeDependencyManifest") {
+    group = "verification"
+    description = "Writes canonical runtime dependency coordinates for every app variant."
+
+    doLast {
+        val missingConfigurations =
+            buzzRuntimeClasspathNames.filter { configurations.findByName(it) == null }
+        if (missingConfigurations.isNotEmpty()) {
+            throw GradleException(
+                "Missing required app runtime configurations: " +
+                    missingConfigurations.joinToString(", "),
+            )
+        }
+
+        val lines = mutableListOf<String>()
+        for (configurationName in buzzRuntimeClasspathNames.sorted()) {
+            lines += "configuration\t$configurationName"
+            val configuration = configurations.getByName(configurationName)
+            val resolutionResult = configuration.incoming.resolutionResult
+            val unresolved =
+                resolutionResult.allDependencies
+                    .filterIsInstance<UnresolvedDependencyResult>()
+                    .map { dependency -> dependency.attempted.displayName }
+                    .distinct()
+                    .sorted()
+            if (unresolved.isNotEmpty()) {
+                throw GradleException(
+                    "Unresolved $configurationName dependencies: " + unresolved.joinToString(", "),
+                )
+            }
+            val coordinates =
+                resolutionResult.allComponents
+                    .mapNotNull { component -> component.moduleVersion }
+                    .map { module -> "${module.group}:${module.name}:${module.version}" }
+                    .distinct()
+                    .sorted()
+            lines += coordinates.map { coordinate ->
+                "component\t$configurationName\t$coordinate"
+            }
+        }
+
+        val manifest = buzzRuntimeDependencyManifest.get().asFile
+        manifest.parentFile.mkdirs()
+        manifest.writeText(lines.sorted().joinToString(separator = "\n", postfix = "\n"))
+    }
 }
 
 gradle.taskGraph.whenReady {

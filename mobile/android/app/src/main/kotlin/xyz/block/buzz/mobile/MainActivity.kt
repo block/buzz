@@ -1,5 +1,6 @@
 package xyz.block.buzz.mobile
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -78,9 +79,16 @@ internal object AndroidImageProcessor {
 
 class MainActivity : FlutterActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var notificationBridge: AndroidNotificationBridge? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        notificationBridge?.dispose()
+        notificationBridge = AndroidNotificationBridge(
+            activity = this,
+            binaryMessenger = flutterEngine.dartExecutor.binaryMessenger,
+        )
 
         mediaUploadChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -104,6 +112,31 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        notificationBridge?.handleIntent(intent) ?: setIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        notificationBridge?.handleResume()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        notificationBridge?.handlePermissionResult(requestCode, permissions, grantResults)
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        notificationBridge?.dispose()
+        notificationBridge = null
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 
     private fun handleSanitizeImageForUpload(

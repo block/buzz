@@ -6,8 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../shared/theme/theme.dart';
 
@@ -16,6 +16,14 @@ part 'pairing_qr_scanner/fallback_scanner.dart';
 part 'pairing_qr_scanner/scanner_camera.dart';
 
 const _qrScannerPlatformChannel = MethodChannel('buzz/qr_scanner');
+
+/// Builds the camera surface used by a pairing QR scanner.
+///
+/// Production uses ZXing-C++ through [ReaderWidget]. Tests can provide a
+/// camera-free surface and drive [onDetected] directly.
+@visibleForTesting
+typedef PairingQrScannerCameraBuilder =
+    Widget Function(ValueChanged<String> onDetected);
 
 /// Returns whether the current iPhone should use the Dynamic Island scanner.
 ///
@@ -43,7 +51,10 @@ Future<bool> usesDynamicIslandQrScannerPortal() async {
 /// Callers determine device support with
 /// [usesDynamicIslandQrScannerPortal]. Standard devices reveal the camera
 /// behind their existing app surface with [FallbackPairingQrScanner].
-Future<String?> showDynamicIslandPairingQrScanner(BuildContext context) {
+Future<String?> showDynamicIslandPairingQrScanner(
+  BuildContext context, {
+  @visibleForTesting PairingQrScannerCameraBuilder? cameraBuilder,
+}) {
   return Navigator.of(context).push<String>(
     PageRouteBuilder<String>(
       opaque: false,
@@ -51,7 +62,8 @@ Future<String?> showDynamicIslandPairingQrScanner(BuildContext context) {
       barrierDismissible: false,
       transitionDuration: Duration.zero,
       reverseTransitionDuration: Duration.zero,
-      pageBuilder: (_, _, _) => const _DynamicIslandQrScannerPortal(),
+      pageBuilder: (_, _, _) =>
+          _DynamicIslandQrScannerPortal(cameraBuilder: cameraBuilder),
     ),
   );
 }
@@ -79,16 +91,6 @@ Future<void> _performDynamicIslandQrScanSuccessHaptic() async {
   } on MissingPluginException {
     // Widget tests and non-iOS embedders do not register the bridge.
   }
-}
-
-String? _firstScannedValue(BarcodeCapture capture) {
-  for (final barcode in capture.barcodes) {
-    final value = barcode.rawValue;
-    if (value != null && value.isNotEmpty) {
-      return value;
-    }
-  }
-  return null;
 }
 
 /// Geometry for the iPhone Dynamic Island scanner portal.

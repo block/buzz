@@ -63,6 +63,8 @@ jobs:
             mobile:
               - 'scripts/check-file-sizes-core.mjs'
               - 'scripts/check-file-sizes-core.test.mjs'
+              - 'scripts/check-android-google-free.py'
+              - 'scripts/test-check-android-google-free.sh'
               - 'mobile/**'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-worktree-overrides.sh'
@@ -86,6 +88,8 @@ jobs:
         run: scripts/test-mobile-worktree-overrides.sh
       - name: File size ratchet unit tests
         run: node --test scripts/check-file-sizes-core.test.mjs
+      - name: Android Google SDK-free guard unit tests
+        run: scripts/test-check-android-google-free.sh
 
   rust-lint:
     name: Rust Lint
@@ -838,6 +842,10 @@ jobs:
           restore-keys: ${{ runner.os }}-hermit-cache-
       - name: Prime Flutter SDK
         run: flutter --version
+      - name: Setup Gradle 8.14.5
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          gradle-version: '8.14.5'
       - name: Save Hermit package cache
         if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -871,6 +879,18 @@ jobs:
         run: cd mobile && flutter test
       - name: Build Android debug APK
         run: just mobile-build-android
+      - name: Android JVM tests and dependency manifest
+        run: |
+          gradle -p mobile/android \
+            :app:testDebugUnitTest \
+            :app:writeBuzzRuntimeDependencyManifest \
+            --no-daemon \
+            --console=plain
+      - name: Verify Android APK and dependencies are Google SDK-free
+        run: |
+          scripts/check-android-google-free.py \
+            --apk mobile/build/app/outputs/flutter-apk/app-debug.apk \
+            --dependency-manifest mobile/build/app/reports/buzz-runtime-dependencies.tsv
 
   security:
     name: Security

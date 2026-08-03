@@ -15,6 +15,7 @@ class FallbackPairingQrScanner extends HookWidget {
   const FallbackPairingQrScanner({
     required this.appSurface,
     required this.onClosed,
+    this.cameraBuilder,
     super.key,
   });
 
@@ -24,22 +25,18 @@ class FallbackPairingQrScanner extends HookWidget {
   /// Called after the app surface has returned, with a scanned value if any.
   final ValueChanged<String?> onClosed;
 
+  /// Overrides the native camera surface in widget tests.
+  @visibleForTesting
+  final PairingQrScannerCameraBuilder? cameraBuilder;
+
   @override
   Widget build(BuildContext context) {
-    final controller = useMemoized(MobileScannerController.new);
     final animation = useAnimationController(
       duration: _fallbackScannerOpenDuration,
       reverseDuration: _fallbackScannerCloseDuration,
     );
     final isClosing = useRef(false);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-
-    useEffect(
-      () => () {
-        unawaited(controller.dispose());
-      },
-      [controller],
-    );
 
     useEffect(() {
       if (reduceMotion) {
@@ -68,15 +65,10 @@ class FallbackPairingQrScanner extends HookWidget {
       }
     }
 
-    void handleDetection(BarcodeCapture capture) {
+    void handleDetection(String value) {
       if (isClosing.value) {
         return;
       }
-      final value = _firstScannedValue(capture);
-      if (value == null) {
-        return;
-      }
-
       unawaited(closeScanner(value));
     }
 
@@ -114,8 +106,8 @@ class FallbackPairingQrScanner extends HookWidget {
                           fit: StackFit.expand,
                           children: [
                             _QrScannerCamera(
-                              controller: controller,
                               onDetect: handleDetection,
+                              cameraBuilder: cameraBuilder,
                             ),
                             const IgnorePointer(
                               child: _FallbackQrScannerViewfinder(),
