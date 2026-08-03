@@ -595,6 +595,39 @@ test("start a new direct message from the sidebar", async ({ page }) => {
   await expect(page.getByTestId("section-actions-dms")).not.toBeFocused();
 });
 
+test("new message search hides relay-only agents misclassified as people", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "anyone",
+        channelIds: [GENERAL_CHANNEL_ID],
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        isAgent: false,
+      },
+    ],
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("quinn");
+
+  await expect(page.getByTestId("new-dm-empty")).toContainText(
+    "No matching users.",
+  );
+  await expect(
+    page.getByTestId(`new-dm-result-${DM_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+});
+
 test("keeps typing focus while arrow keys traverse and select DM recipients", async ({
   page,
 }) => {

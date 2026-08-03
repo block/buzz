@@ -522,6 +522,7 @@ test("relay-only shared agents stay hidden from DM mentions", async ({
 test("relay-only shared agents stay hidden while channel type is unresolved", async ({
   page,
 }) => {
+  await installMockBridge(page, { userSearchDelayMs: 10_000 });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -533,7 +534,15 @@ test("relay-only shared agents stay hidden while channel type is unresolved", as
       `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
     ),
   ).toBeVisible();
-  await input.fill("");
+  await expect
+    .poll(async () =>
+      (await readCommandPayloadLog(page)).some(
+        (entry) =>
+          entry.command === "search_users" &&
+          (entry.payload as { query?: string }).query === "alice",
+      ),
+    )
+    .toBe(true);
 
   await page.evaluate(async (channelId) => {
     const bridge = window as Window & {
@@ -547,11 +556,7 @@ test("relay-only shared agents stay hidden while channel type is unresolved", as
     await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   }, GENERAL_CHANNEL_ID);
 
-  await input.fill("@");
-
-  await expect(
-    autocomplete(page).getByTestId(`mention-suggestion-${MOCK_VIEWER_PUBKEY}`),
-  ).toBeVisible();
+  await expect(input).toContainText("@alice");
   await expect(
     autocomplete(page).getByTestId(
       `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
@@ -560,19 +565,30 @@ test("relay-only shared agents stay hidden while channel type is unresolved", as
 });
 
 test("relay-only shared agents appear in forum mentions", async ({ page }) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["watercooler"],
+      },
+    ],
+  });
   await page.goto("/");
   await page.getByTestId("channel-watercooler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
   await page.getByRole("button", { name: "Start a new post..." }).click();
 
   const input = page.getByTestId("message-input");
-  await input.fill("@alice");
+  await input.fill("@quinn");
 
-  const aliceRow = page
+  const quinnRow = page
     .getByTestId("mention-autocomplete")
-    .getByTestId(`mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`);
-  await expect(aliceRow).toBeVisible();
-  await expect(aliceRow.getByTestId("mention-agent-icon")).toBeVisible();
+    .getByTestId(`mention-suggestion-${ALLOWLIST_RELAY_AGENT_PUBKEY}`);
+  await expect(quinnRow).toBeVisible();
+  await expect(quinnRow.getByTestId("mention-agent-icon")).toBeVisible();
 });
 
 test("autocomplete filters managed-agent suggestions as user types", async ({
@@ -992,6 +1008,7 @@ test("relay-only agents are visible in channel mentions when allowlisted", async
         name: "quinn",
         respondTo: "allowlist",
         respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelIds: [GENERAL_CHANNEL_ID],
       },
     ],
   });
@@ -1005,6 +1022,39 @@ test("relay-only agents are visible in channel mentions when allowlisted", async
   const dropdown = autocomplete(page);
   await expect(dropdown.getByText("quinn")).toBeVisible();
   await expect(dropdown.getByText("agent")).toBeVisible();
+});
+
+test("relay-only allowlisted agents stay hidden outside their channel", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["agents"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  await page.getByTestId("message-input").fill("@quinn");
+  const quinnRow = autocomplete(page).getByTestId(
+    `mention-suggestion-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(quinnRow).toBeVisible();
+  await expect(quinnRow.getByTestId("mention-agent-icon")).toBeVisible();
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("@quinn");
+
+  await expect(quinnRow).toHaveCount(0);
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({

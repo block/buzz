@@ -15,10 +15,7 @@ import {
   useRelayAgentsQuery,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
-import {
-  getMentionableAgentPubkeys,
-  getSharedChannelIds,
-} from "@/features/agents/lib/agentAutocompleteEligibility";
+import { getMentionableAgentPubkeys } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useChannelsQuery, useOpenDmMutation } from "@/features/channels/hooks";
 import {
@@ -129,7 +126,6 @@ function useAgentCandidates() {
   const identityQuery = useIdentityQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
-  const channelsQuery = useChannelsQuery();
 
   return React.useMemo(() => {
     const managed = managedAgentsQuery.data ?? [];
@@ -138,10 +134,10 @@ function useAgentCandidates() {
       managed.map((agent) => [normalizePubkey(agent.pubkey), agent]),
     );
     const mentionable = getMentionableAgentPubkeys({
+      currentChannelId: null,
       currentPubkey: identityQuery.data?.pubkey,
       managedAgentPubkeys: managedByPubkey.keys(),
       relayAgents,
-      sharedChannelIds: getSharedChannelIds(channelsQuery.data),
     });
 
     const candidates: AgentCandidate[] = managed.map((agent) => ({
@@ -167,7 +163,6 @@ function useAgentCandidates() {
       return left.name.localeCompare(right.name);
     });
   }, [
-    channelsQuery.data,
     identityQuery.data?.pubkey,
     managedAgentsQuery.data,
     relayAgentsQuery.data,
