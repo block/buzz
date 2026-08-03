@@ -4298,7 +4298,7 @@ function emitMockChannelMessage(
   recordMockMessage(channelId, event);
   emitMockLiveEvent(channelId, event);
   const rootEvent = history.find((candidate) => candidate.id === rootEventId);
-  if (rootEvent) {
+  if (rootEvent && mockHuddle?.state.ephemeral_channel_id === channelId) {
     const summary = buildMockChannelThreadSummary(
       channelId,
       rootEvent,
