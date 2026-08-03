@@ -15,7 +15,6 @@ import {
 } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
-import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -642,12 +641,6 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     remove: boolean,
   ) => Promise<void>;
 }) {
-  const showMembershipActivityAvatarStacks = useFeatureEnabled(
-    "membershipActivityAvatarStacks",
-  );
-  const useInlineMembershipActivityAvatarLayout = useFeatureEnabled(
-    "membershipActivityAvatarInlineLayout",
-  );
   const sourceMessages = React.useMemo(
     () => groupedMessages ?? [message],
     [groupedMessages, message],
@@ -869,38 +862,18 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     >
       {isMembershipActivity ? (
         <div className={cn(MESSAGE_MARKDOWN_CLASS, "flex flex-col gap-1.5")}>
-          {showMembershipActivityAvatarStacks &&
-          useInlineMembershipActivityAvatarLayout ? (
-            <div className="flex justify-center">
-              <div className="flex min-w-0 max-w-[min(40rem,80%)] items-center gap-2">
-                <MembershipAvatarStack
-                  currentPubkey={currentPubkey}
-                  profiles={profiles}
-                  pubkeys={membershipPubkeys}
-                />
-                <p className="min-w-0 text-left text-xs font-normal leading-4 text-muted-foreground/70">
-                  {description.title} {description.action}
-                </p>
-              </div>
+          <div className="flex justify-center">
+            <div className="flex min-w-0 max-w-[min(40rem,80%)] items-center gap-2">
+              <MembershipAvatarStack
+                currentPubkey={currentPubkey}
+                profiles={profiles}
+                pubkeys={membershipPubkeys}
+              />
+              <p className="min-w-0 text-left text-xs font-normal leading-4 text-muted-foreground/70">
+                {description.title} {description.action}
+              </p>
             </div>
-          ) : (
-            <>
-              {showMembershipActivityAvatarStacks ? (
-                <div className="flex justify-center">
-                  <MembershipAvatarStack
-                    currentPubkey={currentPubkey}
-                    profiles={profiles}
-                    pubkeys={membershipPubkeys}
-                  />
-                </div>
-              ) : null}
-              <div className="flex justify-center">
-                <p className="max-w-[min(40rem,80%)] text-center text-xs font-normal leading-4 text-muted-foreground/70">
-                  {description.title} {description.action}
-                </p>
-              </div>
-            </>
-          )}
+          </div>
           <div className="flex justify-center">{reactionsContent}</div>
         </div>
       ) : (

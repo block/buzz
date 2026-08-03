@@ -1954,42 +1954,6 @@ test("channel date divider keeps the date sticky while the separator rule scroll
   expect(metrics.dividerPillShadow).toBe("none");
 });
 
-test("places the membership activity avatar debug toggle above the channel surface", async ({
-  page,
-}) => {
-  await page.goto("/");
-
-  await page.getByTestId("channel-engineering").click();
-  const toggle = page.getByTestId("membership-activity-avatar-debug-toggle");
-  await expect(toggle).toBeVisible();
-  const layoutToggle = page.getByTestId(
-    "membership-activity-avatar-layout-toggle",
-  );
-  await expect(
-    layoutToggle.getByRole("button", { name: "Top" }),
-  ).toHaveAttribute("aria-pressed", "true");
-  await layoutToggle.getByRole("button", { name: "Inline" }).click();
-  await expect(
-    layoutToggle.getByRole("button", { name: "Inline" }),
-  ).toHaveAttribute("aria-pressed", "true");
-  expect(
-    await toggle.evaluate(
-      (element) => element.parentElement?.dataset.testid === "app-top-chrome",
-    ),
-  ).toBe(true);
-
-  const [toggleBox, channelSurfaceBox] = await Promise.all([
-    toggle.boundingBox(),
-    page.locator("[data-buzz-content-surface]").boundingBox(),
-  ]);
-  if (!toggleBox || !channelSurfaceBox) {
-    throw new Error("missing debug toggle or channel surface");
-  }
-  expect(toggleBox.y + toggleBox.height).toBeLessThanOrEqual(
-    channelSurfaceBox.y,
-  );
-});
-
 test("shows and clears activity indicators for active channel agents", async ({
   page,
 }) => {

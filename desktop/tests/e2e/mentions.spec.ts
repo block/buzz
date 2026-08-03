@@ -5,7 +5,6 @@ import {
   openChannelBrowser,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
-import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 
 const MOCK_VIEWER_PUBKEY = "deadbeef".repeat(8);
 
@@ -1197,7 +1196,7 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await expect(avatarStack.getByTestId("system-message-avatar")).toHaveCount(5);
   await expect(
     groupedRow.locator("p").filter({ hasText: "joined the channel" }),
-  ).toHaveCSS("text-align", "center");
+  ).toHaveCSS("text-align", "left");
   await expect(groupedRow.locator("[data-mention]")).toHaveCount(0);
 
   const visibleName = groupedRow.getByText("Peter Griffin", { exact: true });
@@ -1220,16 +1219,7 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await expect(tooltip).toContainText("Olivia Park");
   await expect(tooltip).toContainText("Sam Rivera");
 
-  await page.evaluate((storageKey) => {
-    const overrides = JSON.parse(
-      window.localStorage.getItem(storageKey) ?? "{}",
-    ) as Record<string, boolean>;
-    overrides.membershipActivityAvatarStacks = false;
-    window.localStorage.setItem(storageKey, JSON.stringify(overrides));
-    window.dispatchEvent(new StorageEvent("storage", { key: storageKey }));
-  }, FEATURE_OVERRIDES_STORAGE_KEY);
-  await expect(avatarStack).toHaveCount(0);
-  await expect(groupedRow).toContainText("joined the channel along with");
+  await expect(avatarStack.locator("..")).toHaveCSS("align-items", "center");
 });
 
 test("system agent profile exposes owned agent actions", async ({ page }) => {
