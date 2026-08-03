@@ -107,6 +107,11 @@ export function ModelPicker({
     return labels[origin] ?? null;
   }, [configSurface]);
 
+  // A model the harness refused, having fallen back to its own default. Until
+  // this was surfaced the picker kept displaying the rejected pick as if it had
+  // taken effect, so a wrong model looked identical to a right one (#2692).
+  const unappliedModelRequest = configSurface?.unappliedModelRequest ?? null;
+
   // Send a live `switch_model` frame to each channel the agent is working in
   // and wait for the harness to acknowledge. Any single `unsupported_model`
   // result rejects the whole pick immediately; all other statuses must arrive
@@ -246,6 +251,14 @@ export function ModelPicker({
       </DropdownMenu>
       {needsRestart ? (
         <span className="text-2xs text-warning">restart to apply</span>
+      ) : null}
+      {unappliedModelRequest ? (
+        <span
+          className="text-2xs text-warning"
+          title={`The harness did not recognise "${unappliedModelRequest}" and is running its own default instead.`}
+        >
+          {unappliedModelRequest} not applied
+        </span>
       ) : null}
     </span>
   );

@@ -4,6 +4,7 @@ mod codex;
 mod goose;
 pub(crate) mod reader;
 mod schema_walker;
+pub(crate) mod session_payload;
 pub(crate) mod types;
 
 pub(crate) use types::*;

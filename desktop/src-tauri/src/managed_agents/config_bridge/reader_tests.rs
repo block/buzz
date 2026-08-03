@@ -238,6 +238,8 @@ fn post_spawn_with_model_config_option_uses_acp() {
         available_models: vec![],
         current_model: Some("claude-opus-4".to_string()),
         model_overridden: false,
+        requested_model: None,
+        model_applied: false,
         goose_native_config: None,
         captured_at: "".to_string(),
     };
@@ -262,6 +264,8 @@ fn acp_model_overrides_file_model_with_override_tracking() {
         available_models: vec![],
         current_model: Some("acp-model".to_string()),
         model_overridden: false,
+        requested_model: None,
+        model_applied: false,
         goose_native_config: None,
         captured_at: "".to_string(),
     };
@@ -331,6 +335,8 @@ fn runtime_override_wins_display_when_model_overridden_is_true() {
         available_models: vec![],
         current_model: Some("live-model".to_string()),
         model_overridden: true,
+        requested_model: Some("live-model".to_string()),
+        model_applied: true,
         goose_native_config: None,
         captured_at: "".to_string(),
     };
@@ -365,6 +371,8 @@ fn no_runtime_override_when_model_overridden_is_false() {
         available_models: vec![],
         current_model: Some("persona-model".to_string()),
         model_overridden: false,
+        requested_model: None,
+        model_applied: false,
         goose_native_config: None,
         captured_at: "".to_string(),
     };
@@ -399,6 +407,8 @@ fn no_false_positive_override_when_persona_edited_mid_life() {
         available_models: vec![],
         current_model: Some("old-persona-model".to_string()),
         model_overridden: false,
+        requested_model: None,
+        model_applied: false,
         goose_native_config: None,
         captured_at: "".to_string(),
     };
@@ -777,4 +787,91 @@ fn missing_required_provider_still_returns_dropdown_field() {
 #[test]
 fn missing_optional_provider_stays_hidden() {
     assert!(build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, false).is_none());
+}
+
+// ── Unapplied model requests (#2692, #4004, #2265) ───────────────────────────
+//
+// When the harness cannot match the requested model against its own catalog it
+// warns and runs its default instead. `model_overridden` cannot express that:
+// it is false both for a rejected request and for no request at all, so the
+// wrong model ran with nothing to distinguish it from a deliberate default.
+// `unapplied_model_request` separates the two.
+
+/// A cache whose session was asked for `requested` and answered with `current`.
+fn model_request_cache(
+    requested: Option<&str>,
+    model_applied: bool,
+    current: &str,
+) -> SessionConfigCache {
+    SessionConfigCache {
+        config_options: vec![],
+        available_modes: vec![],
+        available_models: vec![],
+        current_model: Some(current.to_string()),
+        model_overridden: false,
+        requested_model: requested.map(str::to_string),
+        model_applied,
+        goose_native_config: None,
+        captured_at: "".to_string(),
+    }
+}
+
+#[test]
+fn unapplied_model_request_is_surfaced_when_the_harness_rejects_it() {
+    // The operator asked for "opus[1m]"; the harness had no such id and fell
+    // back to "harness-default". The surface must name the rejected request.
+    let record = test_record();
+    let runtime = test_runtime();
+    let cache = model_request_cache(Some("opus[1m]"), false, "harness-default");
+
+    let surface = read_config_surface(
+        &record,
+        Some(runtime),
+        Some(&cache),
+        Some(("persona-model", ConfigOrigin::PersonaDefault)),
+    );
+
+    assert_eq!(
+        surface.unapplied_model_request.as_deref(),
+        Some("opus[1m]"),
+        "a rejected model request must be surfaced, not silently dropped"
+    );
+}
+
+#[test]
+fn unapplied_model_request_is_none_when_the_request_was_applied() {
+    let record = test_record();
+    let runtime = test_runtime();
+    let cache = model_request_cache(Some("opus[1m]"), true, "opus[1m]");
+
+    let surface = read_config_surface(
+        &record,
+        Some(runtime),
+        Some(&cache),
+        Some(("persona-model", ConfigOrigin::PersonaDefault)),
+    );
+
+    assert_eq!(surface.unapplied_model_request, None);
+}
+
+#[test]
+fn unapplied_model_request_is_none_when_no_model_was_requested() {
+    // The distinction that matters: this session is running the harness default
+    // because nothing was asked for — not because a request was refused. It
+    // must NOT warn, even though `model_applied` is false here too.
+    let record = test_record();
+    let runtime = test_runtime();
+    let cache = model_request_cache(None, false, "harness-default");
+
+    let surface = read_config_surface(
+        &record,
+        Some(runtime),
+        Some(&cache),
+        Some(("persona-model", ConfigOrigin::PersonaDefault)),
+    );
+
+    assert_eq!(
+        surface.unapplied_model_request, None,
+        "no request was made, so there is nothing to warn about"
+    );
 }

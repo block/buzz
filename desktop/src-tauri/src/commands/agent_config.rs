@@ -7,10 +7,8 @@ use crate::{
         config_bridge::{
             read_goose_file_config,
             reader::read_config_surface,
-            types::{
-                AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin,
-                NormalizedField, RuntimeConfigSurface, SessionConfigCache,
-            },
+            session_payload::{parse_config_options, parse_models, parse_modes},
+            types::{ConfigOrigin, NormalizedField, RuntimeConfigSurface, SessionConfigCache},
         },
         current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
@@ -442,6 +440,19 @@ pub fn put_agent_session_config(
         .get("modelOverridden")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Harnesses older than the requestedModel/modelApplied pair omit both.
+    // Defaulting `requested_model` to None keeps those sessions out of the
+    // "requested but not applied" warning rather than mislabelling them.
+    let requested_model = payload
+        .get("requestedModel")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let model_applied = payload
+        .get("modelApplied")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let cache = SessionConfigCache {
         config_options,
@@ -449,6 +460,8 @@ pub fn put_agent_session_config(
         available_models,
         current_model,
         model_overridden,
+        requested_model,
+        model_applied,
         goose_native_config: None,
         captured_at: crate::util::now_iso(),
     };
@@ -457,147 +470,6 @@ pub fn put_agent_session_config(
         return;
     };
     state.put_session_cache(runtime_key, cache);
-}
-
-fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionEntry> {
-    let arr = match raw.and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-    arr.iter()
-        .filter_map(|opt| {
-            let config_id = opt
-                .get("id")
-                .or_else(|| opt.get("configId"))?
-                .as_str()?
-                .to_string();
-            Some(AcpConfigOptionEntry {
-                config_id,
-                category: opt
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                display_name: opt
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                current_value: opt
-                    .get("value")
-                    .or_else(|| opt.get("currentValue"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                options: parse_option_values(opt.get("options")),
-            })
-        })
-        .collect()
-}
-
-fn parse_option_values(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionValue> {
-    let arr = match raw.and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-    arr.iter()
-        .filter_map(|o| {
-            let value = o.get("value").and_then(|v| v.as_str())?.to_string();
-            Some(AcpConfigOptionValue {
-                value,
-                display_name: o
-                    .get("displayName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-            })
-        })
-        .collect()
-}
-
-fn parse_modes(
-    config_options: &[AcpConfigOptionEntry],
-    raw: Option<&serde_json::Value>,
-) -> Vec<String> {
-    if let Some(arr) = raw.and_then(|v| v.as_array()) {
-        return arr
-            .iter()
-            .filter_map(|m| m.as_str().map(str::to_string))
-            .collect();
-    }
-    // Fall back: extract mode options from configOptions with category "mode".
-    config_options
-        .iter()
-        .filter(|o| o.category.as_deref() == Some("mode"))
-        .flat_map(|o| o.options.iter().map(|v| v.value.clone()))
-        .collect()
-}
-
-fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<String>) {
-    let raw = match raw {
-        Some(v) => v,
-        None => return (Vec::new(), None),
-    };
-
-    // Object shape: { currentModelId, availableModels: [...] }
-    if let Some(obj) = raw.as_object() {
-        let current_model = obj
-            .get("currentModelId")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let models = obj
-            .get("availableModels")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        let model_id = m
-                            .get("modelId")
-                            .or_else(|| m.get("id"))
-                            .and_then(|v| v.as_str())?
-                            .to_string();
-                        Some(AcpModelEntry {
-                            model_id,
-                            name: m.get("name").and_then(|v| v.as_str()).map(str::to_string),
-                            description: m
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        return (models, current_model);
-    }
-
-    // Array shape: [{ modelId, isCurrent, ... }]
-    let arr = match raw.as_array() {
-        Some(a) => a,
-        None => return (Vec::new(), None),
-    };
-    let mut current_model = None;
-    let models = arr
-        .iter()
-        .filter_map(|m| {
-            let model_id = m
-                .get("modelId")
-                .or_else(|| m.get("id"))
-                .and_then(|v| v.as_str())?
-                .to_string();
-            if m.get("isCurrent")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                current_model = Some(model_id.clone());
-            }
-            Some(AcpModelEntry {
-                model_id,
-                name: m.get("name").and_then(|v| v.as_str()).map(str::to_string),
-                description: m
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-            })
-        })
-        .collect();
-    (models, current_model)
 }
 
 #[cfg(test)]
@@ -733,6 +605,10 @@ mod tests {
             available_models: vec![],
             current_model: Some(current_model.to_string()),
             model_overridden,
+            // A live switch that set `model_overridden` is by definition a
+            // request the harness accepted, so the pair stays coherent here.
+            requested_model: model_overridden.then(|| current_model.to_string()),
+            model_applied: model_overridden,
             goose_native_config: None,
             captured_at: "".to_string(),
         }

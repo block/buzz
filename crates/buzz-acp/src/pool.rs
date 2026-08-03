@@ -1000,6 +1000,15 @@ async fn create_session_and_apply_model(
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
             "modelOverridden": agent.model_overridden && switch_succeeded,
+            // Disambiguate the two states `modelOverridden: false` collapses:
+            // "no model was requested" and "the requested model was rejected".
+            // `requestedModel` is what the operator actually asked for (null
+            // when nothing was set); `modelApplied` reports whether the harness
+            // accepted it. A non-null `requestedModel` with `modelApplied:
+            // false` is the silent-fallback arm above — the agent is running
+            // its own default, and the desktop can finally say so.
+            "requestedModel": agent.desired_model.clone(),
+            "modelApplied": switch_succeeded,
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
